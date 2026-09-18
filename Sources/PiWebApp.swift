@@ -25,6 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let commandRunner: CommandRunning
     private let processInspector: ProcessInspector
     private let serviceManager: ServiceManager
+    /// 远程访问密码的唯一存储。AppDelegate 只把它注入 ServiceManager、设置界面
+    /// 和诊断文本的状态行，绝不把密码写进 UserDefaults、日志或诊断内容。
+    private let keychain: KeychainStoring
 
     private var startURL: URL { serviceManager.configuration.serviceURL }
 
@@ -32,17 +35,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     init(
         appConfiguration: AppConfiguration = AppConfiguration.forCurrentProcess(),
-        commandRunner: CommandRunning = SystemCommandRunner()
+        commandRunner: CommandRunning = SystemCommandRunner(),
+        keychain: KeychainStoring = KeychainStore()
     ) {
         self.appConfiguration = appConfiguration
         self.commandRunner = commandRunner
+        self.keychain = keychain
         let processInspector = ProcessInspector(runner: commandRunner)
         self.processInspector = processInspector
         self.serviceManager = ServiceManager(
             configuration: appConfiguration.serviceConfiguration,
             appConfiguration: appConfiguration,
             processInspector: processInspector,
-            commandRunner: commandRunner
+            commandRunner: commandRunner,
+            // 远程模式的门控与环境变量都读这一个闭包：读取失败即“无密码”。
+            remoteAccessPassword: { RemoteAccessPassword.load(from: keychain) }
         )
         super.init()
     }
@@ -703,35 +710,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func showPreferences(_ sender: Any?) {
-        let controller = PreferencesWindowController(configuration: serviceManager.configuration)
+        let controller = PreferencesWindowController(configuration: serviceManager.configuration, keychain: keychain)
         controller.onSave = { [weak self] newConfiguration in
-            guard let self else { return }
-            self.appConfiguration.save(newConfiguration)
-            let changed = self.serviceManager.configuration.runtimeSignature != newConfiguration.runtimeSignature
-            let managed = changed && self.serviceManager.managedServicePID() != nil
-
-            if managed {
-                // 先停止旧参数启动的服务，再切换配置，避免旧端口和新端口同时留下实例。
-                self.serviceManager.stopService { [weak self] in
-                    guard let self else { return }
-                    self.serviceManager.updateConfiguration(newConfiguration)
-                    self.serviceManager.reloadAfterConfigurationChange()
-                }
-            } else {
-                self.serviceManager.updateConfiguration(newConfiguration)
-                if changed {
-                    self.serviceManager.reloadAfterConfigurationChange()
-                } else {
-                    // Re-emit the current state so the status menu title refreshes.
-                    self.serviceManager.setState(self.serviceManager.currentState)
-                }
-            }
+            self?.applyPreferencesConfiguration(newConfiguration, credentialsChanged: false)
+        }
+        controller.onRemoteAccessCredentialsChanged = { [weak self] newConfiguration in
+            self?.applyPreferencesConfiguration(newConfiguration, credentialsChanged: true)
         }
         preferencesWindowController = controller
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         if !NSApp.isActive {
             NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    /// 设置窗口保存后的统一入口。
+    ///
+    /// `credentialsChanged` 表示 Keychain 中的密码刚被设置或删除：远程模式下
+    /// 正在运行的托管服务必须重启，新的 `PI_WEB_PASSWORD`（或没有它）才会进入
+    /// 子进程环境。删除密码已经把 hostname 收回 loopback，因此会走普通的重启
+    /// 路径。
+    private func applyPreferencesConfiguration(_ newConfiguration: ServiceConfiguration, credentialsChanged: Bool) {
+        appConfiguration.save(newConfiguration)
+        let changed = serviceManager.configuration.runtimeSignature != newConfiguration.runtimeSignature
+        let needsRestartForCredentials = credentialsChanged && !RemoteAccessPolicy.isLoopbackHostname(newConfiguration.hostname)
+        let managed = (changed || needsRestartForCredentials) && serviceManager.managedServicePID() != nil
+
+        if managed {
+            // 先停止旧参数启动的服务，再切换配置，避免旧端口和新端口同时留下实例。
+            serviceManager.stopService { [weak self] in
+                guard let self else { return }
+                self.serviceManager.updateConfiguration(newConfiguration)
+                self.serviceManager.reloadAfterConfigurationChange()
+            }
+        } else {
+            serviceManager.updateConfiguration(newConfiguration)
+            if changed || needsRestartForCredentials {
+                serviceManager.reloadAfterConfigurationChange()
+            } else {
+                // Re-emit the current state so the status menu title refreshes.
+                serviceManager.setState(serviceManager.currentState)
+            }
         }
     }
 
@@ -847,7 +867,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             managedPID: serviceManager.managedServicePID().map(String.init) ?? "无（外部服务或未运行）",
             piWebPath: piWebPath,
             configurationDirectory: "~/.pi/agent",
-            logPath: appConfiguration.logURL.path
+            logPath: appConfiguration.logURL.path,
+            remoteAccessPasswordStatus: RemoteAccessPassword.statusText(
+                isSet: RemoteAccessPassword.isSet(in: keychain)
+            )
         ))
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(diagnostics, forType: .string)

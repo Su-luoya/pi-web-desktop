@@ -21,6 +21,9 @@ struct DiagnosticsInput: Equatable {
     var piWebPath: String
     var configurationDirectory: String
     var logPath: String
+    /// 远程访问密码的状态文案（例如 `RemoteAccessPassword.statusText(isSet:)`）。
+    /// 只允许“已设置/未设置”这类描述：不得传入密码值、长度或 Keychain 原始数据。
+    var remoteAccessPasswordStatus: String
 }
 
 enum DiagnosticsCollector {
@@ -38,6 +41,7 @@ enum DiagnosticsCollector {
         pi-web 路径: \(input.piWebPath)
         配置目录: \(input.configurationDirectory)
         日志: \(input.logPath)
+        远程访问密码: \(input.remoteAccessPasswordStatus)
         """
     }
 }

@@ -266,7 +266,8 @@ private final class ServiceManagerHarness {
         processExecutablePath: @escaping (pid_t) -> String? = { _ in nil },
         fileManager: FileManager,
         baseEnvironment: [String: String],
-        ownershipStore: ServiceOwnershipStoring? = nil
+        ownershipStore: ServiceOwnershipStoring? = nil,
+        remoteAccessPassword: @escaping () -> String? = { nil }
     ) throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("PiWebDesktopTests-\(UUID().uuidString)", isDirectory: true)
@@ -302,6 +303,7 @@ private final class ServiceManagerHarness {
             fileManager: fileManager,
             ownershipStore: store,
             signaler: signaler,
+            remoteAccessPassword: remoteAccessPassword,
             instanceID: Self.instanceID
         )
         // 既有测试覆盖的是依赖门控打开后的行为；门控本身的测试会显式关闭它。
@@ -385,7 +387,9 @@ private func makeHarness(
     processOutput: @escaping ([String]) -> String? = { _ in nil },
     processExecutablePath: @escaping (pid_t) -> String? = { _ in nil },
     fileManager: FileManager = .default,
-    ownershipStore: ServiceOwnershipStoring? = nil
+    baseEnvironment: [String: String] = fakeBaseEnvironment,
+    ownershipStore: ServiceOwnershipStoring? = nil,
+    remoteAccessPassword: @escaping () -> String? = { nil }
 ) throws -> ServiceManagerHarness {
     try ServiceManagerHarness(
         configuration: configuration,
@@ -393,8 +397,9 @@ private func makeHarness(
         processOutput: processOutput,
         processExecutablePath: processExecutablePath,
         fileManager: fileManager,
-        baseEnvironment: fakeBaseEnvironment,
-        ownershipStore: ownershipStore
+        baseEnvironment: baseEnvironment,
+        ownershipStore: ownershipStore,
+        remoteAccessPassword: remoteAccessPassword
     )
 }
 
@@ -1307,5 +1312,117 @@ final class ServiceManagerTests: XCTestCase {
         harness.manager.startManagedService()
         XCTAssertEqual(harness.launcher.launchCount, 1)
         XCTAssertEqual(harness.manager.currentState, .starting)
+    }
+
+    // MARK: - 远程访问密码（GitHub #8）
+
+    private static let remoteSecret = "unit-test-secret-Aa1!"
+
+    private func remoteConfiguration(piWebPath: String) -> ServiceConfiguration {
+        var configuration = configured(piWebPath)
+        configuration.hostname = "pi.example.invalid"
+        configuration.allowedHosts = "pi.example.invalid"
+        return configuration
+    }
+
+    /// 远程 hostname 没有 Keychain 密码时：不启动子进程、不加载服务页，
+    /// 只给出可读失败提示。
+    func testRemoteHostnameWithoutPasswordRefusesToLaunch() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(remoteConfiguration(piWebPath: try harness.makeExecutable()))
+        harness.probe.ready = false
+
+        harness.manager.startManagedService()
+
+        XCTAssertEqual(harness.launcher.launchCount, 0)
+        XCTAssertEqual(harness.loadRequests, 0)
+        XCTAssertEqual(harness.manager.startDecision(), .missingRemotePassword)
+        XCTAssertEqual(harness.manager.currentState, .failed(RemoteAccessPolicy.missingPasswordMessage))
+        XCTAssertEqual(harness.startupFailures, [RemoteAccessPolicy.missingPasswordMessage])
+    }
+
+    /// 远程 hostname + Keychain 非空密码：正常启动，密码只出现在子进程环境里，
+    /// 命令行、所有权记录和日志都没有它。
+    func testRemoteHostnameWithPasswordInjectsThePasswordOnlyIntoTheEnvironment() throws {
+        let harness = try makeHarness(
+            alive: { $0 == 5150 },
+            processOutput: processOutput(for: 5150),
+            remoteAccessPassword: { Self.remoteSecret }
+        )
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(remoteConfiguration(piWebPath: try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = false
+
+        harness.manager.startManagedService()
+
+        let specification = try XCTUnwrap(harness.launcher.specifications.first)
+        XCTAssertEqual(specification.environment["PI_WEB_PASSWORD"], Self.remoteSecret)
+        XCTAssertFalse(specification.arguments.contains(Self.remoteSecret))
+        XCTAssertEqual(specification.arguments, ["--hostname", "pi.example.invalid", "--port", "30141", "--no-open"])
+        let recordText = try String(contentsOf: harness.ownerFileURL, encoding: .utf8)
+        XCTAssertFalse(recordText.contains(Self.remoteSecret))
+        let logText = (try? String(contentsOf: harness.logURL, encoding: .utf8)) ?? ""
+        XCTAssertFalse(logText.contains(Self.remoteSecret))
+        XCTAssertEqual(harness.manager.currentState, .starting)
+    }
+
+    /// loopback 模式即使 Keychain 里有密码也不注入，并清掉继承来的同名变量。
+    func testLoopbackLaunchRemovesAnInheritedPasswordVariable() throws {
+        let harness = try makeHarness(
+            alive: { $0 == 5150 },
+            processOutput: processOutput(for: 5150),
+            baseEnvironment: ["BASE": "1", "PI_WEB_PASSWORD": "inherited-secret"],
+            remoteAccessPassword: { Self.remoteSecret }
+        )
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = false
+
+        harness.manager.startManagedService()
+
+        let specification = try XCTUnwrap(harness.launcher.specifications.first)
+        XCTAssertNil(specification.environment["PI_WEB_PASSWORD"])
+        XCTAssertEqual(specification.environment["BASE"], "1")
+    }
+
+    /// 用户主动启动（菜单/启动时）缺密码时给出同一个可读提示，并且不探测、
+    /// 不启动、不加载页面。
+    func testStartEntriesReportTheMissingRemotePassword() throws {
+        var configuration = ServiceConfiguration.default
+        configuration.hostname = "pi.example.invalid"
+        let harness = try makeHarness(configuration: configuration)
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(remoteConfiguration(piWebPath: try harness.makeExecutable()))
+        harness.probe.ready = true
+
+        harness.manager.startAtLaunch()
+        harness.manager.startService()
+
+        XCTAssertEqual(harness.launcher.launchCount, 0)
+        XCTAssertEqual(harness.loadRequests, 0)
+        XCTAssertTrue(harness.probe.probedURLs.isEmpty, "缺密码时连外部服务都不探测")
+        XCTAssertEqual(harness.startupFailures, [RemoteAccessPolicy.missingPasswordMessage, RemoteAccessPolicy.missingPasswordMessage])
+        XCTAssertEqual(harness.manager.currentState, .failed(RemoteAccessPolicy.missingPasswordMessage))
+    }
+
+    /// 缺密码时不采用已经就绪的外部服务，也不开始健康轮询：否则界面会显示成
+    /// “正在运行（外部服务）”并加载服务页。
+    func testRemoteHostnameWithoutPasswordDoesNotAdoptReadyExternalService() throws {
+        var configuration = ServiceConfiguration.default
+        configuration.hostname = "pi.example.invalid"
+        configuration.autoStart = false
+        let harness = try makeHarness(configuration: configuration)
+        defer { harness.cleanUp() }
+        harness.probe.ready = true
+
+        harness.manager.startAtLaunch()
+        harness.manager.startHealthMonitor()
+
+        XCTAssertEqual(harness.loadRequests, 0)
+        XCTAssertTrue(harness.scheduler.repeatingWork.isEmpty)
+        XCTAssertEqual(harness.manager.currentState, .failed(RemoteAccessPolicy.missingPasswordMessage))
     }
 }

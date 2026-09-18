@@ -119,10 +119,21 @@ struct ServiceLaunchSpecification: Equatable {
         configuration: ServiceConfiguration,
         piWebPath: String,
         appConfiguration: AppConfiguration,
-        baseEnvironment: [String: String]
+        baseEnvironment: [String: String],
+        remoteAccessPassword: String? = nil
     ) -> ServiceLaunchSpecification {
         var environment = baseEnvironment
         environment["PI_WEB_NO_OPEN"] = "1"
+        // 远程访问密码只通过子进程环境传递：不进入命令行、UserDefaults、日志、
+        // 诊断文本或错误消息。loopback 模式、缺少密码和读取失败都只会清掉继承
+        // 来的同名变量，绝不退化成无认证的远程监听。
+        if !RemoteAccessPolicy.isLoopbackHostname(configuration.hostname),
+           let remoteAccessPassword,
+           !remoteAccessPassword.isEmpty {
+            environment["PI_WEB_PASSWORD"] = remoteAccessPassword
+        } else {
+            environment.removeValue(forKey: "PI_WEB_PASSWORD")
+        }
         if !configuration.allowedHosts.isEmpty {
             environment["PI_WEB_ALLOWED_HOSTS"] = configuration.allowedHosts
         } else {
@@ -397,6 +408,8 @@ enum ServiceStartDecision: Equatable {
     case existingProcess
     /// No pi-web executable could be resolved.
     case missingExecutable
+    /// 远程 hostname 已配置，但 Keychain 中没有可用的非空密码。
+    case missingRemotePassword
     /// Launch this specification.
     case launch(ServiceLaunchSpecification)
 }
@@ -461,6 +474,9 @@ final class ServiceManager {
     private let fileManager: FileManager
     private let ownershipStore: ServiceOwnershipStoring
     private let signaler: ServiceSignaling
+    /// 读取远程访问密码（Keychain）。默认返回 nil，即“无密码”：远程模式因此默认
+    /// 被拒绝，测试也绝不会碰到真实 Keychain；生产环境由 AppDelegate 注入。
+    private let remoteAccessPassword: () -> String?
 
     private var serviceProcess: ServiceProcessHandle?
     private var launchGeneration = 0
@@ -483,6 +499,7 @@ final class ServiceManager {
         fileManager: FileManager = .default,
         ownershipStore: ServiceOwnershipStoring = FileServiceOwnershipStore(),
         signaler: ServiceSignaling = POSIXServiceSignaler(),
+        remoteAccessPassword: @escaping () -> String? = { nil },
         instanceID: String = UUID().uuidString
     ) {
         self.configuration = configuration
@@ -496,6 +513,7 @@ final class ServiceManager {
         self.fileManager = fileManager
         self.ownershipStore = ownershipStore
         self.signaler = signaler
+        self.remoteAccessPassword = remoteAccessPassword
         self.instanceID = instanceID
     }
 
@@ -510,9 +528,23 @@ final class ServiceManager {
         onStateChange?(state)
     }
 
-    /// 允许启动服务与加载服务页的前置条件：依赖门控打开，且不在停止/退出流程中。
+    /// 允许启动服务与加载服务页的前置条件：依赖门控打开，不在停止/退出流程中，
+    /// 并且远程访问的前置条件满足（非 loopback hostname 必须有非空密码）。
+    /// 密码读取失败按“无密码”处理，因此远程模式不会在认证不可用时启动。
     private var isStartPermitted: Bool {
-        isDependencyGateOpen && !isStoppingService && !isQuitting
+        isDependencyGateOpen && !isStoppingService && !isQuitting && hasRequiredRemoteAccessCredentials
+    }
+
+    /// 远程 hostname 是否具备可用的非空密码；loopback 恒为 true。
+    private var hasRequiredRemoteAccessCredentials: Bool {
+        RemoteAccessPolicy.allowsRemoteListening(hostname: configuration.hostname, password: remoteAccessPassword())
+    }
+
+    /// 依赖门控已就绪、但远程模式缺密码时给出可读失败提示；其它拒绝（诊断未通过、
+    /// 正在停止或退出）保持静默，避免诊断页被启动失败提示覆盖。
+    private func reportRemoteAccessRequirementIfNeeded() {
+        guard isDependencyGateOpen, !isStoppingService, !isQuitting, !hasRequiredRemoteAccessCredentials else { return }
+        reportStartupFailure(RemoteAccessPolicy.missingPasswordMessage)
     }
 
     // MARK: - Ownership and dependency lookup
@@ -587,6 +619,9 @@ final class ServiceManager {
 
     func startDecision() -> ServiceStartDecision {
         guard !isStoppingService else { return .ignored }
+        // 远程监听的前置条件：Keychain 中必须存在非空密码。条目被删除、内容为空
+        // 或读取失败时一律按“无密码”处理，绝不启动去掉认证的服务。
+        guard hasRequiredRemoteAccessCredentials else { return .missingRemotePassword }
         if managedServicePID() != nil { return .existingProcess }
         // A launch that has not produced a record yet is still in flight (or is
         // an unrecorded child that survived cleanup). Starting another one
@@ -599,7 +634,8 @@ final class ServiceManager {
             configuration: configuration,
             piWebPath: piWebPath,
             appConfiguration: appConfiguration,
-            baseEnvironment: environment()
+            baseEnvironment: environment(),
+            remoteAccessPassword: remoteAccessPassword()
         ))
     }
 
@@ -616,7 +652,10 @@ final class ServiceManager {
         // Records from earlier runs are evaluated (and cleaned) before any new
         // launch decision, so a leftover file can never be adopted.
         reconcileOwnershipRecord()
-        guard isStartPermitted else { return }
+        guard isStartPermitted else {
+            reportRemoteAccessRequirementIfNeeded()
+            return
+        }
         if configuration.autoStart || forceStart {
             ensureServerIsRunning()
         } else {
@@ -639,7 +678,10 @@ final class ServiceManager {
     }
 
     func ensureServerIsRunning() {
-        guard isStartPermitted else { return }
+        guard isStartPermitted else {
+            reportRemoteAccessRequirementIfNeeded()
+            return
+        }
         checkServer { [weak self] ready in
             guard let self else { return }
             self.scheduler.onMain {
@@ -659,7 +701,10 @@ final class ServiceManager {
     /// managed one. The dependency gate is enforced again inside the async
     /// callback and in `startManagedService()`.
     func startService() {
-        guard isStartPermitted else { return }
+        guard isStartPermitted else {
+            reportRemoteAccessRequirementIfNeeded()
+            return
+        }
         checkServer { [weak self] ready in
             guard let self else { return }
             self.scheduler.onMain {
@@ -677,7 +722,10 @@ final class ServiceManager {
     /// 唯一的受托管启动入口：启动、重启、配置变更、重试和健康恢复都收敛到这里，
     /// 依赖门控关闭时直接返回，不产生任何进程或页面副作用。
     func startManagedService() {
-        guard isStartPermitted else { return }
+        guard isStartPermitted else {
+            reportRemoteAccessRequirementIfNeeded()
+            return
+        }
         switch startDecision() {
         case .ignored:
             return
@@ -686,6 +734,9 @@ final class ServiceManager {
             return
         case .missingExecutable:
             reportStartupFailure("找不到 pi-web。请确认已执行 npm install -g @agegr/pi-web@latest。")
+            return
+        case .missingRemotePassword:
+            reportStartupFailure(RemoteAccessPolicy.missingPasswordMessage)
             return
         case .launch(let specification):
             do {
@@ -959,7 +1010,10 @@ final class ServiceManager {
     /// saved. Gated like every other start entry: while the dependency gate is
     /// closed only the state message is updated, never a launch or page load.
     func reloadAfterConfigurationChange() {
-        guard isStartPermitted else { return }
+        guard isStartPermitted else {
+            reportRemoteAccessRequirementIfNeeded()
+            return
+        }
         checkServer { [weak self] ready in
             guard let self else { return }
             self.scheduler.onMain {

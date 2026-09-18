@@ -8,9 +8,8 @@ enum ServiceState: Equatable {
     case stopped
     case failed(String)
 
-    /// Base text for the status menu and diagnostics. `.running` gets no
-    /// ownership suffix here; use `statusText(for:managedPID:)` for the copy
-    /// the app actually shows.
+    /// Base text used by the status menu, matching the pre-split behaviour:
+    /// `.running` is shown without an ownership suffix.
     var displayText: String {
         switch self {
         case .checking: return "正在检查"
@@ -21,9 +20,9 @@ enum ServiceState: Equatable {
         }
     }
 
-    /// User visible status text. A running service is labelled by ownership, so
-    /// the status menu keeps the pre-split distinction between an app-managed
-    /// process and an external one.
+    /// Diagnostics copy only: a running service is labelled by ownership, as the
+    /// pre-split `statusDescription()` did for "复制诊断信息". The status menu must
+    /// use `displayText` instead.
     static func statusText(for state: ServiceState, managedPID: pid_t?) -> String {
         guard case .running = state else { return state.displayText }
         return managedPID == nil ? "正在运行（外部服务）" : "正在运行（本应用管理）"
@@ -259,6 +258,7 @@ final class ServiceManager {
     private let fileManager: FileManager
 
     private var serviceProcess: ServiceProcessHandle?
+    private var launchGeneration = 0
     private var logHandle: FileHandle?
     private var healthToken: RepeatingTimerToken?
     private var startupAttempts = 0
@@ -406,9 +406,14 @@ final class ServiceManager {
         case .launch(let specification):
             do {
                 let handle = try openLogForWriting()
+                // Token for this launch: a late termination callback from an
+                // earlier process must not clear the replacement or close its log.
+                launchGeneration &+= 1
+                let generation = launchGeneration
                 let process = try launcher.launch(specification, logHandle: handle) { [weak self] in
                     guard let self else { return }
                     self.scheduler.onMain {
+                        guard self.launchGeneration == generation else { return }
                         self.serviceProcess = nil
                         self.closeLog()
                         if !self.isStoppingService && !self.isQuitting {

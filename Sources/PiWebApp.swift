@@ -455,7 +455,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func applyState(_ state: ServiceState) {
         currentState = state
-        statusMenuItem?.title = "状态：\(ServiceState.statusText(for: state, managedPID: serviceManager.managedServicePID()))"
+        // The status menu keeps the pre-split base text; the ownership suffix is
+        // reserved for the diagnostics copy.
+        statusMenuItem?.title = "状态：\(state.displayText)"
     }
 
     /// Alert shown when the managed service could not start. ServiceManager owns

@@ -1,0 +1,76 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	objectVersion = 56;
+	classes = {};
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000001 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* main.swift */; };
+		A10000000000000000000002 /* PiWebApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* PiWebApp.swift */; };
+		A10000000000000000000003 /* PreferencesWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* PreferencesWindowController.swift */; };
+		A10000000000000000000004 /* ServiceConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* ServiceConfiguration.swift */; };
+		A10000000000000000000005 /* ApplicationIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* ApplicationIcon.icns */; };
+		A10000000000000000000006 /* ServiceConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* ServiceConfigurationTests.swift */; };
+		A10000000000000000000007 /* ServiceConfiguration.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* ServiceConfiguration.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A20000000000000000000001 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		A20000000000000000000002 /* PiWebApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PiWebApp.swift; sourceTree = "<group>"; };
+		A20000000000000000000003 /* PreferencesWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferencesWindowController.swift; sourceTree = "<group>"; };
+		A20000000000000000000004 /* ServiceConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceConfiguration.swift; sourceTree = "<group>"; };
+		A20000000000000000000005 /* ApplicationIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = ApplicationIcon.icns; sourceTree = "<group>"; };
+		A20000000000000000000006 /* ServiceConfigurationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceConfigurationTests.swift; sourceTree = "<group>"; };
+		A20000000000000000000007 /* PiWebDesktop.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PiWebDesktop.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000008 /* PiWebDesktopTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PiWebDesktopTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A30000000000000000000001 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A40000000000000000000001 = {isa = PBXGroup; children = (A40000000000000000000002, A40000000000000000000003, A40000000000000000000004, A40000000000000000000005); sourceTree = "<group>"; };
+		A40000000000000000000002 /* Sources */ = {isa = PBXGroup; children = (A20000000000000000000001, A20000000000000000000002, A20000000000000000000003, A20000000000000000000004); path = Sources; sourceTree = "<group>"; };
+		A40000000000000000000003 /* Resources */ = {isa = PBXGroup; children = (A20000000000000000000005); path = Resources; sourceTree = "<group>"; };
+		A40000000000000000000004 /* PiWebDesktopTests */ = {isa = PBXGroup; children = (A20000000000000000000006); path = PiWebDesktopTests; sourceTree = "<group>"; };
+		A40000000000000000000005 /* Products */ = {isa = PBXGroup; children = (A20000000000000000000007, A20000000000000000000008); name = Products; sourceTree = "<group>"; };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A50000000000000000000001 /* PiWebDesktop */ = {isa = PBXNativeTarget; buildConfigurationList = A60000000000000000000001; buildPhases = (A30000000000000000000003, A30000000000000000000004, A30000000000000000000001); buildRules = (); dependencies = (); name = PiWebDesktop; productName = PiWebDesktop; productReference = A20000000000000000000007; productType = "com.apple.product-type.application"; };
+		A50000000000000000000002 /* PiWebDesktopTests */ = {isa = PBXNativeTarget; buildConfigurationList = A60000000000000000000002; buildPhases = (A30000000000000000000005, A30000000000000000000002); buildRules = (); dependencies = (); name = PiWebDesktopTests; productName = PiWebDesktopTests; productReference = A20000000000000000000008; productType = "com.apple.product-type.bundle.unit-test"; };
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A80000000000000000000001 /* Project object */ = {isa = PBXProject; attributes = { LastUpgradeCheck = 1600; ORGANIZATIONNAME = "su-luoya"; TargetAttributes = { A50000000000000000000001 = { CreatedOnToolsVersion = 16.0; }; A50000000000000000000002 = { CreatedOnToolsVersion = 16.0; }; }; }; buildConfigurationList = A60000000000000000000003; compatibilityVersion = "Xcode 15.0"; developmentRegion = zh_CN; hasScannedForEncodings = 0; knownRegions = (en, zh_CN); mainGroup = A40000000000000000000001; productRefGroup = A40000000000000000000005; projectDirPath = ""; projectRoot = ""; targets = (A50000000000000000000001, A50000000000000000000002); };
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A30000000000000000000004 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000005); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXBuildPhase section */
+		A30000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001, A10000000000000000000002, A10000000000000000000003, A10000000000000000000004); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000005 /* Test Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000006, A10000000000000000000007); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A90000000000000000000001 = {isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; CLANG_ENABLE_MODULES = YES; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Manual; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = "Pi Web Desktop"; INFOPLIST_KEY_CFBundleIconFile = ApplicationIcon; INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)"; INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)"; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools"; INFOPLIST_KEY_NSHumanReadableCopyright = ""; INFOPLIST_KEY_NSHighResolutionCapable = YES; MACOSX_DEPLOYMENT_TARGET = 14.0; MARKETING_VERSION = "0.1.0-alpha.1"; PRODUCT_BUNDLE_IDENTIFIER = "io.github.su-luoya.pi-web-desktop"; PRODUCT_NAME = PiWebDesktop; SDKROOT = macosx; SWIFT_VERSION = 5.0; }; name = Debug; };
+		A90000000000000000000002 = {isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; CLANG_ENABLE_MODULES = YES; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Manual; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = "Pi Web Desktop Tests"; INFOPLIST_KEY_CFBundleIconFile = ApplicationIcon; INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)"; INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)"; MACOSX_DEPLOYMENT_TARGET = 14.0; MARKETING_VERSION = "0.1.0-alpha.1"; PRODUCT_BUNDLE_IDENTIFIER = "io.github.su-luoya.pi-web-desktop.tests"; PRODUCT_NAME = PiWebDesktopTests; SDKROOT = macosx; SWIFT_VERSION = 5.0; }; name = Debug; };
+		A90000000000000000000004 = {isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; CLANG_ENABLE_MODULES = YES; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Manual; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = "Pi Web Desktop"; INFOPLIST_KEY_CFBundleIconFile = ApplicationIcon; INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)"; INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)"; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools"; INFOPLIST_KEY_NSHumanReadableCopyright = ""; INFOPLIST_KEY_NSHighResolutionCapable = YES; MACOSX_DEPLOYMENT_TARGET = 14.0; MARKETING_VERSION = "0.1.0-alpha.1"; PRODUCT_BUNDLE_IDENTIFIER = "io.github.su-luoya.pi-web-desktop"; PRODUCT_NAME = PiWebDesktop; SDKROOT = macosx; SWIFT_VERSION = 5.0; }; name = Release; };
+		A90000000000000000000005 = {isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; CLANG_ENABLE_MODULES = YES; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Manual; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = "Pi Web Desktop Tests"; INFOPLIST_KEY_CFBundleIconFile = ApplicationIcon; INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)"; INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)"; MACOSX_DEPLOYMENT_TARGET = 14.0; MARKETING_VERSION = "0.1.0-alpha.1"; PRODUCT_BUNDLE_IDENTIFIER = "io.github.su-luoya.pi-web-desktop.tests"; PRODUCT_NAME = PiWebDesktopTests; SDKROOT = macosx; SWIFT_VERSION = 5.0; }; name = Release; };
+		A90000000000000000000006 = {isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; CLANG_ENABLE_MODULES = YES; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Manual; MACOSX_DEPLOYMENT_TARGET = 14.0; SDKROOT = macosx; SWIFT_VERSION = 5.0; }; name = Release; };
+		A90000000000000000000003 = {isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; CLANG_ENABLE_MODULES = YES; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Manual; MACOSX_DEPLOYMENT_TARGET = 14.0; SDKROOT = macosx; SWIFT_VERSION = 5.0; }; name = Debug; };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A60000000000000000000001 = {isa = XCConfigurationList; buildConfigurations = (A90000000000000000000001, A90000000000000000000004); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A60000000000000000000002 = {isa = XCConfigurationList; buildConfigurations = (A90000000000000000000002, A90000000000000000000005); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A60000000000000000000003 = {isa = XCConfigurationList; buildConfigurations = (A90000000000000000000003, A90000000000000000000006); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+	};
+	rootObject = A80000000000000000000001;
+}

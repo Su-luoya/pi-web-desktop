@@ -20,6 +20,27 @@
 
 当前脚本生成 `build/Pi-Web-Desktop.app`，使用 Apple Silicon、macOS 14 目标和 ad-hoc 签名。源码目录中的图标可能携带 macOS 扩展属性；构建脚本会避免把不适合签名的 Finder 元数据复制进 app bundle。
 
+## Xcode 工程构建与测试
+
+标准 Xcode 工程使用 Apple Silicon、macOS 14 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让配置测试在没有 host app 的情况下仍可编译，target 会直接把 `Sources/ServiceConfiguration.swift` 加入测试源；因此测试文件直接使用该 target 内编译的 `ServiceConfiguration`，不通过 `@testable import PiWebDesktop` 引入 app target。
+
+```bash
+DERIVED_DATA_PATH="$(mktemp -d /tmp/PiWebDesktopDerivedData.XXXXXX)"
+trap 'rm -rf "$DERIVED_DATA_PATH"' EXIT
+XCODEBUILD_ARGS=(
+  -project PiWebDesktop.xcodeproj
+  -scheme PiWebDesktop
+  -sdk macosx
+  -derivedDataPath "$DERIVED_DATA_PATH"
+  CODE_SIGN_STYLE=Manual
+  CODE_SIGN_IDENTITY=-
+)
+xcodebuild "${XCODEBUILD_ARGS[@]}" build
+xcodebuild "${XCODEBUILD_ARGS[@]}" test
+```
+
+CI 在 `macos-14` 上使用同样的临时 `derivedDataPath` 和 ad-hoc `CODE_SIGN_IDENTITY=-`，不需要开发者账号或 provisioning profile。`xcodebuild` 的工程构建和测试验证需要完整 Xcode（命令行工具目录本身不提供完整的 Xcode 工程构建/测试环境）。当前环境若只有 Command Line Tools，则 `xcodebuild` 不可验证，会因 active developer directory 不是完整 Xcode 而失败；此时请使用下方 alpha 脚本验证构建路径。临时目录会在命令完成后删除，避免提交 DerivedData。
+
 ## 本地运行
 
 ```bash

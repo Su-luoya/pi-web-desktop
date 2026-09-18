@@ -22,14 +22,14 @@
 
 ## Xcode 工程构建与测试
 
-标准 Xcode 工程使用 Apple Silicon、macOS 14 SDK，并包含 `PiWebDesktopTests` XCTest target：
+标准 Xcode 工程使用 Apple Silicon、macOS 14 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让配置测试在没有 host app 的情况下仍可编译，target 会直接把 `Sources/ServiceConfiguration.swift` 加入测试源；因此测试文件直接使用该 target 内编译的 `ServiceConfiguration`，不通过 `@testable import PiWebDesktop` 引入 app target。
 
 ```bash
 xcodebuild -project PiWebDesktop.xcodeproj -scheme PiWebDesktop -sdk macosx build
 xcodebuild -project PiWebDesktop.xcodeproj -scheme PiWebDesktop -sdk macosx test
 ```
 
-`xcodebuild test` 需要完整 Xcode（命令行工具目录本身不提供测试运行器）；若环境仅安装 Command Line Tools，请使用下方 alpha 脚本验证构建路径。构建产物应使用 `-derivedDataPath` 指向临时目录，避免提交 DerivedData。
+`xcodebuild` 的工程构建和测试验证需要完整 Xcode（命令行工具目录本身不提供完整的 Xcode 工程构建/测试环境）。当前环境若只有 Command Line Tools，则 `xcodebuild` 不可验证，会因 active developer directory 不是完整 Xcode 而失败；此时请使用下方 alpha 脚本验证构建路径。构建产物应使用 `-derivedDataPath` 指向临时目录，避免提交 DerivedData。
 
 ## 本地运行
 

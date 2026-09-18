@@ -1,5 +1,4 @@
 import XCTest
-@testable import PiWebDesktop
 
 final class ServiceConfigurationTests: XCTestCase {
     func testDefaultsUseLoopbackService() {

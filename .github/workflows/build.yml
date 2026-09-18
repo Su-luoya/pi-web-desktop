@@ -44,6 +44,8 @@ jobs:
         run: ./Scripts/build.sh
       - name: Verify ad-hoc signature
         run: codesign --verify --deep --strict build/Pi-Web-Desktop.app
+      - name: Smoke launch
+        run: ./Scripts/smoke.sh
       - name: Check application identity of Xcode and script builds
         run: |
           set -euo pipefail

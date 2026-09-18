@@ -791,8 +791,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         NSWorkspace.shared.open(logURL)
     }
 
-    private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版本"
+    // 版本信息只有一个来源：bundle 的 Info.plist（由 Configuration/AppIdentity.xcconfig 生成）。
+    // Swift 侧不保存第二套版本常量；读取失败时明确标注为开发构建。
+    private var appVersionDescription: String {
+        let info = Bundle.main.infoDictionary
+        guard let shortVersion = (info?["CFBundleShortVersionString"] as? String)?.nilIfEmpty,
+              let buildVersion = (info?["CFBundleVersion"] as? String)?.nilIfEmpty else {
+            return "开发构建（Info.plist 缺少 CFBundleShortVersionString 或 CFBundleVersion）"
+        }
+        return "\(shortVersion) (\(buildVersion))"
     }
 
     @objc private func copyDiagnostics(_ sender: Any?) {
@@ -800,7 +807,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let piWebVersion = shell([piWebPath, "--version"])?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "未知"
         let nodeVersion = shell(["/usr/bin/env", "node", "--version"])?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "未知"
         let diagnostics = """
-        Pi Web Desktop: \(appVersion)
+        Pi Web Desktop: \(appVersionDescription)
         pi-web: \(piWebVersion)
         Node.js: \(nodeVersion)
         服务地址: \(startURL.absoluteString)

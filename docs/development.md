@@ -41,6 +41,29 @@ xcodebuild "${XCODEBUILD_ARGS[@]}" test
 
 CI 在 `macos-14` 上使用同样的临时 `derivedDataPath` 和 ad-hoc `CODE_SIGN_IDENTITY=-`，不需要开发者账号或 provisioning profile。`xcodebuild` 的工程构建和测试验证需要完整 Xcode（命令行工具目录本身不提供完整的 Xcode 工程构建/测试环境）。当前环境若只有 Command Line Tools，则 `xcodebuild` 不可验证，会因 active developer directory 不是完整 Xcode 而失败；此时请使用下方 alpha 脚本验证构建路径。临时目录会在命令完成后删除，避免提交 DerivedData。
 
+## 身份与版本单一来源
+
+应用身份与版本只有一个来源：`Configuration/AppIdentity.xcconfig`。它包含显示名、可执行名、图标名、最低系统版本、bundle identifier、`MARKETING_VERSION` 与 `CURRENT_PROJECT_VERSION`。`PiWebDesktop.xcodeproj` 的全部 6 个 build configuration（project、app、tests 的 Debug/Release）都通过 `baseConfigurationReference` 继承该文件，`Scripts/build.sh` 也从同一个文件读取并生成 `build/Pi-Web-Desktop.app/Contents/Info.plist`。不要在其他文件里重复版本、bundle id、显示名或最低系统版本字面值：改版本只需要改这一个文件，并让 Git tag 与 `MARKETING_VERSION` 一致（见 docs/releasing.md）。
+
+测试 target 复用同一身份：`PRODUCT_BUNDLE_IDENTIFIER = $(APP_TEST_BUNDLE_IDENTIFIER)`、`INFOPLIST_KEY_CFBundleDisplayName = $(APP_TEST_DISPLAY_NAME)`、`PRODUCT_NAME = $(TARGET_NAME)`，这些变量同样定义在 xcconfig 里，避免在工程文件中再写一遍身份字面值。
+
+## 一致性检查
+
+```bash
+./Scripts/build.sh
+./Scripts/check-identity.sh
+```
+
+`Scripts/check-identity.sh` 退出码 0 表示全部通过，非 0 表示至少一项失败；也可以传入 bundle 路径检查指定产物：`./Scripts/check-identity.sh /path/to/Pi-Web-Desktop.app`。它检查：
+
+- xcconfig 存在，且显示名、可执行名、图标名、最低系统版本、bundle identifier、`MARKETING_VERSION`、`CURRENT_PROJECT_VERSION` 均非空；
+- `project.pbxproj` 通过 `baseConfigurationReference` 引用该 xcconfig，所有 build configuration 都继承它，且 `MARKETING_VERSION`、`CURRENT_PROJECT_VERSION`、`PRODUCT_BUNDLE_IDENTIFIER`、`PRODUCT_NAME`、`MACOSX_DEPLOYMENT_TARGET`、`INFOPLIST_KEY_CFBundle*` 没有任何字面值，版本与 bundle id 字面值也不出现在工程文件中；
+- 已构建 bundle 的 `CFBundleShortVersionString`、`CFBundleVersion`、`CFBundleIdentifier`、`CFBundleName`、`CFBundleDisplayName`、`CFBundleExecutable`、`CFBundleIconFile`、`LSMinimumSystemVersion` 与 xcconfig 一致（需要先运行 `./Scripts/build.sh`）；
+- `Sources/ServiceConfiguration.swift` 默认 hostname 为 `127.0.0.1`、默认 proxy 为空、noProxy 只包含 loopback 条目；
+- 仓库文本中不出现私人默认值：Tailscale 主机名（小写形式）、tailnet DNS 后缀、CGNAT 私网地址、`/Users` 下的绝对路径、固定本地代理端点；`MARKETING_VERSION` 的字面值也不得出现在 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/`。
+
+脚本通过路径排除与字符串拼接保证自身文本不会触发这些模式，`.github/workflows/build.yml` 里的 personal-data grep 同样排除该脚本。
+
 ## 本地运行
 
 ```bash
@@ -52,9 +75,10 @@ open build/Pi-Web-Desktop.app
 ## 验证
 
 ```bash
-sh -n Scripts/build.sh Scripts/install.sh
+sh -n Scripts/build.sh Scripts/install.sh Scripts/check-identity.sh
 ./Scripts/build.sh
 codesign --verify --deep --strict build/Pi-Web-Desktop.app
+./Scripts/check-identity.sh
 ```
 
 服务生命周期、依赖诊断、版本解析、安装来源、脱敏和所有权判定应使用单元测试和本地假服务测试。测试不得访问真实 npm、GitHub、用户 Keychain 或 `~/.pi`。

@@ -35,11 +35,13 @@ jobs:
         run: ./Scripts/build.sh
       - name: Verify ad-hoc signature
         run: codesign --verify --deep --strict build/Pi-Web-Desktop.app
+      - name: Check application identity
+        run: ./Scripts/check-identity.sh
       - name: Check for accidental personal data
         run: |
-          ! git grep -nE 'taila|127\.0\.0\.1:7890|/Users/[^/]+' -- ':!*.icns' ':!.github/workflows/build.yml'
+          ! git grep -nE 'taila|127\.0\.0\.1:7890|/Users/[^/]+' -- ':!*.icns' ':!.github/workflows/build.yml' ':!Scripts/check-identity.sh'
       - name: Check shell scripts
-        run: sh -n Scripts/build.sh Scripts/install.sh
+        run: sh -n Scripts/build.sh Scripts/install.sh Scripts/check-identity.sh
       - name: Package smoke artifact
         run: ditto -c -k --sequesterRsrc --keepParent build/Pi-Web-Desktop.app Pi-Web-Desktop-alpha.zip
       - name: Checksum

@@ -32,7 +32,18 @@ Review the upstream documentation and package metadata before installing or upda
 open build/Pi-Web-Desktop.app
 ```
 
-The current development build uses the system Swift compiler and produces an Apple Silicon app targeting macOS 14. A standard Xcode project and test target are planned for the first alpha milestone.
+The current development build uses the system Swift compiler and produces an Apple Silicon app targeting macOS 14. The checked-in `PiWebDesktop.xcodeproj` (scheme `PiWebDesktop`, unhosted `PiWebDesktopTests` target) is built and tested with `xcodebuild` before the script rebuilds the same app.
+
+Application identity and version have a single source: `Configuration/AppIdentity.xcconfig`. The current alpha is `0.1.0-alpha.1` (build `1`), bundle identifier `io.github.su-luoya.pi-web-desktop`, display name `Pi Web Desktop`, minimum system version `14.0`. `Scripts/build.sh` generates `build/Pi-Web-Desktop.app/Contents/Info.plist` from that file, and `PiWebDesktop.xcodeproj` inherits it as its base configuration, so the Xcode project, the tests and the script cannot drift apart.
+
+Verify the source of truth after any identity or version change:
+
+```bash
+./Scripts/build.sh
+./Scripts/check-identity.sh
+```
+
+`Scripts/check-identity.sh` compares the xcconfig against the project file, the built bundle's `Info.plist` and the local service defaults, and rejects private defaults (tailnet hostnames, CGNAT addresses, absolute home paths, fixed proxy endpoints).
 
 ## Install the alpha app
 

@@ -29,6 +29,12 @@ private final class DependencyFakeFileSystem: DependencyFileSystemProbing {
     var symlinks: [String: String] = [:]
     var resolvedPaths: [String: String] = [:]
     var files: [String: String] = [:]
+    /// 存在的目录（例如假 Pi 配置目录）。
+    var directories: Set<String> = []
+    /// 存在但不可读的目录。
+    var unreadableDirectories: Set<String> = []
+    /// `readText` 实际读过的路径，供“从未读取认证内容”的断言使用。
+    private(set) var readPaths: [String] = []
 
     func isExecutableFile(atPath path: String) -> Bool {
         executables.contains(path)
@@ -45,11 +51,21 @@ private final class DependencyFakeFileSystem: DependencyFileSystemProbing {
     }
 
     func readText(atPath path: String) -> String? {
-        files[path]
+        readPaths.append(path)
+        return files[path]
     }
 
     func homeDirectoryPath() -> String {
         home
+    }
+
+    func directoryExists(atPath path: String) -> Bool? {
+        directories.contains(path) || unreadableDirectories.contains(path)
+    }
+
+    func isReadableDirectory(atPath path: String) -> Bool? {
+        guard directoryExists(atPath: path) == true else { return nil }
+        return !unreadableDirectories.contains(path)
     }
 }
 
@@ -59,6 +75,8 @@ private struct DependencyHarness {
     var architecture = "arm64"
     var osVersion = OperatingSystemVersion(majorVersion: 14, minorVersion: 5, patchVersion: 0)
     var configuredPiWebPath = ""
+    /// 默认端口探针结果；nil 表示无法判定。
+    var portAvailability: Bool? = true
 
     func checker() -> DependencyChecker {
         DependencyChecker(
@@ -68,8 +86,18 @@ private struct DependencyHarness {
                 architecture: { architecture },
                 operatingSystemVersion: { osVersion }
             ),
-            configuredPiWebPath: configuredPiWebPath
+            configuredPiWebPath: configuredPiWebPath,
+            portProbe: DependencyFakePortProbe(availability: { portAvailability })
         )
+    }
+}
+
+/// 固定结果的假端口探针：不绑定真实端口。
+private struct DependencyFakePortProbe: DependencyPortProbing {
+    var availability: () -> Bool?
+
+    func isPortAvailable(host: String, port: Int) -> Bool? {
+        availability()
     }
 }
 
@@ -176,7 +204,10 @@ final class DependencyCheckerTests: XCTestCase {
         let harness = makeHarness()
         let report = harness.checker().run()
 
-        XCTAssertEqual(report.findings.map(\.kind), [.system, .node, .piCLI, .piWeb])
+        XCTAssertEqual(
+            report.findings.map(\.kind),
+            [.system, .node, .piCLI, .piWeb, .port, .piConfigDirectory]
+        )
         XCTAssertTrue(report.blockingFindings.isEmpty)
         XCTAssertTrue(report.canStartService)
     }
@@ -196,13 +227,21 @@ final class DependencyCheckerTests: XCTestCase {
             ]).canStartService,
             "系统项只做提示，不阻塞启动"
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             DependencyReport(findings: [
                 finding(.node, .ok),
                 finding(.piCLI, .unknown),
                 finding(.piWeb, .unknown)
             ]).canStartService,
-            "pi/pi-web 存在但版本无法解析不阻塞"
+            "pi/pi-web 版本无法解析（unknown）不得放行启动"
+        )
+        XCTAssertFalse(
+            DependencyReport(findings: [
+                finding(.node, .ok),
+                finding(.piCLI, .ok),
+                finding(.piWeb, .unknown)
+            ]).canStartService,
+            "pi-web 版本无法解析时无法确认身份，必须关闭门控"
         )
         XCTAssertFalse(
             DependencyReport(findings: [
@@ -485,7 +524,7 @@ final class DependencyCheckerTests: XCTestCase {
         XCTAssertTrue(report.canStartService)
     }
 
-    func testUnparseablePiWebVersionWithoutPackageJSONIsUnknownButDoesNotBlock() {
+    func testUnparseablePiWebVersionWithoutPackageJSONIsUnknownAndBlocks() {
         let report = makeHarness(piWebVersionOutput: "unknown", includePackageJSON: false).checker().run()
         let piWeb = report.finding(for: .piWeb)
         XCTAssertEqual(piWeb?.status, .unknown)
@@ -493,8 +532,16 @@ final class DependencyCheckerTests: XCTestCase {
         XCTAssertNil(piWeb?.packageName)
         XCTAssertEqual(piWeb?.confidence, .inferred)
         XCTAssertEqual(piWeb?.remediationID, "install.pi-web")
-        XCTAssertTrue(report.canStartService)
-        XCTAssertFalse(report.blockingFindings.contains { $0.kind == .piWeb })
+        XCTAssertFalse(report.canStartService, "无法解析版本且没有 package.json 名称时不能放行")
+        XCTAssertEqual(report.blockingFindings.map(\.kind), [.piWeb])
+    }
+
+    /// pi 版本无法解析时同样不能放行：门控要求三条硬性前置都能核对身份。
+    func testUnparseablePiVersionIsUnknownAndBlocks() {
+        let report = makeHarness(piVersionOutput: "unknown").checker().run()
+        XCTAssertEqual(report.finding(for: .piCLI)?.status, .unknown)
+        XCTAssertFalse(report.canStartService)
+        XCTAssertEqual(report.blockingFindings.map(\.kind), [.piCLI])
     }
 
     func testForeignPackageNameLowersConfidenceToInferred() {
@@ -533,6 +580,38 @@ final class DependencyCheckerTests: XCTestCase {
         XCTAssertEqual(report.finding(for: .piWeb)?.status, .missing)
         XCTAssertEqual(report.blockingFindings.map(\.kind), [.piWeb])
         XCTAssertFalse(report.canStartService)
+    }
+
+    // MARK: - 路径选择的身份证据
+
+    /// 路径选择用的只读证据：可执行位、`--version` 版本、package.json 名称。
+    /// 可执行位不是身份，所以不满足版本/包名时 `confirmsPiWebIdentity` 为 false。
+    func testPiWebIdentityEvidenceReportsExecutabilityVersionAndPackageName() {
+        let checker = makeHarness().checker()
+
+        let piWeb = checker.piWebIdentityEvidence(atPath: "/opt/homebrew/bin/pi-web")
+        XCTAssertTrue(piWeb.isExecutable)
+        XCTAssertEqual(piWeb.version, "1.2.3")
+        XCTAssertEqual(piWeb.packageName, "@agegr/pi-web")
+        XCTAssertTrue(piWeb.confirmsPiWebIdentity)
+
+        // 可执行但版本无法解析、包名也不符（`/bin/echo` 这类文件）：身份不成立。
+        let echoHarness = DependencyHarness()
+        echoHarness.fileSystem.executables = ["/bin/echo"]
+        echoHarness.runner.handler = { arguments in
+            arguments.joined(separator: " ") == "/bin/echo --version" ? "--version\n" : nil
+        }
+        let echo = echoHarness.checker().piWebIdentityEvidence(atPath: "/bin/echo")
+        XCTAssertTrue(echo.isExecutable)
+        XCTAssertNil(echo.version)
+        XCTAssertNil(echo.packageName)
+        XCTAssertFalse(echo.confirmsPiWebIdentity)
+
+        // 不可执行：不运行任何命令，直接报告不可用。
+        let missing = echoHarness.checker().piWebIdentityEvidence(atPath: "/bin/definitely-not-here")
+        XCTAssertFalse(missing.isExecutable)
+        XCTAssertFalse(missing.confirmsPiWebIdentity)
+        XCTAssertFalse(echoHarness.runner.invocationLines.contains("/bin/definitely-not-here --version"))
     }
 
     // MARK: - 系统检查
@@ -605,16 +684,19 @@ final class DependencyCheckerTests: XCTestCase {
         XCTAssertFalse(text.contains("?"))
     }
 
-    func testBlockingSummaryListsOnlyBlockers() {
+    func testStatusPageListsMissingItemsAndTheirNextSteps() {
         let harness = makeHarness()
         harness.fileSystem.executables.remove("/opt/homebrew/bin/pi")
         let report = harness.checker().run()
         XCTAssertEqual(report.blockingFindings.map(\.kind), [.piCLI])
 
-        let summary = DependencyReportPresenter.blockingSummary(for: report)
-        XCTAssertTrue(summary.contains("Pi CLI：缺失"))
-        XCTAssertFalse(summary.contains("Node.js："))
-        XCTAssertFalse(summary.contains("/opt/homebrew"))
+        let statusPage = DependencyReportPresenter.statusPageText(for: report, setupIncomplete: false)
+        XCTAssertTrue(statusPage.contains("Pi CLI：缺失"))
+        XCTAssertTrue(statusPage.contains("下一步："))
+        XCTAssertTrue(statusPage.contains("重新检测"))
+        XCTAssertTrue(statusPage.contains("缺少硬性前置"))
+        XCTAssertFalse(statusPage.contains(harness.fileSystem.home))
+        XCTAssertTrue(statusPage.contains("不会退出"), "缺少硬性前置时必须说明应用不会退出")
     }
 
     func testInstallCommandsTextComesFromTheStaticManifest() {
@@ -662,7 +744,7 @@ final class DependencyCheckerTests: XCTestCase {
         let report = harness.checker().run()
         let combined = [
             DependencyReportPresenter.summaryText(for: report),
-            DependencyReportPresenter.blockingSummary(for: report),
+            DependencyReportPresenter.statusPageText(for: report, setupIncomplete: false),
             DependencyReportPresenter.installCommandsText(for: report)
         ].joined(separator: "\n")
 

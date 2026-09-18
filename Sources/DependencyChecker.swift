@@ -104,6 +104,8 @@ enum DependencyInstallSource: String, Equatable {
     case homebrew = "homebrew"
     case npmGlobal = "npm-global"
     case localPath = "local-path"
+    /// 由操作系统直接回答的诊断项（默认端口、Pi 配置目录），不是安装来源推断。
+    case system = "system"
     case unknown = "unknown"
 }
 
@@ -124,12 +126,20 @@ struct DependencyFinding: Equatable {
         case node
         case piCLI = "pi"
         case piWeb = "pi-web"
+        /// 默认服务端口是否可用；只做提示，不阻塞启动。
+        case port = "port"
+        /// Pi 配置目录（`~/.pi/agent`）是否存在与可读；只做提示，不读取内容。
+        case piConfigDirectory = "pi-config"
     }
 
     enum Status: String, Equatable {
         case ok
         case missing
         case outdated
+        /// 端口已被其他进程占用；不阻塞启动（已有的 Pi Web 服务会被直接复用）。
+        case occupied
+        /// 路径存在但不可读。
+        case unreadable
         case unknown
     }
 
@@ -176,29 +186,41 @@ struct DependencyReport: Equatable {
         findings.first { $0.kind == kind }
     }
 
-    /// 阻塞服务启动的诊断项：Node.js 未达到最低版本（缺失/过旧/无法确定）或
-    /// pi、pi-web 缺失。系统项只做提示，不阻塞启动；pi/pi-web 存在但版本无法
-    /// 解析不阻塞（可执行文件已确认存在）。
+    /// 硬性前置（必需项）的固定顺序：Node.js、Pi CLI、Pi Web。
+    /// 路由、门控和路径选择都读这一份清单，不再各自重复。
+    static let prerequisiteKinds: [DependencyFinding.Kind] = [.node, .piCLI, .piWeb]
+
+    /// 未通过的必需项：报告里没有该条目，或状态不是 `.ok`。
+    /// 缺项也算未通过：`DependencyReport(findings: [])` 必须进入诊断页，
+    /// 不能因为 `blockingFindings` 为空就被当成就绪。
+    var unsatisfiedPrerequisiteKinds: [DependencyFinding.Kind] {
+        Self.prerequisiteKinds.filter { kind in
+            guard let finding = finding(for: kind) else { return true }
+            return finding.status != .ok
+        }
+    }
+
+    /// 阻塞服务启动的诊断项（只包含报告里存在的条目）：Node.js 状态不是 `ok`
+    /// （缺失/过旧/无法确定），以及 Pi CLI / Pi Web 状态不是 `ok`（缺失或版本
+    /// 无法解析）。系统项、默认端口占用和 Pi 配置目录只做提示，不阻塞启动。
+    /// 报告里缺少必需条目时这里不会出现对应项，因此门控不能只用它判定
+    /// （见 `unsatisfiedPrerequisiteKinds`）。
     var blockingFindings: [DependencyFinding] {
         findings.filter { finding in
             switch finding.kind {
-            case .system:
+            case .system, .port, .piConfigDirectory:
                 return false
-            case .node:
+            case .node, .piCLI, .piWeb:
                 return finding.status != .ok
-            case .piCLI, .piWeb:
-                return finding.status == .missing
             }
         }
     }
 
-    /// pi 与 pi-web 都存在且 Node.js 版本满足最低要求时才为 true。
-    /// 缺少任一条目（例如空报告）时为 false，门控默认关闭。
+    /// 三条硬性前置都存在且状态都是 `.ok` 时才为 true。
+    /// 缺少任一条目（例如空报告）或状态为 `.unknown` 都为 false：版本无法解析
+    /// 意味着无法核对身份，不能放行启动。
     var canStartService: Bool {
-        guard let pi = finding(for: .piCLI),
-              let piWeb = finding(for: .piWeb),
-              let node = finding(for: .node) else { return false }
-        return pi.status != .missing && piWeb.status != .missing && node.status == .ok
+        unsatisfiedPrerequisiteKinds.isEmpty
     }
 }
 
@@ -217,6 +239,11 @@ protocol DependencyFileSystemProbing {
     /// 读取 UTF-8 文本；不存在或不可读时返回 nil。
     func readText(atPath path: String) -> String?
     func homeDirectoryPath() -> String
+    /// 路径是否存在且是目录；探针无法判定时返回 nil。只回答存在性。
+    func directoryExists(atPath path: String) -> Bool?
+    /// 目录（或文件）是否可读；探针无法判定时返回 nil。
+    /// 只读权限位，不列目录、不读取任何文件内容。
+    func isReadableDirectory(atPath path: String) -> Bool?
 }
 
 /// 生产实现：只使用 `FileManager` 和标准 URL 解析，Apple 系统框架以内。
@@ -247,6 +274,78 @@ struct SystemDependencyFileSystemProbe: DependencyFileSystemProbing {
 
     func homeDirectoryPath() -> String {
         fileManager.homeDirectoryForCurrentUser.path
+    }
+
+    func directoryExists(atPath path: String) -> Bool? {
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory) else { return false }
+        return isDirectory.boolValue
+    }
+
+    /// `isReadableFile` 只查询访问权限，不会列出目录内容；Pi 配置目录因此只被
+    /// 判断“存在/可读”，认证文件内容永远不会进入诊断。
+    func isReadableDirectory(atPath path: String) -> Bool? {
+        guard fileManager.fileExists(atPath: path) else { return nil }
+        return fileManager.isReadableFile(atPath: path)
+    }
+}
+
+/// 默认服务端口的本地可用性探针。
+///
+/// 只在本机创建、绑定并关闭一个 TCP socket：不连接任何远端、不发送数据、
+/// 不调用外部命令、不解析域名。返回值语义：
+/// - `true`：绑定成功，端口可用；
+/// - `false`：`EADDRINUSE`，端口已被其他进程占用；
+/// - `nil`：无法判定（主机不是字面量地址、端口非法或其他绑定错误）。
+protocol DependencyPortProbing {
+    func isPortAvailable(host: String, port: Int) -> Bool?
+}
+
+/// 生产实现：`bind(2)` 一个 loopback/字面量地址上的 TCP socket。
+struct SystemDependencyPortProbe: DependencyPortProbing {
+    func isPortAvailable(host: String, port: Int) -> Bool? {
+        guard (1...65535).contains(port) else { return nil }
+        let address = Self.normalizedHost(host)
+
+        var ipv4 = in_addr()
+        if inet_pton(AF_INET, address, &ipv4) == 1 {
+            var socketAddress = sockaddr_in()
+            socketAddress.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            socketAddress.sin_family = sa_family_t(AF_INET)
+            socketAddress.sin_port = in_port_t(UInt16(port).bigEndian)
+            socketAddress.sin_addr = ipv4
+            return Self.canBind(family: AF_INET, address: &socketAddress, length: socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+
+        var ipv6 = in6_addr()
+        if inet_pton(AF_INET6, address, &ipv6) == 1 {
+            var socketAddress = sockaddr_in6()
+            socketAddress.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+            socketAddress.sin6_family = sa_family_t(AF_INET6)
+            socketAddress.sin6_port = in_port_t(UInt16(port).bigEndian)
+            socketAddress.sin6_addr = ipv6
+            return Self.canBind(family: AF_INET6, address: &socketAddress, length: socklen_t(MemoryLayout<sockaddr_in6>.size))
+        }
+
+        // 主机名（例如 `localhost`）不做 DNS 解析：无法判定时不猜测端口状态。
+        return nil
+    }
+
+    private static func normalizedHost(_ host: String) -> String {
+        let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed == "localhost" { return "127.0.0.1" }
+        return trimmed
+    }
+
+    private static func canBind<Address>(family: Int32, address: inout Address, length: socklen_t) -> Bool? {
+        let descriptor = socket(family, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { return nil }
+        defer { close(descriptor) }
+        let result = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(descriptor, $0, length) }
+        }
+        if result == 0 { return true }
+        return errno == EADDRINUSE ? false : nil
     }
 }
 
@@ -310,6 +409,8 @@ struct DependencyChecker {
     static let shellPath = "/bin/zsh"
     static let runnerPath = "/usr/bin/env"
     static let piWebPackageName = "@agegr/pi-web"
+    /// Pi 配置目录相对 Home 的路径；只检查存在与可读，不读取内容。
+    static let piConfigurationDirectoryRelativePath = ".pi/agent"
     /// package.json 向上查找的最大层数。
     static let packageSearchDepth = 6
 
@@ -317,20 +418,29 @@ struct DependencyChecker {
     private let fileSystem: DependencyFileSystemProbing
     private let system: DependencySystemProbe
     private let configuredPiWebPath: String
+    private let serviceHostname: String
+    private let servicePort: Int
+    private let portProbe: DependencyPortProbing
 
     init(
         commandRunner: CommandRunning = SystemCommandRunner(),
         fileSystem: DependencyFileSystemProbing = SystemDependencyFileSystemProbe(),
         system: DependencySystemProbe = .live,
-        configuredPiWebPath: String = ""
+        configuredPiWebPath: String = "",
+        serviceHostname: String = ServiceConfiguration.defaultHostname,
+        servicePort: Int = ServiceConfiguration.defaultPort,
+        portProbe: DependencyPortProbing = SystemDependencyPortProbe()
     ) {
         self.commandRunner = commandRunner
         self.fileSystem = fileSystem
         self.system = system
         self.configuredPiWebPath = configuredPiWebPath
+        self.serviceHostname = serviceHostname
+        self.servicePort = servicePort
+        self.portProbe = portProbe
     }
 
-    /// 运行全部检查。顺序固定：系统、Node.js、Pi CLI、Pi Web。
+    /// 运行全部检查。顺序固定：系统、Node.js、Pi CLI、Pi Web、默认端口、Pi 配置目录。
     func run() -> DependencyReport {
         let redactor = DependencyPathRedactor(homeDirectory: fileSystem.homeDirectoryPath())
         let npmPrefix = localNPMPrefix()
@@ -338,8 +448,33 @@ struct DependencyChecker {
             makeSystemFinding(),
             makeNodeFinding(npmPrefix: npmPrefix, redactor: redactor),
             makePiFinding(npmPrefix: npmPrefix, redactor: redactor),
-            makePiWebFinding(npmPrefix: npmPrefix, redactor: redactor)
+            makePiWebFinding(npmPrefix: npmPrefix, redactor: redactor),
+            makePortFinding(),
+            makePiConfigurationDirectoryFinding(redactor: redactor)
         ])
+    }
+
+    // MARK: - 路径选择的身份证据
+
+    /// 为一个候选 pi-web 路径收集只读身份证据：可执行位、`--version` 解析出的
+    /// 版本，以及沿真实路径向上找到的 package.json 名称。
+    ///
+    /// 只做“执行 `--version` + 读 package.json 的 name”这两件只读的事：不安装、
+    /// 不联网、不写配置、不读取任何认证内容。可执行位本身不是身份（`/bin/echo`
+    /// 也可执行），所以调用方必须再用版本或包名校验。
+    func piWebIdentityEvidence(atPath path: String) -> PiWebIdentityEvidence {
+        guard fileSystem.isExecutableFile(atPath: path) else {
+            return PiWebIdentityEvidence(isExecutable: false, version: nil, packageName: nil)
+        }
+        let metadata = packageMetadata(resolvedPath: fileSystem.resolvedPath(atPath: path))
+        let version = trimmed(commandRunner.run([path, "--version"]))
+            .flatMap { SemanticVersion.firstVersion(in: $0) }?
+            .description
+        return PiWebIdentityEvidence(
+            isExecutable: true,
+            version: version,
+            packageName: metadata.name
+        )
     }
 
     // MARK: - 探针
@@ -638,7 +773,79 @@ struct DependencyChecker {
         )
     }
 
-    private func missingFinding(kind: DependencyFinding.Kind, remediationID: String) -> DependencyFinding {
+    /// 默认服务端口是否可用。只做本地 `bind(2)`，不连接网络、不调用命令。
+    /// 占用只提示不阻塞：占用者可能就是已有的 Pi Web 服务，应用会直接复用。
+    private func makePortFinding() -> DependencyFinding {
+        let available = portProbe.isPortAvailable(host: serviceHostname, port: servicePort)
+        let status: DependencyFinding.Status
+        let confidence: DependencyFinding.Confidence
+        switch available {
+        case .some(true):
+            status = .ok
+            confidence = .verified
+        case .some(false):
+            status = .occupied
+            confidence = .verified
+        case .none:
+            status = .unknown
+            confidence = .unknown
+        }
+        return DependencyFinding(
+            kind: .port,
+            status: status,
+            path: "\(serviceHostname):\(servicePort)",
+            resolvedPath: nil,
+            symlinkTarget: nil,
+            version: nil,
+            installSource: .system,
+            confidence: confidence,
+            remediationID: nil,
+            packageName: nil,
+            packageVersion: nil
+        )
+    }
+
+    /// Pi 配置目录（`~/.pi/agent`）的存在与可读性。
+    ///
+    /// 只向文件系统探针询问“是否存在/是否可读”，不列目录、不读取目录里的任何
+    /// 文件，因此认证内容永远不会进入诊断报告。缺失或不可读只做提示，不阻塞
+    /// 启动，也没有修复命令（首次运行 Pi CLI 会自行创建该目录）。
+    private func makePiConfigurationDirectoryFinding(redactor: DependencyPathRedactor) -> DependencyFinding {
+        let home = normalizedDirectory(fileSystem.homeDirectoryPath())
+        let rawPath = home.isEmpty
+            ? Self.piConfigurationDirectoryRelativePath
+            : "\(home)/\(Self.piConfigurationDirectoryRelativePath)"
+        let displayPath = redactor.redact(rawPath)
+
+        func finding(status: DependencyFinding.Status, confidence: DependencyFinding.Confidence) -> DependencyFinding {
+            DependencyFinding(
+                kind: .piConfigDirectory,
+                status: status,
+                path: displayPath,
+                resolvedPath: nil,
+                symlinkTarget: nil,
+                version: nil,
+                installSource: .localPath,
+                confidence: confidence,
+                remediationID: nil,
+                packageName: nil,
+                packageVersion: nil
+            )
+        }
+
+        guard let exists = fileSystem.directoryExists(atPath: rawPath) else {
+            return finding(status: .unknown, confidence: .unknown)
+        }
+        guard exists else {
+            return finding(status: .missing, confidence: .verified)
+        }
+        guard let readable = fileSystem.isReadableDirectory(atPath: rawPath) else {
+            return finding(status: .unknown, confidence: .unknown)
+        }
+        return finding(status: readable ? .ok : .unreadable, confidence: .verified)
+    }
+
+    private func missingFinding(kind: DependencyFinding.Kind, remediationID: String? = nil) -> DependencyFinding {
         DependencyFinding(
             kind: kind,
             status: .missing,
@@ -684,6 +891,8 @@ enum DependencyReportPresenter {
         case .node: return "Node.js"
         case .piCLI: return "Pi CLI"
         case .piWeb: return "Pi Web"
+        case .port: return "默认端口"
+        case .piConfigDirectory: return "Pi 配置目录"
         }
     }
 
@@ -692,6 +901,8 @@ enum DependencyReportPresenter {
         case .ok: return "正常"
         case .missing: return "缺失"
         case .outdated: return "版本过旧"
+        case .occupied: return "被占用"
+        case .unreadable: return "不可读"
         case .unknown: return "无法确定"
         }
     }
@@ -701,7 +912,26 @@ enum DependencyReportPresenter {
         case .homebrew: return "Homebrew"
         case .npmGlobal: return "npm 全局"
         case .localPath: return "本地路径"
+        case .system: return "系统"
         case .unknown: return "未知"
+        }
+    }
+
+    /// 路径列文本：没有路径时区分“不适用”（系统/端口/配置目录）与“未找到”（可执行文件）。
+    static func pathText(for finding: DependencyFinding) -> String {
+        if let path = finding.path { return path }
+        switch finding.kind {
+        case .system, .port, .piConfigDirectory: return "—"
+        case .node, .piCLI, .piWeb: return "未找到"
+        }
+    }
+
+    /// 版本列文本：端口与配置目录没有版本概念，用“—”而不是“未知”。
+    static func versionText(for finding: DependencyFinding) -> String {
+        if let version = finding.version { return version }
+        switch finding.kind {
+        case .system, .node, .piCLI, .piWeb: return "未知"
+        case .port, .piConfigDirectory: return "—"
         }
     }
 
@@ -718,8 +948,8 @@ enum DependencyReportPresenter {
             Row(
                 title: title(for: finding.kind),
                 status: statusText(for: finding.status),
-                path: finding.path ?? (finding.kind == .system ? "—" : "未找到"),
-                version: finding.version ?? "未知",
+                path: pathText(for: finding),
+                version: versionText(for: finding),
                 source: sourceText(for: finding.installSource),
                 confidence: confidenceText(for: finding.confidence)
             )
@@ -740,7 +970,7 @@ enum DependencyReportPresenter {
             if let symlinkTarget = finding.symlinkTarget {
                 lines.append("  符号链接目标：\(symlinkTarget)")
             }
-            lines.append("  版本：\(finding.version ?? "未知")")
+            lines.append("  版本：\(versionText(for: finding))")
             lines.append("  安装来源：\(sourceText(for: finding.installSource))")
             lines.append("  可信度：\(confidenceText(for: finding.confidence))")
             if finding.kind == .piWeb {
@@ -755,19 +985,98 @@ enum DependencyReportPresenter {
                let entry = InstallCommandManifest.entry(withID: remediationID) {
                 lines.append("  修复：\(entry.title)（\(sanitize(url: entry.documentationURL))）")
             }
+            if let nextStep = nextStepText(for: finding) {
+                lines.append("  下一步：\(nextStep)")
+            }
         }
         return lines.joined(separator: "\n")
     }
 
-    /// 诊断提示页用的短结论。
-    static func blockingSummary(for report: DependencyReport) -> String {
-        let blocking = report.blockingFindings
-        guard !blocking.isEmpty else { return "依赖检查未通过。" }
-        let descriptions = blocking.map { finding in
-            "· \(title(for: finding.kind))：\(statusText(for: finding.status))"
+    /// 单个诊断项的下一步操作提示；不需要提示时返回 nil。
+    ///
+    /// 端口与 Pi 配置目录永远返回 nil 到“修复命令”路径：它们不阻塞启动，
+    /// 文本里只给可读说明，不会让应用去安装、创建或读取任何东西。
+    static func nextStepText(for finding: DependencyFinding) -> String? {
+        switch finding.kind {
+        case .system:
+            return finding.status == .ok ? nil : "系统项只做提示，不阻塞启动。"
+        case .node:
+            return finding.status == .ok ? nil : "安装或升级 Node.js 到最低版本，然后点击“重新检测”。"
+        case .piCLI:
+            guard finding.status != .ok else { return nil }
+            return "安装 Pi CLI（命令见诊断窗口的“复制安装命令”），然后点击“重新检测”。"
+        case .piWeb:
+            switch finding.status {
+            case .ok:
+                return nil
+            case .missing:
+                return "安装 Pi Web，或在诊断窗口点击“选择 pi-web 路径…”指定已安装的可执行文件。"
+            default:
+                return "已找到 pi-web，但版本无法解析；不影响启动。"
+            }
+        case .port:
+            switch finding.status {
+            case .occupied:
+                return "端口被占用不会阻塞启动；如果占用者是已有的 Pi Web 服务，应用会直接使用它，否则请在“设置”里更换端口。"
+            case .unknown:
+                return "无法确认端口占用情况，不影响启动。"
+            default:
+                return nil
+            }
+        case .piConfigDirectory:
+            switch finding.status {
+            case .missing:
+                return "尚未创建 Pi 配置目录（~/\(DependencyChecker.piConfigurationDirectoryRelativePath)）：先运行一次 Pi CLI；应用不会创建该目录，也不会读取其中的认证文件。"
+            case .unreadable, .unknown:
+                return "无法确认 Pi 配置目录的存在与可读性；不影响启动，应用不会读取目录内容。"
+            default:
+                return nil
+            }
         }
-        return (["以下前置未满足："] + descriptions + ["请在“依赖与环境诊断”窗口中复制安装命令，安装后点击“重新检测”。"])
-            .joined(separator: "\n")
+    }
+
+    /// 首次启动诊断状态页正文（WebView 与诊断窗口共用）。
+    ///
+    /// 只输出已脱敏的报告字段和静态文案；不包含 URL 查询参数、凭据或真实
+    /// 用户绝对路径。硬性前置缺失时列出缺失项与下一步操作；就绪但首次设置
+    /// 尚未完成时说明如何进入主窗口。
+    static func statusPageText(for report: DependencyReport, setupIncomplete: Bool) -> String {
+        var lines: [String] = []
+        if report.canStartService {
+            lines.append("结论：硬性前置已满足。")
+            if setupIncomplete {
+                lines.append("首次设置尚未完成：请点击“开始使用 Pi Web”，或在诊断窗口点击“重新检测”后进入主窗口。")
+            } else {
+                lines.append("服务可以启动。")
+            }
+        } else {
+            lines.append("结论：缺少硬性前置，服务启动已暂停。应用会保留窗口，不会退出。")
+        }
+
+        lines.append("")
+        lines.append("诊断结果：")
+        for finding in report.findings {
+            // 每一项都输出完整的五个字段，缺值用占位符，不因 nil 省略整行。
+            let fields = [
+                "· \(title(for: finding.kind))：\(statusText(for: finding.status))",
+                "路径：\(pathText(for: finding))",
+                "版本：\(versionText(for: finding))",
+                "来源：\(sourceText(for: finding.installSource))",
+                "可信度：\(confidenceText(for: finding.confidence))"
+            ]
+            lines.append(fields.joined(separator: "  "))
+        }
+
+        let hints = report.findings.compactMap { finding -> String? in
+            guard let nextStep = nextStepText(for: finding) else { return nil }
+            return "· \(title(for: finding.kind))：\(nextStep)"
+        }
+        if !hints.isEmpty {
+            lines.append("")
+            lines.append("下一步：")
+            lines.append(contentsOf: hints)
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// 只包含当前诊断引用到的修复项，保持 `InstallCommandManifest` 的固定顺序。

@@ -1172,6 +1172,52 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertTrue(harness.pageMessages.isEmpty)
     }
 
+    /// `autoStart` 关闭时 `startAtLaunch()` 只探测外部服务，不拉起子进程：
+    /// 正常启动（包括已配置的每次重启）继续尊重 `autoStart`。
+    func testStartAtLaunchWithAutoStartOffOnlyProbesForAnExternalService() throws {
+        var configuration = ServiceConfiguration.default
+        configuration.autoStart = false
+        let harness = try makeHarness(configuration: configuration)
+        defer { harness.cleanUp() }
+        var runtime = configuration
+        runtime.piWebPath = try harness.makeExecutable()
+        harness.manager.updateConfiguration(runtime)
+        harness.probe.ready = false
+
+        harness.manager.startAtLaunch()
+
+        XCTAssertEqual(harness.launcher.launchCount, 0, "autoStart=false 时正常启动不得拉起服务")
+        XCTAssertEqual(harness.manager.currentState, .stopped)
+        XCTAssertEqual(harness.pageMessages, ["Pi Web 服务未运行。"])
+        XCTAssertEqual(harness.scheduler.repeatingWork.count, 1, "仍要开始健康轮询")
+    }
+
+    /// 首次启动诊断刚完成时 `forceStart` 为 true：即使 `autoStart` 关闭也必须
+    /// 显式启动服务，否则用户刚修好前置却只看到“服务未运行”（GitHub #7 复审）。
+    func testStartAtLaunchForceStartLaunchesEvenWhenAutoStartIsOff() throws {
+        var configuration = ServiceConfiguration.default
+        configuration.autoStart = false
+        let harness = try makeHarness(
+            configuration: configuration,
+            alive: { $0 == 5150 },
+            processOutput: processOutput(for: 5150)
+        )
+        defer { harness.cleanUp() }
+        var runtime = configuration
+        let executable = try harness.makeExecutable()
+        runtime.piWebPath = executable
+        harness.manager.updateConfiguration(runtime)
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = false
+
+        harness.manager.startAtLaunch(forceStart: true)
+
+        XCTAssertEqual(harness.launcher.launchCount, 1)
+        XCTAssertEqual(harness.launcher.specifications.first?.executablePath, executable)
+        XCTAssertEqual(harness.manager.currentState, .starting)
+        XCTAssertEqual(harness.scheduler.repeatingWork.count, 1, "启动后仍要开始健康轮询")
+    }
+
     /// 启动轮询是延迟回调：轮询期间门控关闭时不得采信 ready。
     func testGateClosedWhilePollingDoesNotAdoptTheService() throws {
         let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))

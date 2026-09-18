@@ -22,7 +22,7 @@
 
 ## Xcode 工程构建与测试
 
-标准 Xcode 工程使用 Apple Silicon、macOS 14 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让测试在没有 host app 的情况下仍可编译，target 会把被测源码直接加入测试源：`Sources/ServiceConfiguration.swift`、`Sources/AppConfiguration.swift`、`Sources/ProcessInspector.swift`、`Sources/DiagnosticsCollector.swift`、`Sources/DependencyChecker.swift`、`Sources/InstallCommandManifest.swift`、`Sources/ServiceManager.swift`、`Sources/ServiceOwnership.swift`、`Sources/WebViewNavigationPolicy.swift`；因此测试文件直接使用该 target 内编译的这些类型，不通过 `@testable import PiWebDesktop` 引入 app target。`Sources/WebViewController.swift` 与 `Sources/DiagnosticsWindowController.swift` 依赖 AppKit/WebKit 且需要真实窗口，只进 app target；依赖诊断的纯文本呈现（`DependencyReportPresenter`）因此放在 `DependencyChecker.swift` 里，可以在 unhosted 目标里测试。这些测试使用假的 `ps`/`lsof` 输出、注入的存活判定、假的进程启动器、即时执行的调度器和临时目录，不访问真实进程、网络、Keychain 或 `~/.pi`。
+标准 Xcode 工程使用 Apple Silicon、macOS 14 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让测试在没有 host app 的情况下仍可编译，target 会把被测源码直接加入测试源：`Sources/ServiceConfiguration.swift`、`Sources/AppConfiguration.swift`、`Sources/ProcessInspector.swift`、`Sources/DiagnosticsCollector.swift`、`Sources/DependencyChecker.swift`、`Sources/FirstLaunchDiagnostics.swift`、`Sources/InstallCommandManifest.swift`、`Sources/ServiceManager.swift`、`Sources/ServiceOwnership.swift`、`Sources/WebViewNavigationPolicy.swift`；因此测试文件直接使用该 target 内编译的这些类型，不通过 `@testable import PiWebDesktop` 引入 app target。`Sources/WebViewController.swift` 与 `Sources/DiagnosticsWindowController.swift` 依赖 AppKit/WebKit 且需要真实窗口，只进 app target；依赖诊断的纯文本呈现（`DependencyReportPresenter`）与首次启动路由、控件映射、路径选择因此分别放在 `DependencyChecker.swift` 和 `FirstLaunchDiagnostics.swift` 里，可以在 unhosted 目标里测试。这些测试使用假的 `ps`/`lsof` 输出、注入的存活判定、假的进程启动器、即时执行的调度器、假依赖探针和临时目录，不访问真实进程、网络、Keychain、真实端口或 `~/.pi`。
 
 ```bash
 DERIVED_DATA_PATH="$(mktemp -d /tmp/PiWebDesktopDerivedData.XXXXXX)"
@@ -94,11 +94,19 @@ open build/Pi-Web-Desktop.app
 
 默认服务地址是 `http://127.0.0.1:30141/`。首版基线默认 loopback，不开放局域网监听。
 
-## 依赖诊断
+## 依赖诊断与首次启动
 
-启动时应用会先运行 `DependencyChecker`，检查 Apple Silicon / macOS 14+、Node.js `>=22.19.0`、Pi CLI 和 Pi Web（可执行文件、版本、真实路径、符号链接目标、pi-web 的 package.json）与安装来源。前置不满足时应用不会启动服务或加载服务页面，而是显示诊断提示页并打开“依赖与环境诊断”窗口；满足时行为与拆分前一致。
+启动时应用会先运行 `DependencyChecker`，检查 Apple Silicon / macOS 14+、Node.js `>=22.19.0`、Pi CLI、Pi Web（可执行文件、版本、真实路径、符号链接目标、pi-web 的 package.json）、默认服务端口（本机 `bind(2)`，不连接网络）和 Pi 配置目录（`~/.pi/agent`，只问“存在/可读”）。
 
-诊断窗口也可以随时从菜单“服务 → 依赖与环境诊断…”打开。窗口里的“复制安装命令”只把 `Sources/InstallCommandManifest.swift` 的静态命令写入剪贴板，“重新检测”只重新运行一次 `DependencyChecker`；应用不会执行安装命令、不会调用 `sudo`、不联网，也不读取认证内容。手工排查时可以单独运行只读命令：
+首次启动路由由 `DiagnosticsRouting` 决定（纯函数，只有主窗口与诊断页两种结果，不存在退出应用的分支）：
+
+- 硬性前置（Node.js / Pi CLI / Pi Web）缺失、报告缺项或版本无法解析：诊断页列出需要处理的项与下一步操作，服务控件（启动/停止/重启）全部禁用，WebView 显示诊断页而不是服务页，应用保留窗口。缺项与 `unknown` 与“缺失”一样不放行：无法核对身份就不启动服务。
+- 硬性前置已满足但首次设置尚未完成：先显示诊断页（所有行已绿色），点击“开始使用 Pi Web”或在窗口里点“重新检测”后记录设置完成并进入主窗口。首次设置状态存在 UserDefaults（经 `AppConfiguration`），只有环境复核通过才会写入。
+- 两者都满足：直接进入正常主窗口，行为与 #6 一致。普通启动沿用 `service.autoStart`；本次路由本身就是“刚完成首次设置”时（点“开始使用 Pi Web”或在就绪后重新检测）会显式启动服务，忽略 `autoStart`。
+
+默认端口被占用或 Pi 配置目录缺失都只提示，不阻塞启动：占用者可能就是已有的 Pi Web 服务（应用会直接复用），而 Pi 配置目录由 Pi CLI 首次运行时自行创建——应用不会创建目录，也不会读取目录内任何文件（认证内容永远不会进入诊断）。
+
+诊断窗口也可以随时从菜单“服务 → 依赖与环境诊断…”打开。窗口里的“复制安装命令”只把 `Sources/InstallCommandManifest.swift` 的静态命令写入剪贴板，“重新检测”只重新运行一次 `DependencyChecker`，“选择 pi-web 路径…”经 `NSOpenPanel` 选择可执行文件，先由 `DependencyChecker.piWebIdentityEvidence(atPath:)` 收集只读身份证据（`--version` 版本与 package.json `name`），再经 `AppConfiguration` 写回 `ServiceConfiguration.piWebPath` 并立即重新检测；不可执行、或可执行但既解析不出版本、package.json 名称也不是 `@agegr/pi-web`（例如 `/bin/echo`）时，窗口显示可读错误且配置不变。应用不会执行安装命令、不会调用 `sudo`、不联网，也不读取认证内容。手工排查时可以单独运行只读命令：
 
 ```bash
 node --version
@@ -107,9 +115,9 @@ pi --version
 pi-web --version
 ```
 
-无头环境里也可以用假命令输出和假文件系统探针覆盖同样的判定：`PiWebDesktopTests/DependencyCheckerTests.swift` 使用 `DependencyFakeRunner`（命令）、`DependencyFakeFileSystem`（磁盘）和固定的架构/系统版本，覆盖缺少命令、Node 版本过低、符号链接、安装来源未知、版本无法解析、`canStartService` 门控和脱敏断言；测试不执行真实 npm/pi/pi-web，不访问网络、`~/.pi`、用户 Home 或真实 npm 前缀。
+无头环境里也可以用假命令输出、假文件系统探针和假端口探针覆盖同样的判定：`PiWebDesktopTests/DependencyCheckerTests.swift` 使用 `DependencyFakeRunner`（命令）、`DependencyFakeFileSystem`（磁盘）和固定的架构/系统版本与端口结果，覆盖缺少命令、Node 版本过低、符号链接、安装来源未知、版本无法解析为 unknown（pi/pi-web 的 unknown 同样关闭门控）、路径选择的只读身份证据（`--version` 版本 / package.json 名称 / 不可执行）、`canStartService` 门控矩阵、脱敏断言；`PiWebDesktopTests/FirstLaunchDiagnosticsTests.swift` 覆盖首次启动路由（干净环境 → 诊断页并列出缺失项与下一步、缺少 pi/pi-web 不会退出、就绪但未完成首次设置 → 诊断页、就绪 + 已完成 → 主窗口、缺项（含空报告）/版本无法解析必须停在诊断页）、路径选择（可执行且可核对身份（版本或 package.json 名称）→ 写配置并解除门控；可执行但不是 pi-web（如 `/bin/echo`）/不可执行/空/相对路径 → 配置不变 + 可读错误）、首次设置完成后的启动语义（显式启动，普通启动尊重 `autoStart`）、状态页字段完整性（每项都输出路径/版本/来源/可信度）、默认端口（占用/无法判定不阻塞）、Pi 配置目录（缺失/不可读只提示且从未读取目录内容）与控件可用性映射（blocked/checking 时 start/stop/restart 全不可用）。测试不执行真实 npm/pi/pi-web，不访问网络、`~/.pi`、用户 Home、真实端口或真实 npm 前缀。
 
-门控在 `ServiceManager` 层面也是硬前置：`isDependencyGateOpen` 默认关闭，启动/重启、配置变更重载、启动失败重试、启动轮询和健康检查的入口与异步回调都会重新确认它；`AppDelegate` 只在 `canStartService == true` 时打开，并在阻塞时调用 `stopHealthMonitor()`。这些行为由 `PiWebDesktopTests/ServiceManagerTests.swift` 的假启动器/假探测/假调度器覆盖，不需要真实进程或网络。
+门控在 `ServiceManager` 层面也是硬前置：`isDependencyGateOpen` 默认关闭，启动/重启、配置变更重载、启动失败重试、启动轮询和健康检查的入口与异步回调都会重新确认它；`AppDelegate` 只在 `canStartService == true` 时打开，并在阻塞时调用 `stopHealthMonitor()`。停止入口也受同一映射约束：门控为 `.checking` 或 `.blocked` 时 start/stop/restart 全部不可用。普通启动调用 `startAtLaunch()`，只有“刚完成首次设置”的这一次传 `forceStart: true`，因此即使 `autoStart` 关闭也会显式启动服务，而之后的每次重启仍沿用户设置。这些行为由 `PiWebDesktopTests/ServiceManagerTests.swift` 的假启动器/假探测/假调度器覆盖，不需要真实进程或网络。
 
 ## Smoke 运行
 
@@ -117,16 +125,22 @@ pi-web --version
 ./Scripts/smoke.sh
 ```
 
-`Scripts/smoke.sh` 是没有完整 Xcode 时验证“应用能启动、主窗口能建立、进程能正常退出”的可执行入口。它在 `build/Pi-Web-Desktop.app` 不存在时先运行 `./Scripts/build.sh`，然后用 `PI_WEB_DESKTOP_SMOKE=1` 运行 `build/Pi-Web-Desktop.app/Contents/MacOS/PiWebDesktop`，默认 60 秒超时（可用 `PI_WEB_DESKTOP_SMOKE_TIMEOUT_SECONDS` 覆盖，必须是正整数），断言退出码为 0 且输出包含固定标记 `smoke: ready`；失败时打印退出码、超时原因和已捕获的应用输出。退出码 0 表示 smoke 通过，1 表示构建/退出码/标记/超时任一失败，2 表示超时参数非法。
+`Scripts/smoke.sh` 是没有完整 Xcode 时验证“应用能启动、主窗口/诊断页能建立、进程能正常退出”的可执行入口。它在 `build/Pi-Web-Desktop.app` 不存在时先运行 `./Scripts/build.sh`，然后依次执行两种模式（每种模式有独立的超时和标记断言）：
 
-`PI_WEB_DESKTOP_SMOKE=1` 只影响那一次启动：
+- 启动 smoke：`PI_WEB_DESKTOP_SMOKE=1`，建立主窗口后打印 `smoke: ready`；
+- 诊断 smoke：`PI_WEB_DESKTOP_SMOKE=diagnostics`，跑确定性诊断夹具与真实路由决策，打开诊断状态页后先打印 `smoke: diagnostics items=<n> blockers=<n>`，再打印 `smoke: diagnostics ready`。
 
-- support 目录改为 `$TMPDIR/pi-web-desktop-smoke-<pid>`，日志也写在该临时目录下，退出前删除；不写 `~/Library/Application Support/Pi Web Desktop`，也不写 `~/Library/Logs`。
+两种模式都必须在超时内以 0 退出并输出各自的标记；默认超时 60 秒，可用 `PI_WEB_DESKTOP_SMOKE_TIMEOUT_SECONDS` 覆盖（必须是正整数）。失败时脚本打印退出码、超时原因和已捕获的应用输出。退出码 0 表示两种模式都通过，1 表示构建/退出码/标记/超时任一失败，2 表示超时参数非法。
+
+smoke 变量只影响那一次启动：
+
+- support 目录改为 `$TMPDIR/pi-web-desktop-smoke-<pid>`，日志也写在该临时目录下，退出前删除；两种模式都不写 `~/Library/Application Support/Pi Web Desktop`、不写 `~/Library/Logs`，也不写真实 UserDefaults。
 - 跳过单实例锁与 `service.autoStart` 的服务自动启动，不启动真实 pi-web，也不启动健康检查。
-- 跳过依赖门控：`applicationDidFinishLaunching` 在 smoke 分支直接返回，不运行 `DependencyChecker`、不等待后台结果、不显示诊断窗口；因此即使本机缺少 Node.js/Pi/Pi Web，`./Scripts/smoke.sh` 仍然验证主窗口建立与退出路径。
-- 建立主菜单与主窗口后向 stdout 打印 `smoke: ready` 并以 0 退出；临时目录创建失败或主窗口未建立时向 stderr 报错并以 1 退出，不打印标记。
+- 启动 smoke 跳过依赖门控：`applicationDidFinishLaunching` 在 smoke 分支直接返回，不运行 `DependencyChecker`、不等待后台结果、不显示诊断窗口；因此即使本机缺少 Node.js/Pi/Pi Web，仍然验证主窗口建立与退出路径。
+- 诊断 smoke 不运行真实探针：`DiagnosticsSmokeFixture` 用假命令 runner、空文件系统和固定端口探针生成确定性报告（系统项用 `DependencyChecker.minimumMacOSVersion` 而不是另一份版本字面值），但路由、诊断行、状态页和窗口都由真实代码生成；前置固定判定为缺失，所以它同时验证了门控路径。
+- 建立窗口/诊断页后向 stdout 打印标记并以 0 退出；临时目录创建失败、主窗口未建立或诊断夹具不再进入诊断页时向 stderr 报错并以 1 退出，不打印标记。
 
-变量未设置时行为完全不变。smoke 只验证窗口建立与退出路径，不验证服务功能，也不替代 `xcodebuild` 的构建和 `xcodebuild test` 的单元测试：本机只有 Command Line Tools 时无法运行 XCTest，smoke 不声称覆盖测试用例。
+变量未设置时行为完全不变。smoke 只验证窗口、诊断页与退出路径，不验证服务功能，也不替代 `xcodebuild` 的构建和 `xcodebuild test` 的单元测试：本机只有 Command Line Tools 时无法运行 XCTest，smoke 不声称覆盖测试用例。
 
 ## 验证
 

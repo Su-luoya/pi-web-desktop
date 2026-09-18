@@ -68,9 +68,43 @@ final class AppConfigurationTests: XCTestCase {
 
     func testSmokeDetectionNeedsTheExactValue() {
         XCTAssertTrue(AppConfiguration.isSmokeLaunch(environment: ["PI_WEB_DESKTOP_SMOKE": "1"]))
+        XCTAssertTrue(AppConfiguration.isSmokeLaunch(environment: ["PI_WEB_DESKTOP_SMOKE": "diagnostics"]))
         XCTAssertFalse(AppConfiguration.isSmokeLaunch(environment: ["PI_WEB_DESKTOP_SMOKE": "0"]))
         XCTAssertFalse(AppConfiguration.isSmokeLaunch(environment: ["PI_WEB_DESKTOP_SMOKE": ""]))
         XCTAssertFalse(AppConfiguration.isSmokeLaunch(environment: [:]))
+    }
+
+    func testSmokeLaunchModesAreDistinctAndBothUseTheTemporaryRoot() {
+        XCTAssertEqual(AppConfiguration.smokeLaunchMode(environment: [:]), AppConfiguration.SmokeLaunchMode.none)
+        XCTAssertEqual(AppConfiguration.smokeLaunchMode(environment: ["PI_WEB_DESKTOP_SMOKE": "1"]), .startup)
+        XCTAssertEqual(AppConfiguration.smokeLaunchMode(environment: ["PI_WEB_DESKTOP_SMOKE": "diagnostics"]), .diagnostics)
+        XCTAssertEqual(AppConfiguration.smokeLaunchMode(environment: ["PI_WEB_DESKTOP_SMOKE": "yes"]), .none)
+
+        for value in ["1", "diagnostics"] {
+            let smoke = AppConfiguration.forCurrentProcess(
+                environment: ["PI_WEB_DESKTOP_SMOKE": value],
+                homeDirectory: fakeHome,
+                temporaryDirectory: fakeTemporary,
+                processIdentifier: 4242,
+                defaults: makeEmptyDefaults()
+            )
+            XCTAssertTrue(smoke.isSmokeLaunch)
+            XCTAssertEqual(smoke.supportURL, fakeTemporary.appendingPathComponent("pi-web-desktop-smoke-4242", isDirectory: true))
+            XCTAssertFalse(smoke.supportURL.path.hasPrefix(fakeHome.path))
+        }
+    }
+
+    func testFirstLaunchSetupStartsIncompleteAndPersistsOnlyWhenMarked() {
+        let defaults = makeEmptyDefaults()
+        let configuration = AppConfiguration(supportURL: fakeSupport, logsRootURL: fakeLogs, defaults: defaults)
+
+        XCTAssertFalse(configuration.hasCompletedFirstLaunchSetup)
+        configuration.markFirstLaunchSetupCompleted()
+        XCTAssertTrue(configuration.hasCompletedFirstLaunchSetup)
+
+        // 另一个 suite（相当于干净安装）不受影响；标记只写注入的 defaults。
+        let fresh = AppConfiguration(supportURL: fakeSupport, logsRootURL: fakeLogs, defaults: makeEmptyDefaults())
+        XCTAssertFalse(fresh.hasCompletedFirstLaunchSetup)
     }
 
     func testNormalLaunchKeepsTheRealSupportLocations() {

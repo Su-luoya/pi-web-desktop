@@ -9,11 +9,25 @@ import Foundation
 /// `~/Library/Logs/Pi Web Desktop.log` and the loopback service defaults from
 /// `ServiceConfiguration`.
 struct AppConfiguration {
-    /// Environment variable that switches the process into the smoke launch.
+    /// Smoke 启动模式。两种模式都使用临时 support 目录、跳过单实例锁和服务
+    /// 自动启动，也都不写真实 UserDefaults。
+    enum SmokeLaunchMode: Equatable {
+        case none
+        /// `PI_WEB_DESKTOP_SMOKE=1`：建立主窗口后打印 `smoke: ready`。
+        case startup
+        /// `PI_WEB_DESKTOP_SMOKE=diagnostics`：打开诊断状态页后打印
+        /// `smoke: diagnostics ready`。不运行真实探针。
+        case diagnostics
+    }
+
+    /// Environment variable that switches the process into a smoke launch.
     static let smokeLaunchEnvironmentKey = "PI_WEB_DESKTOP_SMOKE"
     static let smokeLaunchEnvironmentValue = "1"
-    /// Fixed marker the smoke launch prints once the main window exists.
+    static let smokeDiagnosticsLaunchEnvironmentValue = "diagnostics"
+    /// Fixed marker the startup smoke launch prints once the main window exists.
     static let smokeReadyMarker = "smoke: ready"
+    /// Fixed marker the diagnostics smoke launch prints once the status page exists.
+    static let smokeDiagnosticsReadyMarker = "smoke: diagnostics ready"
 
     /// Runtime state root: PID files, instance lock and service workspace.
     /// Defaults to `~/Library/Application Support/Pi Web Desktop`.
@@ -22,21 +36,29 @@ struct AppConfiguration {
     /// Directory that holds `Pi Web Desktop.log`. Defaults to `~/Library/Logs`.
     let logsRootURL: URL
 
-    /// True when the process was started with `PI_WEB_DESKTOP_SMOKE=1`.
-    let isSmokeLaunch: Bool
+    /// Which smoke launch (if any) this process is running.
+    let smokeLaunchMode: SmokeLaunchMode
+
+    /// True for any smoke launch mode.
+    var isSmokeLaunch: Bool { smokeLaunchMode != .none }
 
     private let defaults: UserDefaults
+
+    private enum SetupKey {
+        /// Set once a first-launch diagnostics review passed (`canStartService`).
+        static let firstLaunchSetupCompleted = "firstLaunch.setupCompleted"
+    }
 
     init(
         supportURL: URL,
         logsRootURL: URL,
         defaults: UserDefaults = .standard,
-        isSmokeLaunch: Bool = false
+        smokeLaunchMode: SmokeLaunchMode = .none
     ) {
         self.supportURL = supportURL
         self.logsRootURL = logsRootURL
         self.defaults = defaults
-        self.isSmokeLaunch = isSmokeLaunch
+        self.smokeLaunchMode = smokeLaunchMode
     }
 
     var logURL: URL { logsRootURL.appendingPathComponent("Pi Web Desktop.log") }
@@ -61,6 +83,15 @@ struct AppConfiguration {
     /// Persists service settings through the same injected UserDefaults.
     func save(_ configuration: ServiceConfiguration) { configuration.save(to: defaults) }
 
+    /// True once a first-launch diagnostics review passed on this machine.
+    /// A fresh install (or a value written by an older build) starts as false,
+    /// so the first launch shows the diagnostics surface before the main window.
+    var hasCompletedFirstLaunchSetup: Bool { defaults.bool(forKey: SetupKey.firstLaunchSetupCompleted) }
+
+    /// Records that the first-launch review passed. Called only after a ready
+    /// `DependencyReport`; a blocked report never marks setup complete.
+    func markFirstLaunchSetupCompleted() { defaults.set(true, forKey: SetupKey.firstLaunchSetupCompleted) }
+
     static func defaultSupportURL(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
         homeDirectory.appendingPathComponent("Library/Application Support/Pi Web Desktop", isDirectory: true)
     }
@@ -79,7 +110,16 @@ struct AppConfiguration {
     }
 
     static func isSmokeLaunch(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
-        environment[smokeLaunchEnvironmentKey] == smokeLaunchEnvironmentValue
+        smokeLaunchMode(environment: environment) != .none
+    }
+
+    /// `1` → startup smoke, `diagnostics` → diagnostics smoke, anything else → none.
+    static func smokeLaunchMode(environment: [String: String] = ProcessInfo.processInfo.environment) -> SmokeLaunchMode {
+        switch environment[smokeLaunchEnvironmentKey] {
+        case smokeLaunchEnvironmentValue: return .startup
+        case smokeDiagnosticsLaunchEnvironmentValue: return .diagnostics
+        default: return .none
+        }
     }
 
     /// Configuration for the current process. A smoke launch gets a temporary
@@ -97,7 +137,7 @@ struct AppConfiguration {
                 supportURL: root,
                 logsRootURL: root.appendingPathComponent("Logs", isDirectory: true),
                 defaults: defaults,
-                isSmokeLaunch: true
+                smokeLaunchMode: smokeLaunchMode(environment: environment)
             )
         }
         return AppConfiguration(

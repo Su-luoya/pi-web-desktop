@@ -193,7 +193,8 @@ final class PreferencesWindowController: NSWindowController {
             quitBehavior: ServiceConfiguration.QuitBehavior.allCases[quitBehaviorPopup.indexOfSelectedItem]
         )
         configuration = newConfiguration
-        newConfiguration.save()
+        // Persisted by AppDelegate through AppConfiguration so UserDefaults
+        // access stays in one place.
         onSave?(newConfiguration)
         close()
     }

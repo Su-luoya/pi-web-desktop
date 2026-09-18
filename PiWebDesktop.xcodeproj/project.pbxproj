@@ -13,6 +13,22 @@
 		A10000000000000000000005 /* ApplicationIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* ApplicationIcon.icns */; };
 		A10000000000000000000006 /* ServiceConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* ServiceConfigurationTests.swift */; };
 		A10000000000000000000007 /* ServiceConfiguration.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* ServiceConfiguration.swift */; };
+		A10000000000000000000008 /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* AppConfiguration.swift */; };
+		A10000000000000000000009 /* ProcessInspector.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* ProcessInspector.swift */; };
+		A1000000000000000000000A /* DiagnosticsCollector.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* DiagnosticsCollector.swift */; };
+		A1000000000000000000000B /* AppConfiguration.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* AppConfiguration.swift */; };
+		A1000000000000000000000C /* ProcessInspector.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* ProcessInspector.swift */; };
+		A1000000000000000000000D /* DiagnosticsCollector.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* DiagnosticsCollector.swift */; };
+		A1000000000000000000000E /* AppConfigurationTests.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* AppConfigurationTests.swift */; };
+		A1000000000000000000000F /* DiagnosticsCollectorTests.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* DiagnosticsCollectorTests.swift */; };
+		A10000000000000000000010 /* ProcessInspectorTests.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000F /* ProcessInspectorTests.swift */; };
+		A10000000000000000000011 /* ServiceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000010 /* ServiceManager.swift */; };
+		A10000000000000000000012 /* WebViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000011 /* WebViewController.swift */; };
+		A10000000000000000000013 /* WebViewNavigationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* WebViewNavigationPolicy.swift */; };
+		A10000000000000000000014 /* ServiceManager.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000010 /* ServiceManager.swift */; };
+		A10000000000000000000015 /* WebViewNavigationPolicy.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* WebViewNavigationPolicy.swift */; };
+		A10000000000000000000016 /* ServiceManagerTests.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* ServiceManagerTests.swift */; };
+		A10000000000000000000017 /* WebViewNavigationPolicyTests.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* WebViewNavigationPolicyTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -25,6 +41,17 @@
 		A20000000000000000000007 /* PiWebDesktop.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PiWebDesktop.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000008 /* PiWebDesktopTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PiWebDesktopTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000009 /* AppIdentity.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = AppIdentity.xcconfig; sourceTree = "<group>"; };
+		A2000000000000000000000A /* AppConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfiguration.swift; sourceTree = "<group>"; };
+		A2000000000000000000000B /* ProcessInspector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessInspector.swift; sourceTree = "<group>"; };
+		A2000000000000000000000C /* DiagnosticsCollector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsCollector.swift; sourceTree = "<group>"; };
+		A2000000000000000000000D /* AppConfigurationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfigurationTests.swift; sourceTree = "<group>"; };
+		A2000000000000000000000E /* DiagnosticsCollectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsCollectorTests.swift; sourceTree = "<group>"; };
+		A2000000000000000000000F /* ProcessInspectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessInspectorTests.swift; sourceTree = "<group>"; };
+		A20000000000000000000010 /* ServiceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceManager.swift; sourceTree = "<group>"; };
+		A20000000000000000000011 /* WebViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewController.swift; sourceTree = "<group>"; };
+		A20000000000000000000012 /* WebViewNavigationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewNavigationPolicy.swift; sourceTree = "<group>"; };
+		A20000000000000000000013 /* ServiceManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceManagerTests.swift; sourceTree = "<group>"; };
+		A20000000000000000000014 /* WebViewNavigationPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewNavigationPolicyTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -34,9 +61,9 @@
 
 /* Begin PBXGroup section */
 		A40000000000000000000001 = {isa = PBXGroup; children = (A40000000000000000000002, A40000000000000000000003, A40000000000000000000004, A40000000000000000000005, A40000000000000000000006); sourceTree = "<group>"; };
-		A40000000000000000000002 /* Sources */ = {isa = PBXGroup; children = (A20000000000000000000001, A20000000000000000000002, A20000000000000000000003, A20000000000000000000004); path = Sources; sourceTree = "<group>"; };
+		A40000000000000000000002 /* Sources */ = {isa = PBXGroup; children = (A20000000000000000000001, A20000000000000000000002, A20000000000000000000003, A20000000000000000000004, A2000000000000000000000A, A2000000000000000000000B, A2000000000000000000000C, A20000000000000000000010, A20000000000000000000011, A20000000000000000000012); path = Sources; sourceTree = "<group>"; };
 		A40000000000000000000003 /* Resources */ = {isa = PBXGroup; children = (A20000000000000000000005); path = Resources; sourceTree = "<group>"; };
-		A40000000000000000000004 /* PiWebDesktopTests */ = {isa = PBXGroup; children = (A20000000000000000000006); path = PiWebDesktopTests; sourceTree = "<group>"; };
+		A40000000000000000000004 /* PiWebDesktopTests */ = {isa = PBXGroup; children = (A20000000000000000000006, A2000000000000000000000D, A2000000000000000000000E, A2000000000000000000000F, A20000000000000000000013, A20000000000000000000014); path = PiWebDesktopTests; sourceTree = "<group>"; };
 		A40000000000000000000005 /* Products */ = {isa = PBXGroup; children = (A20000000000000000000007, A20000000000000000000008); name = Products; sourceTree = "<group>"; };
 		A40000000000000000000006 /* Configuration */ = {isa = PBXGroup; children = (A20000000000000000000009); path = Configuration; sourceTree = "<group>"; };
 /* End PBXGroup section */
@@ -55,8 +82,8 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXBuildPhase section */
-		A30000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001, A10000000000000000000002, A10000000000000000000003, A10000000000000000000004); runOnlyForDeploymentPostprocessing = 0; };
-		A30000000000000000000005 /* Test Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000006, A10000000000000000000007); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001, A10000000000000000000002, A10000000000000000000003, A10000000000000000000004, A10000000000000000000008, A10000000000000000000009, A1000000000000000000000A, A10000000000000000000011, A10000000000000000000012, A10000000000000000000013); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000005 /* Test Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000006, A10000000000000000000007, A1000000000000000000000B, A1000000000000000000000C, A1000000000000000000000D, A1000000000000000000000E, A1000000000000000000000F, A10000000000000000000010, A10000000000000000000014, A10000000000000000000015, A10000000000000000000016, A10000000000000000000017); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXBuildPhase section */
 
 /* Begin XCBuildConfiguration section */

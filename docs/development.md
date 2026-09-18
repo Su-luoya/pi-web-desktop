@@ -22,7 +22,7 @@
 
 ## Xcode 工程构建与测试
 
-标准 Xcode 工程使用 Apple Silicon、macOS 14 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让配置测试在没有 host app 的情况下仍可编译，target 会直接把 `Sources/ServiceConfiguration.swift` 加入测试源；因此测试文件直接使用该 target 内编译的 `ServiceConfiguration`，不通过 `@testable import PiWebDesktop` 引入 app target。
+标准 Xcode 工程使用 Apple Silicon、macOS 14 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让测试在没有 host app 的情况下仍可编译，target 会把被测源码直接加入测试源：`Sources/ServiceConfiguration.swift`、`Sources/AppConfiguration.swift`、`Sources/ProcessInspector.swift`、`Sources/DiagnosticsCollector.swift`、`Sources/ServiceManager.swift`、`Sources/WebViewNavigationPolicy.swift`；因此测试文件直接使用该 target 内编译的这些类型，不通过 `@testable import PiWebDesktop` 引入 app target。`Sources/WebViewController.swift` 依赖 AppKit/WebKit 且需要真实窗口，只进 app target；它使用的 URL 判定规则因此拆在 `WebViewNavigationPolicy.swift` 里，可以在 unhosted 目标里测试。这些测试使用假的 `ps`/`lsof` 输出、注入的存活判定、假的进程启动器、即时执行的调度器和临时目录，不访问真实进程、网络、Keychain 或 `~/.pi`。
 
 ```bash
 DERIVED_DATA_PATH="$(mktemp -d /tmp/PiWebDesktopDerivedData.XXXXXX)"
@@ -94,16 +94,35 @@ open build/Pi-Web-Desktop.app
 
 默认服务地址是 `http://127.0.0.1:30141/`。首版基线默认 loopback，不开放局域网监听。
 
+## Smoke 运行
+
+```bash
+./Scripts/smoke.sh
+```
+
+`Scripts/smoke.sh` 是没有完整 Xcode 时验证“应用能启动、主窗口能建立、进程能正常退出”的可执行入口。它在 `build/Pi-Web-Desktop.app` 不存在时先运行 `./Scripts/build.sh`，然后用 `PI_WEB_DESKTOP_SMOKE=1` 运行 `build/Pi-Web-Desktop.app/Contents/MacOS/PiWebDesktop`，默认 60 秒超时（可用 `PI_WEB_DESKTOP_SMOKE_TIMEOUT_SECONDS` 覆盖，必须是正整数），断言退出码为 0 且输出包含固定标记 `smoke: ready`；失败时打印退出码、超时原因和已捕获的应用输出。退出码 0 表示 smoke 通过，1 表示构建/退出码/标记/超时任一失败，2 表示超时参数非法。
+
+`PI_WEB_DESKTOP_SMOKE=1` 只影响那一次启动：
+
+- support 目录改为 `$TMPDIR/pi-web-desktop-smoke-<pid>`，日志也写在该临时目录下，退出前删除；不写 `~/Library/Application Support/Pi Web Desktop`，也不写 `~/Library/Logs`。
+- 跳过单实例锁与 `service.autoStart` 的服务自动启动，不启动真实 pi-web，也不启动健康检查。
+- 建立主菜单与主窗口后向 stdout 打印 `smoke: ready` 并以 0 退出；临时目录创建失败或主窗口未建立时向 stderr 报错并以 1 退出，不打印标记。
+
+变量未设置时行为完全不变。smoke 只验证窗口建立与退出路径，不验证服务功能，也不替代 `xcodebuild` 的构建和 `xcodebuild test` 的单元测试：本机只有 Command Line Tools 时无法运行 XCTest，smoke 不声称覆盖测试用例。
+
 ## 验证
 
 ```bash
-sh -n Scripts/build.sh Scripts/install.sh Scripts/check-identity.sh
+sh -n Scripts/build.sh Scripts/install.sh Scripts/check-identity.sh Scripts/smoke.sh
 ./Scripts/build.sh
 codesign --verify --deep --strict build/Pi-Web-Desktop.app
 ./Scripts/check-identity.sh
+./Scripts/smoke.sh
 ```
 
 服务生命周期、依赖诊断、版本解析、安装来源、脱敏和所有权判定应使用单元测试和本地假服务测试。测试不得访问真实 npm、GitHub、用户 Keychain 或 `~/.pi`。
+
+`PiWebDesktopTests/ServiceManagerTests.swift` 覆盖服务所有权（过期 PID 记录、外部进程、匹配进程、运行中的子进程优先）和启动决策（完整命令行与环境变量、找不到可执行文件、停止中忽略启动、复用已运行进程）、停止与退出行为、健康检查重试；所有副作用都走注入的 `CommandRunning`/`ServiceLaunching`/`ServiceProbing`/`ServiceScheduling`，断言不依赖真实的进程、网络或墙钟时间。`PiWebDesktopTests/WebViewNavigationPolicyTests.swift` 覆盖本地/外链 URL 判定。
 
 ## 开发约束
 

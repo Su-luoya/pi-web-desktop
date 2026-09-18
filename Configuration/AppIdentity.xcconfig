@@ -9,17 +9,24 @@
 // release tag (v<MARKETING_VERSION>) in sync. See docs/releasing.md.
 
 // Application identity.
+//
+// APP_BUNDLE_IDENTIFIER is the base variable: nothing overrides it, so both the
+// app identifier and the test identifier can derive from it without a cycle.
+// The test target does override PRODUCT_BUNDLE_IDENTIFIER, so nothing in this
+// file may derive from that setting.
 APP_DISPLAY_NAME = Pi Web Desktop
 APP_BUNDLE_NAME = $(APP_DISPLAY_NAME)
 APP_EXECUTABLE_NAME = PiWebDesktop
 APP_ICON_NAME = ApplicationIcon
 APP_MINIMUM_SYSTEM_VERSION = 14.0
-PRODUCT_BUNDLE_IDENTIFIER = io.github.su-luoya.pi-web-desktop
+APP_BUNDLE_IDENTIFIER = io.github.su-luoya.pi-web-desktop
 
-// The test bundle derives from the same identity so the project file does not
-// need its own copy of these literals.
+PRODUCT_BUNDLE_IDENTIFIER = $(APP_BUNDLE_IDENTIFIER)
+
+// The test bundle derives from the same base variable so the project file does
+// not need its own copy of these literals.
 APP_TEST_DISPLAY_NAME = $(APP_DISPLAY_NAME) Tests
-APP_TEST_BUNDLE_IDENTIFIER = $(PRODUCT_BUNDLE_IDENTIFIER).tests
+APP_TEST_BUNDLE_IDENTIFIER = $(APP_BUNDLE_IDENTIFIER).tests
 
 // Version.
 MARKETING_VERSION = 0.1.0-alpha.1

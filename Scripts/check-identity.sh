@@ -5,13 +5,17 @@ set -eu
 # (Configuration/AppIdentity.xcconfig) and that the Xcode project, the packaging
 # script, the built app bundle and the service defaults all agree with it.
 #
-# Usage: ./Scripts/check-identity.sh [path/to/App.app ...]
+# Usage: ./Scripts/check-identity.sh [--test-bundle path/to/App.xctest] [path/to/App.app ...]
 #
 # Every bundle path given on the command line is checked; with no argument the
-# default script build (build/Pi-Web-Desktop.app) is checked. CI passes both the
-# Xcode product and the script product in one run.
+# default script build (build/Pi-Web-Desktop.app) is checked. CI passes the
+# Xcode product, the script product and the Xcode test bundle in one run.
+# --test-bundle accepts a single test bundle and checks its CFBundleIdentifier
+# against the resolved APP_TEST_BUNDLE_IDENTIFIER plus its version fields; it may
+# be omitted, in which case the behaviour is unchanged.
 #
-# Exit status: 0 when every check passes, 1 when at least one check fails.
+# Exit status: 0 when every check passes, 1 when at least one check fails,
+# 2 for invalid arguments.
 #
 # The repository text scan below never reports this file itself: the file is
 # excluded from the scan, and every pattern is assembled from fragments so the
@@ -49,11 +53,20 @@ info() {
   printf 'info %s\n' "$1"
 }
 
+usage_error() {
+  printf 'error: %s\n' "$1" >&2
+  printf 'usage: ./Scripts/check-identity.sh [--test-bundle path/to/App.xctest] [path/to/App.app ...]\n' >&2
+  exit 2
+}
+
 # Read one value from the single-source xcconfig and expand $(VAR) references.
-# Same implementation as Scripts/build.sh: Xcode, the build script and this
-# checker must interpret the file identically.
+# Pass "raw" as the second argument to keep the unexpanded text, which is how a
+# circular reference (APP_TEST_BUNDLE_IDENTIFIER -> PRODUCT_BUNDLE_IDENTIFIER,
+# which the test target overrides back to APP_TEST_BUNDLE_IDENTIFIER) is caught.
+# Same parser as Scripts/build.sh: Xcode, the build script and this checker must
+# interpret the file identically.
 xcconfig_value() {
-  awk -v key="$1" '
+  awk -v key="$1" -v mode="${2:-expanded}" '
     function trim(text) {
       gsub(/^[[:space:]]+/, "", text)
       gsub(/[[:space:]]+$/, "", text)
@@ -70,7 +83,7 @@ xcconfig_value() {
     }
     END {
       value = values[key]
-      for (pass = 0; pass < 5; pass++) {
+      for (pass = 0; pass < 5 && mode != "raw"; pass++) {
         expanded = value
         while (match(expanded, /\$\([A-Za-z_][A-Za-z0-9_]*\)/)) {
           ref = substr(expanded, RSTART + 2, RLENGTH - 3)
@@ -228,6 +241,37 @@ check_loopback_entries() {
   done
 }
 
+# --- arguments -------------------------------------------------------------
+# Positional arguments are bundle paths; --test-bundle takes exactly one path.
+TEST_BUNDLE=''
+argument_count=$#
+argument_index=0
+while [ "$argument_index" -lt "$argument_count" ]; do
+  argument=$1
+  shift
+  argument_index=$((argument_index + 1))
+  case $argument in
+    --test-bundle)
+      if [ "$argument_index" -ge "$argument_count" ]; then
+        usage_error '--test-bundle requires a bundle path'
+      fi
+      if [ -n "$TEST_BUNDLE" ]; then
+        usage_error '--test-bundle accepts a single bundle path'
+      fi
+      TEST_BUNDLE=$1
+      shift
+      argument_index=$((argument_index + 1))
+      ;;
+    -*)
+      usage_error "unknown option $argument"
+      ;;
+    *)
+      # Keep positional paths for the bundle loop below.
+      set -- "$@" "$argument"
+      ;;
+  esac
+done
+
 printf 'check-identity: single source is %s\n' "$XCCONFIG_REL"
 
 # --- 1. single source -------------------------------------------------------
@@ -245,6 +289,8 @@ APP_EXECUTABLE_NAME=$(xcconfig_value APP_EXECUTABLE_NAME)
 APP_ICON_NAME=$(xcconfig_value APP_ICON_NAME)
 APP_MINIMUM_SYSTEM_VERSION=$(xcconfig_value APP_MINIMUM_SYSTEM_VERSION)
 APP_BUNDLE_IDENTIFIER=$(xcconfig_value PRODUCT_BUNDLE_IDENTIFIER)
+BASE_BUNDLE_IDENTIFIER=$(xcconfig_value APP_BUNDLE_IDENTIFIER)
+APP_TEST_BUNDLE_IDENTIFIER=$(xcconfig_value APP_TEST_BUNDLE_IDENTIFIER)
 APP_VERSION=$(xcconfig_value MARKETING_VERSION)
 APP_BUILD=$(xcconfig_value CURRENT_PROJECT_VERSION)
 
@@ -254,7 +300,9 @@ for entry in \
   "APP_EXECUTABLE_NAME=$APP_EXECUTABLE_NAME" \
   "APP_ICON_NAME=$APP_ICON_NAME" \
   "APP_MINIMUM_SYSTEM_VERSION=$APP_MINIMUM_SYSTEM_VERSION" \
+  "APP_BUNDLE_IDENTIFIER=$BASE_BUNDLE_IDENTIFIER" \
   "PRODUCT_BUNDLE_IDENTIFIER=$APP_BUNDLE_IDENTIFIER" \
+  "APP_TEST_BUNDLE_IDENTIFIER=$APP_TEST_BUNDLE_IDENTIFIER" \
   "MARKETING_VERSION=$APP_VERSION" \
   "CURRENT_PROJECT_VERSION=$APP_BUILD"
 do
@@ -266,6 +314,21 @@ do
     fail "xcconfig $key is missing"
   fi
 done
+
+# The test target overrides PRODUCT_BUNDLE_IDENTIFIER with
+# $(APP_TEST_BUNDLE_IDENTIFIER). If APP_TEST_BUNDLE_IDENTIFIER derived from
+# PRODUCT_BUNDLE_IDENTIFIER in turn, the value would be circular and no build
+# product could prove that it resolves. Assert the unexpanded template, because
+# the expanded value looks correct either way.
+TEST_BUNDLE_IDENTIFIER_TEMPLATE=$(xcconfig_value APP_TEST_BUNDLE_IDENTIFIER raw)
+case $TEST_BUNDLE_IDENTIFIER_TEMPLATE in
+  *'$(PRODUCT_BUNDLE_IDENTIFIER)'*)
+    fail "xcconfig APP_TEST_BUNDLE_IDENTIFIER references \$(PRODUCT_BUNDLE_IDENTIFIER), which the test target overrides (circular reference)"
+    ;;
+  *)
+    pass "xcconfig APP_TEST_BUNDLE_IDENTIFIER does not reference \$(PRODUCT_BUNDLE_IDENTIFIER)"
+    ;;
+esac
 
 # --- 2. Xcode project -------------------------------------------------------
 printf '\n== Xcode project ==\n'
@@ -321,7 +384,20 @@ for bundle in "$@"; do
   check_bundle "$bundle"
 done
 
-# --- 4. service defaults ----------------------------------------------------
+# --- 4. test bundle ---------------------------------------------------------
+if [ -n "$TEST_BUNDLE" ]; then
+  printf '\n== test bundle ==\n'
+  test_plist="$TEST_BUNDLE/Contents/Info.plist"
+  if [ ! -f "$test_plist" ]; then
+    fail "test bundle $TEST_BUNDLE: Info.plist not found at $test_plist"
+  else
+    check_bundle_value "$TEST_BUNDLE" "$test_plist" CFBundleIdentifier "$APP_TEST_BUNDLE_IDENTIFIER"
+    check_bundle_value "$TEST_BUNDLE" "$test_plist" CFBundleShortVersionString "$APP_VERSION"
+    check_bundle_value "$TEST_BUNDLE" "$test_plist" CFBundleVersion "$APP_BUILD"
+  fi
+fi
+
+# --- 5. service defaults ----------------------------------------------------
 printf '\n== service defaults ==\n'
 if [ ! -f "$SERVICE_CONFIG" ]; then
   fail "missing $SERVICE_CONFIG_REL"
@@ -349,7 +425,7 @@ else
   fi
 fi
 
-# --- 5. repository text scan ------------------------------------------------
+# --- 6. repository text scan ------------------------------------------------
 printf '\n== repository text scan ==\n'
 if ! git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   fail "repository text scan needs a Git work tree at $ROOT"

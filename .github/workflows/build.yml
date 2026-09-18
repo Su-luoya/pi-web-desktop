@@ -48,7 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           trap 'rm -rf "$DERIVED_DATA_PATH"' EXIT
-          ./Scripts/check-identity.sh "$XCODE_APP_PATH" build/Pi-Web-Desktop.app
+          ./Scripts/check-identity.sh --test-bundle "$DERIVED_DATA_PATH/Build/Products/Debug/PiWebDesktopTests.xctest" "$XCODE_APP_PATH" build/Pi-Web-Desktop.app
       - name: Check for accidental personal data
         run: |
           ! git grep -nE 'taila|127\.0\.0\.1:7890|/Users/[^/]+' -- ':!*.icns' ':!.github/workflows/build.yml' ':!Scripts/check-identity.sh'

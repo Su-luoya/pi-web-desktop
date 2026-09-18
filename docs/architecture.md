@@ -22,7 +22,8 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 - `InstallCommandManifest`（`Sources/InstallCommandManifest.swift`）：修复建议的静态清单（Node.js 最低版本、Pi CLI 与 Pi Web 的 npm 安装命令、官方文档 URL）。纯编译期常量，不联网、不动态生成；应用只展示和复制，绝不执行。
 - `FirstLaunchDiagnostics`（`Sources/FirstLaunchDiagnostics.swift`）：首次启动路由、门控控件映射、pi-web 路径选择和诊断 smoke 夹具的纯逻辑——`DiagnosticsGate`（`checking`/`ready`/`blocked`）、`ServiceControlState`（门控 → start/stop/restart 可用性）、`DiagnosticsRouting`（报告 + 首次设置状态 → `mainWindow`/`diagnostics(reasons)`）、`ServiceLaunchIntent`（首次设置刚完成 → 显式启动，否则尊重 `autoStart`）、`PiWebPathSelection` 与 `PiWebIdentityEvidence`（选中的路径 + 只读身份证据 → 新配置或可读错误）和 `DiagnosticsSmokeFixture`。不依赖 AppKit，可在 unhosted 测试目标里直接断言。
 - `DiagnosticsWindowController`（`Sources/DiagnosticsWindowController.swift`）：首次启动诊断状态页（诊断项表格 + 可复制的安装命令 + “选择 pi-web 路径…”“重新检测”“开始使用 Pi Web”）。它只渲染 `DependencyReport` 和收集用户选择：选择结果经 `onSelectPiWebPath` 交给 `AppDelegate` 校验并写入配置，重新检测经 `onRecheck` 回调；窗口不执行安装命令、不写配置。
-- `PreferencesWindowController`：用户设置界面；保存后由 `AppDelegate` 经 `AppConfiguration` 写回 UserDefaults。
+- `PreferencesWindowController`：用户设置界面；保存后由 `AppDelegate` 经 `AppConfiguration` 写回 UserDefaults。“远程访问”分区显示密码已设置/未设置，提供设置/生成/删除密码按钮，并说明密码认证不等于传输加密；删除密码会关闭远程模式并恢复默认 loopback。
+- `KeychainStore`（`Sources/KeychainStore.swift`）：远程访问密码的存储与门控纯逻辑。`KeychainStoring` 协议只提供 save/load/delete/exists，生产实现是 macOS Security 的 `kSecClassGenericPassword`（service = bundle identifier，account = `remote-access-password`，`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`）；`RemoteAccessPassword` 给出读取与“已设置/未设置”状态文本，`RemoteAccessPolicy` 判定 loopback、hostname 校验、远程监听前置条件与“删除密码后回到 loopback”，`RemoteAccessSetup` 是设置界面的保存流程（密码只进 Keychain，配置只进 UserDefaults），`PasswordGenerator` 用 `SecRandomCopyBytes` 在本地生成不低于 24 位、含大小写字母数字符号的密码，`SecretScrubbing` 在展示前移除已知秘密。
 
 ### 注入点
 
@@ -30,12 +31,12 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 
 - `CommandRunning`：`ps`/`lsof`/`zsh` 等命令；`SystemCommandRunner` 是唯一真实实现。
 - `ProcessInspector`：监听 PID、进程存活判断、`pgid`/`lstart`/`comm` 事实读取；其中 `processIsAlive` 闭包可注入，测试里完全不看真实进程。
-- `ServiceLaunching`：全项目唯一启动服务进程的地方（`SystemServiceLauncher`）。生产实现用 `posix_spawn` + `POSIX_SPAWN_SETPGROUP` 让子进程成为独立进程组的组长，并保留日志重定向、环境变量、工作目录和 stdin 为 `/dev/null`；测试用假实现断言完整命令行与环境变量。
+- `ServiceLaunching`：全项目唯一启动服务进程的地方（`SystemServiceLauncher`）。生产实现用 `posix_spawn` + `POSIX_SPAWN_SETPGROUP` 让子进程成为独立进程组的组长，并保留日志重定向、环境变量、工作目录和 stdin 为 `/dev/null`；测试用假实现断言完整命令行与环境变量。远程模式下 `PI_WEB_PASSWORD` 只出现在这个环境字典里（见下节）。
 - `ServiceOwnershipStoring`：`service-owner.json` 的读写（`FileServiceOwnershipStore`）；测试可以注入写入失败的实现来验证“启动后写不进记录就终止刚启动的进程组”。
 - `ServiceSignaling`：只提供“向进程组发送信号”和“进程组是否存活”两个方法（`POSIXServiceSignaler` 用 `kill(-pgid, ...)`）；接口里没有单 PID 发送方法，测试用假实现记录收到的组信号。
 - `ServiceProbing`：启动轮询与健康检查用的 HTTP 探测（`URLSessionServiceProbe`，超时经参数注入）。
 - `ServiceScheduling`：主队列/后台队列、延时、重复定时器和 `sleep` 的调度；测试里即时执行，不等待真实时间。
-- `AppConfiguration`、`environment` 闭包与 `FileManager`：路径、子进程环境变量和文件操作。
+- `AppConfiguration`、`environment` 闭包与 `FileManager`：路径、子进程环境变量和文件操作；`ServiceManager` 另外注入 `remoteAccessPassword` 闭包（默认返回 nil，即“无密码”），因此测试永远不会读到真实 Keychain。
 - `DependencyFileSystemProbing` / `DependencySystemProbe` / `DependencyPortProbing`：依赖诊断的文件系统探针（可执行文件、符号链接、真实路径、文本读取、Home 目录、目录存在与可读性）、系统探针（`uname` 架构、macOS 版本）和端口探针（本机 `bind(2)`，只回“可用/占用/无法判定”）；测试注入假实现，因此不触碰真实 Home、npm 前缀、`~/.pi`、真实端口或网络。
 
 `WebViewController` 通过构造参数接收 service URL、端口和 `windowProvider` 闭包（保存面板、打开面板和查找栏需要窗口），所以 `AppDelegate` 不持有 WebKit 状态。
@@ -43,7 +44,6 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 尚未实现（后续 issue 范围）：
 
 - `UpdateCoordinator`：版本检查、更新计划、用户确认和受限安装。
-- `KeychainStore`：保存远程访问密码，不把秘密写入普通设置、命令行、日志或诊断。
 
 `DiagnosticsCollector` 只负责文本组装；脱敏由调用方保证——只传入上面列出的字段，不传入密码等秘密。
 
@@ -110,14 +110,31 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 
 启动时（`startAtLaunch()` → `reconcileOwnershipRecord()`）会重新验证磁盘上的记录：进程已不存在、或记录来自上一次应用运行（`instanceID` 不同）时，只删除记录文件，绝不向对应 PID 发送信号；“退出但保持服务运行”留下的服务在下次启动时因此按外部服务处理。删除规则由 `ServiceOwnershipVerdict.shouldRemoveRecord` 决定：唯一保留记录的情况是 `ps` 事实暂时不可读，此时仍然不会发送信号，留待下次再验证。
 
+## 远程访问与密码
+
+远程访问的唯一前置条件是 Keychain 中存在非空密码。密码的存储、读取和状态都在 `KeychainStore`（`Sources/KeychainStore.swift`）中：
+
+- 存储：`kSecClassGenericPassword`，`kSecAttrService` 是应用的 bundle identifier，`kSecAttrAccount` 是 `remote-access-password`，可访问性固定为 `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`。密码只存在于这一个条目里，不进入 UserDefaults、命令行参数、日志文件、诊断文本或错误消息；`KeychainStoreError` 只携带 notFound / OSStatus，不携带秘密。
+- 读取：`RemoteAccessPassword.load(from:)` 在条目缺失、为空或读取失败时都返回 nil（fail closed：读取失败不会被当成“可以用无认证方式启动”）。
+- 门控：`RemoteAccessPolicy.allowsRemoteListening(hostname:password:)`——loopback 恒允许；hostname 不是 loopback 时必须存在非空密码。`ServiceManager.isStartPermitted` 包含这个条件，所以启动、重启、配置变更重载、启动重试、启动轮询和健康检查都无法在缺密码时启动服务、探测外部服务或加载服务页；`ServiceStartDecision.missingRemotePassword` 给出可读的失败提示。
+- 单次读取：`ServiceManager.startManagedService()` 在本次启动里只读一次凭证，并且把它同时传给门控和 `ServiceLaunchSpecification.make(..., remoteAccessPassword:)`（决策入口是 `startDecision(credentials:)`）。校验通过后不再读 Keychain，因此不存在“校验时有效、此后二次读取失效却仍然 `.launch`”的 fail-open 窗口（GitHub #8 复审）；读取失败或条目缺失一律按“无密码”拒绝启动。
+- 保存：`RemoteAccessSetup.apply(requested:newPassword:keychain:)` 是设置界面的保存流程。`newPassword` 为 nil 表示沿用已有密码，非空则先写入 Keychain；远程 hostname 没有可用密码时返回可读错误且不返回配置，调用方因此不会写 UserDefaults。密码写入失败时错误文本会先经过 `SecretScrubbing`，即使底层错误描述意外带上密码也不会展示。
+- 生成：界面上的“生成高强度密码”调用 `PasswordGenerator`（`SecRandomCopyBytes`，长度下限 24，保证大写字母/小写字母/数字/符号四类字符各至少一个，再用可注入随机源做 Fisher–Yates 洗牌），不联网、不引入依赖。
+- 删除：删除 Keychain 条目后 `RemoteAccessPolicy.disablingRemoteAccess(in:)` 把 hostname 收回 `127.0.0.1`，其余字段保持不变；`AppDelegate` 经 `AppConfiguration` 保存新配置，并且当远程服务正在运行时重启它，使新的（或已删除的）`PI_WEB_PASSWORD` 生效。
+- 运行中收敛：密码也可能在服务运行期间被外部删除或变成不可读，门控本身拦不住已经在跑的进程。`ServiceManager.closeRemoteAccessIfCredentialsAreUnavailable()` 是这类状态的收敛入口：配置是非 loopback 且取不到凭证时，若存在本应用启动、且仍能通过所有权验证的进程，则把 hostname 收回 `127.0.0.1`，走 `stopService()` 的既有验证路径停止该进程组（外部服务、无法验证的记录零信号），把状态改成带可读提示的 `.failed(RemoteAccessPolicy.revokedPasswordMessage)`，并通过 `onRemoteAccessClosed` 让 `AppDelegate` 持久化回落后的配置（不静默重启）。触发点是每 4 秒一次的健康轮询、所有启动入口的缺密码拒绝分支，以及依赖检查完成时（`AppDelegate.applyDependencyReport`）。没有可验证的托管进程时不改动用户配置，只给出“需要设置密码”的提示。
+
+传输密码的路径只有一处：`ServiceLaunchSpecification.make(..., remoteAccessPassword:)`。只有当 hostname 不是 loopback 且密码非空时，子进程环境才包含 `PI_WEB_PASSWORD`；否则该变量会被从环境里删除（包括清除父进程继承来的同名变量）。命令行参数 `--hostname/--port/--no-open`、所有权记录（只有命令文本的 SHA-256 摘要）、日志文件（只有子进程的 stdout/stderr）和诊断文本（只有“已设置/未设置”）都不包含密码值或长度。
+
+监听边界：默认值仍是 `127.0.0.1`；`0.0.0.0`、`::` 与 `[::]` 在界面保存时被拒绝，不会成为默认值也不会被一次误输入打开。保存时 `RemoteAccessPolicy.normalizedHostname(_:)` 把 IPv6 字面量统一成不带方括号的形式（`::1`，与 `--hostname` 参数和端口探测一致），拼 URL 时再由 `RemoteAccessPolicy.urlHost(for:)` 加方括号：`http://[::1]:端口/`（`URLComponents` 对未加方括号的 IPv6 host 会返回 nil，旧实现会静默回落到 `127.0.0.1`）。冒号只允许出现在合法的 IPv6 字面量里，`example.invalid:8443` 这类把端口写进地址的输入会在保存时被拒绝。密码认证只验证访问者，不是传输加密：设置界面和文档都明确要求远程访问自行配置受信任的加密隧道或 HTTPS 反向代理。
+
 ## 网络边界
 
-默认监听 `127.0.0.1`。远程访问需要用户显式配置受信任的加密隧道或 HTTPS 反向代理，并设置 Pi Web 密码。桌面应用不把密码写入 UserDefaults、日志或诊断信息。
+默认监听 `127.0.0.1`，非 loopback 监听地址必须先在 Keychain 中设置非空密码（见上节）。远程访问还需要用户显式配置受信任的加密隧道或 HTTPS 反向代理：密码认证不等于传输加密。桌面应用不把密码写入 UserDefaults、命令行、日志或诊断信息。
 
 ## 数据位置
 
 - 普通设置：UserDefaults（读写都经 `AppConfiguration`）。
-- 远程访问密码：macOS Keychain。
+- 远程访问密码：macOS Keychain（service = bundle identifier，account = `remote-access-password`，仅本文一处存储）。
 - 运行状态和 PID：`~/Library/Application Support/Pi Web Desktop/`。
 - 日志：`~/Library/Logs/Pi Web Desktop.log`，应用执行轮转。
 

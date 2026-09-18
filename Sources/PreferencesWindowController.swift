@@ -1,24 +1,41 @@
 import Cocoa
 
-final class PreferencesWindowController: NSWindowController {
+final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate {
     var onSave: ((ServiceConfiguration) -> Void)?
     var onCancel: (() -> Void)?
+    /// 密码在 Keychain 中被设置或删除后触发。
+    ///
+    /// 调用方负责持久化可能被改写的配置（删除密码会关闭远程模式并回到默认
+    /// loopback）以及让正在运行的远程服务重启，使新的 `PI_WEB_PASSWORD` 生效。
+    /// 回调只传配置，不传密码。
+    var onRemoteAccessCredentialsChanged: ((ServiceConfiguration) -> Void)?
 
     private let pathField = NSTextField()
-    private let hostnameField = NSTextField(labelWithString: "127.0.0.1")
+    private let hostnameField = NSTextField()
     private let portField = NSTextField()
     private let allowedHostsField = NSTextField()
     private let httpProxyField = NSTextField()
     private let httpsProxyField = NSTextField()
     private let noProxyField = NSTextField()
+    private let passwordStatusLabel = NSTextField(labelWithString: "")
+    private let newPasswordField = NSSecureTextField()
+    private let savePasswordButton = NSButton(title: "保存密码", target: nil, action: nil)
+    private let generatePasswordButton = NSButton(title: "生成高强度密码", target: nil, action: nil)
+    private let deletePasswordButton = NSButton(title: "删除密码", target: nil, action: nil)
+    private let remoteAccessHintLabel = NSTextField(labelWithString: "")
     private let autoStartButton = NSButton(checkboxWithTitle: "应用启动时自动启动服务", target: nil, action: nil)
     private let quitBehaviorPopup = NSPopUpButton()
     private let errorLabel = NSTextField(labelWithString: "")
 
     private var configuration: ServiceConfiguration
+    private let keychain: KeychainStoring
+    /// 只保留“已设置/未设置”的结论：已保存的密码永远不会被读回并显示。
+    private var hasStoredPassword: Bool
 
-    init(configuration: ServiceConfiguration) {
+    init(configuration: ServiceConfiguration, keychain: KeychainStoring = KeychainStore()) {
         self.configuration = configuration
+        self.keychain = keychain
+        self.hasStoredPassword = RemoteAccessPassword.isSet(in: keychain)
         super.init(window: nil)
         buildWindow()
         loadValues()
@@ -36,6 +53,8 @@ final class PreferencesWindowController: NSWindowController {
 
         let serviceHeader = NSTextField(labelWithString: "服务")
         serviceHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        let remoteHeader = NSTextField(labelWithString: "远程访问")
+        remoteHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         let networkHeader = NSTextField(labelWithString: "网络与代理")
         networkHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         let behaviorHeader = NSTextField(labelWithString: "行为")
@@ -48,9 +67,24 @@ final class PreferencesWindowController: NSWindowController {
         saveButton.keyEquivalent = "\r"
         cancelButton.keyEquivalent = "\u{1b}"
 
+        savePasswordButton.target = self
+        savePasswordButton.action = #selector(savePassword(_:))
+        generatePasswordButton.target = self
+        generatePasswordButton.action = #selector(generatePassword(_:))
+        deletePasswordButton.target = self
+        deletePasswordButton.action = #selector(deletePassword(_:))
+
         let pathRow = row(label: "pi-web 路径", field: pathField, trailing: pathPicker)
-        let hostnameRow = row(label: "监听地址（仅本机）", field: hostnameField)
         let portRow = row(label: "端口", field: portField)
+        hostnameField.delegate = self
+        let hostnameRow = row(label: "监听地址", field: hostnameField)
+        let passwordStatusRow = row(label: "访问密码", field: passwordStatusLabel, trailing: nil, isReadOnly: true)
+        let newPasswordRow = row(label: "新密码", field: newPasswordField, trailing: generatePasswordButton)
+        let passwordButtonRow = NSStackView(views: [savePasswordButton, deletePasswordButton, NSView()])
+        passwordButtonRow.orientation = .horizontal
+        passwordButtonRow.spacing = 8
+        passwordButtonRow.alignment = .centerY
+        let passwordActionsRow = row(label: "密码操作", field: passwordButtonRow, trailing: nil, isReadOnly: true)
         let allowedHostsRow = row(label: "允许的主机名", field: allowedHostsField)
         let httpProxyRow = row(label: "HTTP 代理", field: httpProxyField)
         let httpsProxyRow = row(label: "HTTPS 代理", field: httpsProxyField)
@@ -61,9 +95,15 @@ final class PreferencesWindowController: NSWindowController {
         autoStartButton.target = self
         autoStartButton.action = #selector(autoStartChanged(_:))
 
+        for hint in [remoteAccessHintLabel, passwordHintLabel] {
+            hint.lineBreakMode = .byWordWrapping
+            hint.maximumNumberOfLines = 0
+            hint.textColor = .secondaryLabelColor
+        }
         errorLabel.textColor = .systemRed
         errorLabel.isHidden = true
         errorLabel.lineBreakMode = .byWordWrapping
+        errorLabel.maximumNumberOfLines = 0
 
         let buttons = NSStackView(views: [resetButton, NSView(), cancelButton, saveButton])
         buttons.orientation = .horizontal
@@ -71,9 +111,13 @@ final class PreferencesWindowController: NSWindowController {
         buttons.alignment = .centerY
 
         let stack = NSStackView(views: [
-            title, serviceHeader, pathRow, hostnameRow, portRow,
+            title,
+            serviceHeader, pathRow, portRow,
+            remoteHeader, hostnameRow, passwordStatusRow, newPasswordRow, passwordActionsRow,
+            passwordHintLabel, remoteAccessHintLabel,
             networkHeader, allowedHostsRow, httpProxyRow, httpsProxyRow, noProxyRow,
-            behaviorHeader, autoStartButton, quitRow, errorLabel, buttons
+            behaviorHeader, autoStartButton, quitRow,
+            errorLabel, buttons
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -81,11 +125,16 @@ final class PreferencesWindowController: NSWindowController {
         stack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(stack)
 
-        for rowView in [pathRow, hostnameRow, portRow, allowedHostsRow, httpProxyRow, httpsProxyRow, noProxyRow, quitRow] {
+        for rowView in [
+            pathRow, portRow, hostnameRow, passwordStatusRow, newPasswordRow, passwordActionsRow,
+            allowedHostsRow, httpProxyRow, httpsProxyRow, noProxyRow, quitRow
+        ] {
             rowView.widthAnchor.constraint(equalToConstant: 520).isActive = true
         }
         buttons.widthAnchor.constraint(equalToConstant: 520).isActive = true
         errorLabel.widthAnchor.constraint(equalToConstant: 520).isActive = true
+        passwordHintLabel.widthAnchor.constraint(equalToConstant: 520).isActive = true
+        remoteAccessHintLabel.widthAnchor.constraint(equalToConstant: 520).isActive = true
 
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
@@ -96,7 +145,10 @@ final class PreferencesWindowController: NSWindowController {
             autoStartButton.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
 
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 568, height: 500), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        // 新增“远程访问”分区后内容变高（密码状态、新密码、密码按钮和两段说明）。
+        // 780 覆盖了带两行错误提示时的实测高度（约 770），因此固定高度的窗口不会
+        // 裁掉说明文字或底部按钮。
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 568, height: 780), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Pi Web Desktop 设置"
         window.contentView = content
         window.isReleasedWhenClosed = false
@@ -104,7 +156,11 @@ final class PreferencesWindowController: NSWindowController {
         self.window = window
     }
 
-    private func row(label: String, field: NSView, trailing: NSView? = nil) -> NSView {
+    /// 远程访问密码与传输加密的区别：界面必须明确说明密码认证不等于加密。
+    private let passwordHintLabel = NSTextField(labelWithString:
+        "密码认证只验证访问者身份，不等于 HTTPS 或加密隧道。远程访问请自行配置受信任的加密隧道（例如 WireGuard、SSH 端口转发）或 HTTPS 反向代理。")
+
+    private func row(label: String, field: NSView, trailing: NSView? = nil, isReadOnly: Bool = false) -> NSView {
         let labelView = NSTextField(labelWithString: label)
         labelView.alignment = .right
         labelView.widthAnchor.constraint(equalToConstant: 100).isActive = true
@@ -112,6 +168,9 @@ final class PreferencesWindowController: NSWindowController {
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 8
+        if isReadOnly {
+            return row
+        }
         if let textField = field as? NSTextField {
             textField.isEditable = true
             textField.translatesAutoresizingMaskIntoConstraints = false
@@ -124,9 +183,9 @@ final class PreferencesWindowController: NSWindowController {
 
     private func loadValues() {
         pathField.stringValue = configuration.piWebPath
-        hostnameField.stringValue = ServiceConfiguration.defaultHostname
-        hostnameField.isEditable = false
-        hostnameField.isEnabled = false
+        hostnameField.stringValue = configuration.hostname
+        hostnameField.isEditable = true
+        hostnameField.isEnabled = true
         portField.stringValue = String(configuration.port)
         allowedHostsField.stringValue = configuration.allowedHosts
         httpProxyField.stringValue = configuration.httpProxy
@@ -134,6 +193,30 @@ final class PreferencesWindowController: NSWindowController {
         noProxyField.stringValue = configuration.noProxy
         autoStartButton.state = configuration.autoStart ? .on : .off
         quitBehaviorPopup.selectItem(at: ServiceConfiguration.QuitBehavior.allCases.firstIndex(of: configuration.quitBehavior) ?? 0)
+        refreshRemoteAccessState()
+    }
+
+    /// 刷新“已设置/未设置”和与 hostname 联动的提示。只读结论来自 Keychain，
+    /// 已保存的密码不会出现在任何控件里。
+    private func refreshRemoteAccessState() {
+        hasStoredPassword = RemoteAccessPassword.isSet(in: keychain)
+        passwordStatusLabel.stringValue = RemoteAccessPassword.statusText(isSet: hasStoredPassword)
+        deletePasswordButton.isEnabled = hasStoredPassword
+        remoteAccessHintLabel.stringValue = remoteAccessHintText()
+    }
+
+    private func remoteAccessHintText() -> String {
+        let hostname = hostnameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if RemoteAccessPolicy.isLoopbackHostname(hostname) {
+            return "当前只监听本机（\(ServiceConfiguration.defaultHostname)），不需要密码。"
+                + "改成远程地址前必须先在 Keychain 中保存密码。"
+        }
+        if hasStoredPassword {
+            return "监听地址 \(hostname) 属于远程访问：访问者必须输入访问密码，"
+                + "“允许的主机名”只做 Host 校验，不能替代密码认证。"
+        }
+        return "监听地址 \(hostname) 无法保存也无法启动：请先保存密码，"
+            + "或把监听地址改回 \(ServiceConfiguration.defaultHostname)。"
     }
 
     @objc private func selectPiWebPath(_ sender: Any?) {
@@ -151,6 +234,8 @@ final class PreferencesWindowController: NSWindowController {
     }
 
     @objc private func resetDefaults(_ sender: Any?) {
+        // 恢复默认只重置普通设置：已保存的密码属于用户在 Keychain 中的秘密，
+        // 只能由用户显式点击“删除密码”移除。
         configuration = .default
         loadValues()
         errorLabel.isHidden = true
@@ -165,24 +250,71 @@ final class PreferencesWindowController: NSWindowController {
         close()
     }
 
+    @objc private func savePassword(_ sender: Any?) {
+        let outcome = RemoteAccessSetup.apply(
+            requested: configuration,
+            newPassword: newPasswordField.stringValue,
+            keychain: keychain
+        )
+        guard let updated = outcome.configuration else {
+            showError(outcome.error ?? "无法保存密码。")
+            return
+        }
+        configuration = updated
+        newPasswordField.stringValue = ""
+        refreshRemoteAccessState()
+        errorLabel.isHidden = true
+        onRemoteAccessCredentialsChanged?(configuration)
+    }
+
+    @objc private func generatePassword(_ sender: Any?) {
+        guard let generated = PasswordGenerator.generate() else {
+            showError("无法生成密码：系统随机数不可用。请稍后重试。")
+            return
+        }
+        // 新生成的密码只出现在输入框里，供用户复制后点击“保存密码”；
+        // 已保存的密码不会被读回显示。
+        newPasswordField.stringValue = generated
+        errorLabel.isHidden = true
+    }
+
+    @objc private func deletePassword(_ sender: Any?) {
+        do {
+            try keychain.delete(for: RemoteAccessPassword.account)
+        } catch {
+            showError("无法删除 Keychain 中的密码：\(RemoteAccessSetup.readableMessage(for: error))")
+            return
+        }
+        // 删除密码自动关闭远程模式并恢复默认 loopback，配置由回调持久化。
+        configuration = RemoteAccessPolicy.disablingRemoteAccess(in: configuration)
+        hostnameField.stringValue = configuration.hostname
+        newPasswordField.stringValue = ""
+        refreshRemoteAccessState()
+        errorLabel.isHidden = true
+        onRemoteAccessCredentialsChanged?(configuration)
+    }
+
     @objc private func save(_ sender: Any?) {
         guard let port = Int(portField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)), (1...65535).contains(port) else {
             showError("端口必须是 1 到 65535 之间的整数。")
             return
         }
-        let hostname = ServiceConfiguration.defaultHostname
-        guard hostname == "127.0.0.1" else {
-            showError("当前版本只允许本机访问。")
+        let hostname = hostnameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let message = RemoteAccessPolicy.hostnameValidationMessage(hostname) {
+            showError(message)
             return
         }
-        let url = URL(string: "http://\(hostname):\(port)/")
-        guard let url, url.host == hostname, url.port == port else {
+        // IPv6 字面量统一保存为不带方括号的形式（`::1`）：`--hostname` 参数和端口
+        // 探测都用这个形式，只有 URL 主机需要方括号（`http://[::1]:端口/`）。
+        let normalizedHostname = RemoteAccessPolicy.normalizedHostname(hostname)
+        let urlHost = RemoteAccessPolicy.urlHost(for: normalizedHostname)
+        guard let url = URL(string: "http://\(urlHost):\(port)/"), url.host != nil, url.port == port else {
             showError("监听地址无效。")
             return
         }
 
-        let newConfiguration = ServiceConfiguration(
-            hostname: hostname,
+        let requested = ServiceConfiguration(
+            hostname: normalizedHostname,
             port: port,
             piWebPath: pathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             allowedHosts: allowedHostsField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -192,11 +324,25 @@ final class PreferencesWindowController: NSWindowController {
             autoStart: autoStartButton.state == .on,
             quitBehavior: ServiceConfiguration.QuitBehavior.allCases[quitBehaviorPopup.indexOfSelectedItem]
         )
+        // 密码只写入 Keychain；配置只通过 onSave 交给 AppDelegate 写入 UserDefaults。
+        // 远程 hostname 缺少密码时这一步直接返回可读错误，配置不会被保存。
+        let pendingPassword = newPasswordField.stringValue.isEmpty ? nil : newPasswordField.stringValue
+        let outcome = RemoteAccessSetup.apply(requested: requested, newPassword: pendingPassword, keychain: keychain)
+        guard let newConfiguration = outcome.configuration else {
+            showError(outcome.error ?? "设置未保存。")
+            return
+        }
         configuration = newConfiguration
+        newPasswordField.stringValue = ""
         // Persisted by AppDelegate through AppConfiguration so UserDefaults
         // access stays in one place.
         onSave?(newConfiguration)
         close()
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        guard (notification.object as? NSTextField) === hostnameField else { return }
+        remoteAccessHintLabel.stringValue = remoteAccessHintText()
     }
 
     private func showError(_ message: String) {

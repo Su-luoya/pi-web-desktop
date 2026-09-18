@@ -15,6 +15,7 @@ Pi Web Desktop 不收集或上传遥测、使用统计、会话内容、认证�
 - 运行状态写入 `~/Library/Application Support/Pi Web Desktop/`。
 - 日志写入 `~/Library/Logs/Pi Web Desktop.log` 并轮转。
 - 应用不读取、复制或迁移 `~/.pi/agent/auth.json` 等 Pi 认证内容。
+- 首次启动诊断只检查 `~/.pi/agent` 是否存在与可读（不列目录、不读取任何文件），报告里只出现脱敏后的路径 `~/.pi/agent`。
 
 ## 诊断脱敏
 

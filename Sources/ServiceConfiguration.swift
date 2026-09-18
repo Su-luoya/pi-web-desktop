@@ -1,6 +1,6 @@
 import Foundation
 
-struct ServiceConfiguration {
+struct ServiceConfiguration: Equatable {
     enum QuitBehavior: String, CaseIterable {
         case ask
         case keepRunning

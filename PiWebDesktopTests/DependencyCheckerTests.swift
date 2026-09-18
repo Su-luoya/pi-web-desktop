@@ -29,6 +29,12 @@ private final class DependencyFakeFileSystem: DependencyFileSystemProbing {
     var symlinks: [String: String] = [:]
     var resolvedPaths: [String: String] = [:]
     var files: [String: String] = [:]
+    /// 存在的目录（例如假 Pi 配置目录）。
+    var directories: Set<String> = []
+    /// 存在但不可读的目录。
+    var unreadableDirectories: Set<String> = []
+    /// `readText` 实际读过的路径，供“从未读取认证内容”的断言使用。
+    private(set) var readPaths: [String] = []
 
     func isExecutableFile(atPath path: String) -> Bool {
         executables.contains(path)
@@ -45,11 +51,21 @@ private final class DependencyFakeFileSystem: DependencyFileSystemProbing {
     }
 
     func readText(atPath path: String) -> String? {
-        files[path]
+        readPaths.append(path)
+        return files[path]
     }
 
     func homeDirectoryPath() -> String {
         home
+    }
+
+    func directoryExists(atPath path: String) -> Bool? {
+        directories.contains(path) || unreadableDirectories.contains(path)
+    }
+
+    func isReadableDirectory(atPath path: String) -> Bool? {
+        guard directoryExists(atPath: path) == true else { return nil }
+        return !unreadableDirectories.contains(path)
     }
 }
 
@@ -59,6 +75,8 @@ private struct DependencyHarness {
     var architecture = "arm64"
     var osVersion = OperatingSystemVersion(majorVersion: 14, minorVersion: 5, patchVersion: 0)
     var configuredPiWebPath = ""
+    /// 默认端口探针结果；nil 表示无法判定。
+    var portAvailability: Bool? = true
 
     func checker() -> DependencyChecker {
         DependencyChecker(
@@ -68,8 +86,18 @@ private struct DependencyHarness {
                 architecture: { architecture },
                 operatingSystemVersion: { osVersion }
             ),
-            configuredPiWebPath: configuredPiWebPath
+            configuredPiWebPath: configuredPiWebPath,
+            portProbe: DependencyFakePortProbe(availability: { portAvailability })
         )
+    }
+}
+
+/// 固定结果的假端口探针：不绑定真实端口。
+private struct DependencyFakePortProbe: DependencyPortProbing {
+    var availability: () -> Bool?
+
+    func isPortAvailable(host: String, port: Int) -> Bool? {
+        availability()
     }
 }
 
@@ -176,7 +204,10 @@ final class DependencyCheckerTests: XCTestCase {
         let harness = makeHarness()
         let report = harness.checker().run()
 
-        XCTAssertEqual(report.findings.map(\.kind), [.system, .node, .piCLI, .piWeb])
+        XCTAssertEqual(
+            report.findings.map(\.kind),
+            [.system, .node, .piCLI, .piWeb, .port, .piConfigDirectory]
+        )
         XCTAssertTrue(report.blockingFindings.isEmpty)
         XCTAssertTrue(report.canStartService)
     }
@@ -605,16 +636,19 @@ final class DependencyCheckerTests: XCTestCase {
         XCTAssertFalse(text.contains("?"))
     }
 
-    func testBlockingSummaryListsOnlyBlockers() {
+    func testStatusPageListsMissingItemsAndTheirNextSteps() {
         let harness = makeHarness()
         harness.fileSystem.executables.remove("/opt/homebrew/bin/pi")
         let report = harness.checker().run()
         XCTAssertEqual(report.blockingFindings.map(\.kind), [.piCLI])
 
-        let summary = DependencyReportPresenter.blockingSummary(for: report)
-        XCTAssertTrue(summary.contains("Pi CLI：缺失"))
-        XCTAssertFalse(summary.contains("Node.js："))
-        XCTAssertFalse(summary.contains("/opt/homebrew"))
+        let statusPage = DependencyReportPresenter.statusPageText(for: report, setupIncomplete: false)
+        XCTAssertTrue(statusPage.contains("Pi CLI：缺失"))
+        XCTAssertTrue(statusPage.contains("下一步："))
+        XCTAssertTrue(statusPage.contains("重新检测"))
+        XCTAssertTrue(statusPage.contains("缺少硬性前置"))
+        XCTAssertFalse(statusPage.contains(harness.fileSystem.home))
+        XCTAssertTrue(statusPage.contains("不会退出"), "缺少硬性前置时必须说明应用不会退出")
     }
 
     func testInstallCommandsTextComesFromTheStaticManifest() {
@@ -662,7 +696,7 @@ final class DependencyCheckerTests: XCTestCase {
         let report = harness.checker().run()
         let combined = [
             DependencyReportPresenter.summaryText(for: report),
-            DependencyReportPresenter.blockingSummary(for: report),
+            DependencyReportPresenter.statusPageText(for: report, setupIncomplete: false),
             DependencyReportPresenter.installCommandsText(for: report)
         ].joined(separator: "\n")
 

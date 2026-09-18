@@ -13,19 +13,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var currentState: ServiceState = .checking
     private var preferencesWindowController: PreferencesWindowController?
     private var diagnosticsWindowController: DiagnosticsWindowController?
-    /// 依赖门控禁用的启动类菜单项（启动/重启）；停止项不受影响。
-    private var serviceStartMenuItems: [NSMenuItem] = []
+    /// 依赖门控禁用的服务控件菜单项（启动/停止/重启）。
+    private var serviceControlMenuItems: [NSMenuItem] = []
     private var dependencyReport: DependencyReport?
-    private var dependencyGate: DependencyGate = .checking
+    /// 依赖门控状态；start/stop/restart 的可用性统一由 `ServiceControlState` 映射。
+    private var dependencyGate: DiagnosticsGate = .checking
     private var dependencyCheckGeneration = 0
     private var shouldPresentDiagnostics = false
-
-    /// 依赖前置的门控状态。检查完成前不允许启动服务。
-    private enum DependencyGate: Equatable {
-        case checking
-        case ready
-        case blocked
-    }
 
     private let appConfiguration: AppConfiguration
     private let commandRunner: CommandRunning
@@ -54,9 +48,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        if appConfiguration.isSmokeLaunch {
+        switch appConfiguration.smokeLaunchMode {
+        case .startup:
             runSmokeLaunch()
             return
+        case .diagnostics:
+            runDiagnosticsSmokeLaunch()
+            return
+        case .none:
+            break
         }
         try? FileManager.default.createDirectory(at: appConfiguration.supportURL, withIntermediateDirectories: true)
         guard acquireSingleInstanceLock() else {
@@ -103,6 +103,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func failSmokeLaunch(_ message: String) -> Never {
         FileHandle.standardError.write(Data("smoke launch failed: \(message)\n".utf8))
         exit(1)
+    }
+
+    /// `PI_WEB_DESKTOP_SMOKE=diagnostics` diagnostics smoke: temporary support
+    /// directory, no single-instance lock, no service auto-start and no real
+    /// probes. It uses the deterministic `DiagnosticsSmokeFixture` report, runs
+    /// the real first-launch routing decision, renders the diagnostics status
+    /// page into the WebView and creates the diagnostics window, then prints the
+    /// fixed marker and exits 0. Any failure exits non-zero without printing it.
+    /// Without the variable this path is never taken.
+    private func runDiagnosticsSmokeLaunch() {
+        do {
+            try FileManager.default.createDirectory(at: appConfiguration.supportURL, withIntermediateDirectories: true)
+        } catch {
+            failSmokeLaunch("cannot create \(appConfiguration.supportURL.path): \(error.localizedDescription)")
+        }
+        installMainMenu()
+        createWindow()
+        guard window != nil, webViewController != nil else {
+            failSmokeLaunch("main window was not created")
+        }
+
+        let report = DiagnosticsSmokeFixture.report()
+        let route = DiagnosticsRouting.route(DiagnosticsRouting.Context(report: report, hasCompletedFirstLaunchSetup: false))
+        guard case .diagnostics = route else {
+            failSmokeLaunch("the deterministic diagnostics report did not route to the diagnostics page")
+        }
+
+        webViewController.showDependencyPage(
+            title: "首次启动环境检查",
+            message: DependencyReportPresenter.statusPageText(for: report, setupIncomplete: true)
+        )
+        showDiagnostics(report: report, firstLaunchSetupIncomplete: true, canContinueToService: report.canStartService)
+
+        let supportURL = appConfiguration.supportURL
+        let summary = "smoke: diagnostics items=\(report.findings.count) blockers=\(report.blockingFindings.count)\n"
+        DispatchQueue.main.async {
+            FileHandle.standardOutput.write(Data((summary + AppConfiguration.smokeDiagnosticsReadyMarker + "\n").utf8))
+            try? FileManager.default.removeItem(at: supportURL)
+            exit(0)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -227,7 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: - Menus
 
     private func installMainMenu() {
-        serviceStartMenuItems.removeAll()
+        serviceControlMenuItems.removeAll()
         let mainMenu = NSMenu()
 
         let appMenuItem = NSMenuItem()
@@ -240,9 +280,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hideOthers.keyEquivalentModifierMask = [.command, .option]
         appMenu.addItem(withTitle: "显示全部", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
         appMenu.addItem(withTitle: "设置…", action: #selector(showPreferences(_:)), keyEquivalent: ",")
-        appMenu.addItem(makeServiceStartMenuItem(title: "启动服务", action: #selector(startServiceAction(_:))))
-        appMenu.addItem(makeServiceStartMenuItem(title: "重启服务", action: #selector(restartServiceAction(_:))))
-        appMenu.addItem(withTitle: "停止服务", action: #selector(stopServiceAction(_:)), keyEquivalent: "")
+        appMenu.addItem(makeServiceControlMenuItem(title: "启动服务", action: #selector(startServiceAction(_:))))
+        appMenu.addItem(makeServiceControlMenuItem(title: "重启服务", action: #selector(restartServiceAction(_:))))
+        appMenu.addItem(makeServiceControlMenuItem(title: "停止服务", action: #selector(stopServiceAction(_:))))
         appMenu.addItem(withTitle: "在浏览器中打开", action: #selector(openInBrowser(_:)), keyEquivalent: "")
         appMenu.addItem(withTitle: "复制本地地址", action: #selector(copyLocalAddress(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
@@ -286,9 +326,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         statusMenuItem = serviceMenu.addItem(withTitle: "状态：正在检查…", action: nil, keyEquivalent: "")
         statusMenuItem?.isEnabled = false
         serviceMenu.addItem(.separator())
-        serviceMenu.addItem(makeServiceStartMenuItem(title: "启动服务", action: #selector(startServiceAction(_:))))
-        serviceMenu.addItem(makeServiceStartMenuItem(title: "重启服务", action: #selector(restartServiceAction(_:))))
-        serviceMenu.addItem(withTitle: "停止服务", action: #selector(stopServiceAction(_:)), keyEquivalent: "")
+        serviceMenu.addItem(makeServiceControlMenuItem(title: "启动服务", action: #selector(startServiceAction(_:))))
+        serviceMenu.addItem(makeServiceControlMenuItem(title: "重启服务", action: #selector(restartServiceAction(_:))))
+        serviceMenu.addItem(makeServiceControlMenuItem(title: "停止服务", action: #selector(stopServiceAction(_:))))
         serviceMenu.addItem(withTitle: "设置…", action: #selector(showPreferences(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "在浏览器中打开", action: #selector(openInBrowser(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "复制本地地址", action: #selector(copyLocalAddress(_:)), keyEquivalent: "")
@@ -311,87 +351,155 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.mainMenu = mainMenu
     }
 
-    /// 依赖门控禁用的菜单项；由 `validateMenuItem` 在菜单打开时再次确认。
-    private func makeServiceStartMenuItem(title: String, action: Selector) -> NSMenuItem {
+    /// 依赖门控禁用的服务控件菜单项（启动/停止/重启）；菜单打开时由
+    /// `validateMenuItem` 再次确认。两处都读取同一个 `ServiceControlState` 映射。
+    private func makeServiceControlMenuItem(title: String, action: Selector) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-        serviceStartMenuItems.append(item)
+        serviceControlMenuItems.append(item)
         return item
     }
 
     // MARK: - 依赖诊断门控
 
-    /// 启动时的环境检查。命令执行会阻塞，因此放到后台；结果回到主线程后再
-    /// 决定服务是否可启动。检查期间启动/重启菜单项保持禁用。
-    private func runDependencyCheck() {
+    /// 启动时与“重新检测”共用的环境检查。命令执行会阻塞，因此放到后台；
+    /// 结果回到主线程后再决定路由与门控。检查期间服务控件保持禁用。
+    private func runDependencyCheck(triggeredByUser: Bool = false) {
         dependencyGate = .checking
+        applyServiceControlAvailability()
         // 检查期间即使有异步回调到达，服务启动入口也必须保持关闭。
         serviceManager.isDependencyGateOpen = false
-        serviceStartMenuItems.forEach { $0.isEnabled = false }
         dependencyCheckGeneration += 1
         let generation = dependencyCheckGeneration
         // 在主线程读配置和注入的 runner，后台只执行只读探测。
+        let configuration = serviceManager.configuration
         let checker = DependencyChecker(
             commandRunner: commandRunner,
-            configuredPiWebPath: serviceManager.configuration.piWebPath
+            configuredPiWebPath: configuration.piWebPath,
+            serviceHostname: configuration.hostname,
+            servicePort: configuration.port
         )
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let report = checker.run()
             DispatchQueue.main.async {
                 guard let self, generation == self.dependencyCheckGeneration else { return }
-                self.applyDependencyReport(report)
+                self.applyDependencyReport(report, triggeredByUser: triggeredByUser)
             }
         }
     }
 
-    /// `canStartService == true` 时恢复原有启动路径；否则禁用启动菜单项、显示
-    /// 诊断窗口，并用诊断提示页替代服务页面（不加载服务地址）。
-    private func applyDependencyReport(_ report: DependencyReport) {
+    /// 显式更新菜单项的启用状态。三个服务控件的门控相同（只有 `.ready` 时可用），
+    /// 所以用同一个映射值；停止项也受门控约束（GitHub #7）。
+    private func applyServiceControlAvailability() {
+        let controls = ServiceControlState(gate: dependencyGate)
+        serviceControlMenuItems.forEach { $0.isEnabled = controls.canStart }
+    }
+
+    /// 应用诊断结果：先定门控（只看硬性前置），再定路由（诊断页或主窗口）。
+    ///
+    /// - 门控为 `.ready` 当且仅当 `canStartService`；端口占用与 Pi 配置目录
+    ///   缺失只提示，不改变门控。
+    /// - 用户主动重新检测得到就绪报告时记录首次设置完成，路由随即进入主窗口。
+    /// - 缺少 pi/pi-web 时路由结果是 `.diagnostics`：应用保留窗口，没有退出分支。
+    private func applyDependencyReport(_ report: DependencyReport, triggeredByUser: Bool) {
         dependencyReport = report
-        let presentDiagnostics = !report.canStartService || shouldPresentDiagnostics
+
+        if triggeredByUser, DiagnosticsRouting.completesFirstLaunchSetup(report: report) {
+            appConfiguration.markFirstLaunchSetupCompleted()
+        }
+
+        dependencyGate = report.canStartService ? .ready : .blocked
+        applyServiceControlAvailability()
+        serviceManager.isDependencyGateOpen = report.canStartService
+
+        let firstLaunchSetupIncomplete = !appConfiguration.hasCompletedFirstLaunchSetup
+        let route = DiagnosticsRouting.route(DiagnosticsRouting.Context(
+            report: report,
+            hasCompletedFirstLaunchSetup: appConfiguration.hasCompletedFirstLaunchSetup
+        ))
+        let presentDiagnostics = shouldPresentDiagnostics
         shouldPresentDiagnostics = false
 
-        if report.canStartService {
-            let wasReady = dependencyGate == .ready
-            dependencyGate = .ready
-            serviceManager.isDependencyGateOpen = true
-            serviceStartMenuItems.forEach { $0.isEnabled = true }
-            if !presentDiagnostics {
-                diagnosticsWindowController?.close()
-                diagnosticsWindowController = nil
+        switch route {
+        case .mainWindow:
+            diagnosticsWindowController?.close()
+            diagnosticsWindowController = nil
+            serviceManager.setState(.checking)
+            webViewController.showLoadingPage(message: "正在检查 Pi Web 服务…")
+            serviceManager.startAtLaunch()
+            if presentDiagnostics {
+                showDiagnostics(
+                    report: report,
+                    firstLaunchSetupIncomplete: firstLaunchSetupIncomplete,
+                    canContinueToService: report.canStartService
+                )
             }
-            if !wasReady {
-                serviceManager.setState(.checking)
-                webViewController.showLoadingPage(message: "正在检查 Pi Web 服务…")
-                serviceManager.startAtLaunch()
-            }
-        } else {
-            dependencyGate = .blocked
-            // 阻塞时关掉服务启动入口并停止健康轮询：不能在诊断页上把状态改回
-            // running，也不能重新加载服务页。
-            serviceManager.isDependencyGateOpen = false
+        case .diagnostics:
+            // 诊断页不管理服务：停掉健康轮询并把状态置为 stopped，避免健康检查
+            // 把状态改回 running、把诊断页覆盖回服务页。前置缺失与“首次设置
+            // 未完成”两条路径都不启动服务。
             serviceManager.stopHealthMonitor()
-            serviceStartMenuItems.forEach { $0.isEnabled = false }
             serviceManager.setState(.stopped)
-            webViewController.showDependencyPage(message: DependencyReportPresenter.blockingSummary(for: report))
-        }
-        if presentDiagnostics {
-            showDiagnostics(report: report)
+            webViewController.showDependencyPage(
+                title: firstLaunchSetupIncomplete ? "首次启动环境检查" : "无法启动 Pi Web 服务",
+                message: DependencyReportPresenter.statusPageText(for: report, setupIncomplete: firstLaunchSetupIncomplete)
+            )
+            showDiagnostics(
+                report: report,
+                firstLaunchSetupIncomplete: firstLaunchSetupIncomplete,
+                canContinueToService: report.canStartService
+            )
         }
     }
 
-    private func showDiagnostics(report: DependencyReport) {
+    private func showDiagnostics(report: DependencyReport, firstLaunchSetupIncomplete: Bool, canContinueToService: Bool) {
         if let controller = diagnosticsWindowController {
-            controller.update(report: report)
+            controller.update(
+                report: report,
+                firstLaunchSetupIncomplete: firstLaunchSetupIncomplete,
+                canContinueToService: canContinueToService
+            )
             controller.window?.makeKeyAndOrderFront(nil)
         } else {
-            let controller = DiagnosticsWindowController(report: report)
-            controller.onRecheck = { [weak self] in self?.runDependencyCheck() }
+            let controller = DiagnosticsWindowController(
+                report: report,
+                firstLaunchSetupIncomplete: firstLaunchSetupIncomplete,
+                canContinueToService: canContinueToService
+            )
+            controller.onRecheck = { [weak self] in self?.runDependencyCheck(triggeredByUser: true) }
+            controller.onContinue = { [weak self] in self?.completeFirstLaunchSetup() }
+            controller.onSelectPiWebPath = { [weak self] path in self?.applySelectedPiWebPath(path) }
             diagnosticsWindowController = controller
             controller.showWindow(nil)
         }
         if !NSApp.isActive {
             NSApp.activate(ignoringOtherApps: true)
         }
+    }
+
+    /// 用户选择的 pi-web 路径：校验失败时返回可读错误且不碰配置；成功时经
+    /// `AppConfiguration` 写回 `ServiceConfiguration.piWebPath`，随即重新检测。
+    private func applySelectedPiWebPath(_ path: String) -> String? {
+        let result = PiWebPathSelection.apply(
+            selectedPath: path,
+            configuration: serviceManager.configuration,
+            isExecutable: { FileManager.default.isExecutableFile(atPath: $0) }
+        )
+        guard let error = result.error else {
+            let configuration = result.configuration
+            appConfiguration.save(configuration)
+            serviceManager.updateConfiguration(configuration)
+            runDependencyCheck(triggeredByUser: true)
+            return nil
+        }
+        return error
+    }
+
+    /// 首次设置完成：记录状态后用最近一次报告重新走路由，随即进入主窗口。
+    private func completeFirstLaunchSetup() {
+        guard let report = dependencyReport,
+              DiagnosticsRouting.completesFirstLaunchSetup(report: report) else { return }
+        appConfiguration.markFirstLaunchSetupCompleted()
+        applyDependencyReport(report, triggeredByUser: false)
     }
 
     // MARK: - Window and WebView
@@ -616,6 +724,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func startServiceAction(_ sender: Any?) {
         guard dependencyGate == .ready else { return }
+        if !appConfiguration.hasCompletedFirstLaunchSetup {
+            // 在首次启动诊断页主动启动服务等同于“开始使用 Pi Web”：
+            // 记录首次设置完成并走正常主窗口路径（startAtLaunch 会启动服务）。
+            completeFirstLaunchSetup()
+            return
+        }
         serviceManager.startService()
     }
 
@@ -672,7 +786,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func showDiagnosticsAction(_ sender: Any?) {
         if let report = dependencyReport {
-            showDiagnostics(report: report)
+            showDiagnostics(
+                report: report,
+                firstLaunchSetupIncomplete: !appConfiguration.hasCompletedFirstLaunchSetup,
+                canContinueToService: report.canStartService
+            )
         } else {
             // 首次检查还没返回：检查结束后无论如何都展示一次结果。
             shouldPresentDiagnostics = true
@@ -756,11 +874,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        let controls = ServiceControlState(gate: dependencyGate)
         switch menuItem.action {
         case #selector(startServiceAction(_:)):
-            return dependencyGate == .ready && serviceManager.managedServicePID() == nil
-        case #selector(stopServiceAction(_:)): return true
-        case #selector(restartServiceAction(_:)): return dependencyGate == .ready
+            return controls.canStart && serviceManager.managedServicePID() == nil
+        case #selector(stopServiceAction(_:)): return controls.canStop
+        case #selector(restartServiceAction(_:)): return controls.canRestart
         case #selector(toggleFullScreen(_:)):
             menuItem.title = window.styleMask.contains(.fullScreen) ? "退出全屏幕" : "进入全屏幕"
             return true

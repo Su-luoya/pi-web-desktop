@@ -232,6 +232,51 @@ final class KeychainStoreTests: XCTestCase {
         }
     }
 
+    /// `::1` 与 `[::1]` 都要能保存，并且拼出合法的 `http://[::1]:…/` URL。
+    /// `http://::1:30141/` 不是合法 URL，`URLComponents` 对未加方括号的 IPv6
+    /// host 会返回 nil（旧实现会静默回落到 127.0.0.1）。
+    func testIPv6HostnamesPassValidationAndProduceABracketedURL() {
+        for hostname in ["::1", "[::1]"] {
+            XCTAssertNil(RemoteAccessPolicy.hostnameValidationMessage(hostname), "\(hostname) 应当可以保存")
+            let normalized = RemoteAccessPolicy.normalizedHostname(hostname)
+            XCTAssertEqual(normalized, "::1")
+            XCTAssertTrue(RemoteAccessPolicy.isLoopbackHostname(normalized))
+
+            let urlHost = RemoteAccessPolicy.urlHost(for: normalized)
+            XCTAssertEqual(urlHost, "[::1]")
+            let url = URL(string: "http://\(urlHost):30141/")
+            XCTAssertEqual(url?.absoluteString, "http://[::1]:30141/")
+            XCTAssertEqual(url?.host, "::1")
+            XCTAssertEqual(url?.port, 30141)
+
+            var configuration = ServiceConfiguration.default
+            configuration.hostname = hostname
+            XCTAssertEqual(configuration.serviceURL.absoluteString, "http://[::1]:30141/")
+            XCTAssertEqual(configuration.serviceURL.host, "::1")
+            XCTAssertEqual(configuration.serviceURL.port, 30141)
+        }
+    }
+
+    func testURLHostBracketsOnlyIPv6Literals() {
+        XCTAssertEqual(RemoteAccessPolicy.urlHost(for: "127.0.0.1"), "127.0.0.1")
+        XCTAssertEqual(RemoteAccessPolicy.urlHost(for: "pi.example.invalid"), "pi.example.invalid")
+        XCTAssertEqual(RemoteAccessPolicy.urlHost(for: "[::1]"), "[::1]")
+        XCTAssertEqual(RemoteAccessPolicy.urlHost(for: "::ffff:127.0.0.1"), "[::ffff:127.0.0.1]")
+        XCTAssertEqual(RemoteAccessPolicy.urlHost(for: ""), ServiceConfiguration.defaultHostname)
+        XCTAssertEqual(RemoteAccessPolicy.urlHost(for: "   "), ServiceConfiguration.defaultHostname)
+        XCTAssertTrue(RemoteAccessPolicy.isIPv6Literal("::1"))
+        XCTAssertFalse(RemoteAccessPolicy.isIPv6Literal("[::1]"))
+        XCTAssertFalse(RemoteAccessPolicy.isIPv6Literal("pi.example.invalid"))
+        XCTAssertFalse(RemoteAccessPolicy.isIPv6Literal("127.0.0.1"))
+    }
+
+    /// 把端口写进地址（`host:port`）在保存时就给出针对性拒绝，而不是拼出无效 URL。
+    func testHostnameValidationRejectsValuesWithAnEmbeddedPort() {
+        for hostname in ["pi.example.invalid:30141", "127.0.0.1:30141", "example.com:"] {
+            XCTAssertNotNil(RemoteAccessPolicy.hostnameValidationMessage(hostname), "\(hostname) 应当被拒绝")
+        }
+    }
+
     func testRemoteListeningRequiresANonEmptyPassword() {
         XCTAssertTrue(RemoteAccessPolicy.allowsRemoteListening(hostname: "127.0.0.1", password: nil))
         XCTAssertTrue(RemoteAccessPolicy.allowsRemoteListening(hostname: "127.0.0.1", password: ""))

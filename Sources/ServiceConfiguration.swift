@@ -90,7 +90,9 @@ struct ServiceConfiguration: Equatable {
     var serviceURL: URL {
         var components = URLComponents()
         components.scheme = "http"
-        components.host = hostname
+        // IPv6 字面量必须加方括号：URLComponents 对 host = "::1" 会返回 nil，
+        // 否则这里会静默回落到 127.0.0.1 并连错地址。
+        components.host = RemoteAccessPolicy.urlHost(for: hostname)
         components.port = port
         components.path = "/"
         return components.url ?? URL(string: "http://127.0.0.1:30141/")!

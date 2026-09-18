@@ -304,14 +304,17 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
             showError(message)
             return
         }
-        let url = URL(string: "http://\(hostname):\(port)/")
-        guard let url, url.host != nil, url.port == port else {
+        // IPv6 字面量统一保存为不带方括号的形式（`::1`）：`--hostname` 参数和端口
+        // 探测都用这个形式，只有 URL 主机需要方括号（`http://[::1]:端口/`）。
+        let normalizedHostname = RemoteAccessPolicy.normalizedHostname(hostname)
+        let urlHost = RemoteAccessPolicy.urlHost(for: normalizedHostname)
+        guard let url = URL(string: "http://\(urlHost):\(port)/"), url.host != nil, url.port == port else {
             showError("监听地址无效。")
             return
         }
 
         let requested = ServiceConfiguration(
-            hostname: hostname,
+            hostname: normalizedHostname,
             port: port,
             piWebPath: pathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             allowedHosts: allowedHostsField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),

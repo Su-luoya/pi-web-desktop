@@ -117,13 +117,15 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 - 存储：`kSecClassGenericPassword`，`kSecAttrService` 是应用的 bundle identifier，`kSecAttrAccount` 是 `remote-access-password`，可访问性固定为 `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`。密码只存在于这一个条目里，不进入 UserDefaults、命令行参数、日志文件、诊断文本或错误消息；`KeychainStoreError` 只携带 notFound / OSStatus，不携带秘密。
 - 读取：`RemoteAccessPassword.load(from:)` 在条目缺失、为空或读取失败时都返回 nil（fail closed：读取失败不会被当成“可以用无认证方式启动”）。
 - 门控：`RemoteAccessPolicy.allowsRemoteListening(hostname:password:)`——loopback 恒允许；hostname 不是 loopback 时必须存在非空密码。`ServiceManager.isStartPermitted` 包含这个条件，所以启动、重启、配置变更重载、启动重试、启动轮询和健康检查都无法在缺密码时启动服务、探测外部服务或加载服务页；`ServiceStartDecision.missingRemotePassword` 给出可读的失败提示。
+- 单次读取：`ServiceManager.startManagedService()` 在本次启动里只读一次凭证，并且把它同时传给门控和 `ServiceLaunchSpecification.make(..., remoteAccessPassword:)`（决策入口是 `startDecision(credentials:)`）。校验通过后不再读 Keychain，因此不存在“校验时有效、此后二次读取失效却仍然 `.launch`”的 fail-open 窗口（GitHub #8 复审）；读取失败或条目缺失一律按“无密码”拒绝启动。
 - 保存：`RemoteAccessSetup.apply(requested:newPassword:keychain:)` 是设置界面的保存流程。`newPassword` 为 nil 表示沿用已有密码，非空则先写入 Keychain；远程 hostname 没有可用密码时返回可读错误且不返回配置，调用方因此不会写 UserDefaults。密码写入失败时错误文本会先经过 `SecretScrubbing`，即使底层错误描述意外带上密码也不会展示。
 - 生成：界面上的“生成高强度密码”调用 `PasswordGenerator`（`SecRandomCopyBytes`，长度下限 24，保证大写字母/小写字母/数字/符号四类字符各至少一个，再用可注入随机源做 Fisher–Yates 洗牌），不联网、不引入依赖。
 - 删除：删除 Keychain 条目后 `RemoteAccessPolicy.disablingRemoteAccess(in:)` 把 hostname 收回 `127.0.0.1`，其余字段保持不变；`AppDelegate` 经 `AppConfiguration` 保存新配置，并且当远程服务正在运行时重启它，使新的（或已删除的）`PI_WEB_PASSWORD` 生效。
+- 运行中收敛：密码也可能在服务运行期间被外部删除或变成不可读，门控本身拦不住已经在跑的进程。`ServiceManager.closeRemoteAccessIfCredentialsAreUnavailable()` 是这类状态的收敛入口：配置是非 loopback 且取不到凭证时，若存在本应用启动、且仍能通过所有权验证的进程，则把 hostname 收回 `127.0.0.1`，走 `stopService()` 的既有验证路径停止该进程组（外部服务、无法验证的记录零信号），把状态改成带可读提示的 `.failed(RemoteAccessPolicy.revokedPasswordMessage)`，并通过 `onRemoteAccessClosed` 让 `AppDelegate` 持久化回落后的配置（不静默重启）。触发点是每 4 秒一次的健康轮询、所有启动入口的缺密码拒绝分支，以及依赖检查完成时（`AppDelegate.applyDependencyReport`）。没有可验证的托管进程时不改动用户配置，只给出“需要设置密码”的提示。
 
 传输密码的路径只有一处：`ServiceLaunchSpecification.make(..., remoteAccessPassword:)`。只有当 hostname 不是 loopback 且密码非空时，子进程环境才包含 `PI_WEB_PASSWORD`；否则该变量会被从环境里删除（包括清除父进程继承来的同名变量）。命令行参数 `--hostname/--port/--no-open`、所有权记录（只有命令文本的 SHA-256 摘要）、日志文件（只有子进程的 stdout/stderr）和诊断文本（只有“已设置/未设置”）都不包含密码值或长度。
 
-监听边界：默认值仍是 `127.0.0.1`；`0.0.0.0`、`::` 与 `[::]` 在界面保存时被拒绝，不会成为默认值也不会被一次误输入打开。密码认证只验证访问者，不是传输加密：设置界面和文档都明确要求远程访问自行配置受信任的加密隧道或 HTTPS 反向代理。
+监听边界：默认值仍是 `127.0.0.1`；`0.0.0.0`、`::` 与 `[::]` 在界面保存时被拒绝，不会成为默认值也不会被一次误输入打开。保存时 `RemoteAccessPolicy.normalizedHostname(_:)` 把 IPv6 字面量统一成不带方括号的形式（`::1`，与 `--hostname` 参数和端口探测一致），拼 URL 时再由 `RemoteAccessPolicy.urlHost(for:)` 加方括号：`http://[::1]:端口/`（`URLComponents` 对未加方括号的 IPv6 host 会返回 nil，旧实现会静默回落到 `127.0.0.1`）。冒号只允许出现在合法的 IPv6 字面量里，`example.invalid:8443` 这类把端口写进地址的输入会在保存时被拒绝。密码认证只验证访问者，不是传输加密：设置界面和文档都明确要求远程访问自行配置受信任的加密隧道或 HTTPS 反向代理。
 
 ## 网络边界
 

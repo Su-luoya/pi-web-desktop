@@ -428,6 +428,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         applyServiceControlAvailability()
         serviceManager.isDependencyGateOpen = report.canStartService
 
+        // 依赖检查（启动时或用户重新检测）是又一个收敛点：远程配置却取不到密码，
+        // 而本应用管理的远程进程仍在运行时，立即停止它并关闭远程模式。
+        serviceManager.closeRemoteAccessIfCredentialsAreUnavailable()
+
         let firstLaunchSetupIncomplete = !appConfiguration.hasCompletedFirstLaunchSetup
         let route = DiagnosticsRouting.route(DiagnosticsRouting.Context(
             report: report,
@@ -680,6 +684,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         serviceManager.onStartupFailure = { [weak self] message in
             self?.presentStartupError(message)
         }
+        serviceManager.onRemoteAccessClosed = { [weak self] closed in
+            self?.persistClosedRemoteAccessConfiguration(closed)
+        }
+    }
+
+    /// 远程访问被 `ServiceManager` 收敛（密码被删除或读取失败、已停止托管进程）
+    /// 后只持久化回落后的 loopback 配置，不自动重启：用户先看到“已停止并回到
+    /// loopback”的可读提示，再由自己决定是否启动，敏感状态变化不做静默重启。
+    private func persistClosedRemoteAccessConfiguration(_ closed: ServiceConfiguration) {
+        appConfiguration.save(closed)
+        serviceManager.updateConfiguration(closed)
     }
 
     private func applyState(_ state: ServiceState) {

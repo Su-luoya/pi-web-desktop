@@ -206,6 +206,36 @@ private final class ManagerFailingOwnershipStore: ServiceOwnershipStoring {
     func removeRecord(at url: URL) {}
 }
 
+/// 可变密码来源：测试可以在运行中把“Keychain 条目”删掉（置 nil）。
+private final class MutablePasswordProvider {
+    var password: String?
+    private(set) var readCount = 0
+
+    init(_ password: String?) {
+        self.password = password
+    }
+
+    func read() -> String? {
+        readCount += 1
+        return password
+    }
+}
+
+/// 依次返回给定值、之后恒为 nil 的密码来源。用来证明启动路径只读一次。
+private final class OneShotPasswordProvider {
+    private var remaining: [String?]
+    private(set) var readCount = 0
+
+    init(_ values: [String?]) {
+        remaining = values
+    }
+
+    func read() -> String? {
+        readCount += 1
+        return remaining.isEmpty ? nil : remaining.removeFirst()
+    }
+}
+
 // MARK: - Harness
 
 private let fakeLaunchedAt = "Wed Jul 30 12:00:00 2025"
@@ -258,6 +288,7 @@ private final class ServiceManagerHarness {
     private(set) var pageMessages: [String] = []
     private(set) var startupFailures: [String] = []
     private(set) var loadRequests = 0
+    private(set) var closedRemoteConfigurations: [ServiceConfiguration] = []
 
     init(
         configuration: ServiceConfiguration,
@@ -313,6 +344,9 @@ private final class ServiceManagerHarness {
         manager.onPageMessage = { [weak self] message in self?.pageMessages.append(message) }
         manager.onStartupFailure = { [weak self] message in self?.startupFailures.append(message) }
         manager.onLoadPage = { [weak self] in self?.loadRequests += 1 }
+        manager.onRemoteAccessClosed = { [weak self] configuration in
+            self?.closedRemoteConfigurations.append(configuration)
+        }
     }
 
     var ownerFileURL: URL { appConfiguration.serviceOwnerURL }
@@ -1424,5 +1458,177 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(harness.loadRequests, 0)
         XCTAssertTrue(harness.scheduler.repeatingWork.isEmpty)
         XCTAssertEqual(harness.manager.currentState, .failed(RemoteAccessPolicy.missingPasswordMessage))
+    }
+
+    // MARK: - 凭证只读一次（GitHub #8 复审）
+
+    /// 决策与启动规格共用同一次凭证读取：凭证只返回一次时也必须带上它启动，
+    /// 不能因为二次读取失败而退化成无认证的远程启动。
+    func testStartDecisionCarriesTheValidatedCredentialIntoTheLaunchSpecification() throws {
+        let provider = OneShotPasswordProvider([Self.remoteSecret])
+        let harness = try makeHarness(remoteAccessPassword: { provider.read() })
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(remoteConfiguration(piWebPath: try harness.makeExecutable()))
+
+        guard case .launch(let specification) = harness.manager.startDecision() else {
+            XCTFail("预期 .launch，实际为 \(harness.manager.startDecision())")
+            return
+        }
+
+        XCTAssertEqual(provider.readCount, 1, "启动决策只允许读取一次凭证")
+        XCTAssertEqual(specification.environment["PI_WEB_PASSWORD"], Self.remoteSecret)
+        XCTAssertFalse(specification.arguments.contains(Self.remoteSecret))
+    }
+
+    /// 启动路径同样只读一次：校验通过的凭证就是子进程环境里那一个。
+    func testStartManagedServiceReadsTheCredentialOnceAndLaunchesWithTheValidatedValue() throws {
+        let provider = OneShotPasswordProvider([Self.remoteSecret])
+        let harness = try makeHarness(
+            alive: { $0 == 5150 },
+            processOutput: processOutput(for: 5150),
+            remoteAccessPassword: { provider.read() }
+        )
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(remoteConfiguration(piWebPath: try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = false
+
+        harness.manager.startManagedService()
+
+        XCTAssertEqual(provider.readCount, 1, "启动路径只允许读取一次凭证")
+        XCTAssertEqual(harness.launcher.launchCount, 1)
+        XCTAssertEqual(harness.launcher.specifications.first?.environment["PI_WEB_PASSWORD"], Self.remoteSecret)
+        XCTAssertEqual(harness.manager.currentState, .starting)
+    }
+
+    // MARK: - 运行中密码被删除的收敛（GitHub #8 复审）
+
+    /// 远程服务运行中 Keychain 条目被删除：健康轮询必须停止已验证的进程组、
+    /// 删除所有权记录、把配置收回 loopback 并通过回调通知持久化。
+    func testDeletingThePasswordWhileRemoteServiceRunsStopsItAndClosesRemoteMode() throws {
+        let provider = MutablePasswordProvider(Self.remoteSecret)
+        let harness = try makeHarness(
+            alive: { $0 == 5150 },
+            processOutput: processOutput(for: 5150),
+            remoteAccessPassword: { provider.read() }
+        )
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(remoteConfiguration(piWebPath: try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = false
+
+        harness.manager.startAtLaunch()
+        XCTAssertEqual(harness.launcher.launchCount, 1)
+        XCTAssertEqual(harness.manager.managedServicePID(), 5150)
+        XCTAssertNotNil(harness.readOwnershipRecord())
+        XCTAssertEqual(harness.scheduler.repeatingWork.count, 1)
+
+        // 模拟用户在 Keychain 里删除条目（或读取失败）：下一次健康轮询必须收敛。
+        provider.password = nil
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        harness.scheduler.runAllBackgroundWork()
+
+        XCTAssertEqual(
+            harness.signaler.groupSignals,
+            [ManagerFakeSignaler.GroupSignal(signal: SIGTERM, processGroupID: 5150)],
+            "只对已验证的托管进程组发信号"
+        )
+        XCTAssertNil(harness.manager.managedServicePID())
+        XCTAssertNil(harness.readOwnershipRecord())
+        XCTAssertEqual(harness.manager.configuration.hostname, ServiceConfiguration.defaultHostname)
+        XCTAssertEqual(
+            harness.closedRemoteConfigurations.map(\.hostname),
+            [ServiceConfiguration.defaultHostname],
+            "回落后的配置必须交给 AppDelegate 持久化"
+        )
+        XCTAssertEqual(harness.manager.currentState, .failed(RemoteAccessPolicy.revokedPasswordMessage))
+        XCTAssertTrue(harness.pageMessages.contains(RemoteAccessPolicy.revokedPasswordMessage))
+        XCTAssertTrue(harness.startupFailures.isEmpty, "收敛不是启动失败，不应该弹出启动失败告警")
+    }
+
+    /// 所有权无法验证（例如记录来自旧实例）时：绝不发信号，也不改动用户配置；
+    /// 应用不会对无法证明是自己启动的进程动手。
+    func testPasswordRevocationWithAnUnverifiableProcessSendsNoSignalAndKeepsTheConfiguration() throws {
+        let provider = MutablePasswordProvider(Self.remoteSecret)
+        let harness = try makeHarness(
+            alive: { $0 == 5150 },
+            processOutput: processOutput(for: 5150),
+            remoteAccessPassword: { provider.read() }
+        )
+        defer { harness.cleanUp() }
+        // 记录来自旧实例：进程还活着，但本实例永远不可能认领它。
+        try harness.writeOwnershipRecord(harness.makeOwnershipRecord(instanceID: "instance-from-an-earlier-run"))
+        var configuration = remoteConfiguration(piWebPath: try harness.makeExecutable())
+        configuration.autoStart = false
+        harness.manager.updateConfiguration(configuration)
+        harness.manager.startHealthMonitor()
+        XCTAssertEqual(harness.scheduler.repeatingWork.count, 1)
+
+        provider.password = nil
+        harness.probe.ready = true
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        harness.scheduler.runAllBackgroundWork()
+
+        XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
+        XCTAssertTrue(harness.closedRemoteConfigurations.isEmpty)
+        XCTAssertEqual(harness.manager.configuration.hostname, configuration.hostname)
+    }
+
+    /// 菜单“启动服务”在密码被删除且远程服务仍在运行时同样要收敛，而不是只报
+    /// 一句缺密码就继续放着无认证的远程进程。
+    func testStartServiceWithRunningRemoteServiceWithoutCredentialsStopsIt() throws {
+        let provider = MutablePasswordProvider(Self.remoteSecret)
+        let harness = try makeHarness(
+            alive: { $0 == 5150 },
+            processOutput: processOutput(for: 5150),
+            remoteAccessPassword: { provider.read() }
+        )
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(remoteConfiguration(piWebPath: try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = false
+        harness.manager.startManagedService()
+        XCTAssertEqual(harness.manager.managedServicePID(), 5150)
+
+        provider.password = nil
+        harness.manager.startService()
+        harness.scheduler.runAllBackgroundWork()
+
+        XCTAssertEqual(harness.signaler.groupSignals.map(\.processGroupID), [5150])
+        XCTAssertNil(harness.manager.managedServicePID())
+        XCTAssertEqual(harness.manager.configuration.hostname, ServiceConfiguration.defaultHostname)
+        XCTAssertEqual(harness.closedRemoteConfigurations.count, 1)
+        XCTAssertEqual(harness.manager.currentState, .failed(RemoteAccessPolicy.revokedPasswordMessage))
+        XCTAssertTrue(harness.probe.probedURLs.isEmpty, "收敛后不要再探测远程地址")
+    }
+
+    /// 收敛后的健康轮询不再重复动作：配置已是 loopback，没有密码也不再介入，
+    /// 更不会静默重启服务。
+    func testRevocationConvergenceIsIdempotentAcrossHealthChecks() throws {
+        let provider = MutablePasswordProvider(Self.remoteSecret)
+        let harness = try makeHarness(
+            alive: { $0 == 5150 },
+            processOutput: processOutput(for: 5150),
+            remoteAccessPassword: { provider.read() }
+        )
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(remoteConfiguration(piWebPath: try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = false
+        harness.manager.startAtLaunch()
+
+        provider.password = nil
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        harness.scheduler.runAllBackgroundWork()
+        let signalCountAfterConvergence = harness.signaler.groupSignals.count
+
+        harness.probe.ready = false
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        harness.scheduler.runAllBackgroundWork()
+
+        XCTAssertEqual(harness.signaler.groupSignals.count, signalCountAfterConvergence)
+        XCTAssertEqual(harness.closedRemoteConfigurations.count, 1)
+        XCTAssertEqual(harness.manager.currentState, .failed(RemoteAccessPolicy.revokedPasswordMessage))
+        XCTAssertEqual(harness.launcher.launchCount, 1, "收敛后不得静默重启")
     }
 }

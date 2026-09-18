@@ -194,6 +194,40 @@ enum RemoteAccessPolicy {
     /// 远程监听缺少密码时的固定提示文案（启动、保存、界面共用）。
     static let missingPasswordMessage = "远程监听需要先设置访问密码：请打开“设置…→远程访问”，输入或生成密码后再试。"
 
+    /// 运行中密码被删除或读取失败、远程托管进程被停止时的固定提示。
+    static let revokedPasswordMessage =
+        "远程访问密码已被删除或无法读取，已停止远程服务并关闭远程模式；"
+        + "监听地址已回到 \(ServiceConfiguration.defaultHostname)。"
+
+    /// 规范化 hostname：去掉两端空白，并把 IPv6 字面量的方括号去掉。
+    ///
+    /// 存储和子进程参数都用不带方括号的形式（`::1`，与 `--hostname` 的约定
+    /// 一致），只有 URL 主机需要方括号；`[::1]` 与 `::1` 因此等价。
+    static func normalizedHostname(_ hostname: String) -> String {
+        let trimmed = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("["), trimmed.hasSuffix("]"), trimmed.count > 2 else { return trimmed }
+        let literal = String(trimmed.dropFirst().dropLast())
+        return literal.contains(":") ? literal : trimmed
+    }
+
+    /// URL 主机形式：IPv6 字面量必须加方括号。
+    ///
+    /// `http://::1:30141/` 不是合法 URL（`URLComponents` 对 `host = "::1"` 返回
+    /// nil），`http://[::1]:30141/` 才是；主机名与 IPv4 不含冒号，原样返回。
+    /// 空值按政策就是 loopback，这里也返回默认地址，绝不拼出空 host 的 URL。
+    static func urlHost(for hostname: String) -> String {
+        let host = normalizedHostname(hostname)
+        guard !host.isEmpty else { return ServiceConfiguration.defaultHostname }
+        guard host.contains(":") else { return host }
+        return "[\(host)]"
+    }
+
+    /// 是否是合法的 IPv6 字面量（已去方括号）。用于拒绝 `host:port` 这类误输入。
+    static func isIPv6Literal(_ hostname: String) -> Bool {
+        var address = in6_addr()
+        return hostname.contains(":") && inet_pton(AF_INET6, hostname, &address) == 1
+    }
+
     /// loopback 判定：空值按 loopback 处理（默认配置），并覆盖 `localhost`、
     /// `*.localhost`、`::1` 与整个 `127.0.0.0/8`。
     static func isLoopbackHostname(_ hostname: String) -> Bool {
@@ -224,6 +258,11 @@ enum RemoteAccessPolicy {
         let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_[]:")
         guard trimmed.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
             return "监听地址只能包含字母、数字、点、连字符、下划线和 IPv6 方括号；不要填写协议、路径或空格。"
+        }
+        // 冒号只允许出现在 IPv6 字面量里：`example.invalid:8443` 这类输入是把端口
+        // 写进了地址，直接拒绝，避免拼出无意义的 URL。
+        if trimmed.contains(":"), !isIPv6Literal(normalizedHostname(trimmed)) {
+            return "监听地址里的冒号只允许用于 IPv6 字面量；端口请填写在“端口”字段。"
         }
         return nil
     }

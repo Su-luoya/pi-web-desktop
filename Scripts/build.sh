@@ -2,11 +2,84 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+XCCONFIG_REL="Configuration/AppIdentity.xcconfig"
+XCCONFIG="$ROOT/$XCCONFIG_REL"
 BUILD_DIR="$ROOT/build"
 APP="$BUILD_DIR/Pi-Web-Desktop.app"
-BIN="$APP/Contents/MacOS/PiWebDesktop"
-SOURCE="$ROOT/Sources/PiWebApp.swift"
-ICON="$ROOT/Resources/ApplicationIcon.icns"
+
+# Read one value from the single-source xcconfig, expanding $(VAR) references,
+# so this script and PiWebDesktop.xcodeproj always agree on identity and version.
+xcconfig_value() {
+  awk -v key="$1" '
+    function trim(text) {
+      gsub(/^[[:space:]]+/, "", text)
+      gsub(/[[:space:]]+$/, "", text)
+      return text
+    }
+    {
+      line = $0
+      sub(/\/\/.*/, "", line)
+      if (line ~ /^[[:space:]]*#/) next
+      eq = index(line, "=")
+      if (eq == 0) next
+      name = trim(substr(line, 1, eq - 1))
+      if (name != "") values[name] = trim(substr(line, eq + 1))
+    }
+    END {
+      value = values[key]
+      for (pass = 0; pass < 5; pass++) {
+        expanded = value
+        while (match(expanded, /\$\([A-Za-z_][A-Za-z0-9_]*\)/)) {
+          ref = substr(expanded, RSTART + 2, RLENGTH - 3)
+          if (!(ref in values)) break
+          expanded = substr(expanded, 1, RSTART - 1) values[ref] substr(expanded, RSTART + RLENGTH)
+        }
+        if (expanded == value) break
+        value = expanded
+      }
+      print value
+    }
+  ' "$XCCONFIG"
+}
+
+require_value() {
+  if [ -z "$2" ]; then
+    printf 'error: %s is missing from %s\n' "$1" "$XCCONFIG_REL" >&2
+    exit 1
+  fi
+  case $2 in
+    *'<'*|*'>'*|*'&'*)
+      printf 'error: %s contains XML characters that cannot be written to Info.plist\n' "$1" >&2
+      exit 1
+      ;;
+  esac
+}
+
+if [ ! -f "$XCCONFIG" ]; then
+  printf 'error: missing %s\n' "$XCCONFIG_REL" >&2
+  exit 1
+fi
+
+APP_DISPLAY_NAME=$(xcconfig_value APP_DISPLAY_NAME)
+APP_BUNDLE_NAME=$(xcconfig_value APP_BUNDLE_NAME)
+APP_EXECUTABLE_NAME=$(xcconfig_value APP_EXECUTABLE_NAME)
+APP_ICON_NAME=$(xcconfig_value APP_ICON_NAME)
+APP_MINIMUM_SYSTEM_VERSION=$(xcconfig_value APP_MINIMUM_SYSTEM_VERSION)
+APP_BUNDLE_IDENTIFIER=$(xcconfig_value PRODUCT_BUNDLE_IDENTIFIER)
+APP_VERSION=$(xcconfig_value MARKETING_VERSION)
+APP_BUILD=$(xcconfig_value CURRENT_PROJECT_VERSION)
+
+require_value APP_DISPLAY_NAME "$APP_DISPLAY_NAME"
+require_value APP_BUNDLE_NAME "$APP_BUNDLE_NAME"
+require_value APP_EXECUTABLE_NAME "$APP_EXECUTABLE_NAME"
+require_value APP_ICON_NAME "$APP_ICON_NAME"
+require_value APP_MINIMUM_SYSTEM_VERSION "$APP_MINIMUM_SYSTEM_VERSION"
+require_value PRODUCT_BUNDLE_IDENTIFIER "$APP_BUNDLE_IDENTIFIER"
+require_value MARKETING_VERSION "$APP_VERSION"
+require_value CURRENT_PROJECT_VERSION "$APP_BUILD"
+
+BIN="$APP/Contents/MacOS/$APP_EXECUTABLE_NAME"
+ICON="$ROOT/Resources/$APP_ICON_NAME.icns"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -15,14 +88,14 @@ swiftc "$ROOT/Sources/PiWebApp.swift" \
   "$ROOT/Sources/ServiceConfiguration.swift" \
   "$ROOT/Sources/PreferencesWindowController.swift" \
   "$ROOT/Sources/main.swift" \
-  -target arm64-apple-macosx14.0 \
+  -target "arm64-apple-macosx$APP_MINIMUM_SYSTEM_VERSION" \
   -o "$BIN" \
   -framework Cocoa \
   -framework WebKit
 
 if [ -f "$ICON" ]; then
   # Avoid preserving Finder/File Provider metadata into the app bundle.
-  ditto --norsrc --noextattr "$ICON" "$APP/Contents/Resources/ApplicationIcon.icns"
+  ditto --norsrc --noextattr "$ICON" "$APP/Contents/Resources/$APP_ICON_NAME.icns"
 fi
 
 clear_metadata() {
@@ -45,7 +118,8 @@ clear_metadata() {
 # Finder/resource-fork metadata copied from user files can invalidate ad-hoc signing.
 clear_metadata
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+# Identity and version come from Configuration/AppIdentity.xcconfig only.
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -53,27 +127,27 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleDevelopmentRegion</key>
     <string>zh_CN</string>
     <key>CFBundleDisplayName</key>
-    <string>Pi Web Desktop</string>
+    <string>$APP_DISPLAY_NAME</string>
     <key>CFBundleExecutable</key>
-    <string>PiWebDesktop</string>
+    <string>$APP_EXECUTABLE_NAME</string>
     <key>CFBundleIconFile</key>
-    <string>ApplicationIcon</string>
+    <string>$APP_ICON_NAME</string>
     <key>CFBundleIdentifier</key>
-    <string>io.github.su-luoya.pi-web-desktop</string>
+    <string>$APP_BUNDLE_IDENTIFIER</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Pi Web Desktop</string>
+    <string>$APP_BUNDLE_NAME</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0-alpha.1</string>
+    <string>$APP_VERSION</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>$APP_BUILD</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.developer-tools</string>
     <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
+    <string>$APP_MINIMUM_SYSTEM_VERSION</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>

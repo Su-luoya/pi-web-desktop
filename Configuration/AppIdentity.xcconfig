@@ -1,0 +1,47 @@
+// Pi Web Desktop application identity and version: the single source of truth.
+//
+// Readers (do not duplicate these values anywhere else):
+//   * PiWebDesktop.xcodeproj/project.pbxproj (baseConfigurationReference)
+//   * Scripts/build.sh (build/Pi-Web-Desktop.app/Contents/Info.plist)
+//   * Scripts/check-identity.sh (consistency assertions)
+//
+// Version changes happen only here: bump MARKETING_VERSION, and keep the Git
+// release tag (v<MARKETING_VERSION>) in sync. See docs/releasing.md.
+
+// Application identity.
+//
+// APP_BUNDLE_IDENTIFIER is the base variable: nothing overrides it, so both the
+// app identifier and the test identifier can derive from it without a cycle.
+// The test target does override PRODUCT_BUNDLE_IDENTIFIER, so nothing in this
+// file may derive from that setting.
+APP_DISPLAY_NAME = Pi Web Desktop
+APP_BUNDLE_NAME = $(APP_DISPLAY_NAME)
+APP_EXECUTABLE_NAME = PiWebDesktop
+APP_ICON_NAME = ApplicationIcon
+APP_MINIMUM_SYSTEM_VERSION = 14.0
+APP_BUNDLE_IDENTIFIER = io.github.su-luoya.pi-web-desktop
+
+PRODUCT_BUNDLE_IDENTIFIER = $(APP_BUNDLE_IDENTIFIER)
+
+// The test bundle derives from the same base variable so the project file does
+// not need its own copy of these literals.
+APP_TEST_DISPLAY_NAME = $(APP_DISPLAY_NAME) Tests
+APP_TEST_BUNDLE_IDENTIFIER = $(APP_BUNDLE_IDENTIFIER).tests
+
+// Version.
+MARKETING_VERSION = 0.1.0-alpha.1
+CURRENT_PROJECT_VERSION = 1
+
+// Mapping used by Xcode's generated Info.plist (GENERATE_INFOPLIST_FILE = YES).
+PRODUCT_NAME = $(APP_EXECUTABLE_NAME)
+MACOSX_DEPLOYMENT_TARGET = $(APP_MINIMUM_SYSTEM_VERSION)
+INFOPLIST_KEY_CFBundleDisplayName = $(APP_DISPLAY_NAME)
+INFOPLIST_KEY_CFBundleShortVersionString = $(MARKETING_VERSION)
+INFOPLIST_KEY_CFBundleVersion = $(CURRENT_PROJECT_VERSION)
+
+// Deliberately no INFOPLIST_KEY_CFBundleIconFile: Xcode does not generate the
+// CFBundleIconFile key from that setting (confirmed on the Xcode product in CI),
+// so writing it here would only pretend to be a source of truth. APP_ICON_NAME
+// is consumed by Scripts/build.sh, which writes CFBundleIconFile into the bundle
+// it packages, and by Scripts/check-identity.sh, which asserts that every bundle
+// contains Contents/Resources/<APP_ICON_NAME>.icns.

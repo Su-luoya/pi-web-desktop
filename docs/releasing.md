@@ -12,6 +12,15 @@
 
 未公证的 ZIP 不是稳定安装包。不要建议用户全局关闭 Gatekeeper；如果用户明确下载并理解风险，说明如何针对单个应用处理 macOS 的阻止提示。
 
+## 版本来源与 Git tag
+
+应用身份与版本的唯一来源是 `Configuration/AppIdentity.xcconfig` 中的 `MARKETING_VERSION` 与 `CURRENT_PROJECT_VERSION`；`PiWebDesktop.xcodeproj` 通过 `baseConfigurationReference` 继承该文件，`Scripts/build.sh` 也从同一文件生成 `Info.plist`。因此：
+
+- tag 名称固定为 `v<MARKETING_VERSION>`，例如 `MARKETING_VERSION = 0.1.0-alpha.1` 对应 tag `v0.1.0-alpha.1`；tag 与该值不一致时不得发布。
+- 打 tag 前先提交版本改动，再运行 `./Scripts/build.sh && ./Scripts/check-identity.sh`，确认 xcconfig、Xcode 工程、已构建 bundle 的 `Info.plist` 与本地服务默认值一致。
+- `Scripts/check-identity.sh` 会拒绝 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/` 里出现 `MARKETING_VERSION` 的字面值；不要在代码、脚本或模板中复制版本号。
+- 发布说明里同时写明 `CFBundleShortVersionString`（即 `MARKETING_VERSION`）与 `CFBundleVersion`（即 `CURRENT_PROJECT_VERSION`），便于用户核对下载的 ZIP。
+
 ## 版本门槛
 
 - `alpha.1`：安全开源基线、依赖诊断和服务生命周期。

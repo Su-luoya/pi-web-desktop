@@ -128,8 +128,12 @@ scan_forbidden() {
 }
 
 bundle_plist_value() {
-  # $1 = Info.plist path, $2 = key
-  plutil -extract "$2" raw -o - "$1" 2>/dev/null || true
+  # $1 = Info.plist path, $2 = key. Prints the value only when plutil succeeds:
+  # for a missing key plutil exits non-zero and reports the failure, so its
+  # output is trusted only on success.
+  if value=$(plutil -extract "$2" raw -o - "$1" 2>/dev/null); then
+    printf '%s' "$value"
+  fi
 }
 
 check_bundle_value() {
@@ -168,8 +172,26 @@ check_bundle() {
   check_bundle_value "$bundle" "$plist" CFBundleIdentifier "$APP_BUNDLE_IDENTIFIER"
   check_bundle_value "$bundle" "$plist" CFBundleDisplayName "$APP_DISPLAY_NAME"
   check_bundle_value "$bundle" "$plist" CFBundleExecutable "$APP_EXECUTABLE_NAME"
-  check_bundle_value "$bundle" "$plist" CFBundleIconFile "$APP_ICON_NAME"
   check_bundle_value "$bundle" "$plist" LSMinimumSystemVersion "$APP_MINIMUM_SYSTEM_VERSION"
+
+  # Both products must ship the icon resource. The Info.plist key is optional
+  # because Xcode's generated plist does not emit CFBundleIconFile, while
+  # ./Scripts/build.sh writes it.
+  icon_resource="$bundle/Contents/Resources/$APP_ICON_NAME.icns"
+  if [ -f "$icon_resource" ]; then
+    pass "bundle $bundle: Contents/Resources/$APP_ICON_NAME.icns exists"
+  else
+    fail "bundle $bundle: missing icon resource $icon_resource"
+  fi
+
+  reported_icon=$(bundle_plist_value "$plist" CFBundleIconFile)
+  if [ -z "$reported_icon" ]; then
+    info "bundle $bundle: Info.plist has no CFBundleIconFile key (Xcode-generated plists omit it; the packaging script writes '$APP_ICON_NAME', and the icon resource above is checked in both products)"
+  elif [ "$reported_icon" = "$APP_ICON_NAME" ]; then
+    pass "bundle $bundle: CFBundleIconFile = $reported_icon"
+  else
+    fail "bundle $bundle: CFBundleIconFile is '$reported_icon' but the xcconfig expects '$APP_ICON_NAME'"
+  fi
 
   # CFBundleName is information only. Xcode's generated Info.plist takes it from
   # PRODUCT_NAME, while the release script writes the display name into the
@@ -269,8 +291,7 @@ for key in \
   MACOSX_DEPLOYMENT_TARGET \
   INFOPLIST_KEY_CFBundleShortVersionString \
   INFOPLIST_KEY_CFBundleVersion \
-  INFOPLIST_KEY_CFBundleDisplayName \
-  INFOPLIST_KEY_CFBundleIconFile
+  INFOPLIST_KEY_CFBundleDisplayName
 do
   literals=$(pbxproj_literal_assignments "$key")
   if [ -z "$literals" ]; then

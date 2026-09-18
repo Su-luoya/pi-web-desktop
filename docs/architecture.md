@@ -4,6 +4,10 @@
 
 Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管理并显示用户已经安装的 Pi Web 服务；它不 fork、不打包、不维护上游 `agegr/pi-web` 的 Web 服务代码。
 
+本仓库是社区维护的**非官方**项目，与上游 Pi Web 维护者没有隶属关系。支持平台、签名与公证限制、无 SLA 等边界见 [README 支持矩阵](../README.md#支持矩阵)；身份与版本的单一来源、构建与验证入口见 [开发说明](development.md)。
+
+本文只描述已实现的组件边界与行为。尚未实现的组件在文末列出，不会被当作已完成能力描述。
+
 ## 组件边界
 
 配置、进程检查和诊断文本（Issue #4 第一段）以及服务生命周期和 WebKit 交互（Issue #4 第二段）都已经从 `Sources/PiWebApp.swift` 移出；默认值、用户可见行为、菜单和窗口布局不变。

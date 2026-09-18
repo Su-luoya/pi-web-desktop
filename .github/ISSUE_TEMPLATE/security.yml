@@ -9,6 +9,18 @@ body:
     attributes:
       value: |
         不要在此表单中提交未修复漏洞的利用细节、凭据、token、私有日志或真实用户数据。请使用 SECURITY.md 中的私密报告流程。
+  - type: dropdown
+    id: priority
+    attributes:
+      label: 影响程度（priority 标签）
+      description: 由维护者按已评估的影响设置；P0 表示安全、数据损坏或广泛不可启动。
+      options:
+        - P0 — 安全、数据损坏或广泛不可启动
+        - P1 — 里程碑阻塞
+        - P2 — 正常计划工作
+        - P3 — 可延后改进
+    validations:
+      required: true
   - type: textarea
     id: summary
     attributes:

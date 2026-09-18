@@ -1,6 +1,16 @@
 version: 2
 updates:
+  # GitHub Actions 全部按提交 SHA 固定（不使用浮动 tag）；Dependabot 只负责每周
+  # 把固定版本升级到新版本，升级仍然走正常 PR 评审和 CI。
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    # 维护者分诊时按影响补充 area: build-release 或 priority: P2。
+    labels:
+      - dependencies
+      - github_actions

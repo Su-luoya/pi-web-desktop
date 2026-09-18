@@ -1,26 +1,9 @@
 import Cocoa
-import WebKit
 
-private enum ServiceState {
-    case checking
-    case starting
-    case running
-    case stopped
-    case failed(String)
-}
-
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow!
-    private var webView: WKWebView!
+    private var webViewController: WebViewController!
     private var statusMenuItem: NSMenuItem?
-    private var serviceProcess: Process?
-    private var logHandle: FileHandle?
-    private var startupAttempts = 0
-    private var didLaunchService = false
-    private var restartAttempts = 0
-    private var healthTimer: Timer?
-    private var isQuitting = false
-    private var isStoppingService = false
     private var terminationDecisionPending = false
     private var hasInstanceLock = false
     private var eventMonitor: Any?
@@ -28,17 +11,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var screenFitWorkItem: DispatchWorkItem?
     private var isFullScreenTransition = false
     private var currentState: ServiceState = .checking
-    private var findBar: NSView?
-    private var findField: NSSearchField?
     private var preferencesWindowController: PreferencesWindowController?
-    private var configuration: ServiceConfiguration
 
     private let appConfiguration: AppConfiguration
     private let commandRunner: CommandRunning
     private let processInspector: ProcessInspector
+    private let serviceManager: ServiceManager
 
-    private var startURL: URL { configuration.serviceURL }
-    private let maxStartupAttempts = 150
+    private var startURL: URL { serviceManager.configuration.serviceURL }
 
     private var instanceLockHandle: FileHandle?
 
@@ -48,8 +28,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     ) {
         self.appConfiguration = appConfiguration
         self.commandRunner = commandRunner
-        self.processInspector = ProcessInspector(runner: commandRunner)
-        self.configuration = appConfiguration.serviceConfiguration
+        let processInspector = ProcessInspector(runner: commandRunner)
+        self.processInspector = processInspector
+        self.serviceManager = ServiceManager(
+            configuration: appConfiguration.serviceConfiguration,
+            appConfiguration: appConfiguration,
+            processInspector: processInspector,
+            commandRunner: commandRunner
+        )
         super.init()
     }
 
@@ -69,25 +55,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         installScreenChangeObserver()
         installMainMenu()
         createWindow()
-        setState(.checking)
-        showLoadingPage(message: "正在检查 Pi Web 服务…")
-        if configuration.autoStart {
-            ensureServerIsRunning()
-        } else {
-            checkServer { [weak self] ready in
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    if ready {
-                        self.setState(.running)
-                        self.loadPiWeb()
-                    } else {
-                        self.setState(.stopped)
-                        self.showErrorPage(message: "Pi Web 服务未运行。")
-                    }
-                }
-            }
-        }
-        startHealthMonitor()
+        installServiceManagerCallbacks()
+        serviceManager.setState(.checking)
+        webViewController.showLoadingPage(message: "正在检查 Pi Web 服务…")
+        serviceManager.startAtLaunch()
     }
 
     // MARK: - Smoke launch
@@ -104,7 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
         installMainMenu()
         createWindow()
-        guard window != nil, webView != nil else {
+        guard window != nil, webViewController != nil else {
             failSmokeLaunch("main window was not created")
         }
         let supportURL = appConfiguration.supportURL
@@ -121,9 +92,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        healthTimer?.invalidate()
+        serviceManager.stopHealthMonitor()
         try? FileManager.default.removeItem(at: appConfiguration.appPIDURL)
-        try? logHandle?.close()
+        serviceManager.closeLog()
         if let eventMonitor {
             NSEvent.removeMonitor(eventMonitor)
             self.eventMonitor = nil
@@ -138,10 +109,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard !isQuitting else { return .terminateNow }
+        guard !serviceManager.isQuitting else { return .terminateNow }
         guard !terminationDecisionPending else { return .terminateLater }
 
-        switch configuration.quitBehavior {
+        switch serviceManager.configuration.quitBehavior {
         case .keepRunning:
             quitKeepingService(nil)
         case .stopService:
@@ -379,15 +350,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     private func createWindow() {
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
-        configuration.preferences.setValue(true, forKey: "developerExtrasEnabled")
-
-        webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.navigationDelegate = self
-        webView.uiDelegate = self
-        webView.allowsMagnification = true
-        webView.allowsBackForwardNavigationGestures = true
+        webViewController = WebViewController(
+            serviceURL: startURL,
+            servicePort: serviceManager.configuration.port,
+            windowProvider: { [weak self] in self?.window }
+        )
+        webViewController.onNavigationFailure = { [weak self] failure in
+            guard let self, !self.serviceManager.isQuitting else { return }
+            self.serviceManager.setState(.stopped)
+            switch failure {
+            case .loadFailed(let description):
+                self.webViewController.showErrorPage(message: "页面加载失败：\(description)")
+            case .connectionFailed(let description):
+                self.webViewController.showErrorPage(message: "无法连接 Pi Web：\(description)")
+            }
+        }
 
         window = NSWindow(
             contentRect: preferredWindowFrame(for: NSScreen.main),
@@ -403,7 +380,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         window.collectionBehavior = [.fullScreenPrimary]
         window.minSize = NSSize(width: 560, height: 560)
         // 使用原生标题栏作为稳定的拖拽区域；网页内容不会被透明拖拽层遮挡。
-        window.contentView = webView
+        window.contentView = webViewController.webView
         window.center()
         window.setFrameAutosaveName("PiWebMainWindow")
         window.makeKeyAndOrderFront(nil)
@@ -454,208 +431,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         scheduleWindowFit()
     }
 
-    // MARK: - Service lifecycle
+    // MARK: - Service manager callbacks
 
-    private func resolvePiWebPath() -> String? {
-        if let configured = configuration.piWebPath.nilIfEmpty {
-            return FileManager.default.isExecutableFile(atPath: configured) ? configured : nil
+    private func installServiceManagerCallbacks() {
+        serviceManager.onStateChange = { [weak self] state in
+            self?.applyState(state)
         }
-        let candidates = [
-            "/opt/homebrew/bin/pi-web",
-            "/usr/local/bin/pi-web",
-            "\(FileManager.default.homeDirectoryForCurrentUser.path)/.npm-global/bin/pi-web"
-        ]
-        if let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
-            return path
-        }
-        return shell(["/bin/zsh", "-lc", "command -v pi-web 2>/dev/null"])?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-    }
-
-    private func ensureServerIsRunning() {
-        checkServer { [weak self] ready in
+        serviceManager.onLoadPage = { [weak self] in
             guard let self else { return }
-            DispatchQueue.main.async {
-                if ready {
-                    self.setState(.running)
-                    self.loadPiWeb()
-                } else {
-                    self.startManagedService()
-                }
-            }
+            self.webViewController.updateService(
+                url: self.serviceManager.configuration.serviceURL,
+                port: self.serviceManager.configuration.port
+            )
+            self.webViewController.loadServicePage()
+        }
+        serviceManager.onPageMessage = { [weak self] message in
+            self?.webViewController.showLoadingPage(message: message)
+        }
+        serviceManager.onStartupFailure = { [weak self] message in
+            self?.presentStartupError(message)
         }
     }
 
-    private func startManagedService() {
-        guard !isStoppingService else { return }
-        guard serviceProcess?.isRunning != true else {
-            pollUntilReady()
-            return
-        }
-        let path = configuration.piWebPath.nilIfEmpty ?? resolvePiWebPath()
-        guard let piWebPath = path else {
-            showStartupError("找不到 pi-web。请确认已执行 npm install -g @agegr/pi-web@latest。")
-            return
-        }
-
-        do {
-            try FileManager.default.createDirectory(at: appConfiguration.serviceWorkingDirectory, withIntermediateDirectories: true)
-            try FileManager.default.createDirectory(at: appConfiguration.logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if !FileManager.default.fileExists(atPath: appConfiguration.logURL.path) {
-                FileManager.default.createFile(atPath: appConfiguration.logURL.path, contents: nil)
-            }
-            rotateLogsIfNeeded()
-            let handle = try FileHandle(forWritingTo: appConfiguration.logURL)
-            try handle.seekToEnd()
-            logHandle = handle
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: piWebPath)
-        process.arguments = ["--hostname", configuration.hostname, "--port", String(configuration.port), "--no-open"]
-        process.currentDirectoryURL = appConfiguration.serviceWorkingDirectory
-            var environment = ProcessInfo.processInfo.environment
-            environment["PI_WEB_NO_OPEN"] = "1"
-            if !configuration.allowedHosts.isEmpty {
-                environment["PI_WEB_ALLOWED_HOSTS"] = configuration.allowedHosts
-            } else {
-                environment.removeValue(forKey: "PI_WEB_ALLOWED_HOSTS")
-            }
-            environment["PATH"] = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-            let proxyURL = configuration.httpProxy
-            let httpsProxyURL = configuration.httpsProxy
-            for (key, value) in [("HTTP_PROXY", proxyURL), ("http_proxy", proxyURL), ("HTTPS_PROXY", httpsProxyURL), ("https_proxy", httpsProxyURL)] {
-                if value.isEmpty { environment.removeValue(forKey: key) } else { environment[key] = value }
-            }
-            if configuration.noProxy.isEmpty {
-                environment.removeValue(forKey: "NO_PROXY")
-                environment.removeValue(forKey: "no_proxy")
-            } else {
-                environment["NO_PROXY"] = configuration.noProxy
-                environment["no_proxy"] = configuration.noProxy
-            }
-            process.environment = environment
-            process.standardInput = FileHandle.nullDevice
-            process.standardOutput = handle
-            process.standardError = handle
-            process.terminationHandler = { [weak self] process in
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    self.serviceProcess = nil
-                    try? self.logHandle?.close()
-                    self.logHandle = nil
-                    if !self.isStoppingService && !self.isQuitting {
-                        self.setState(.stopped)
-                    }
-                }
-            }
-            try process.run()
-            serviceProcess = process
-            didLaunchService = true
-            startupAttempts = 0
-            try "\(process.processIdentifier)\n".write(to: appConfiguration.managedPIDURL, atomically: true, encoding: .utf8)
-            setState(.starting)
-            showLoadingPage(message: "正在启动 Pi Web…")
-            pollUntilReady()
-        } catch {
-            showStartupError("无法启动 pi-web：\(error.localizedDescription)")
-        }
+    private func applyState(_ state: ServiceState) {
+        currentState = state
+        statusMenuItem?.title = "状态：\(ServiceState.statusText(for: state, managedPID: serviceManager.managedServicePID()))"
     }
 
-    private func pollUntilReady() {
-        startupAttempts += 1
-        guard startupAttempts <= maxStartupAttempts else {
-            showStartupError("Pi Web 在 30 秒内未能启动。请查看日志：\(appConfiguration.logURL.path)")
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+    /// Alert shown when the managed service could not start. ServiceManager owns
+    /// the state change and the "启动失败" page; the buttons are UI wiring here.
+    private func presentStartupError(_ message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Pi Web 启动失败"
+        alert.informativeText = message
+        alert.addButton(withTitle: "重试")
+        alert.addButton(withTitle: "打开日志")
+        alert.addButton(withTitle: "退出")
+        alert.beginSheetModal(for: window) { [weak self] response in
             guard let self else { return }
-            self.checkServer { ready in
-                DispatchQueue.main.async {
-                    if ready {
-                        self.restartAttempts = 0
-                        self.setState(.running)
-                        self.loadPiWeb()
-                    } else if let process = self.serviceProcess, !process.isRunning {
-                        self.showStartupError("pi-web 进程已退出。请查看日志：\(self.appConfiguration.logURL.path)")
-                    } else {
-                        self.pollUntilReady()
-                    }
-                }
+            switch response {
+            case .alertFirstButtonReturn: self.serviceManager.ensureServerIsRunning()
+            case .alertSecondButtonReturn: self.openLog(nil)
+            default: self.quitApp(nil)
             }
         }
-    }
-
-    private func stopService(completion: (() -> Void)? = nil) {
-        isStoppingService = true
-        let pid = managedServicePID()
-        guard let pid else {
-            isStoppingService = false
-            setState(.stopped)
-            completion?()
-            return
-        }
-        DispatchQueue.global().async { [weak self] in
-            _ = self?.shell(["/bin/kill", "-TERM", "\(pid)"])
-            for _ in 0..<40 {
-                guard let self, self.processInspector.isProcessAlive(pid) else { break }
-                usleep(100_000)
-            }
-            if let self, self.processInspector.isProcessAlive(pid) {
-                _ = self.shell(["/bin/kill", "-KILL", "\(pid)"])
-            }
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.serviceProcess = nil
-                self.didLaunchService = false
-                self.isStoppingService = false
-                try? FileManager.default.removeItem(at: self.appConfiguration.managedPIDURL)
-                self.setState(.stopped)
-                completion?()
-            }
-        }
-    }
-
-    private func managedServicePID() -> pid_t? {
-        if let process = serviceProcess, process.isRunning { return process.processIdentifier }
-        return processInspector.managedServicePID(pidFileURL: appConfiguration.managedPIDURL)
-    }
-
-    private func rotateLogsIfNeeded() {
-        let maxBytes = 10 * 1024 * 1024
-        let logURL = appConfiguration.logURL
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: logURL.path),
-              let size = attributes[.size] as? NSNumber,
-              size.intValue >= maxBytes else { return }
-
-        let fileManager = FileManager.default
-        let directory = logURL.deletingLastPathComponent()
-        let base = logURL.deletingPathExtension().lastPathComponent
-        let rotated = directory.appendingPathComponent("\(base).1.log")
-        let previous = directory.appendingPathComponent("\(base).2.log")
-        try? fileManager.removeItem(at: previous)
-        try? fileManager.moveItem(at: rotated, to: previous)
-        try? fileManager.moveItem(at: logURL, to: rotated)
-        fileManager.createFile(atPath: logURL.path, contents: nil)
     }
 
     @objc private func showPreferences(_ sender: Any?) {
-        let controller = PreferencesWindowController(configuration: configuration)
+        let controller = PreferencesWindowController(configuration: serviceManager.configuration)
         controller.onSave = { [weak self] newConfiguration in
             guard let self else { return }
             self.appConfiguration.save(newConfiguration)
-            let changed = self.configuration.runtimeSignature != newConfiguration.runtimeSignature
-            let managed = changed && self.managedServicePID() != nil
+            let changed = self.serviceManager.configuration.runtimeSignature != newConfiguration.runtimeSignature
+            let managed = changed && self.serviceManager.managedServicePID() != nil
 
             if managed {
                 // 先停止旧参数启动的服务，再切换配置，避免旧端口和新端口同时留下实例。
-                self.stopService { [weak self] in
+                self.serviceManager.stopService { [weak self] in
                     guard let self else { return }
-                    self.configuration = newConfiguration
-                    self.reloadConfigurationAndService()
+                    self.serviceManager.updateConfiguration(newConfiguration)
+                    self.serviceManager.reloadAfterConfigurationChange()
                 }
             } else {
-                self.configuration = newConfiguration
-                if changed { self.reloadConfigurationAndService() }
-                else { self.setState(self.currentState) }
+                self.serviceManager.updateConfiguration(newConfiguration)
+                if changed {
+                    self.serviceManager.reloadAfterConfigurationChange()
+                } else {
+                    // Re-emit the current state so the status menu title refreshes.
+                    self.serviceManager.setState(self.serviceManager.currentState)
+                }
             }
         }
         preferencesWindowController = controller
@@ -666,115 +511,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
     }
 
-    private func reloadConfigurationAndService() {
-        checkServer { [weak self] ready in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if ready {
-                    self.setState(.running)
-                    self.loadPiWeb()
-                } else if self.configuration.autoStart {
-                    self.startManagedService()
-                } else {
-                    self.setState(.stopped)
-                    self.showErrorPage(message: "设置已保存，服务尚未启动。")
-                }
-            }
-        }
-    }
-
-    private func checkServer(completion: @escaping (Bool) -> Void) {
-        var request = URLRequest(url: startURL)
-        request.timeoutInterval = 1
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        let sessionConfiguration = URLSessionConfiguration.ephemeral
-        sessionConfiguration.timeoutIntervalForRequest = 1
-        sessionConfiguration.timeoutIntervalForResource = 1
-        let session = URLSession(configuration: sessionConfiguration)
-        session.dataTask(with: request) { _, response, _ in
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            completion((200..<500).contains(status))
-            session.finishTasksAndInvalidate()
-        }.resume()
-    }
-
-    private func startHealthMonitor() {
-        healthTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] _ in
-            guard let self, !self.isQuitting, !self.isStoppingService else { return }
-            self.checkServer { ready in
-                DispatchQueue.main.async {
-                    if ready {
-                        if case .running = self.currentState {
-                            self.restartAttempts = 0
-                        } else {
-                            self.setState(.running)
-                            self.restartAttempts = 0
-                            self.loadPiWeb()
-                        }
-                    } else if case .running = self.currentState {
-                        self.setState(.stopped)
-                        self.showLoadingPage(message: "Pi Web 服务已断开，正在尝试恢复…")
-                        if self.didLaunchService && self.restartAttempts < 1 {
-                            self.restartAttempts += 1
-                            self.startManagedService()
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func setState(_ state: ServiceState) {
-        currentState = state
-        let text: String
-        switch state {
-        case .checking: text = "正在检查"
-        case .starting: text = "正在启动"
-        case .running: text = "正在运行"
-        case .stopped: text = "已停止"
-        case .failed(let message): text = "失败：\(message)"
-        }
-        statusMenuItem?.title = "状态：\(text)"
-    }
 
     // MARK: - Actions
 
     @objc private func startServiceAction(_ sender: Any?) {
-        checkServer { [weak self] ready in
-            DispatchQueue.main.async {
-                if ready { self?.setState(.running); self?.loadPiWeb() }
-                else { self?.startManagedService() }
-            }
-        }
+        serviceManager.startService()
     }
 
     @objc private func restartServiceAction(_ sender: Any?) {
-        if managedServicePID() != nil {
-            stopService { [weak self] in self?.startManagedService() }
+        if serviceManager.managedServicePID() != nil {
+            serviceManager.restartManagedService()
         } else {
             presentExternalServiceWarning(action: "重启") { [weak self] in
-                self?.stopListenerProcessAndStart()
+                self?.serviceManager.stopExternalListenerAndStart()
             }
         }
     }
 
     @objc private func stopServiceAction(_ sender: Any?) {
-        if managedServicePID() != nil {
-            stopService()
+        if serviceManager.managedServicePID() != nil {
+            serviceManager.stopService()
         } else {
             presentExternalServiceWarning(action: "停止") { [weak self] in
-                self?.stopExternalListener()
+                self?.serviceManager.stopExternalListener()
             }
         }
     }
 
     private func presentExternalServiceWarning(action: String, proceed: @escaping () -> Void) {
-        checkServer { [weak self] ready in
+        serviceManager.checkServer { [weak self] ready in
             DispatchQueue.main.async {
                 guard let self else { return }
                 if !ready {
-                    if action == "重启" { self.startManagedService() }
-                    else { self.setState(.stopped) }
+                    if action == "重启" { self.serviceManager.startManagedService() }
+                    else { self.serviceManager.setState(.stopped) }
                     return
                 }
                 let alert = NSAlert()
@@ -788,20 +558,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 }
             }
         }
-    }
-
-    private func stopExternalListener() {
-        guard let listener = processInspector.listenerPID(port: configuration.port),
-              processInspector.isPiWebProcess(listener) else { return }
-        let parent = processInspector.parentProcess(of: listener)
-        let candidate = parent > 1 && processInspector.isPiWebProcess(parent) ? parent : listener
-        _ = shell(["/bin/kill", "-TERM", "\(candidate)"])
-        setState(.stopped)
-    }
-
-    private func stopListenerProcessAndStart() {
-        stopExternalListener()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.startManagedService() }
     }
 
     @objc private func openInBrowser(_ sender: Any?) { NSWorkspace.shared.open(startURL) }
@@ -824,7 +580,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     @objc private func copyDiagnostics(_ sender: Any?) {
-        let piWebPath = resolvePiWebPath() ?? "未找到"
+        let piWebPath = serviceManager.resolvePiWebPath() ?? "未找到"
         let piWebVersion = shell([piWebPath, "--version"])?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "未知"
         let nodeVersion = shell(["/usr/bin/env", "node", "--version"])?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "未知"
         let diagnostics = DiagnosticsCollector.text(for: DiagnosticsInput(
@@ -833,9 +589,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             nodeVersion: nodeVersion,
             serviceAddress: startURL.absoluteString,
             status: statusDescription(),
-            listenerPID: processInspector.listenerPIDDescription(port: configuration.port),
-            listenerProcess: processInspector.listenerProcessDescription(port: configuration.port),
-            managedPID: managedServicePID().map(String.init) ?? "无（外部服务或未运行）",
+            listenerPID: processInspector.listenerPIDDescription(port: serviceManager.configuration.port),
+            listenerProcess: processInspector.listenerProcessDescription(port: serviceManager.configuration.port),
+            managedPID: serviceManager.managedServicePID().map(String.init) ?? "无（外部服务或未运行）",
             piWebPath: piWebPath,
             configurationDirectory: "~/.pi/agent",
             logPath: appConfiguration.logURL.path
@@ -845,76 +601,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     private func statusDescription() -> String {
-        switch currentState {
-        case .checking: return "正在检查"
-        case .starting: return "正在启动"
-        case .running: return managedServicePID() == nil ? "正在运行（外部服务）" : "正在运行（本应用管理）"
-        case .stopped: return "已停止"
-        case .failed(let message): return "失败：\(message)"
-        }
+        ServiceState.statusText(for: currentState, managedPID: serviceManager.managedServicePID())
     }
 
-    @objc private func reloadPage(_ sender: Any?) { webView.reload() }
-    @objc private func hardReloadPage(_ sender: Any?) { webView.reloadFromOrigin() }
-    @objc private func zoomIn(_ sender: Any?) { webView.pageZoom = min(webView.pageZoom + 0.1, 3.0) }
-    @objc private func zoomOut(_ sender: Any?) { webView.pageZoom = max(webView.pageZoom - 0.1, 0.5) }
-    @objc private func resetZoom(_ sender: Any?) { webView.pageZoom = 1.0 }
+    @objc private func reloadPage(_ sender: Any?) { webViewController.reload() }
+    @objc private func hardReloadPage(_ sender: Any?) { webViewController.reloadFromOrigin() }
+    @objc private func zoomIn(_ sender: Any?) { webViewController.zoomIn() }
+    @objc private func zoomOut(_ sender: Any?) { webViewController.zoomOut() }
+    @objc private func resetZoom(_ sender: Any?) { webViewController.resetZoom() }
 
-    @objc private func showFindBar(_ sender: Any?) {
-        if findBar == nil { createFindBar() }
-        findBar?.isHidden = false
-        window.makeFirstResponder(findField)
-    }
-
-    private func createFindBar() {
-        guard let contentView = window.contentView else { return }
-        let bar = NSVisualEffectView()
-        bar.material = .headerView
-        bar.blendingMode = .withinWindow
-        bar.translatesAutoresizingMaskIntoConstraints = false
-        let field = NSSearchField()
-        field.placeholderString = "在页面中查找"
-        field.target = self
-        field.action = #selector(findText(_:))
-        field.translatesAutoresizingMaskIntoConstraints = false
-        let previous = NSButton(title: "‹", target: self, action: #selector(findPrevious(_:)))
-        let next = NSButton(title: "›", target: self, action: #selector(findNext(_:)))
-        let close = NSButton(title: "完成", target: self, action: #selector(closeFindBar(_:)))
-        for button in [previous, next, close] { button.translatesAutoresizingMaskIntoConstraints = false; bar.addSubview(button) }
-        bar.addSubview(field)
-        contentView.addSubview(bar)
-        NSLayoutConstraint.activate([
-            bar.topAnchor.constraint(equalTo: contentView.topAnchor), bar.trailingAnchor.constraint(equalTo: contentView.trailingAnchor), bar.heightAnchor.constraint(equalToConstant: 44), bar.widthAnchor.constraint(equalToConstant: 410),
-            field.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 10), field.centerYAnchor.constraint(equalTo: bar.centerYAnchor), field.widthAnchor.constraint(equalToConstant: 250),
-            previous.leadingAnchor.constraint(equalTo: field.trailingAnchor, constant: 4), previous.centerYAnchor.constraint(equalTo: bar.centerYAnchor), previous.widthAnchor.constraint(equalToConstant: 32),
-            next.leadingAnchor.constraint(equalTo: previous.trailingAnchor, constant: 2), next.centerYAnchor.constraint(equalTo: bar.centerYAnchor), next.widthAnchor.constraint(equalToConstant: 32),
-            close.leadingAnchor.constraint(equalTo: next.trailingAnchor, constant: 4), close.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -8), close.centerYAnchor.constraint(equalTo: bar.centerYAnchor)
-        ])
-        findBar = bar
-        findField = field
-    }
-
-    @objc private func findText(_ sender: Any?) { performFind(backwards: false) }
-    @objc private func findNext(_ sender: Any?) { performFind(backwards: false) }
-    @objc private func findPrevious(_ sender: Any?) { performFind(backwards: true) }
-    private func performFind(backwards: Bool) {
-        guard let text = findField?.stringValue, !text.isEmpty else { return }
-        if #available(macOS 11.0, *) {
-            let configuration = WKFindConfiguration()
-            configuration.backwards = backwards
-            configuration.wraps = true
-            webView.find(text, configuration: configuration) { _ in }
-        }
-    }
-    @objc private func closeFindBar(_ sender: Any?) { findBar?.isHidden = true; window.makeFirstResponder(webView) }
+    @objc private func showFindBar(_ sender: Any?) { webViewController.showFindBar(in: window) }
 
     @objc private func quitKeepingService(_ sender: Any?) {
-        guard !isQuitting else { return }
-        isQuitting = true
-        healthTimer?.invalidate()
-        isStoppingService = false
-        try? logHandle?.close()
-        logHandle = nil
+        guard !serviceManager.isQuitting else { return }
+        serviceManager.keepRunningOnQuit()
         // 不调用 stopService，也不删除 service.pid，让 pi-web 继续独立运行。
         NSApp.terminate(nil)
     }
@@ -924,159 +624,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     @objc private func quitAndStop(_ sender: Any?) {
-        guard !isQuitting else { return }
-        isQuitting = true
-        healthTimer?.invalidate()
-        isStoppingService = true
-
-        let finish = { [weak self] in
-            guard let self else { return }
-            self.stopRemainingListenerAndQuit()
-        }
-
-        if managedServicePID() != nil {
-            stopService(completion: finish)
-        } else {
-            finish()
-        }
-    }
-
-    private func stopRemainingListenerAndQuit() {
-        guard let listener = processInspector.listenerPID(port: configuration.port),
-              processInspector.isPiWebProcess(listener) else {
-            isStoppingService = false
+        guard !serviceManager.isQuitting else { return }
+        serviceManager.stopAllServices {
             NSApp.terminate(nil)
-            return
         }
-        let parent = processInspector.parentProcess(of: listener)
-        let candidate = parent > 1 && processInspector.isPiWebProcess(parent) ? parent : listener
-        _ = shell(["/bin/kill", "-TERM", "\(candidate)"])
-        if candidate != listener { _ = shell(["/bin/kill", "-TERM", "\(listener)"]) }
-        waitForServerToStop(candidate: candidate, listener: listener, attempt: 0)
-    }
-
-    private func waitForServerToStop(candidate: pid_t, listener: pid_t, attempt: Int) {
-        checkServer { [weak self] ready in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if !ready {
-                    self.isStoppingService = false
-                    NSApp.terminate(nil)
-                } else if attempt < 30 {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        self.waitForServerToStop(candidate: candidate, listener: listener, attempt: attempt + 1)
-                    }
-                } else {
-                    // 明确选择“退出并停止”时，同时结束包装进程和实际监听进程。
-                    _ = self.shell(["/bin/kill", "-KILL", "\(candidate)"])
-                    if candidate != listener { _ = self.shell(["/bin/kill", "-KILL", "\(listener)"]) }
-                    self.isStoppingService = false
-                    NSApp.terminate(nil)
-                }
-            }
-        }
-    }
-
-    // MARK: - WebKit
-
-    private func loadPiWeb() { webView.load(URLRequest(url: startURL, cachePolicy: .reloadIgnoringLocalCacheData)) }
-
-    private func isLocalURL(_ url: URL) -> Bool {
-        guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return false }
-        return ["127.0.0.1", "localhost", "::1"].contains(url.host?.lowercased() ?? "") && (url.port ?? configuration.port) == configuration.port
-    }
-
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        guard !isQuitting else { return }
-        setState(.stopped)
-        showErrorPage(message: "页面加载失败：\(error.localizedDescription)")
-    }
-
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        guard !isQuitting else { return }
-        setState(.stopped)
-        showErrorPage(message: "无法连接 Pi Web：\(error.localizedDescription)")
-    }
-
-    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
-        let scheme = url.scheme?.lowercased() ?? ""
-        if isLocalURL(url) || ["about", "blob", "data"].contains(scheme) {
-            decisionHandler(.allow)
-        } else {
-            NSWorkspace.shared.open(url)
-            decisionHandler(.cancel)
-        }
-    }
-
-    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-        if !navigationResponse.canShowMIMEType {
-            if #available(macOS 11.3, *) { decisionHandler(.download) } else { decisionHandler(.cancel) }
-        } else { decisionHandler(.allow) }
-    }
-
-    @available(macOS 11.3, *)
-    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) { download.delegate = self }
-    @available(macOS 11.3, *)
-    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) { download.delegate = self }
-
-    @available(macOS 11.3, *)
-    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = suggestedFilename
-        panel.beginSheetModal(for: window) { result in completionHandler(result == .OK ? panel.url : nil) }
-    }
-
-    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if let url = navigationAction.request.url {
-            if isLocalURL(url) { webView.load(URLRequest(url: url)) } else { NSWorkspace.shared.open(url) }
-        }
-        return nil
-    }
-
-    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
-        panel.canChooseDirectories = parameters.allowsDirectories
-        panel.canChooseFiles = true
-        panel.beginSheetModal(for: window) { response in completionHandler(response == .OK ? panel.urls : nil) }
     }
 
     // MARK: - Error and utility
-
-    private func showErrorPage(message: String) {
-        showLoadingPage(message: message)
-    }
-
-    private func showLoadingPage(message: String) {
-        let safe = message.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
-        let html = """
-        <!doctype html><meta charset="utf-8"><style>
-        html,body{height:100%;margin:0;background:#0b1020;color:#d7fff8;font:15px -apple-system,BlinkMacSystemFont,sans-serif}body{display:grid;place-items:center}.box{text-align:center}.pi{font:700 88px ui-monospace,monospace;color:#7fffe8;text-shadow:0 0 28px #21d9cc88}.msg{margin-top:18px;color:#a8b3cc}.dot{display:inline-block;animation:pulse 1s infinite alternate}@keyframes pulse{to{opacity:.25}}</style>
-        <div class="box"><div class="pi">π</div><div class="msg">\(safe) <span class="dot">●</span></div></div>
-        """
-        webView.loadHTMLString(html, baseURL: nil)
-    }
-
-    private func showStartupError(_ message: String) {
-        setState(.failed(message))
-        showLoadingPage(message: "启动失败")
-        let alert = NSAlert()
-        alert.alertStyle = .critical
-        alert.messageText = "Pi Web 启动失败"
-        alert.informativeText = message
-        alert.addButton(withTitle: "重试")
-        alert.addButton(withTitle: "打开日志")
-        alert.addButton(withTitle: "退出")
-        alert.beginSheetModal(for: window) { [weak self] response in
-            guard let self else { return }
-            switch response {
-            case .alertFirstButtonReturn: self.ensureServerIsRunning()
-            case .alertSecondButtonReturn: self.openLog(nil)
-            default: self.quitApp(nil)
-            }
-        }
-    }
 
     @discardableResult private func shell(_ arguments: [String]) -> String? {
         commandRunner.run(arguments)
@@ -1084,7 +638,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
-        case #selector(startServiceAction(_:)): return managedServicePID() == nil
+        case #selector(startServiceAction(_:)): return serviceManager.managedServicePID() == nil
         case #selector(stopServiceAction(_:)), #selector(restartServiceAction(_:)): return true
         case #selector(toggleFullScreen(_:)):
             menuItem.title = window.styleMask.contains(.fullScreen) ? "退出全屏幕" : "进入全屏幕"
@@ -1092,8 +646,4 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         default: return true
         }
     }
-}
-
-private extension String {
-    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

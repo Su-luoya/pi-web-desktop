@@ -20,7 +20,7 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 - `DiagnosticsCollector`：把调用方已收集的版本、地址、状态、PID、进程描述和路径组装为诊断文本，自身不执行命令、不读磁盘。
 - `DependencyChecker`（`Sources/DependencyChecker.swift`）：启动前的只读依赖诊断。检查系统（`uname` 架构与 macOS 版本）、Node.js（必须 `>= 22.19.0`，自实现语义化版本比较）、Pi CLI、Pi Web（可执行文件、版本、真实路径、符号链接目标，以及 pi-web 的 package.json `name`/`version`）、默认服务端口（本机 `bind(2)` 判定可用/被占用）和 Pi 配置目录（`~/.pi/agent`，只问“存在吗/可读吗”）。命令经 `CommandRunning` 注入，磁盘经 `DependencyFileSystemProbing` 注入，架构与系统版本经 `DependencySystemProbe` 注入，端口经 `DependencyPortProbing` 注入。它不安装、不升级、不联网、不调用 `sudo`，也不读取认证内容；路径在离开 checker 前已经完成 Home 脱敏（`~`）。
 - `InstallCommandManifest`（`Sources/InstallCommandManifest.swift`）：修复建议的静态清单（Node.js 最低版本、Pi CLI 与 Pi Web 的 npm 安装命令、官方文档 URL）。纯编译期常量，不联网、不动态生成；应用只展示和复制，绝不执行。
-- `FirstLaunchDiagnostics`（`Sources/FirstLaunchDiagnostics.swift`）：首次启动路由、门控控件映射、pi-web 路径选择和诊断 smoke 夹具的纯逻辑——`DiagnosticsGate`（`checking`/`ready`/`blocked`）、`ServiceControlState`（门控 → start/stop/restart 可用性）、`DiagnosticsRouting`（报告 + 首次设置状态 → `mainWindow`/`diagnostics(reasons)`）、`PiWebPathSelection`（选中的路径 → 新配置或可读错误）和 `DiagnosticsSmokeFixture`。不依赖 AppKit，可在 unhosted 测试目标里直接断言。
+- `FirstLaunchDiagnostics`（`Sources/FirstLaunchDiagnostics.swift`）：首次启动路由、门控控件映射、pi-web 路径选择和诊断 smoke 夹具的纯逻辑——`DiagnosticsGate`（`checking`/`ready`/`blocked`）、`ServiceControlState`（门控 → start/stop/restart 可用性）、`DiagnosticsRouting`（报告 + 首次设置状态 → `mainWindow`/`diagnostics(reasons)`）、`ServiceLaunchIntent`（首次设置刚完成 → 显式启动，否则尊重 `autoStart`）、`PiWebPathSelection` 与 `PiWebIdentityEvidence`（选中的路径 + 只读身份证据 → 新配置或可读错误）和 `DiagnosticsSmokeFixture`。不依赖 AppKit，可在 unhosted 测试目标里直接断言。
 - `DiagnosticsWindowController`（`Sources/DiagnosticsWindowController.swift`）：首次启动诊断状态页（诊断项表格 + 可复制的安装命令 + “选择 pi-web 路径…”“重新检测”“开始使用 Pi Web”）。它只渲染 `DependencyReport` 和收集用户选择：选择结果经 `onSelectPiWebPath` 交给 `AppDelegate` 校验并写入配置，重新检测经 `onRecheck` 回调；窗口不执行安装命令、不写配置。
 - `PreferencesWindowController`：用户设置界面；保存后由 `AppDelegate` 经 `AppConfiguration` 写回 UserDefaults。
 
@@ -53,14 +53,14 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 
 `DependencyReport` 有两条派生规则：
 
-- `canStartService`：Pi CLI 与 Pi Web 都存在（`status != missing`）且 Node.js 状态为 `ok` 时才为 true；缺少任一诊断项或报告为空时为 false，门控默认关闭。
-- `blockingFindings`：Node.js 非 `ok`（缺失/过旧/无法确定），以及 Pi CLI / Pi Web 缺失。系统项、默认端口（`被占用`/`无法确定`）和 Pi 配置目录（`缺失`/`不可读`/`无法确定`）只提示，不阻塞。
+- `canStartService`：Node.js、Pi CLI、Pi Web 三条硬性前置都存在，且状态均为 `ok` 时才为 true。缺少任一条目（例如空报告）或状态为 `unknown`（版本无法解析、无法核对身份）都不放行，门控默认关闭。
+- `blockingFindings`：报告里存在的必需项中状态非 `ok` 的项（Node.js 缺失/过旧/无法确定，Pi CLI / Pi Web 缺失或版本无法解析）。系统项、默认端口（`被占用`/`无法确定`）和 Pi 配置目录（`缺失`/`不可读`/`无法确定`）只提示，不阻塞。报告缺项时 `blockingFindings` 里不会出现对应条目，所以门控还看 `unsatisfiedPrerequisiteKinds`，不能只用它判定。
 
-首次启动路由（`DiagnosticsRouting`，纯函数）：输入是诊断报告和 `AppConfiguration.hasCompletedFirstLaunchSetup`，输出只有 `mainWindow` 与 `diagnostics(reasons)` 两种取值，不存在“退出应用”的分支。
+首次启动路由（`DiagnosticsRouting`，纯函数）：输入是诊断报告和 `AppConfiguration.hasCompletedFirstLaunchSetup`，输出只有 `mainWindow` 与 `diagnostics(reasons)` 两种取值，不存在“退出应用”的分支。判定条件是 `canStartService`（必需项齐备且状态均为 `ok`），不是 `blockingFindings` 是否为空：`DependencyReport(findings: [])` 这类缺少必需条目的报告必须停留在诊断页。
 
-- 硬性前置缺失时报告 `.missingPrerequisites([...])`，应用保留窗口、停掉健康轮询、不加载服务地址，WebView 显示诊断状态页而不是服务页。
+- 硬性前置未通过时报告 `.unmetPrerequisites([...])`（缺项与状态非 `ok` 的必需项，顺序固定为 Node.js、Pi CLI、Pi Web），应用保留窗口、停掉健康轮询、不加载服务地址，WebView 显示诊断状态页而不是服务页。
 - 硬性前置已满足但首次设置未完成时报告 `.firstLaunchSetupIncomplete`，同样先显示诊断状态页（所有行已是绿色），由“开始使用 Pi Web”或“重新检测”完成设置后进入主窗口。
-- 两者都成立时进入正常主窗口：加载服务页并调用 `startAtLaunch()`。
+- 两者都成立时进入正常主窗口：加载服务页并启动服务。普通启动尊重 `service.autoStart`（调用 `startAtLaunch()`）；如果用户刚刚完成首次设置（本次路由就是“完成设置”触发的，例如点击“开始使用 Pi Web”或在就绪后重新检测），则用 `ServiceLaunchIntent.startExplicitly` 走 `startAtLaunch(forceStart: true)` 显式启动，忽略 `autoStart`——否则用户刚修好前置却只会看到“Pi Web 服务未运行。”。
 
 首次设置完成的唯一条件是硬性前置就绪（`DiagnosticsRouting.completesFirstLaunchSetup` = `canStartService`）。状态存在 UserDefaults（经 `AppConfiguration`），只有用户主动重新检测得到就绪报告、或在诊断页选择 pi-web 路径后重新检测、或点击“开始使用 Pi Web”时才写入；缺少前置时永远不会标记完成。端口占用与 Pi 配置目录缺失只做提示，不产生修复命令（`remediationID == nil`），TUI/WebView 文本里只给出可读说明。
 
@@ -73,8 +73,8 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 门控与路由结果：
 
 - 路由 `mainWindow`：与拆分前一致——显示“正在检查 Pi Web 服务…”，调用 `serviceManager.startAtLaunch()`；诊断窗口只在用户主动打开时显示。
-- 路由 `diagnostics`：服务控件按 `ServiceControlState` 禁用（`.blocked` 时 start/stop/restart 全不可用），不调用 `startAtLaunch()`，WebView 显示诊断状态页（列出六个诊断项、结论和下一步操作）而不是服务地址，并打开/刷新诊断窗口。`.blocked` 时还会 `stopHealthMonitor()` 并把状态置为 stopped，避免健康检查把状态改回 running。
-- “重新检测”只是重新运行一次 `DependencyChecker`（使用当前 `ServiceConfiguration.piWebPath`）；前置满足后立即打开门控、撤销控件禁用并进入主窗口，无需重启应用。“选择 pi-web 路径…”经 `NSOpenPanel` 选择文件，`PiWebPathSelection` 只接受绝对路径且可执行的文件：失败时返回可读错误、配置不变；成功时经 `AppConfiguration` 写回 `ServiceConfiguration.piWebPath`，随后立即重新检测。
+- 路由 `diagnostics`：服务控件按 `ServiceControlState` 禁用（`.blocked` 时 start/stop/restart 全不可用），不调用 `startAtLaunch()`，WebView 显示诊断状态页（六个诊断项，每项都有状态、路径、版本、安装来源、可信度五个字段，缺失值用“未找到/未知”占位而不是省略整行）而不是服务地址，并打开/刷新诊断窗口。`.blocked` 时还会 `stopHealthMonitor()` 并把状态置为 stopped，避免健康检查把状态改回 running。
+- “重新检测”只是重新运行一次 `DependencyChecker`（使用当前 `ServiceConfiguration.piWebPath`）；前置满足后立即打开门控、撤销控件禁用并进入主窗口，无需重启应用。“选择 pi-web 路径…”经 `NSOpenPanel` 选择文件，`PiWebPathSelection` 要求绝对路径、可执行，并且身份可核对（`--version` 能解析出版本，或沿真实路径向上找到的 package.json `name` 就是 `@agegr/pi-web`）：`/bin/echo` 这类可执行但不是 pi-web 的文件会被拒绝，失败时返回可读错误、配置不变；成功时经 `AppConfiguration` 写回 `ServiceConfiguration.piWebPath`，随后立即重新检测。身份证据由 `DependencyChecker.piWebIdentityEvidence(atPath:)` 收集，只执行 `--version` 并读 package.json 的 `name`，不安装、不联网。
 
 `PI_WEB_DESKTOP_SMOKE=1` 在 `applicationDidFinishLaunching` 的第一个分支返回，因此启动 smoke 完全跳过依赖门控（不运行 checker、不等待后台结果），只验证窗口建立与退出路径。`PI_WEB_DESKTOP_SMOKE=diagnostics` 在另一个分支返回：它使用 `DiagnosticsSmokeFixture` 的确定性报告（固定探针，不执行命令、不读真实磁盘或 `~/.pi`、不绑定真实端口），跑真实的 `DiagnosticsRouting` 决策，渲染诊断状态页并建立诊断窗口，然后打印固定标记并以 0 退出；两者都不写真实 support 目录或 UserDefaults。
 

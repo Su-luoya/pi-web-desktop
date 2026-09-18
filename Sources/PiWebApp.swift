@@ -396,15 +396,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// 应用诊断结果：先定门控（只看硬性前置），再定路由（诊断页或主窗口）。
     ///
-    /// - 门控为 `.ready` 当且仅当 `canStartService`；端口占用与 Pi 配置目录
-    ///   缺失只提示，不改变门控。
+    /// - 门控为 `.ready` 当且仅当 `canStartService`（必需项齐备且状态均为
+    ///   `ok`）；端口占用与 Pi 配置目录缺失只提示，不改变门控。
     /// - 用户主动重新检测得到就绪报告时记录首次设置完成，路由随即进入主窗口。
+    /// - `firstLaunchSetupJustCompleted` 为 true 时（用户刚修好前置）主窗口必须
+    ///   显式启动服务，见 `ServiceLaunchIntent`。
     /// - 缺少 pi/pi-web 时路由结果是 `.diagnostics`：应用保留窗口，没有退出分支。
-    private func applyDependencyReport(_ report: DependencyReport, triggeredByUser: Bool) {
+    private func applyDependencyReport(
+        _ report: DependencyReport,
+        triggeredByUser: Bool,
+        firstLaunchSetupJustCompleted: Bool = false
+    ) {
         dependencyReport = report
 
-        if triggeredByUser, DiagnosticsRouting.completesFirstLaunchSetup(report: report) {
+        var justCompletedSetup = firstLaunchSetupJustCompleted
+        if triggeredByUser,
+           DiagnosticsRouting.completesFirstLaunchSetup(report: report),
+           !appConfiguration.hasCompletedFirstLaunchSetup {
             appConfiguration.markFirstLaunchSetupCompleted()
+            justCompletedSetup = true
         }
 
         dependencyGate = report.canStartService ? .ready : .blocked
@@ -425,7 +435,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             diagnosticsWindowController = nil
             serviceManager.setState(.checking)
             webViewController.showLoadingPage(message: "正在检查 Pi Web 服务…")
-            serviceManager.startAtLaunch()
+            // 首次设置刚完成时必须显式启动，正常启动仍尊重 autoStart（GitHub #7 复审）。
+            let launchIntent = ServiceLaunchIntent.intent(firstLaunchSetupJustCompleted: justCompletedSetup)
+            serviceManager.startAtLaunch(forceStart: launchIntent.forcesStart)
             if presentDiagnostics {
                 showDiagnostics(
                     report: report,
@@ -476,13 +488,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// 用户选择的 pi-web 路径：校验失败时返回可读错误且不碰配置；成功时经
-    /// `AppConfiguration` 写回 `ServiceConfiguration.piWebPath`，随即重新检测。
+    /// 用户选择的 pi-web 路径：校验失败（不可执行或无法确认是 pi-web）时返回可读
+    /// 错误且不碰配置；成功时经 `AppConfiguration` 写回 `ServiceConfiguration.piWebPath`，
+    /// 随即重新检测。身份证据只来自只读的 `--version` 与 package.json `name`。
     private func applySelectedPiWebPath(_ path: String) -> String? {
+        let checker = DependencyChecker(commandRunner: commandRunner)
         let result = PiWebPathSelection.apply(
             selectedPath: path,
             configuration: serviceManager.configuration,
-            isExecutable: { FileManager.default.isExecutableFile(atPath: $0) }
+            evidence: { checker.piWebIdentityEvidence(atPath: $0) }
         )
         guard let error = result.error else {
             let configuration = result.configuration
@@ -495,11 +509,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     /// 首次设置完成：记录状态后用最近一次报告重新走路由，随即进入主窗口。
+    /// 这条路径标记“本次调用刚刚完成设置”，因此主窗口会显式启动服务。
     private func completeFirstLaunchSetup() {
         guard let report = dependencyReport,
-              DiagnosticsRouting.completesFirstLaunchSetup(report: report) else { return }
+              DiagnosticsRouting.completesFirstLaunchSetup(report: report),
+              !appConfiguration.hasCompletedFirstLaunchSetup else { return }
         appConfiguration.markFirstLaunchSetupCompleted()
-        applyDependencyReport(report, triggeredByUser: false)
+        applyDependencyReport(report, triggeredByUser: false, firstLaunchSetupJustCompleted: true)
     }
 
     // MARK: - Window and WebView

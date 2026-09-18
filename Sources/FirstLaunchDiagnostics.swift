@@ -44,16 +44,20 @@ struct ServiceControlState: Equatable {
 ///
 /// 纯函数：不读盘、不执行命令、不启动进程，因此可以在 unhosted 测试里直接断言。
 /// 只有以下两种情况进入诊断状态页：
-/// 1. 硬性前置缺失（Node.js / Pi CLI / Pi Web）；
-/// 2. 硬性前置已满足，但首次设置尚未完成（首次启动需要先走一次环境复核）。
+/// 1. 硬性前置未通过（Node.js / Pi CLI / Pi Web 缺失、过旧或版本无法解析）；
+/// 2. 硬性前置已通过，但首次设置尚未完成（首次启动需要先走一次环境复核）。
 ///
+/// 判定看的是 `DependencyReport.canStartService`（必需项齐备且状态均为 `ok`），
+/// 不是“`blockingFindings` 为空”：`DependencyReport(findings: [])` 这类缺少必需
+/// 条目的报告没有 blocking 项，但必须停留在诊断页。
 /// 除这两种情况外都进入正常主窗口。路由结果里没有“退出应用”这一项：缺少
 /// pi/pi-web 时应用保留窗口并停留在诊断状态页，由用户修复后重新检测。
 enum DiagnosticsRouting {
     /// 停留在诊断状态页的原因。
     enum Reason: Equatable {
-        /// 硬性前置缺失；关联值是缺失的诊断项，顺序与诊断报告一致。
-        case missingPrerequisites([DependencyFinding.Kind])
+        /// 硬性前置未通过；关联值是需要用户处理的诊断项（缺项与状态非 `ok`
+        /// 的项），顺序与 `DependencyReport.prerequisiteKinds` 一致。
+        case unmetPrerequisites([DependencyFinding.Kind])
         /// 首次设置尚未完成（环境复核从未通过）。
         case firstLaunchSetupIncomplete
     }
@@ -74,12 +78,17 @@ enum DiagnosticsRouting {
         }
     }
 
-    /// 硬性前置缺失时优先报告缺失项；前置就绪但首次设置未完成时报告首次设置。
-    /// 两者都不成立时进入正常主窗口。
+    /// 需要用户处理的必需项：报告里没有该条目，或状态不是 `.ok`。
+    /// 报告缺项（包括空报告）也算未通过，所以路由不能只看 `blockingFindings`。
+    static func unmetPrerequisiteKinds(in report: DependencyReport) -> [DependencyFinding.Kind] {
+        report.unsatisfiedPrerequisiteKinds
+    }
+
+    /// 硬性前置未通过时优先报告需要用户处理的项；前置就绪但首次设置未完成时
+    /// 报告首次设置。两者都不成立时进入正常主窗口。
     static func route(_ context: Context) -> Route {
-        let blockingKinds = context.report.blockingFindings.map(\.kind)
-        if !blockingKinds.isEmpty {
-            return .diagnostics([.missingPrerequisites(blockingKinds)])
+        if !context.report.canStartService {
+            return .diagnostics([.unmetPrerequisites(unmetPrerequisiteKinds(in: context.report))])
         }
         if !context.hasCompletedFirstLaunchSetup {
             return .diagnostics([.firstLaunchSetupIncomplete])
@@ -94,13 +103,53 @@ enum DiagnosticsRouting {
     }
 }
 
+// MARK: - 首次启动完成后的启动语义
+
+/// 进入主窗口时服务应如何启动（GitHub #7 复审）。
+///
+/// 首次设置刚由用户完成时不能沿用 `autoStart`：用户刚刚修好了前置，如果关掉
+/// 自动启动，`startAtLaunch()` 只会探测外部服务然后显示“未运行”，看起来像
+/// 设置没有任何效果。正常启动（包括已配置的每次重启）仍然尊重 `autoStart`。
+enum ServiceLaunchIntent: Equatable {
+    /// 正常启动：用配置里的 `autoStart` 决定是否拉起服务。
+    case respectAutoStart
+    /// 首次设置刚完成：忽略 `autoStart`，显式启动服务。
+    case startExplicitly
+
+    /// 可测试的判定点：只有“本次调用刚刚完成首次设置”才显式启动。
+    static func intent(firstLaunchSetupJustCompleted: Bool) -> ServiceLaunchIntent {
+        firstLaunchSetupJustCompleted ? .startExplicitly : .respectAutoStart
+    }
+
+    /// 传给 `ServiceManager.startAtLaunch(forceStart:)` 的开关。
+    var forcesStart: Bool { self == .startExplicitly }
+}
+
 // MARK: - pi-web 路径选择
+
+/// 选择一个 pi-web 可执行文件时收集到的只读身份证据。
+///
+/// 可执行位不是身份：`/bin/echo` 也可执行，所以选择路径时必须再看版本或包名。
+struct PiWebIdentityEvidence: Equatable {
+    /// 目标是否存在且可执行。
+    var isExecutable: Bool
+    /// `--version` 解析出的版本；无法解析为 nil。
+    var version: String?
+    /// 沿真实路径向上找到的 package.json 名称；没有为 nil。
+    var packageName: String?
+
+    /// 至少有一项可核对的身份证据：能解析出版本，或包名就是 `@agegr/pi-web`。
+    var confirmsPiWebIdentity: Bool {
+        version != nil || packageName == DependencyChecker.piWebPackageName
+    }
+}
 
 /// “选择 pi-web 路径”的纯校验与应用逻辑（GitHub #7）。
 ///
 /// 只有校验通过才会返回改写后的配置；被拒绝时返回原配置和一个可读错误，
-/// 调用方因此不可能在失败路径上写入 UserDefaults。可执行性判定由调用方注入，
-/// 测试不需要真实文件。
+/// 调用方因此不可能在失败路径上写入 UserDefaults。可执行性与身份证据由调用方
+/// 注入（生产环境用 `DependencyChecker.piWebIdentityEvidence(atPath:)`），
+/// 测试不需要真实文件、进程或网络。
 enum PiWebPathSelection {
     struct Result: Equatable {
         /// 接受时是写入 `piWebPath` 后的配置；拒绝时与输入完全相同。
@@ -112,7 +161,7 @@ enum PiWebPathSelection {
     static func apply(
         selectedPath: String,
         configuration: ServiceConfiguration,
-        isExecutable: (String) -> Bool
+        evidence: (String) -> PiWebIdentityEvidence
     ) -> Result {
         let trimmed = selectedPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -124,10 +173,18 @@ enum PiWebPathSelection {
                 error: "请选择 pi-web 可执行文件的绝对路径，配置未修改：\(trimmed)"
             )
         }
-        guard isExecutable(trimmed) else {
+        let proof = evidence(trimmed)
+        guard proof.isExecutable else {
             return Result(
                 configuration: configuration,
                 error: "该文件不可执行，配置未修改：\(trimmed)。请选择已安装的 pi-web 可执行文件。"
+            )
+        }
+        guard proof.confirmsPiWebIdentity else {
+            return Result(
+                configuration: configuration,
+                error: "无法确认该文件是 pi-web，配置未修改：\(trimmed)。"
+                    + "需要能解析出版本，或 package.json 名称为 \(DependencyChecker.piWebPackageName)。"
             )
         }
         var updated = configuration

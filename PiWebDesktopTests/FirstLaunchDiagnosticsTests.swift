@@ -101,6 +101,26 @@ private struct FirstLaunchHarness {
 private let firstLaunchPiWebResolvedPath = "/opt/homebrew/lib/node_modules/@agegr/pi-web/dist/cli.js"
 private let firstLaunchPiWebPackageJSONPath = "/opt/homebrew/lib/node_modules/@agegr/pi-web/package.json"
 
+/// 直接构造诊断项，用来验证“报告缺少必需条目”的边界情况。
+private func firstLaunchFinding(
+    _ kind: DependencyFinding.Kind,
+    _ status: DependencyFinding.Status
+) -> DependencyFinding {
+    DependencyFinding(
+        kind: kind,
+        status: status,
+        path: nil,
+        resolvedPath: nil,
+        symlinkTarget: nil,
+        version: nil,
+        installSource: .unknown,
+        confidence: .unknown,
+        remediationID: nil,
+        packageName: nil,
+        packageVersion: nil
+    )
+}
+
 /// Node.js 与 Pi CLI 总是存在；pi-web 可以只通过配置路径可见。
 /// Pi 配置目录默认存在且可读。
 private func makeFirstLaunchHarness(
@@ -149,11 +169,11 @@ final class FirstLaunchDiagnosticsTests: XCTestCase {
         XCTAssertEqual(report.blockingFindings.map(\.kind), [.node, .piCLI, .piWeb])
         XCTAssertEqual(
             DiagnosticsRouting.route(.init(report: report, hasCompletedFirstLaunchSetup: false)),
-            .diagnostics([.missingPrerequisites([.node, .piCLI, .piWeb])])
+            .diagnostics([.unmetPrerequisites([.node, .piCLI, .piWeb])])
         )
         XCTAssertEqual(
             DiagnosticsRouting.route(.init(report: report, hasCompletedFirstLaunchSetup: true)),
-            .diagnostics([.missingPrerequisites([.node, .piCLI, .piWeb])])
+            .diagnostics([.unmetPrerequisites([.node, .piCLI, .piWeb])])
         )
 
         let text = DependencyReportPresenter.statusPageText(for: report, setupIncomplete: true)
@@ -183,7 +203,7 @@ final class FirstLaunchDiagnosticsTests: XCTestCase {
         guard case .diagnostics(let reasons) = route else {
             return XCTFail("缺少 pi-web 时必须停留在诊断状态页")
         }
-        XCTAssertEqual(reasons, [.missingPrerequisites([.piWeb])])
+        XCTAssertEqual(reasons, [.unmetPrerequisites([.piWeb])])
         // 路由只有主窗口与诊断页两种取值：缺少 pi/pi-web 时没有退出应用的分支。
         XCTAssertNotEqual(route, .mainWindow)
         XCTAssertFalse(DiagnosticsRouting.completesFirstLaunchSetup(report: report))
@@ -220,7 +240,13 @@ final class FirstLaunchDiagnosticsTests: XCTestCase {
         let selection = PiWebPathSelection.apply(
             selectedPath: "/tmp/pi-web",
             configuration: .default,
-            isExecutable: { $0 == "/tmp/pi-web" }
+            evidence: { path in
+                PiWebIdentityEvidence(
+                    isExecutable: path == "/tmp/pi-web",
+                    version: path == "/tmp/pi-web" ? "1.2.3" : nil,
+                    packageName: nil
+                )
+            }
         )
         XCTAssertNil(selection.error)
         XCTAssertEqual(selection.configuration.piWebPath, "/tmp/pi-web")
@@ -240,6 +266,16 @@ final class FirstLaunchDiagnosticsTests: XCTestCase {
         XCTAssertTrue(ServiceControlState(gate: .ready).canStop)
         XCTAssertTrue(ServiceControlState(gate: .ready).canRestart)
 
+        // 重新检测时若身份证据不足（可执行但版本与包名都无法核对），仍不得放行启动。
+        harness.fileSystem.executables.insert("/tmp/not-pi-web")
+        let unverifiable = harness.checker(configuredPiWebPath: "/tmp/not-pi-web").run()
+        XCTAssertEqual(unverifiable.finding(for: .piWeb)?.status, .unknown)
+        XCTAssertFalse(unverifiable.canStartService)
+        XCTAssertEqual(
+            DiagnosticsRouting.route(.init(report: unverifiable, hasCompletedFirstLaunchSetup: true)),
+            .diagnostics([.unmetPrerequisites([.piWeb])])
+        )
+
         // 重新检测只使用只读命令，且从不安装、不联网。
         for line in harness.runner.invocationLines {
             XCTAssertFalse(line.contains("install"))
@@ -255,7 +291,7 @@ final class FirstLaunchDiagnosticsTests: XCTestCase {
         let result = PiWebPathSelection.apply(
             selectedPath: "/tmp/not-executable",
             configuration: configuration,
-            isExecutable: { _ in false }
+            evidence: { _ in PiWebIdentityEvidence(isExecutable: false, version: nil, packageName: nil) }
         )
 
         XCTAssertEqual(result.configuration, configuration, "选择不可执行文件时配置必须保持不变")
@@ -266,14 +302,102 @@ final class FirstLaunchDiagnosticsTests: XCTestCase {
         XCTAssertTrue(error?.contains("/tmp/not-executable") == true)
     }
 
+    /// 只校验可执行位是不够的：`/bin/echo` 也可执行，但它不是 pi-web。
+    func testSelectingAnExecutableThatIsNotPiWebIsRejectedWithoutTouchingTheConfiguration() {
+        var configuration = ServiceConfiguration.default
+        configuration.piWebPath = "/tmp/previous-choice"
+
+        let result = PiWebPathSelection.apply(
+            selectedPath: "/bin/echo",
+            configuration: configuration,
+            evidence: { _ in PiWebIdentityEvidence(isExecutable: true, version: nil, packageName: nil) }
+        )
+
+        XCTAssertEqual(result.configuration, configuration, "无法确认是 pi-web 时配置必须保持不变")
+        XCTAssertEqual(result.configuration.piWebPath, "/tmp/previous-choice")
+        let error = result.error
+        XCTAssertNotNil(error)
+        XCTAssertTrue(error?.contains("无法确认该文件是 pi-web") == true)
+        XCTAssertTrue(error?.contains("/bin/echo") == true)
+        XCTAssertTrue(error?.contains(DependencyChecker.piWebPackageName) == true)
+    }
+
+    /// 可执行且能解析出版本，或 package.json 名称就是 pi-web，都算身份成立。
+    func testPiWebIdentityIsAcceptedByAVersionOrByThePackageName() {
+        let byVersion = PiWebPathSelection.apply(
+            selectedPath: "/tmp/pi-web",
+            configuration: .default,
+            evidence: { _ in PiWebIdentityEvidence(isExecutable: true, version: "7.7.7", packageName: nil) }
+        )
+        XCTAssertNil(byVersion.error)
+        XCTAssertEqual(byVersion.configuration.piWebPath, "/tmp/pi-web")
+
+        let byPackageName = PiWebPathSelection.apply(
+            selectedPath: "/tmp/another-pi-web",
+            configuration: .default,
+            evidence: { _ in
+                PiWebIdentityEvidence(
+                    isExecutable: true,
+                    version: nil,
+                    packageName: DependencyChecker.piWebPackageName
+                )
+            }
+        )
+        XCTAssertNil(byPackageName.error)
+        XCTAssertEqual(byPackageName.configuration.piWebPath, "/tmp/another-pi-web")
+    }
+
+    /// 报告缺少必需条目（含空报告）时不能因为 blockingFindings 为空就进主窗口。
+    func testReportsMissingRequiredItemsOrWithNoFindingsStayOnTheDiagnosticsPage() {
+        let empty = DependencyReport(findings: [])
+        XCTAssertTrue(empty.blockingFindings.isEmpty)
+        XCTAssertEqual(empty.unsatisfiedPrerequisiteKinds, [.node, .piCLI, .piWeb])
+        XCTAssertFalse(empty.canStartService, "缺项报告不得放行启动")
+        XCTAssertEqual(
+            DiagnosticsRouting.route(.init(report: empty, hasCompletedFirstLaunchSetup: true)),
+            .diagnostics([.unmetPrerequisites([.node, .piCLI, .piWeb])])
+        )
+
+        let missingPiWeb = DependencyReport(findings: [
+            firstLaunchFinding(.node, .ok),
+            firstLaunchFinding(.piCLI, .ok)
+        ])
+        XCTAssertTrue(missingPiWeb.blockingFindings.isEmpty)
+        XCTAssertEqual(missingPiWeb.unsatisfiedPrerequisiteKinds, [.piWeb])
+        XCTAssertFalse(missingPiWeb.canStartService)
+        XCTAssertEqual(
+            DiagnosticsRouting.route(.init(report: missingPiWeb, hasCompletedFirstLaunchSetup: true)),
+            .diagnostics([.unmetPrerequisites([.piWeb])])
+        )
+    }
+
+    /// 报告里有条目但版本无法解析（unknown）时也不得放行，路由必须停在诊断页。
+    func testUnknownVersionsNeverReleaseTheGateOrReachTheMainWindow() {
+        let report = DependencyReport(findings: [
+            firstLaunchFinding(.system, .ok),
+            firstLaunchFinding(.node, .ok),
+            firstLaunchFinding(.piCLI, .ok),
+            firstLaunchFinding(.piWeb, .unknown)
+        ])
+        XCTAssertEqual(report.blockingFindings.map(\.kind), [.piWeb])
+        XCTAssertFalse(report.canStartService)
+        XCTAssertEqual(
+            DiagnosticsRouting.route(.init(report: report, hasCompletedFirstLaunchSetup: true)),
+            .diagnostics([.unmetPrerequisites([.piWeb])])
+        )
+    }
+
     func testEmptyOrRelativeSelectionIsRejectedWithoutTouchingTheConfiguration() {
         let configuration = ServiceConfiguration.default
+        let executable: (String) -> PiWebIdentityEvidence = { _ in
+            PiWebIdentityEvidence(isExecutable: true, version: "1.2.3", packageName: nil)
+        }
 
-        let empty = PiWebPathSelection.apply(selectedPath: "   ", configuration: configuration, isExecutable: { _ in true })
+        let empty = PiWebPathSelection.apply(selectedPath: "   ", configuration: configuration, evidence: executable)
         XCTAssertEqual(empty.configuration, configuration)
         XCTAssertNotNil(empty.error)
 
-        let relative = PiWebPathSelection.apply(selectedPath: "bin/pi-web", configuration: configuration, isExecutable: { _ in true })
+        let relative = PiWebPathSelection.apply(selectedPath: "bin/pi-web", configuration: configuration, evidence: executable)
         XCTAssertEqual(relative.configuration, configuration)
         XCTAssertNotNil(relative.error)
     }
@@ -365,7 +489,7 @@ final class FirstLaunchDiagnosticsTests: XCTestCase {
         XCTAssertFalse(first.canStartService)
         XCTAssertEqual(
             DiagnosticsRouting.route(.init(report: first, hasCompletedFirstLaunchSetup: false)),
-            .diagnostics([.missingPrerequisites([.node, .piCLI, .piWeb])])
+            .diagnostics([.unmetPrerequisites([.node, .piCLI, .piWeb])])
         )
         // 端口探针不绑定真实端口，Pi 配置目录只报告“缺失”。
         XCTAssertEqual(first.finding(for: .port)?.status, .ok)
@@ -373,6 +497,43 @@ final class FirstLaunchDiagnosticsTests: XCTestCase {
         let text = DependencyReportPresenter.statusPageText(for: first, setupIncomplete: true)
         XCTAssertTrue(text.contains("~/.pi/agent"))
         XCTAssertFalse(text.contains("/smoke"))
+    }
+
+    // MARK: - 状态页字段完整性
+
+    /// 每项都必须输出路径/版本/来源/可信度五个字段，缺失时用占位符，
+    /// 不得因为值为 nil 而省略整行（GitHub #7 复审）。
+    func testStatusPagePrintsEveryItemWithPathVersionSourceAndConfidence() {
+        let harness = makeFirstLaunchHarness(includePiWebInPath: false, includePiConfigurationDirectory: false)
+        let report = harness.checker().run()
+        let text = DependencyReportPresenter.statusPageText(for: report, setupIncomplete: true)
+
+        for row in DependencyReportPresenter.rows(for: report) {
+            XCTAssertTrue(text.contains("· \(row.title)："), "状态页缺少 \(row.title) 行")
+        }
+        // 缺失的可执行文件：完整一行，路径写“未找到”、版本写“未知”。
+        XCTAssertTrue(
+            text.contains("· Pi Web：缺失  路径：未找到  版本：未知  来源：未知  可信度：未知"),
+            "缺失项也必须输出全部字段"
+        )
+        // 端口/配置目录没有版本概念，仍要输出占位符与来源、可信度。
+        XCTAssertTrue(text.contains("来源：系统"))
+        XCTAssertTrue(text.contains("可信度：已验证"))
+        XCTAssertTrue(text.contains("来源：未知"))
+        XCTAssertTrue(text.contains("可信度：未知"))
+        XCTAssertTrue(text.contains("· 默认端口：正常  路径：\(ServiceConfiguration.defaultHostname):\(ServiceConfiguration.defaultPort)"))
+        XCTAssertTrue(text.contains("· Pi 配置目录：缺失  路径：~/.pi/agent  版本：—"))
+        XCTAssertFalse(text.contains(harness.fileSystem.home))
+    }
+
+    // MARK: - 首次设置完成后的启动语义
+
+    /// 首次设置刚完成时必须显式启动服务；正常启动仍尊重 autoStart（GitHub #7 复审）。
+    func testFirstLaunchCompletionForcesAnExplicitStartWhileANormalLaunchRespectsAutoStart() {
+        XCTAssertEqual(ServiceLaunchIntent.intent(firstLaunchSetupJustCompleted: false), .respectAutoStart)
+        XCTAssertEqual(ServiceLaunchIntent.intent(firstLaunchSetupJustCompleted: true), .startExplicitly)
+        XCTAssertFalse(ServiceLaunchIntent.respectAutoStart.forcesStart)
+        XCTAssertTrue(ServiceLaunchIntent.startExplicitly.forcesStart)
     }
 
     // MARK: - 控件可用性映射

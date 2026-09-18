@@ -186,29 +186,41 @@ struct DependencyReport: Equatable {
         findings.first { $0.kind == kind }
     }
 
-    /// 阻塞服务启动的诊断项：Node.js 未达到最低版本（缺失/过旧/无法确定）或
-    /// pi、pi-web 缺失。系统项、默认端口占用和 Pi 配置目录只做提示，不阻塞启动；
-    /// pi/pi-web 存在但版本无法解析不阻塞（可执行文件已确认存在）。
+    /// 硬性前置（必需项）的固定顺序：Node.js、Pi CLI、Pi Web。
+    /// 路由、门控和路径选择都读这一份清单，不再各自重复。
+    static let prerequisiteKinds: [DependencyFinding.Kind] = [.node, .piCLI, .piWeb]
+
+    /// 未通过的必需项：报告里没有该条目，或状态不是 `.ok`。
+    /// 缺项也算未通过：`DependencyReport(findings: [])` 必须进入诊断页，
+    /// 不能因为 `blockingFindings` 为空就被当成就绪。
+    var unsatisfiedPrerequisiteKinds: [DependencyFinding.Kind] {
+        Self.prerequisiteKinds.filter { kind in
+            guard let finding = finding(for: kind) else { return true }
+            return finding.status != .ok
+        }
+    }
+
+    /// 阻塞服务启动的诊断项（只包含报告里存在的条目）：Node.js 状态不是 `ok`
+    /// （缺失/过旧/无法确定），以及 Pi CLI / Pi Web 状态不是 `ok`（缺失或版本
+    /// 无法解析）。系统项、默认端口占用和 Pi 配置目录只做提示，不阻塞启动。
+    /// 报告里缺少必需条目时这里不会出现对应项，因此门控不能只用它判定
+    /// （见 `unsatisfiedPrerequisiteKinds`）。
     var blockingFindings: [DependencyFinding] {
         findings.filter { finding in
             switch finding.kind {
             case .system, .port, .piConfigDirectory:
                 return false
-            case .node:
+            case .node, .piCLI, .piWeb:
                 return finding.status != .ok
-            case .piCLI, .piWeb:
-                return finding.status == .missing
             }
         }
     }
 
-    /// pi 与 pi-web 都存在且 Node.js 版本满足最低要求时才为 true。
-    /// 缺少任一条目（例如空报告）时为 false，门控默认关闭。
+    /// 三条硬性前置都存在且状态都是 `.ok` 时才为 true。
+    /// 缺少任一条目（例如空报告）或状态为 `.unknown` 都为 false：版本无法解析
+    /// 意味着无法核对身份，不能放行启动。
     var canStartService: Bool {
-        guard let pi = finding(for: .piCLI),
-              let piWeb = finding(for: .piWeb),
-              let node = finding(for: .node) else { return false }
-        return pi.status != .missing && piWeb.status != .missing && node.status == .ok
+        unsatisfiedPrerequisiteKinds.isEmpty
     }
 }
 
@@ -440,6 +452,29 @@ struct DependencyChecker {
             makePortFinding(),
             makePiConfigurationDirectoryFinding(redactor: redactor)
         ])
+    }
+
+    // MARK: - 路径选择的身份证据
+
+    /// 为一个候选 pi-web 路径收集只读身份证据：可执行位、`--version` 解析出的
+    /// 版本，以及沿真实路径向上找到的 package.json 名称。
+    ///
+    /// 只做“执行 `--version` + 读 package.json 的 name”这两件只读的事：不安装、
+    /// 不联网、不写配置、不读取任何认证内容。可执行位本身不是身份（`/bin/echo`
+    /// 也可执行），所以调用方必须再用版本或包名校验。
+    func piWebIdentityEvidence(atPath path: String) -> PiWebIdentityEvidence {
+        guard fileSystem.isExecutableFile(atPath: path) else {
+            return PiWebIdentityEvidence(isExecutable: false, version: nil, packageName: nil)
+        }
+        let metadata = packageMetadata(resolvedPath: fileSystem.resolvedPath(atPath: path))
+        let version = trimmed(commandRunner.run([path, "--version"]))
+            .flatMap { SemanticVersion.firstVersion(in: $0) }?
+            .description
+        return PiWebIdentityEvidence(
+            isExecutable: true,
+            version: version,
+            packageName: metadata.name
+        )
     }
 
     // MARK: - 探针
@@ -1021,14 +1056,15 @@ enum DependencyReportPresenter {
         lines.append("")
         lines.append("诊断结果：")
         for finding in report.findings {
-            var description = "· \(title(for: finding.kind))：\(statusText(for: finding.status))"
-            if let path = finding.path {
-                description += "（\(path)）"
-            }
-            if let version = finding.version {
-                description += " [\(version)]"
-            }
-            lines.append(description)
+            // 每一项都输出完整的五个字段，缺值用占位符，不因 nil 省略整行。
+            let fields = [
+                "· \(title(for: finding.kind))：\(statusText(for: finding.status))",
+                "路径：\(pathText(for: finding))",
+                "版本：\(versionText(for: finding))",
+                "来源：\(sourceText(for: finding.installSource))",
+                "可信度：\(confidenceText(for: finding.confidence))"
+            ]
+            lines.append(fields.joined(separator: "  "))
         }
 
         let hints = report.findings.compactMap { finding -> String? in

@@ -100,13 +100,13 @@ open build/Pi-Web-Desktop.app
 
 首次启动路由由 `DiagnosticsRouting` 决定（纯函数，只有主窗口与诊断页两种结果，不存在退出应用的分支）：
 
-- 硬性前置（Node.js / Pi CLI / Pi Web）缺失：诊断页列出缺失项与下一步操作，服务控件（启动/停止/重启）全部禁用，WebView 显示诊断页而不是服务页，应用保留窗口。
+- 硬性前置（Node.js / Pi CLI / Pi Web）缺失、报告缺项或版本无法解析：诊断页列出需要处理的项与下一步操作，服务控件（启动/停止/重启）全部禁用，WebView 显示诊断页而不是服务页，应用保留窗口。缺项与 `unknown` 与“缺失”一样不放行：无法核对身份就不启动服务。
 - 硬性前置已满足但首次设置尚未完成：先显示诊断页（所有行已绿色），点击“开始使用 Pi Web”或在窗口里点“重新检测”后记录设置完成并进入主窗口。首次设置状态存在 UserDefaults（经 `AppConfiguration`），只有环境复核通过才会写入。
-- 两者都满足：直接进入正常主窗口，行为与 #6 一致。
+- 两者都满足：直接进入正常主窗口，行为与 #6 一致。普通启动沿用 `service.autoStart`；本次路由本身就是“刚完成首次设置”时（点“开始使用 Pi Web”或在就绪后重新检测）会显式启动服务，忽略 `autoStart`。
 
 默认端口被占用或 Pi 配置目录缺失都只提示，不阻塞启动：占用者可能就是已有的 Pi Web 服务（应用会直接复用），而 Pi 配置目录由 Pi CLI 首次运行时自行创建——应用不会创建目录，也不会读取目录内任何文件（认证内容永远不会进入诊断）。
 
-诊断窗口也可以随时从菜单“服务 → 依赖与环境诊断…”打开。窗口里的“复制安装命令”只把 `Sources/InstallCommandManifest.swift` 的静态命令写入剪贴板，“重新检测”只重新运行一次 `DependencyChecker`，“选择 pi-web 路径…”经 `NSOpenPanel` 选择可执行文件后经 `AppConfiguration` 写回 `ServiceConfiguration.piWebPath` 并立即重新检测；选择不可执行文件时窗口显示可读错误且配置不变。应用不会执行安装命令、不会调用 `sudo`、不联网，也不读取认证内容。手工排查时可以单独运行只读命令：
+诊断窗口也可以随时从菜单“服务 → 依赖与环境诊断…”打开。窗口里的“复制安装命令”只把 `Sources/InstallCommandManifest.swift` 的静态命令写入剪贴板，“重新检测”只重新运行一次 `DependencyChecker`，“选择 pi-web 路径…”经 `NSOpenPanel` 选择可执行文件，先由 `DependencyChecker.piWebIdentityEvidence(atPath:)` 收集只读身份证据（`--version` 版本与 package.json `name`），再经 `AppConfiguration` 写回 `ServiceConfiguration.piWebPath` 并立即重新检测；不可执行、或可执行但既解析不出版本、package.json 名称也不是 `@agegr/pi-web`（例如 `/bin/echo`）时，窗口显示可读错误且配置不变。应用不会执行安装命令、不会调用 `sudo`、不联网，也不读取认证内容。手工排查时可以单独运行只读命令：
 
 ```bash
 node --version
@@ -115,9 +115,9 @@ pi --version
 pi-web --version
 ```
 
-无头环境里也可以用假命令输出、假文件系统探针和假端口探针覆盖同样的判定：`PiWebDesktopTests/DependencyCheckerTests.swift` 使用 `DependencyFakeRunner`（命令）、`DependencyFakeFileSystem`（磁盘）和固定的架构/系统版本与端口结果，覆盖缺少命令、Node 版本过低、符号链接、安装来源未知、版本无法解析、`canStartService` 门控和脱敏断言；`PiWebDesktopTests/FirstLaunchDiagnosticsTests.swift` 覆盖首次启动路由（干净环境 → 诊断页并列出缺失项与下一步、缺少 pi/pi-web 不会退出、就绪但未完成首次设置 → 诊断页、就绪 + 已完成 → 主窗口）、路径选择（可执行 → 写配置并解除门控；不可执行/空/相对路径 → 配置不变 + 可读错误）、默认端口（占用/无法判定不阻塞）、Pi 配置目录（缺失/不可读只提示且从未读取目录内容）与控件可用性映射（blocked/checking 时 start/stop/restart 全不可用）。测试不执行真实 npm/pi/pi-web，不访问网络、`~/.pi`、用户 Home、真实端口或真实 npm 前缀。
+无头环境里也可以用假命令输出、假文件系统探针和假端口探针覆盖同样的判定：`PiWebDesktopTests/DependencyCheckerTests.swift` 使用 `DependencyFakeRunner`（命令）、`DependencyFakeFileSystem`（磁盘）和固定的架构/系统版本与端口结果，覆盖缺少命令、Node 版本过低、符号链接、安装来源未知、版本无法解析为 unknown（pi/pi-web 的 unknown 同样关闭门控）、路径选择的只读身份证据（`--version` 版本 / package.json 名称 / 不可执行）、`canStartService` 门控矩阵、脱敏断言；`PiWebDesktopTests/FirstLaunchDiagnosticsTests.swift` 覆盖首次启动路由（干净环境 → 诊断页并列出缺失项与下一步、缺少 pi/pi-web 不会退出、就绪但未完成首次设置 → 诊断页、就绪 + 已完成 → 主窗口、缺项（含空报告）/版本无法解析必须停在诊断页）、路径选择（可执行且可核对身份（版本或 package.json 名称）→ 写配置并解除门控；可执行但不是 pi-web（如 `/bin/echo`）/不可执行/空/相对路径 → 配置不变 + 可读错误）、首次设置完成后的启动语义（显式启动，普通启动尊重 `autoStart`）、状态页字段完整性（每项都输出路径/版本/来源/可信度）、默认端口（占用/无法判定不阻塞）、Pi 配置目录（缺失/不可读只提示且从未读取目录内容）与控件可用性映射（blocked/checking 时 start/stop/restart 全不可用）。测试不执行真实 npm/pi/pi-web，不访问网络、`~/.pi`、用户 Home、真实端口或真实 npm 前缀。
 
-门控在 `ServiceManager` 层面也是硬前置：`isDependencyGateOpen` 默认关闭，启动/重启、配置变更重载、启动失败重试、启动轮询和健康检查的入口与异步回调都会重新确认它；`AppDelegate` 只在 `canStartService == true` 时打开，并在阻塞时调用 `stopHealthMonitor()`。停止入口也受同一映射约束：门控为 `.checking` 或 `.blocked` 时 start/stop/restart 全部不可用。这些行为由 `PiWebDesktopTests/ServiceManagerTests.swift` 的假启动器/假探测/假调度器覆盖，不需要真实进程或网络。
+门控在 `ServiceManager` 层面也是硬前置：`isDependencyGateOpen` 默认关闭，启动/重启、配置变更重载、启动失败重试、启动轮询和健康检查的入口与异步回调都会重新确认它；`AppDelegate` 只在 `canStartService == true` 时打开，并在阻塞时调用 `stopHealthMonitor()`。停止入口也受同一映射约束：门控为 `.checking` 或 `.blocked` 时 start/stop/restart 全部不可用。普通启动调用 `startAtLaunch()`，只有“刚完成首次设置”的这一次传 `forceStart: true`，因此即使 `autoStart` 关闭也会显式启动服务，而之后的每次重启仍沿用户设置。这些行为由 `PiWebDesktopTests/ServiceManagerTests.swift` 的假启动器/假探测/假调度器覆盖，不需要真实进程或网络。
 
 ## Smoke 运行
 

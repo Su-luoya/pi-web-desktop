@@ -606,12 +606,18 @@ final class ServiceManager {
     // MARK: - Startup
 
     /// Initial startup path used by `applicationDidFinishLaunching`.
-    func startAtLaunch() {
+    ///
+    /// `forceStart` is passed as `true` only when the first-launch diagnostics just
+    /// completed: the user has just fixed the prerequisites, so the service must be
+    /// started explicitly even when `autoStart` is off (otherwise the app would show
+    /// “Pi Web 服务未运行。” right after a successful setup). A normal launch keeps
+    /// the stored `autoStart` setting.
+    func startAtLaunch(forceStart: Bool = false) {
         // Records from earlier runs are evaluated (and cleaned) before any new
         // launch decision, so a leftover file can never be adopted.
         reconcileOwnershipRecord()
         guard isStartPermitted else { return }
-        if configuration.autoStart {
+        if configuration.autoStart || forceStart {
             ensureServerIsRunning()
         } else {
             checkServer { [weak self] ready in

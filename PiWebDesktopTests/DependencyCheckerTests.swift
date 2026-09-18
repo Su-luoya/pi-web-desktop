@@ -227,13 +227,21 @@ final class DependencyCheckerTests: XCTestCase {
             ]).canStartService,
             "系统项只做提示，不阻塞启动"
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             DependencyReport(findings: [
                 finding(.node, .ok),
                 finding(.piCLI, .unknown),
                 finding(.piWeb, .unknown)
             ]).canStartService,
-            "pi/pi-web 存在但版本无法解析不阻塞"
+            "pi/pi-web 版本无法解析（unknown）不得放行启动"
+        )
+        XCTAssertFalse(
+            DependencyReport(findings: [
+                finding(.node, .ok),
+                finding(.piCLI, .ok),
+                finding(.piWeb, .unknown)
+            ]).canStartService,
+            "pi-web 版本无法解析时无法确认身份，必须关闭门控"
         )
         XCTAssertFalse(
             DependencyReport(findings: [
@@ -516,7 +524,7 @@ final class DependencyCheckerTests: XCTestCase {
         XCTAssertTrue(report.canStartService)
     }
 
-    func testUnparseablePiWebVersionWithoutPackageJSONIsUnknownButDoesNotBlock() {
+    func testUnparseablePiWebVersionWithoutPackageJSONIsUnknownAndBlocks() {
         let report = makeHarness(piWebVersionOutput: "unknown", includePackageJSON: false).checker().run()
         let piWeb = report.finding(for: .piWeb)
         XCTAssertEqual(piWeb?.status, .unknown)
@@ -524,8 +532,16 @@ final class DependencyCheckerTests: XCTestCase {
         XCTAssertNil(piWeb?.packageName)
         XCTAssertEqual(piWeb?.confidence, .inferred)
         XCTAssertEqual(piWeb?.remediationID, "install.pi-web")
-        XCTAssertTrue(report.canStartService)
-        XCTAssertFalse(report.blockingFindings.contains { $0.kind == .piWeb })
+        XCTAssertFalse(report.canStartService, "无法解析版本且没有 package.json 名称时不能放行")
+        XCTAssertEqual(report.blockingFindings.map(\.kind), [.piWeb])
+    }
+
+    /// pi 版本无法解析时同样不能放行：门控要求三条硬性前置都能核对身份。
+    func testUnparseablePiVersionIsUnknownAndBlocks() {
+        let report = makeHarness(piVersionOutput: "unknown").checker().run()
+        XCTAssertEqual(report.finding(for: .piCLI)?.status, .unknown)
+        XCTAssertFalse(report.canStartService)
+        XCTAssertEqual(report.blockingFindings.map(\.kind), [.piCLI])
     }
 
     func testForeignPackageNameLowersConfidenceToInferred() {
@@ -564,6 +580,38 @@ final class DependencyCheckerTests: XCTestCase {
         XCTAssertEqual(report.finding(for: .piWeb)?.status, .missing)
         XCTAssertEqual(report.blockingFindings.map(\.kind), [.piWeb])
         XCTAssertFalse(report.canStartService)
+    }
+
+    // MARK: - 路径选择的身份证据
+
+    /// 路径选择用的只读证据：可执行位、`--version` 版本、package.json 名称。
+    /// 可执行位不是身份，所以不满足版本/包名时 `confirmsPiWebIdentity` 为 false。
+    func testPiWebIdentityEvidenceReportsExecutabilityVersionAndPackageName() {
+        let checker = makeHarness().checker()
+
+        let piWeb = checker.piWebIdentityEvidence(atPath: "/opt/homebrew/bin/pi-web")
+        XCTAssertTrue(piWeb.isExecutable)
+        XCTAssertEqual(piWeb.version, "1.2.3")
+        XCTAssertEqual(piWeb.packageName, "@agegr/pi-web")
+        XCTAssertTrue(piWeb.confirmsPiWebIdentity)
+
+        // 可执行但版本无法解析、包名也不符（`/bin/echo` 这类文件）：身份不成立。
+        let echoHarness = DependencyHarness()
+        echoHarness.fileSystem.executables = ["/bin/echo"]
+        echoHarness.runner.handler = { arguments in
+            arguments.joined(separator: " ") == "/bin/echo --version" ? "--version\n" : nil
+        }
+        let echo = echoHarness.checker().piWebIdentityEvidence(atPath: "/bin/echo")
+        XCTAssertTrue(echo.isExecutable)
+        XCTAssertNil(echo.version)
+        XCTAssertNil(echo.packageName)
+        XCTAssertFalse(echo.confirmsPiWebIdentity)
+
+        // 不可执行：不运行任何命令，直接报告不可用。
+        let missing = echoHarness.checker().piWebIdentityEvidence(atPath: "/bin/definitely-not-here")
+        XCTAssertFalse(missing.isExecutable)
+        XCTAssertFalse(missing.confirmsPiWebIdentity)
+        XCTAssertFalse(echoHarness.runner.invocationLines.contains("/bin/definitely-not-here --version"))
     }
 
     // MARK: - 系统检查

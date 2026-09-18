@@ -1,0 +1,30 @@
+name: Security vulnerability
+description: 仅用于记录已通过私密渠道处理后的安全修复，不用于公开报告新漏洞。
+title: "[Security] "
+labels:
+  - "type: security"
+  - "area: security"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        不要在此表单中提交未修复漏洞的利用细节、凭据、token、私有日志或真实用户数据。请使用 SECURITY.md 中的私密报告流程。
+  - type: textarea
+    id: summary
+    attributes:
+      label: 脱敏摘要
+      description: 只写修复所需的最小信息。
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: 影响范围
+    validations:
+      required: true
+  - type: textarea
+    id: fix
+    attributes:
+      label: 修复和验证
+    validations:
+      required: true

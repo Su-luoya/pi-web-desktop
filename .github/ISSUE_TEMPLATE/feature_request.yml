@@ -1,0 +1,46 @@
+name: Feature request
+description: 提议一个能被独立讨论和验收的用户能力。
+title: "[Feature] "
+labels:
+  - "type: feature"
+  - "status: needs-decision"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先描述用户问题，再讨论实现方式。大功能需要先完成范围和安全评估。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 用户问题
+      description: 谁遇到了什么问题？当前如何处理？
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_behavior
+    attributes:
+      label: 建议行为
+      description: 描述用户能观察到的行为，不要只写内部实现。
+    validations:
+      required: true
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: 范围外事项
+      description: 明确本提案不解决什么。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收方式
+      description: 写出可执行或可观察的验收标准。
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: 安全与隐私影响
+      description: 说明网络、凭据、进程、更新或本机数据方面的影响。
+    validations:
+      required: true

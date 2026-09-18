@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞报告
+    url: https://github.com/Su-luoya/pi-web-desktop/security/advisories/new
+    about: 请使用私密漏洞报告，不要在公开 Issue 中发布安全细节、凭据或可利用样例。
+  - name: 上游 Pi Web 项目
+    url: https://github.com/agegr/pi-web
+    about: Pi Web 服务本身的问题请先确认是否属于上游项目。

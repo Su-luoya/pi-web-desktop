@@ -1,0 +1,46 @@
+name: Maintenance task
+description: 记录一个可独立合并的维护、构建、测试或文档任务。
+title: "[Maintenance] "
+labels:
+  - "type: maintenance"
+  - "status: needs-decision"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        进入 Orca 前，Issue 必须满足 Definition of Ready。不要在公开内容中放入凭据或私人诊断数据。
+  - type: textarea
+    id: target
+    attributes:
+      label: Target
+      description: 要改变的组件、文件或发布流程。
+    validations:
+      required: true
+  - type: textarea
+    id: change
+    attributes:
+      label: Change
+      description: 需要完成的具体变更。
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: 安全、兼容、依赖和范围限制。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Observable acceptance
+      description: 可执行命令或可观察结果。
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: 列出阻塞 Issue；没有依赖请填写“无”。
+    validations:
+      required: true

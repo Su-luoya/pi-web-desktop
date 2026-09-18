@@ -1,0 +1,31 @@
+name: build
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build app
+        run: ./Scripts/build.sh
+      - name: Verify ad-hoc signature
+        run: codesign --verify --deep --strict build/Pi-Web-Desktop.app
+      - name: Check for accidental personal data
+        run: |
+          ! git grep -nE 'taila|127\.0\.0\.1:7890|/Users/[^/]+' -- ':!*.icns' ':!.github/workflows/build.yml'
+      - name: Check shell scripts
+        run: sh -n Scripts/build.sh Scripts/install.sh
+      - name: Package smoke artifact
+        run: ditto -c -k --sequesterRsrc --keepParent build/Pi-Web-Desktop.app Pi-Web-Desktop-alpha.zip
+      - name: Checksum
+        run: shasum -a 256 Pi-Web-Desktop-alpha.zip

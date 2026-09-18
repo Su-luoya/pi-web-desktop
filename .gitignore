@@ -1,0 +1,19 @@
+# Generated application bundles and build output
+build/
+.DS_Store
+*.backup
+*.zip
+
+# Xcode user state and derived data
+DerivedData/
+xcuserdata/
+*.xcuserstate
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Local project metadata
+.env
+.env.*

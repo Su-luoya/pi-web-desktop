@@ -1,0 +1,63 @@
+name: Bug report
+description: 报告可以复现的行为问题。
+title: "[Bug] "
+labels:
+  - "type: bug"
+  - "status: needs-reproduction"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先搜索已有 Issue。不要在公开内容中填写密码、token、代理凭据、私有路径或完整日志。
+  - type: input
+    id: app_version
+    attributes:
+      label: Pi Web Desktop 版本
+      placeholder: 0.1.0-alpha.1
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 环境
+      description: 请填写 macOS 版本、Mac 芯片、Node.js、Pi 和 Pi Web 版本。
+      placeholder: macOS 14.x, Apple Silicon, Node 24.x, Pi 0.x, Pi Web 0.x
+    validations:
+      required: true
+  - type: textarea
+    id: installation
+    attributes:
+      label: 安装来源
+      description: 请说明应用、Pi 和 Pi Web 的安装方式，例如源码、alpha ZIP、npm、Homebrew 或其他工具。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 重现步骤
+      placeholder: |
+        1. 打开……
+        2. 点击……
+        3. 观察……
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏日志或诊断信息
+      description: 只粘贴已移除用户名、Home 路径、token、密码、代理凭据和查询参数的内容。
+      render: text
+    validations:
+      required: false

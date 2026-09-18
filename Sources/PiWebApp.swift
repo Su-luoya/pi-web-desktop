@@ -524,8 +524,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if serviceManager.managedServicePID() != nil {
             serviceManager.restartManagedService()
         } else {
+            // 外部服务只读：确认后的“重启”只会在端口空闲时启动一个可验证的托管进程；
+            // 如果外部服务仍在响应，应用只是继续使用它，不会向它发送信号。
             presentExternalServiceWarning(action: "重启") { [weak self] in
-                self?.serviceManager.stopExternalListenerAndStart()
+                self?.serviceManager.ensureServerIsRunning()
             }
         }
     }
@@ -534,12 +536,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if serviceManager.managedServicePID() != nil {
             serviceManager.stopService()
         } else {
+            // 外部服务只读：保留原有警告文案，但确认后 stopService() 找不到可验证的
+            // 所有权记录，不会向任何进程发送 TERM/KILL，也不会把状态改成“已停止”。
             presentExternalServiceWarning(action: "停止") { [weak self] in
-                self?.serviceManager.stopExternalListener()
+                self?.serviceManager.stopService()
             }
         }
     }
 
+    /// Warning shown before a stop/restart action that involves a service the
+    /// app cannot prove it started. The copy is intentionally unchanged, but
+    /// `proceed` may only update state or start a managed process: an external
+    /// service never receives a signal.
     private func presentExternalServiceWarning(action: String, proceed: @escaping () -> Void) {
         serviceManager.checkServer { [weak self] ready in
             DispatchQueue.main.async {
@@ -617,7 +625,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func quitKeepingService(_ sender: Any?) {
         guard !serviceManager.isQuitting else { return }
         serviceManager.keepRunningOnQuit()
-        // 不调用 stopService，也不删除 service.pid，让 pi-web 继续独立运行。
+        // 不调用 stopService，也不删除 service-owner.json，让 pi-web 继续独立运行。
         NSApp.terminate(nil)
     }
 

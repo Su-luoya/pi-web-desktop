@@ -90,6 +90,7 @@ swiftc "$ROOT/Sources/PiWebApp.swift" \
   "$ROOT/Sources/ProcessInspector.swift" \
   "$ROOT/Sources/ServiceConfiguration.swift" \
   "$ROOT/Sources/ServiceManager.swift" \
+  "$ROOT/Sources/ServiceOwnership.swift" \
   "$ROOT/Sources/WebViewController.swift" \
   "$ROOT/Sources/WebViewNavigationPolicy.swift" \
   "$ROOT/Sources/PreferencesWindowController.swift" \

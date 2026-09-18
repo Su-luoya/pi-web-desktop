@@ -35,23 +35,26 @@ struct SystemCommandRunner: CommandRunning {
 /// Commands are executed through the injected `CommandRunning`; the parsing
 /// rules are pure static functions so they can be tested with fake `ps`/`lsof`
 /// output. Liveness checks are injectable for the same reason.
+///
+/// This type only reports facts. The decision whether a process belongs to the
+/// app lives in `ServiceOwnershipVerifier`, and no signal path may treat a
+/// command line as ownership proof.
 struct ProcessInspector {
     static let processCommand = "/bin/ps"
     static let listenerCommand = "/usr/sbin/lsof"
-    static let commandMarker = "pi-web"
 
     private let runner: CommandRunning
-    private let fileManager: FileManager
     private let processIsAlive: (pid_t) -> Bool
+    private let processExecutablePath: (pid_t) -> String?
 
     init(
         runner: CommandRunning = SystemCommandRunner(),
-        fileManager: FileManager = .default,
-        processIsAlive: @escaping (pid_t) -> Bool = ProcessInspector.defaultProcessIsAlive
+        processIsAlive: @escaping (pid_t) -> Bool = ProcessInspector.defaultProcessIsAlive,
+        processExecutablePath: @escaping (pid_t) -> String? = ProcessInspector.defaultProcessExecutablePath
     ) {
         self.runner = runner
-        self.fileManager = fileManager
         self.processIsAlive = processIsAlive
+        self.processExecutablePath = processExecutablePath
     }
 
     // MARK: - Pure parsing
@@ -61,19 +64,28 @@ struct ProcessInspector {
         pid > 1 && kill(pid, 0) == 0
     }
 
-    /// Parses a PID record file (service.pid / app.pid). Invalid values and PIDs
-    /// below 2 are rejected, matching the previous inline checks.
+    /// Real executable image path through libproc (`proc_pidpath`).
+    ///
+    /// This is stronger evidence than `ps -o comm=` and resolves the actual
+    /// binary behind symlinks and shebang scripts. It only works for the
+    /// current user's processes; other users' processes make it fail, which
+    /// callers treat as "fall back to `ps -o comm=`".
+    static func defaultProcessExecutablePath(_ pid: pid_t) -> String? {
+        guard pid > 1 else { return nil }
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return nil }
+        let path = String(cString: buffer)
+        return path.isEmpty ? nil : path
+    }
+
+    /// Parses a PID record file (`app.pid`, or the legacy `service.pid` while
+    /// it is being removed). Invalid values and PIDs below 2 are rejected,
+    /// matching the previous inline checks.
     static func parsePIDRecord(_ text: String?) -> pid_t? {
         let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard let pid = pid_t(trimmed), pid > 1 else { return nil }
         return pid
-    }
-
-    /// Parses `ps -o ppid=` output. Unknown or malformed output means "no parent"
-    /// (0), which callers already treat as an unusable candidate.
-    static func parseParentPID(_ output: String?) -> pid_t {
-        let trimmed = output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return pid_t(trimmed) ?? 0
     }
 
     /// Parses `lsof -t` output: the first line is the listener, later lines are
@@ -94,10 +106,38 @@ struct ProcessInspector {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    /// A command is an app-managed pi-web process when its `ps` command line
-    /// contains "pi-web" (case-insensitive).
-    static func isPiWebCommand(_ output: String?) -> Bool {
-        (output ?? "").lowercased().contains(commandMarker)
+    /// Parses `ps -o pgid=` output. Values below 2 are rejected, matching the
+    /// "never signal PID 0, 1 or a negative value" rule.
+    static func parseProcessGroupID(_ output: String?) -> pid_t? {
+        let trimmed = output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard let processGroupID = pid_t(trimmed), processGroupID > 1 else { return nil }
+        return processGroupID
+    }
+
+    /// Parses `ps -o lstart=` output. Whitespace runs are collapsed so the
+    /// value is stable regardless of the column spacing `ps` chooses.
+    static func parseProcessStartTime(_ output: String?) -> String? {
+        let trimmed = output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        return trimmed.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+
+    /// Parses `ps -o comm=` output: the executable path of a PID.
+    static func parseResolvedExecutable(_ output: String?) -> String? {
+        let trimmed = output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Parses `ps -o args=` output: the command line the process reports.
+    ///
+    /// Whitespace runs are collapsed to single spaces, which is the same
+    /// normalization used for the recorded digest. `ps` does not preserve
+    /// quoting, so argument boundaries inside the text are not recoverable
+    /// (see docs/security-ownership.md).
+    static func parseCommandLine(_ output: String?) -> String? {
+        let trimmed = output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        return trimmed.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
     }
 
     // MARK: - Commands
@@ -106,17 +146,65 @@ struct ProcessInspector {
         processIsAlive(pid)
     }
 
-    func isPiWebProcess(_ pid: pid_t) -> Bool {
-        Self.isPiWebCommand(runner.run([Self.processCommand, "-o", "command=", "-p", "\(pid)"]))
-    }
-
     /// Human readable command line for a PID, or "未知" when `ps` has nothing.
     func processDescription(of pid: pid_t) -> String {
         Self.parseProcessDescription(runner.run([Self.processCommand, "-o", "command=", "-p", "\(pid)"])) ?? "未知"
     }
 
-    func parentProcess(of pid: pid_t) -> pid_t {
-        Self.parseParentPID(runner.run([Self.processCommand, "-o", "ppid=", "-p", "\(pid)"]))
+    /// `ps -o pgid=` for a PID, or nil when `ps` cannot read the process (for
+    /// example another user's process without `sudo`).
+    func processGroupID(of pid: pid_t) -> pid_t? {
+        Self.parseProcessGroupID(runner.run([Self.processCommand, "-o", "pgid=", "-p", "\(pid)"]))
+    }
+
+    /// `ps -o lstart=` for a PID, or nil when `ps` cannot read the process.
+    /// The value has a one-second granularity, which limits PID-reuse
+    /// detection (see docs/security-ownership.md).
+    func processLaunchTime(of pid: pid_t) -> String? {
+        Self.parseProcessStartTime(runner.run([Self.processCommand, "-o", "lstart=", "-p", "\(pid)"]))
+    }
+
+    /// `ps -o comm=` for a PID, or nil when `ps` cannot read the process.
+    func resolvedExecutable(of pid: pid_t) -> String? {
+        Self.parseResolvedExecutable(runner.run([Self.processCommand, "-o", "comm=", "-p", "\(pid)"]))
+    }
+
+    /// `ps -o args=` for a PID (normalized), or nil when `ps` cannot read the
+    /// process or reports nothing. This is the live argv the ownership record
+    /// is verified against.
+    func commandLine(of pid: pid_t) -> String? {
+        Self.parseCommandLine(runner.run([Self.processCommand, "-o", "args=", "-p", "\(pid)"]))
+    }
+
+    /// Executable identity for a PID: `proc_pidpath` first, `ps -o comm=` as a
+    /// fallback. The provenance is returned with the path so records can mark
+    /// weak evidence.
+    func resolvedExecutableInfo(of pid: pid_t) -> (path: String, source: ServiceExecutableSource)? {
+        if let path = processExecutablePath(pid), !path.isEmpty {
+            return (path, .procPidPath)
+        }
+        guard let fallback = resolvedExecutable(of: pid) else { return nil }
+        return (fallback, .psComm)
+    }
+
+    /// Facts needed to verify an ownership record.
+    ///
+    /// `pgid`, `lstart` and an executable identity are required; `commandLine`
+    /// may be empty when `ps -o args=` yields nothing, and the verifier then
+    /// treats the record as a mismatch (an empty argv is not ownership proof).
+    func processFacts(of pid: pid_t) -> ServiceProcessFacts? {
+        guard pid > 1,
+              let processGroupID = processGroupID(of: pid),
+              let launchedAt = processLaunchTime(of: pid),
+              let executable = resolvedExecutableInfo(of: pid) else { return nil }
+        return ServiceProcessFacts(
+            pid: pid,
+            processGroupID: processGroupID,
+            launchedAt: launchedAt,
+            resolvedExecutable: executable.path,
+            resolvedExecutableSource: executable.source,
+            commandLine: commandLine(of: pid) ?? ""
+        )
     }
 
     /// PID listening on the configured TCP port, when there is one.
@@ -133,17 +221,5 @@ struct ProcessInspector {
     func listenerProcessDescription(port: Int) -> String {
         guard let pid = listenerPID(port: port) else { return "无" }
         return processDescription(of: pid)
-    }
-
-    /// Owned service PID recorded in a PID file. Stale, unparsable or foreign
-    /// records are removed and reported as nil; the running child process is
-    /// tracked by AppDelegate and checked before this method is used.
-    func managedServicePID(pidFileURL: URL) -> pid_t? {
-        let record = try? String(contentsOf: pidFileURL, encoding: .utf8)
-        guard let pid = Self.parsePIDRecord(record), processIsAlive(pid), isPiWebProcess(pid) else {
-            try? fileManager.removeItem(at: pidFileURL)
-            return nil
-        }
-        return pid
     }
 }

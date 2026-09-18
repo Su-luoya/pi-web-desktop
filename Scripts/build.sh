@@ -87,6 +87,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc "$ROOT/Sources/PiWebApp.swift" \
   "$ROOT/Sources/AppConfiguration.swift" \
   "$ROOT/Sources/DiagnosticsCollector.swift" \
+  "$ROOT/Sources/DependencyChecker.swift" \
+  "$ROOT/Sources/InstallCommandManifest.swift" \
   "$ROOT/Sources/ProcessInspector.swift" \
   "$ROOT/Sources/ServiceConfiguration.swift" \
   "$ROOT/Sources/ServiceManager.swift" \
@@ -94,6 +96,7 @@ swiftc "$ROOT/Sources/PiWebApp.swift" \
   "$ROOT/Sources/WebViewController.swift" \
   "$ROOT/Sources/WebViewNavigationPolicy.swift" \
   "$ROOT/Sources/PreferencesWindowController.swift" \
+  "$ROOT/Sources/DiagnosticsWindowController.swift" \
   "$ROOT/Sources/main.swift" \
   -target "arm64-apple-macosx$APP_MINIMUM_SYSTEM_VERSION" \
   -o "$BIN" \

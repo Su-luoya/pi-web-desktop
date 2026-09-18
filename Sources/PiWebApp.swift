@@ -12,6 +12,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var isFullScreenTransition = false
     private var currentState: ServiceState = .checking
     private var preferencesWindowController: PreferencesWindowController?
+    private var diagnosticsWindowController: DiagnosticsWindowController?
+    /// 依赖门控禁用的启动类菜单项（启动/重启）；停止项不受影响。
+    private var serviceStartMenuItems: [NSMenuItem] = []
+    private var dependencyReport: DependencyReport?
+    private var dependencyGate: DependencyGate = .checking
+    private var dependencyCheckGeneration = 0
+    private var shouldPresentDiagnostics = false
+
+    /// 依赖前置的门控状态。检查完成前不允许启动服务。
+    private enum DependencyGate: Equatable {
+        case checking
+        case ready
+        case blocked
+    }
 
     private let appConfiguration: AppConfiguration
     private let commandRunner: CommandRunning
@@ -57,8 +71,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         createWindow()
         installServiceManagerCallbacks()
         serviceManager.setState(.checking)
-        webViewController.showLoadingPage(message: "正在检查 Pi Web 服务…")
-        serviceManager.startAtLaunch()
+        webViewController.showLoadingPage(message: "正在检查运行环境…")
+        runDependencyCheck()
     }
 
     // MARK: - Smoke launch
@@ -213,6 +227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: - Menus
 
     private func installMainMenu() {
+        serviceStartMenuItems.removeAll()
         let mainMenu = NSMenu()
 
         let appMenuItem = NSMenuItem()
@@ -225,8 +240,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hideOthers.keyEquivalentModifierMask = [.command, .option]
         appMenu.addItem(withTitle: "显示全部", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
         appMenu.addItem(withTitle: "设置…", action: #selector(showPreferences(_:)), keyEquivalent: ",")
-        appMenu.addItem(withTitle: "启动服务", action: #selector(startServiceAction(_:)), keyEquivalent: "")
-        appMenu.addItem(withTitle: "重启服务", action: #selector(restartServiceAction(_:)), keyEquivalent: "")
+        appMenu.addItem(makeServiceStartMenuItem(title: "启动服务", action: #selector(startServiceAction(_:))))
+        appMenu.addItem(makeServiceStartMenuItem(title: "重启服务", action: #selector(restartServiceAction(_:))))
         appMenu.addItem(withTitle: "停止服务", action: #selector(stopServiceAction(_:)), keyEquivalent: "")
         appMenu.addItem(withTitle: "在浏览器中打开", action: #selector(openInBrowser(_:)), keyEquivalent: "")
         appMenu.addItem(withTitle: "复制本地地址", action: #selector(copyLocalAddress(_:)), keyEquivalent: "")
@@ -271,14 +286,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         statusMenuItem = serviceMenu.addItem(withTitle: "状态：正在检查…", action: nil, keyEquivalent: "")
         statusMenuItem?.isEnabled = false
         serviceMenu.addItem(.separator())
-        serviceMenu.addItem(withTitle: "启动服务", action: #selector(startServiceAction(_:)), keyEquivalent: "")
-        serviceMenu.addItem(withTitle: "重启服务", action: #selector(restartServiceAction(_:)), keyEquivalent: "")
+        serviceMenu.addItem(makeServiceStartMenuItem(title: "启动服务", action: #selector(startServiceAction(_:))))
+        serviceMenu.addItem(makeServiceStartMenuItem(title: "重启服务", action: #selector(restartServiceAction(_:))))
         serviceMenu.addItem(withTitle: "停止服务", action: #selector(stopServiceAction(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "设置…", action: #selector(showPreferences(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "在浏览器中打开", action: #selector(openInBrowser(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "复制本地地址", action: #selector(copyLocalAddress(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "打开日志", action: #selector(openLog(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "复制诊断信息", action: #selector(copyDiagnostics(_:)), keyEquivalent: "")
+        serviceMenu.addItem(withTitle: "依赖与环境诊断…", action: #selector(showDiagnosticsAction(_:)), keyEquivalent: "")
         serviceMenuItem.submenu = serviceMenu
 
         let windowMenuItem = NSMenuItem()
@@ -295,6 +311,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.mainMenu = mainMenu
     }
 
+    /// 依赖门控禁用的菜单项；由 `validateMenuItem` 在菜单打开时再次确认。
+    private func makeServiceStartMenuItem(title: String, action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        serviceStartMenuItems.append(item)
+        return item
+    }
+
+    // MARK: - 依赖诊断门控
+
+    /// 启动时的环境检查。命令执行会阻塞，因此放到后台；结果回到主线程后再
+    /// 决定服务是否可启动。检查期间启动/重启菜单项保持禁用。
+    private func runDependencyCheck() {
+        dependencyGate = .checking
+        serviceStartMenuItems.forEach { $0.isEnabled = false }
+        dependencyCheckGeneration += 1
+        let generation = dependencyCheckGeneration
+        // 在主线程读配置和注入的 runner，后台只执行只读探测。
+        let checker = DependencyChecker(
+            commandRunner: commandRunner,
+            configuredPiWebPath: serviceManager.configuration.piWebPath
+        )
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let report = checker.run()
+            DispatchQueue.main.async {
+                guard let self, generation == self.dependencyCheckGeneration else { return }
+                self.applyDependencyReport(report)
+            }
+        }
+    }
+
+    /// `canStartService == true` 时恢复原有启动路径；否则禁用启动菜单项、显示
+    /// 诊断窗口，并用诊断提示页替代服务页面（不加载服务地址）。
+    private func applyDependencyReport(_ report: DependencyReport) {
+        dependencyReport = report
+        let presentDiagnostics = !report.canStartService || shouldPresentDiagnostics
+        shouldPresentDiagnostics = false
+
+        if report.canStartService {
+            let wasReady = dependencyGate == .ready
+            dependencyGate = .ready
+            serviceStartMenuItems.forEach { $0.isEnabled = true }
+            if !presentDiagnostics {
+                diagnosticsWindowController?.close()
+                diagnosticsWindowController = nil
+            }
+            if !wasReady {
+                serviceManager.setState(.checking)
+                webViewController.showLoadingPage(message: "正在检查 Pi Web 服务…")
+                serviceManager.startAtLaunch()
+            }
+        } else {
+            dependencyGate = .blocked
+            serviceStartMenuItems.forEach { $0.isEnabled = false }
+            serviceManager.setState(.stopped)
+            webViewController.showDependencyPage(message: DependencyReportPresenter.blockingSummary(for: report))
+        }
+        if presentDiagnostics {
+            showDiagnostics(report: report)
+        }
+    }
+
+    private func showDiagnostics(report: DependencyReport) {
+        if let controller = diagnosticsWindowController {
+            controller.update(report: report)
+            controller.window?.makeKeyAndOrderFront(nil)
+        } else {
+            let controller = DiagnosticsWindowController(report: report)
+            controller.onRecheck = { [weak self] in self?.runDependencyCheck() }
+            diagnosticsWindowController = controller
+            controller.showWindow(nil)
+        }
+        if !NSApp.isActive {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
 
     // MARK: - Window and WebView
 
@@ -517,10 +608,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: - Actions
 
     @objc private func startServiceAction(_ sender: Any?) {
+        guard dependencyGate == .ready else { return }
         serviceManager.startService()
     }
 
     @objc private func restartServiceAction(_ sender: Any?) {
+        guard dependencyGate == .ready else { return }
         if serviceManager.managedServicePID() != nil {
             serviceManager.restartManagedService()
         } else {
@@ -567,6 +660,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     if response == .alertFirstButtonReturn { proceed() }
                 }
             }
+        }
+    }
+
+    @objc private func showDiagnosticsAction(_ sender: Any?) {
+        if let report = dependencyReport {
+            showDiagnostics(report: report)
+        } else {
+            // 首次检查还没返回：检查结束后无论如何都展示一次结果。
+            shouldPresentDiagnostics = true
         }
     }
 
@@ -648,8 +750,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
-        case #selector(startServiceAction(_:)): return serviceManager.managedServicePID() == nil
-        case #selector(stopServiceAction(_:)), #selector(restartServiceAction(_:)): return true
+        case #selector(startServiceAction(_:)):
+            return dependencyGate == .ready && serviceManager.managedServicePID() == nil
+        case #selector(stopServiceAction(_:)): return true
+        case #selector(restartServiceAction(_:)): return dependencyGate == .ready
         case #selector(toggleFullScreen(_:)):
             menuItem.title = window.styleMask.contains(.fullScreen) ? "退出全屏幕" : "进入全屏幕"
             return true

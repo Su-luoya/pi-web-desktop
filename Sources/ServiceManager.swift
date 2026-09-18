@@ -158,7 +158,7 @@ struct ServiceLaunchSpecification: Equatable {
         return ServiceLaunchSpecification(
             executablePath: piWebPath,
             arguments: arguments(configuration: configuration),
-            workingDirectory: appConfiguration.serviceWorkingDirectory,
+            workingDirectory: appConfiguration.workspaceDirectory(for: configuration),
             environment: environment
         )
     }
@@ -464,8 +464,18 @@ final class ServiceManager {
     /// `DependencyReport.canStartService` 为 true 时打开、为 false 时重新关闭。
     var isDependencyGateOpen = false
 
+    /// 工作目录不可用的原因（GitHub #9）。非 nil 时一切启动入口都被拒绝：
+    /// 目录不存在或不可写时 pi-web 无法在工作目录写入运行文件，启动只会得到
+    /// 难以理解的失败，因此应用先停在诊断状态并给出可读修复提示。
+    /// `AppDelegate` 负责探测与呈现，`ServiceManager` 只执行门控。
+    private(set) var workspaceProblem: WorkspaceDirectoryProblem?
+    /// 生效的工作目录路径（用于可读错误信息），与 `workspaceProblem` 同源。
+    private(set) var workspaceDirectoryPath = ""
+    /// 该路径是否为应用默认工作目录；可读提示据此区分“默认工作目录”与用户自选目录。
+    private(set) var workspaceUsesDefaultLocation = true
+
     /// True once a quit sequence started. AppDelegate drives this through
-    /// `beginQuitting()` / `keepRunningOnQuit()` / `stopAllServices(completion:)`.
+    /// `beginQuitting()` / `keepRunningOnQuit()` / `stopManagedServiceOnQuit(completion:)`.
     private(set) var isQuitting = false
 
     /// Identifier of this app instance. It is part of every ownership record,
@@ -531,19 +541,33 @@ final class ServiceManager {
         self.configuration = configuration
     }
 
+    /// 更新工作目录门控（GitHub #9）。`problem` 为 nil 表示目录可用；路径与
+    /// 来源一起保存，使可读提示不需要重新探测。
+    func setWorkspaceAvailability(
+        problem: WorkspaceDirectoryProblem?,
+        path: String,
+        usesDefaultLocation: Bool = true
+    ) {
+        workspaceProblem = problem
+        workspaceDirectoryPath = path
+        workspaceUsesDefaultLocation = usesDefaultLocation
+    }
+
     func setState(_ state: ServiceState) {
         currentState = state
         onStateChange?(state)
     }
 
-    /// 与凭证无关的启动前置条件：依赖门控打开，不在停止/退出流程中。
-    /// 供 `startManagedService()` 使用：那里自己读一次凭证，避免二次读取。
+    /// 与凭证无关的启动前置条件：依赖门控打开，工作目录可用，不在停止/退出
+    /// 流程中。供 `startManagedService()` 使用：那里自己读一次凭证，避免二次
+    /// 读取。
     private var isBaseStartPermitted: Bool {
-        isDependencyGateOpen && !isStoppingService && !isQuitting
+        isDependencyGateOpen && workspaceProblem == nil && !isStoppingService && !isQuitting
     }
 
-    /// 允许启动服务与加载服务页的前置条件：依赖门控打开，不在停止/退出流程中，
-    /// 并且远程访问的前置条件满足（非 loopback hostname 必须有非空密码）。
+    /// 允许启动服务与加载服务页的前置条件：依赖门控打开，工作目录可用，不在
+    /// 停止/退出流程中，并且远程访问的前置条件满足（非 loopback hostname 必须
+    /// 有非空密码）。
     /// 密码读取失败按“无密码”处理，因此远程模式不会在认证不可用时启动。
     private var isStartPermitted: Bool {
         isBaseStartPermitted && hasRequiredRemoteAccessCredentials
@@ -566,6 +590,24 @@ final class ServiceManager {
         if closeRemoteAccessIfCredentialsAreUnavailable() != nil { return true }
         reportStartupFailure(RemoteAccessPolicy.missingPasswordMessage)
         return true
+    }
+
+    /// 工作目录不可用时的可读失败提示。只在不处于停止/退出流程时给出，避免
+    /// 退出过程中的回调把诊断页覆盖成启动失败。
+    @discardableResult
+    private func reportWorkspaceRequirementIfNeeded() -> Bool {
+        guard let problem = workspaceProblem, !isStoppingService, !isQuitting else { return false }
+        reportStartupFailure(
+            problem.message(path: workspaceDirectoryPath, isDefaultLocation: workspaceUsesDefaultLocation)
+        )
+        return true
+    }
+
+    /// 启动入口的统一前置提示：远程凭证收敛优先，其次是工作目录诊断。
+    @discardableResult
+    private func reportStartRequirementIfNeeded() -> Bool {
+        if reportRemoteAccessRequirementIfNeeded() { return true }
+        return reportWorkspaceRequirementIfNeeded()
     }
 
     /// 远程访问凭证不可用（密码被删除、为空或读取失败）时的收敛入口
@@ -640,8 +682,9 @@ final class ServiceManager {
         if verdict.shouldRemoveRecord {
             ownershipStore.removeRecord(at: appConfiguration.serviceOwnerURL)
         }
-        guard case .managed = verdict else { return nil }
-        return record
+        // 重启认领（GitHub #9）：只有通过逐项校验的记录才能继续被管理；
+        // 任何失败都只把进程当作外部服务，不认领也不发信号。
+        return ServiceOwnershipVerifier.adoption(record: record, verdict: verdict).adoptedRecord
     }
 
     /// Startup reconciliation for records left behind by an earlier run.
@@ -722,7 +765,7 @@ final class ServiceManager {
         // launch decision, so a leftover file can never be adopted.
         reconcileOwnershipRecord()
         guard isStartPermitted else {
-            reportRemoteAccessRequirementIfNeeded()
+            reportStartRequirementIfNeeded()
             return
         }
         if configuration.autoStart || forceStart {
@@ -748,7 +791,7 @@ final class ServiceManager {
 
     func ensureServerIsRunning() {
         guard isStartPermitted else {
-            reportRemoteAccessRequirementIfNeeded()
+            reportStartRequirementIfNeeded()
             return
         }
         checkServer { [weak self] ready in
@@ -771,7 +814,7 @@ final class ServiceManager {
     /// callback and in `startManagedService()`.
     func startService() {
         guard isStartPermitted else {
-            reportRemoteAccessRequirementIfNeeded()
+            reportStartRequirementIfNeeded()
             return
         }
         checkServer { [weak self] ready in
@@ -1009,9 +1052,9 @@ final class ServiceManager {
     /// Stops the verified managed service and then calls `completion` on the
     /// main queue. AppDelegate terminates afterwards.
     ///
-    /// An external listener is never touched on quit: the app cannot prove it
-    /// started it, so it keeps running.
-    func stopAllServices(completion: @escaping () -> Void) {
+    /// 名字只说托管服务：外部服务（用户手动启动的 pi-web、上一次运行留下的
+    /// 服务、任何无法验证的进程）在任何退出行为下都不被停止。
+    func stopManagedServiceOnQuit(completion: @escaping () -> Void) {
         beginQuitting()
         isStoppingService = true
         if managedServicePID() != nil {
@@ -1093,7 +1136,7 @@ final class ServiceManager {
     /// closed only the state message is updated, never a launch or page load.
     func reloadAfterConfigurationChange() {
         guard isStartPermitted else {
-            reportRemoteAccessRequirementIfNeeded()
+            reportStartRequirementIfNeeded()
             return
         }
         checkServer { [weak self] ready in
@@ -1118,7 +1161,12 @@ final class ServiceManager {
     /// Opens the log file for the child process, rotating it first when needed.
     private func openLogForWriting() throws -> FileHandle {
         let logURL = appConfiguration.logURL
-        try fileManager.createDirectory(at: appConfiguration.serviceWorkingDirectory, withIntermediateDirectories: true)
+        // 工作目录可用性由 `setWorkspaceAvailability` 门控；这里只负责在启动
+        // 前确保它存在（默认目录首次使用时创建）。
+        try fileManager.createDirectory(
+            at: appConfiguration.workspaceDirectory(for: configuration),
+            withIntermediateDirectories: true
+        )
         try fileManager.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         if !fileManager.fileExists(atPath: logURL.path) {
             fileManager.createFile(atPath: logURL.path, contents: nil)

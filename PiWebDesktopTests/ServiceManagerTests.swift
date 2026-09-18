@@ -731,7 +731,7 @@ final class ServiceManagerTests: XCTestCase {
         }
         XCTAssertEqual(specification.executablePath, executable)
         XCTAssertEqual(specification.arguments, ["--hostname", "127.0.0.1", "--port", "30141", "--no-open"])
-        XCTAssertEqual(specification.workingDirectory.standardizedFileURL, harness.appConfiguration.serviceWorkingDirectory.standardizedFileURL)
+        XCTAssertEqual(specification.workingDirectory.standardizedFileURL, harness.appConfiguration.defaultWorkspaceDirectory.standardizedFileURL)
 
         let environment = specification.environment
         XCTAssertEqual(environment["PI_WEB_NO_OPEN"], "1")
@@ -966,7 +966,7 @@ final class ServiceManagerTests: XCTestCase {
         harness.manager.setState(.running)
 
         harness.manager.stopService()
-        harness.manager.stopAllServices {}
+        harness.manager.stopManagedServiceOnQuit {}
         harness.scheduler.runAllBackgroundWork()
 
         XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
@@ -1016,7 +1016,7 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
     }
 
-    func testStopAllServicesStopsTheVerifiedChildAndInvokesTheCompletion() throws {
+    func testStopManagedServiceOnQuitStopsTheVerifiedChildAndInvokesTheCompletion() throws {
         let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
         defer { harness.cleanUp() }
         harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
@@ -1025,7 +1025,7 @@ final class ServiceManagerTests: XCTestCase {
         harness.signaler.aliveProcessGroups = [5150]
 
         var completionRan = false
-        harness.manager.stopAllServices { completionRan = true }
+        harness.manager.stopManagedServiceOnQuit { completionRan = true }
         harness.scheduler.runAllBackgroundWork()
 
         XCTAssertTrue(completionRan)
@@ -1037,7 +1037,7 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertNil(harness.readOwnershipRecord())
     }
 
-    func testStopAllServicesLeavesAnExternalServiceRunning() throws {
+    func testStopManagedServiceOnQuitLeavesAnExternalServiceRunning() throws {
         let harness = try makeHarness(
             alive: { $0 == 4321 },
             processOutput: processOutput(for: 4321, listenerPort: 30141)
@@ -1045,10 +1045,164 @@ final class ServiceManagerTests: XCTestCase {
         defer { harness.cleanUp() }
 
         var completionRan = false
-        harness.manager.stopAllServices { completionRan = true }
+        harness.manager.stopManagedServiceOnQuit { completionRan = true }
 
         XCTAssertTrue(completionRan)
         XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
+    }
+
+    /// 三种退出行为与 `QuitPlan` 的对应关系：只有“退出并停止服务”会向已验证的
+    /// 托管进程组发信号；“保持运行”与“询问（未回答前）”都不停止服务。
+    func testEveryQuitBehaviourKeepsTheServiceUnlessStoppingWasRequested() throws {
+        for behavior in ServiceConfiguration.QuitBehavior.allCases {
+            let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+            defer { harness.cleanUp() }
+            var configuration = configured(try harness.makeExecutable())
+            configuration.quitBehavior = behavior
+            harness.manager.updateConfiguration(configuration)
+            harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+            harness.manager.startManagedService()
+            harness.manager.startHealthMonitor()
+            let plan = QuitPlan.plan(for: behavior)
+
+            if plan.stopsManagedService {
+                harness.signaler.aliveProcessGroups = [5150]
+                harness.manager.stopManagedServiceOnQuit {}
+                harness.scheduler.runAllBackgroundWork()
+
+                XCTAssertEqual(
+                    harness.signaler.groupSignals,
+                    [ManagerFakeSignaler.GroupSignal(signal: SIGTERM, processGroupID: 5150)],
+                    "\(behavior) 应停止已验证的托管服务"
+                )
+                XCTAssertNil(harness.readOwnershipRecord())
+            } else {
+                harness.manager.keepRunningOnQuit()
+
+                XCTAssertTrue(harness.signaler.groupSignals.isEmpty, "\(behavior) 不得停止服务")
+                XCTAssertNotNil(harness.readOwnershipRecord())
+                XCTAssertEqual(harness.manager.managedServicePID(), 5150)
+            }
+            XCTAssertTrue(harness.manager.isQuitting)
+            // 应用关闭期间不再有后台轮询。
+            XCTAssertEqual(harness.scheduler.repeatTokens.last?.invalidateCount, 1)
+        }
+    }
+
+    /// 外部服务在三种退出行为下都不被停止：没有可验证的记录就没有信号。
+    func testNoQuitBehaviourEverStopsAnExternalService() throws {
+        for behavior in ServiceConfiguration.QuitBehavior.allCases {
+            let harness = try makeHarness(
+                alive: { $0 == 4321 },
+                processOutput: processOutput(for: 4321, listenerPort: 30141)
+            )
+            defer { harness.cleanUp() }
+            var configuration = ServiceConfiguration.default
+            configuration.quitBehavior = behavior
+            harness.manager.updateConfiguration(configuration)
+            harness.manager.setState(.running)
+
+            let plan = QuitPlan.plan(for: behavior)
+            if plan.stopsManagedService {
+                harness.manager.stopManagedServiceOnQuit {}
+            } else {
+                harness.manager.keepRunningOnQuit()
+            }
+            harness.scheduler.runAllBackgroundWork()
+
+            XCTAssertNil(harness.manager.managedServicePID())
+            XCTAssertTrue(harness.signaler.groupSignals.isEmpty, "\(behavior) 不得停止外部服务")
+            // 外部服务的状态不由本应用管理：退出流程不改写它。
+            XCTAssertEqual(harness.manager.currentState, .running)
+        }
+    }
+
+    // MARK: 重启认领（GitHub #9）
+
+    /// 应用重启后只有通过所有权校验的服务才可被认领；校验失败的进程只作为
+    /// 外部服务出现，既不认领也不发送任何信号。
+    func testUnverifiableRecordFromAnEarlierRunIsNeverReclaimedOrSignalled() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        try harness.writeOwnershipRecord(harness.makeOwnershipRecord(instanceID: "instance-from-an-earlier-run"))
+
+        harness.manager.reconcileOwnershipRecord()
+        XCTAssertNil(harness.manager.managedServicePID())
+
+        harness.manager.setState(.running)
+        harness.manager.stopManagedServiceOnQuit {}
+        harness.scheduler.runAllBackgroundWork()
+
+        XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
+        XCTAssertNil(harness.readOwnershipRecord())
+        XCTAssertNil(harness.manager.managedServicePID())
+        XCTAssertEqual(harness.manager.currentState, .running)
+    }
+
+    // MARK: 工作目录门控（GitHub #9）
+
+    /// 工作目录不存在或不可写时阻止一切启动入口，并给出可读修复提示。
+    func testWorkspaceProblemBlocksEveryStartEntryAndReportsTheFix() throws {
+        let harness = try makeHarness(alive: { _ in false })
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.manager.setWorkspaceAvailability(problem: .notWritable, path: "/tmp/PiWebDesktopTests/read-only-workspace")
+
+        harness.manager.startAtLaunch()
+        harness.manager.startService()
+        harness.manager.ensureServerIsRunning()
+        harness.manager.reloadAfterConfigurationChange()
+        harness.manager.startManagedService()
+
+        XCTAssertEqual(harness.launcher.launchCount, 0)
+        XCTAssertEqual(harness.loadRequests, 0)
+        XCTAssertEqual(harness.startupFailures.count, 4)
+        XCTAssertTrue(harness.startupFailures.allSatisfy { $0.contains("不可写") })
+        XCTAssertTrue(harness.startupFailures.allSatisfy { $0.contains("/tmp/PiWebDesktopTests/read-only-workspace") })
+        XCTAssertTrue(harness.startupFailures.allSatisfy { $0.contains("设置") })
+    }
+
+    /// 可读提示区分默认工作目录与用户自选目录。
+    func testWorkspaceProblemMessageDistinguishesTheDefaultLocation() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+        harness.manager.setWorkspaceAvailability(
+            problem: .missing,
+            path: "/tmp/PiWebDesktopTests/support/Workspace",
+            usesDefaultLocation: true
+        )
+        harness.manager.startAtLaunch()
+        XCTAssertTrue(harness.startupFailures.last?.contains("默认工作目录不存在") == true)
+
+        harness.manager.setWorkspaceAvailability(
+            problem: .missing,
+            path: "/tmp/PiWebDesktopTests/custom-workspace",
+            usesDefaultLocation: false
+        )
+        harness.manager.startAtLaunch()
+        let message = try XCTUnwrap(harness.startupFailures.last)
+        XCTAssertTrue(message.contains("工作目录不存在"))
+        XCTAssertTrue(message.contains("/tmp/PiWebDesktopTests/custom-workspace"))
+        XCTAssertFalse(message.contains("默认工作目录"))
+    }
+
+    /// 工作目录恢复可用后门控重新打开，启动入口照常工作。
+    func testRestoringTheWorkspaceReopensEveryStartEntry() throws {
+        let harness = try makeHarness(alive: { _ in false })
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.manager.setWorkspaceAvailability(problem: .missing, path: "/tmp/PiWebDesktopTests/workspace")
+
+        harness.manager.ensureServerIsRunning()
+        XCTAssertEqual(harness.loadRequests, 0)
+
+        harness.manager.setWorkspaceAvailability(problem: nil, path: "/tmp/PiWebDesktopTests/workspace")
+        harness.manager.ensureServerIsRunning()
+
+        // 假探针默认报告服务已就绪：门控打开后直接加载服务页，不启动新进程。
+        XCTAssertEqual(harness.loadRequests, 1)
+        XCTAssertEqual(harness.launcher.launchCount, 0)
     }
 
     // MARK: Spawn descriptors

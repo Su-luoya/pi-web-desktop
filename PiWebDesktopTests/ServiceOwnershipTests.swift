@@ -92,6 +92,61 @@ final class ServiceOwnershipTests: XCTestCase {
         XCTAssertEqual(verify(record: makeRecord()), .managed)
     }
 
+    // MARK: - 重启认领（GitHub #9）
+
+    /// 只有逐项校验通过的记录才可以被重新认领。
+    func testOnlyAVerifiedRecordIsReclaimed() {
+        let record = makeRecord()
+        let verdict = verify(record: record)
+        XCTAssertEqual(verdict, .managed)
+
+        let adoption = ServiceOwnershipVerifier.adoption(record: record, verdict: verdict)
+
+        XCTAssertEqual(adoption, .adopt(record))
+        XCTAssertEqual(adoption.adoptedRecord, record)
+        XCTAssertTrue(adoption.isAdopted)
+    }
+
+    /// 上一次运行留下的记录（instanceID 不同）永远不能被认领。
+    func testRecordFromAnEarlierRunIsNeverReclaimed() {
+        let record = makeRecord(instanceID: "instance-from-an-earlier-run")
+        let verdict = verify(record: record)
+        XCTAssertEqual(verdict, .external(.instanceMismatch))
+
+        let adoption = ServiceOwnershipVerifier.adoption(record: record, verdict: verdict)
+
+        XCTAssertEqual(adoption, .external(.instanceMismatch))
+        XCTAssertNil(adoption.adoptedRecord)
+        XCTAssertFalse(adoption.isAdopted)
+    }
+
+    /// 任何校验失败都只产生“外部服务”，没有任何失败分支能拿到可管理记录。
+    func testEveryFailedVerificationStaysExternal() {
+        let reusedPID = makeRecord(launchedAt: "Wed Jul 30 13:00:00 2025")
+        let changedPort = makeRecord(port: 30142)
+        let otherInstance = makeRecord(instanceID: "instance-from-an-earlier-run")
+        let cases: [(ServiceOwnershipRecord, ServiceOwnershipVerdict)] = [
+            (reusedPID, verify(record: reusedPID)),
+            (changedPort, verify(record: changedPort)),
+            (otherInstance, verify(record: otherInstance)),
+            (makeRecord(), .external(.processFactsUnavailable))
+        ]
+
+        for (record, verdict) in cases {
+            guard case .external(let expected) = verdict else {
+                return XCTFail("expected an external verdict, got \(verdict)")
+            }
+            let adoption = ServiceOwnershipVerifier.adoption(record: record, verdict: verdict)
+            XCTAssertEqual(adoption, .external(expected))
+            XCTAssertNil(adoption.adoptedRecord)
+        }
+    }
+
+    /// `.managed` 却没有记录不能变成一次“无证据认领”。
+    func testManagedVerdictWithoutARecordIsNotAnAdoption() {
+        XCTAssertEqual(ServiceOwnershipVerifier.adoption(record: nil, verdict: .managed), .external(.invalidRecord))
+    }
+
     // MARK: - PID reuse
 
     func testReusedPIDWithDifferentLaunchTimeIsExternal() {

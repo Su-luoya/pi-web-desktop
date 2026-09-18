@@ -36,6 +36,13 @@ struct ServiceControlState: Equatable {
         let ready = gate == .ready
         self.init(canStart: ready, canStop: ready, canRestart: ready)
     }
+
+    /// 依赖门控 + 工作目录可用性（GitHub #9）。两者都就绪时启动/停止/重启才
+    /// 可用：工作目录不可用时启动会被拒绝，控件必须同步置灰。
+    init(gate: DiagnosticsGate, workspaceIsReady: Bool) {
+        let ready = gate == .ready && workspaceIsReady
+        self.init(canStart: ready, canStop: ready, canRestart: ready)
+    }
 }
 
 // MARK: - 首次启动路由
@@ -43,9 +50,10 @@ struct ServiceControlState: Equatable {
 /// 首次启动路由决策（GitHub #7）。
 ///
 /// 纯函数：不读盘、不执行命令、不启动进程，因此可以在 unhosted 测试里直接断言。
-/// 只有以下两种情况进入诊断状态页：
+/// 只有以下情况进入诊断状态页：
 /// 1. 硬性前置未通过（Node.js / Pi CLI / Pi Web 缺失、过旧或版本无法解析）；
-/// 2. 硬性前置已通过，但首次设置尚未完成（首次启动需要先走一次环境复核）。
+/// 2. 硬性前置已通过，但首次设置尚未完成（首次启动需要先走一次环境复核）；
+/// 3. 工作目录不存在或不可写（GitHub #9）。
 ///
 /// 判定看的是 `DependencyReport.canStartService`（必需项齐备且状态均为 `ok`），
 /// 不是“`blockingFindings` 为空”：`DependencyReport(findings: [])` 这类缺少必需
@@ -60,6 +68,9 @@ enum DiagnosticsRouting {
         case unmetPrerequisites([DependencyFinding.Kind])
         /// 首次设置尚未完成（环境复核从未通过）。
         case firstLaunchSetupIncomplete
+        /// 工作目录不存在或不可写（GitHub #9）：同样阻止启动服务，
+        /// 呈现可读修复提示。
+        case unusableWorkspace(WorkspaceDirectoryProblem)
     }
 
     enum Route: Equatable {
@@ -67,14 +78,21 @@ enum DiagnosticsRouting {
         case diagnostics([Reason])
     }
 
-    /// 路由输入：只包含已算好的诊断报告和首次设置状态。
+    /// 路由输入：只包含已算好的诊断报告、首次设置状态和工作目录校验结果。
     struct Context: Equatable {
         var report: DependencyReport
         var hasCompletedFirstLaunchSetup: Bool
+        /// 工作目录不可用的原因（GitHub #9）；nil 表示目录可用或尚未校验。
+        var workspaceProblem: WorkspaceDirectoryProblem?
 
-        init(report: DependencyReport, hasCompletedFirstLaunchSetup: Bool) {
+        init(
+            report: DependencyReport,
+            hasCompletedFirstLaunchSetup: Bool,
+            workspaceProblem: WorkspaceDirectoryProblem? = nil
+        ) {
             self.report = report
             self.hasCompletedFirstLaunchSetup = hasCompletedFirstLaunchSetup
+            self.workspaceProblem = workspaceProblem
         }
     }
 
@@ -85,15 +103,19 @@ enum DiagnosticsRouting {
     }
 
     /// 硬性前置未通过时优先报告需要用户处理的项；前置就绪但首次设置未完成时
-    /// 报告首次设置。两者都不成立时进入正常主窗口。
+    /// 报告首次设置。工作目录不可用是独立原因，追加在两者之后（两者都成立时
+    /// 页面上会同时看到硬性前置与工作目录两个问题）。
     static func route(_ context: Context) -> Route {
+        var reasons: [Reason] = []
         if !context.report.canStartService {
-            return .diagnostics([.unmetPrerequisites(unmetPrerequisiteKinds(in: context.report))])
+            reasons.append(.unmetPrerequisites(unmetPrerequisiteKinds(in: context.report)))
+        } else if !context.hasCompletedFirstLaunchSetup {
+            reasons.append(.firstLaunchSetupIncomplete)
         }
-        if !context.hasCompletedFirstLaunchSetup {
-            return .diagnostics([.firstLaunchSetupIncomplete])
+        if let problem = context.workspaceProblem {
+            reasons.append(.unusableWorkspace(problem))
         }
-        return .mainWindow
+        return reasons.isEmpty ? .mainWindow : .diagnostics(reasons)
     }
 
     /// 首次设置完成的唯一条件：硬性前置已通过诊断（`canStartService`）。

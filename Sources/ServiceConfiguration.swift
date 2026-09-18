@@ -24,12 +24,17 @@ struct ServiceConfiguration: Equatable {
     var noProxy: String
     var autoStart: Bool
     var quitBehavior: QuitBehavior
+    /// 服务工作目录（绝对路径）；空字符串表示使用应用默认工作目录
+    /// `~/Library/Application Support/Pi Web Desktop/Workspace`。
+    var workspacePath: String
 
     static let defaultHostname = "127.0.0.1"
     static let defaultPort = 30141
     static let defaultAllowedHosts = ""
     static let defaultProxy = ""
     static let defaultNoProxy = "localhost,127.0.0.1,::1"
+    /// 空字符串 = 跟随应用默认工作目录（见 `AppPaths.workspaceDirectory`）。
+    static let defaultWorkspacePath = ""
 
     private enum Key {
         static let hostname = "service.hostname"
@@ -41,6 +46,7 @@ struct ServiceConfiguration: Equatable {
         static let noProxy = "service.noProxy"
         static let autoStart = "service.autoStart"
         static let quitBehavior = "service.quitBehavior"
+        static let workspacePath = "service.workspacePath"
     }
 
     static var `default`: ServiceConfiguration {
@@ -53,7 +59,8 @@ struct ServiceConfiguration: Equatable {
             httpsProxy: defaultProxy,
             noProxy: defaultNoProxy,
             autoStart: true,
-            quitBehavior: .ask
+            quitBehavior: .ask,
+            workspacePath: defaultWorkspacePath
         )
     }
 
@@ -71,7 +78,8 @@ struct ServiceConfiguration: Equatable {
             httpsProxy: defaults.string(forKey: Key.httpsProxy) ?? fallback.httpsProxy,
             noProxy: defaults.string(forKey: Key.noProxy) ?? fallback.noProxy,
             autoStart: defaults.object(forKey: Key.autoStart) as? Bool ?? fallback.autoStart,
-            quitBehavior: behavior
+            quitBehavior: behavior,
+            workspacePath: defaults.string(forKey: Key.workspacePath) ?? fallback.workspacePath
         )
     }
 
@@ -85,6 +93,7 @@ struct ServiceConfiguration: Equatable {
         defaults.set(noProxy, forKey: Key.noProxy)
         defaults.set(autoStart, forKey: Key.autoStart)
         defaults.set(quitBehavior.rawValue, forKey: Key.quitBehavior)
+        defaults.set(workspacePath, forKey: Key.workspacePath)
     }
 
     var serviceURL: URL {
@@ -99,6 +108,6 @@ struct ServiceConfiguration: Equatable {
     }
 
     var runtimeSignature: String {
-        [hostname, String(port), piWebPath, allowedHosts, httpProxy, httpsProxy, noProxy].joined(separator: "\u{1F}.")
+        [hostname, String(port), piWebPath, allowedHosts, httpProxy, httpsProxy, noProxy, workspacePath].joined(separator: "\u{1F}.")
     }
 }

@@ -86,17 +86,20 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 swiftc "$ROOT/Sources/PiWebApp.swift" \
   "$ROOT/Sources/AppConfiguration.swift" \
+  "$ROOT/Sources/AppPaths.swift" \
   "$ROOT/Sources/DiagnosticsCollector.swift" \
   "$ROOT/Sources/DependencyChecker.swift" \
   "$ROOT/Sources/FirstLaunchDiagnostics.swift" \
   "$ROOT/Sources/InstallCommandManifest.swift" \
   "$ROOT/Sources/KeychainStore.swift" \
   "$ROOT/Sources/ProcessInspector.swift" \
+  "$ROOT/Sources/QuitPolicy.swift" \
   "$ROOT/Sources/ServiceConfiguration.swift" \
   "$ROOT/Sources/ServiceManager.swift" \
   "$ROOT/Sources/ServiceOwnership.swift" \
   "$ROOT/Sources/WebViewController.swift" \
   "$ROOT/Sources/WebViewNavigationPolicy.swift" \
+  "$ROOT/Sources/WorkspaceDirectory.swift" \
   "$ROOT/Sources/PreferencesWindowController.swift" \
   "$ROOT/Sources/DiagnosticsWindowController.swift" \
   "$ROOT/Sources/main.swift" \

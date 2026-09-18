@@ -20,11 +20,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var dependencyGate: DiagnosticsGate = .checking
     private var dependencyCheckGeneration = 0
     private var shouldPresentDiagnostics = false
+    /// 工作目录校验结果（GitHub #9）。不可用时门控关闭、路由进入诊断页。
+    private var workspaceValidation: WorkspaceDirectoryValidation = .usable(path: "")
 
     private let appConfiguration: AppConfiguration
     private let commandRunner: CommandRunning
     private let processInspector: ProcessInspector
     private let serviceManager: ServiceManager
+    /// 工作目录探针（存在/是目录/可写）；测试可注入假探针。
+    private let workspaceProbe: WorkspaceDirectoryProbe
     /// 远程访问密码的唯一存储。AppDelegate 只把它注入 ServiceManager、设置界面
     /// 和诊断文本的状态行，绝不把密码写进 UserDefaults、日志或诊断内容。
     private let keychain: KeychainStoring
@@ -36,11 +40,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     init(
         appConfiguration: AppConfiguration = AppConfiguration.forCurrentProcess(),
         commandRunner: CommandRunning = SystemCommandRunner(),
-        keychain: KeychainStoring = KeychainStore()
+        keychain: KeychainStoring = KeychainStore(),
+        workspaceProbe: WorkspaceDirectoryProbe = .live()
     ) {
         self.appConfiguration = appConfiguration
         self.commandRunner = commandRunner
         self.keychain = keychain
+        self.workspaceProbe = workspaceProbe
         let processInspector = ProcessInspector(runner: commandRunner)
         self.processInspector = processInspector
         self.serviceManager = ServiceManager(
@@ -79,6 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         installServiceManagerCallbacks()
         serviceManager.setState(.checking)
         webViewController.showLoadingPage(message: "正在检查运行环境…")
+        refreshWorkspaceState()
         runDependencyCheck()
     }
 
@@ -173,30 +180,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard !serviceManager.isQuitting else { return .terminateNow }
         guard !terminationDecisionPending else { return .terminateLater }
 
-        switch serviceManager.configuration.quitBehavior {
-        case .keepRunning:
-            quitKeepingService(nil)
-        case .stopService:
-            quitAndStop(nil)
-        case .ask:
-            terminationDecisionPending = true
-            let alert = NSAlert()
-            alert.messageText = "退出 Pi Web"
-            alert.informativeText = "是否在退出应用后继续保持 Pi Web 服务运行？"
-            alert.addButton(withTitle: "保持服务运行")
-            alert.addButton(withTitle: "退出并停止服务")
-            alert.addButton(withTitle: "取消")
-            alert.beginSheetModal(for: window) { [weak self] response in
-                guard let self else { return }
-                self.terminationDecisionPending = false
-                switch response {
-                case .alertFirstButtonReturn: self.quitKeepingService(nil)
-                case .alertSecondButtonReturn: self.quitAndStop(nil)
-                default: break
-                }
+        // 退出决策是纯逻辑（QuitPlan）：三种行为（询问/保持运行/停止服务）都在
+        // 这里映射成“弹框 / 退出 / 停止托管服务”。外部服务在任何行为下都不会
+        // 被停止。
+        let plan = QuitPlan.plan(for: serviceManager.configuration.quitBehavior)
+        guard plan.requiresUserConfirmation else {
+            applyQuitPlan(plan)
+            return .terminateLater
+        }
+
+        terminationDecisionPending = true
+        let alert = NSAlert()
+        alert.messageText = "退出 Pi Web"
+        alert.informativeText = "是否在退出应用后继续保持 Pi Web 服务运行？"
+        alert.addButton(withTitle: "保持服务运行")
+        alert.addButton(withTitle: "退出并停止服务")
+        alert.addButton(withTitle: "取消")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
+            self.terminationDecisionPending = false
+            let confirmation: QuitConfirmation
+            switch response {
+            case .alertFirstButtonReturn: confirmation = .keepServiceRunning
+            case .alertSecondButtonReturn: confirmation = .stopService
+            default: confirmation = .cancel
             }
+            self.applyQuitPlan(QuitPlan.plan(for: confirmation))
         }
         return .terminateLater
+    }
+
+    /// 执行退出计划。`.stayOpen`（用户取消）不停止任何服务，也不退出。
+    private func applyQuitPlan(_ plan: QuitPlan) {
+        switch plan.nextStep {
+        case .askUser, .stayOpen:
+            return
+        case .terminate:
+            if plan.stopsManagedService {
+                quitAndStop(nil)
+            } else {
+                quitKeepingService(nil)
+            }
+        }
     }
 
     private func acquireSingleInstanceLock() -> Bool {
@@ -224,12 +249,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard modifiers.contains(.command) else { return event }
 
             switch event.charactersIgnoringModifiers?.lowercased() {
-            case "q":
-                // Command-Q means "退出并停止服务". Do not route it through
-                // NSApp.terminate(), which would invoke the configurable
-                // confirmation dialog when quitBehavior == .ask.
-                self?.quitAndStop(nil)
-                return nil
             case ",":
                 self?.showPreferences(nil)
                 return nil
@@ -294,8 +313,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appMenu.addItem(withTitle: "复制本地地址", action: #selector(copyLocalAddress(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "退出 Pi Web Desktop（保持服务运行）", action: #selector(quitKeepingService(_:)), keyEquivalent: "")
-        let quitAndStopItem = appMenu.addItem(withTitle: "退出 Pi Web Desktop", action: #selector(quitAndStop(_:)), keyEquivalent: "q")
-        quitAndStopItem.keyEquivalentModifierMask = [.command]
+        appMenu.addItem(withTitle: "退出 Pi Web Desktop（停止服务）", action: #selector(quitAndStop(_:)), keyEquivalent: "")
+        // ⌘Q 走配置的退出行为（默认询问），与设置里的“退出行为”一致；两个
+        // 显式菜单项不受配置影响。
+        let quitItem = appMenu.addItem(withTitle: "退出 Pi Web Desktop", action: #selector(quitWithConfiguredBehavior(_:)), keyEquivalent: "q")
+        quitItem.keyEquivalentModifierMask = [.command]
         appMenuItem.submenu = appMenu
 
         let editMenuItem = NSMenuItem()
@@ -368,6 +390,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: - 依赖诊断门控
 
+    /// 工作目录校验（GitHub #9）：默认目录首次使用时创建，自选目录必须已存在
+    /// 且可写。结果同时写入 `ServiceManager` 门控（阻止启动）与路由输入。
+    @discardableResult
+    private func refreshWorkspaceState(
+        configuration: ServiceConfiguration? = nil
+    ) -> WorkspaceDirectoryValidation {
+        let configuration = configuration ?? serviceManager.configuration
+        let validation = WorkspaceDirectory.prepare(
+            configuredPath: configuration.workspacePath,
+            defaultPath: appConfiguration.defaultWorkspaceDirectory.path,
+            probe: workspaceProbe
+        )
+        workspaceValidation = validation
+        serviceManager.setWorkspaceAvailability(
+            problem: validation.problem,
+            path: validation.path,
+            usesDefaultLocation: WorkspaceDirectory.usesDefaultLocation(configured: configuration.workspacePath)
+        )
+        return validation
+    }
+
+    /// 工作目录不可用时状态页上的完整正文；目录可用时返回 nil。
+    private var workspaceProblemMessage: String? {
+        guard workspaceValidation.problem != nil else { return nil }
+        return WorkspaceDirectory.statusPageText(
+            workspaceValidation,
+            defaultPath: appConfiguration.defaultWorkspaceDirectory.path
+        )
+    }
+
+    /// 工作目录不可用时的单条可读修复提示（诊断窗口用）；目录可用时返回 nil。
+    private var workspaceHintMessage: String? {
+        guard let problem = workspaceValidation.problem else { return nil }
+        return problem.message(
+            path: workspaceValidation.path,
+            isDefaultLocation: workspaceValidation.path == appConfiguration.defaultWorkspaceDirectory.path
+        )
+    }
+
     /// 启动时与“重新检测”共用的环境检查。命令执行会阻塞，因此放到后台；
     /// 结果回到主线程后再决定路由与门控。检查期间服务控件保持禁用。
     private func runDependencyCheck(triggeredByUser: Bool = false) {
@@ -397,7 +458,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// 显式更新菜单项的启用状态。三个服务控件的门控相同（只有 `.ready` 时可用），
     /// 所以用同一个映射值；停止项也受门控约束（GitHub #7）。
     private func applyServiceControlAvailability() {
-        let controls = ServiceControlState(gate: dependencyGate)
+        let controls = ServiceControlState(gate: dependencyGate, workspaceIsReady: workspaceValidation.isUsable)
         serviceControlMenuItems.forEach { $0.isEnabled = controls.canStart }
     }
 
@@ -415,10 +476,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         firstLaunchSetupJustCompleted: Bool = false
     ) {
         dependencyReport = report
+        // 工作目录是独立的启动前置：每次报告落地前重新校验（首次使用会创建默认
+        // 目录），使外部删除目录后重新检测就能得到可读提示。
+        refreshWorkspaceState()
 
         var justCompletedSetup = firstLaunchSetupJustCompleted
         if triggeredByUser,
            DiagnosticsRouting.completesFirstLaunchSetup(report: report),
+           workspaceValidation.isUsable,
            !appConfiguration.hasCompletedFirstLaunchSetup {
             appConfiguration.markFirstLaunchSetupCompleted()
             justCompletedSetup = true
@@ -435,7 +500,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let firstLaunchSetupIncomplete = !appConfiguration.hasCompletedFirstLaunchSetup
         let route = DiagnosticsRouting.route(DiagnosticsRouting.Context(
             report: report,
-            hasCompletedFirstLaunchSetup: appConfiguration.hasCompletedFirstLaunchSetup
+            hasCompletedFirstLaunchSetup: appConfiguration.hasCompletedFirstLaunchSetup,
+            workspaceProblem: workspaceValidation.problem
         ))
         let presentDiagnostics = shouldPresentDiagnostics
         shouldPresentDiagnostics = false
@@ -453,25 +519,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 showDiagnostics(
                     report: report,
                     firstLaunchSetupIncomplete: firstLaunchSetupIncomplete,
-                    canContinueToService: report.canStartService
+                    canContinueToService: report.canStartService && workspaceValidation.isUsable
                 )
             }
-        case .diagnostics:
+        case .diagnostics(let reasons):
             // 诊断页不管理服务：停掉健康轮询并把状态置为 stopped，避免健康检查
-            // 把状态改回 running、把诊断页覆盖回服务页。前置缺失与“首次设置
-            // 未完成”两条路径都不启动服务。
+            // 把状态改回 running、把诊断页覆盖回服务页。前置缺失、“首次设置
+            // 未完成”与“工作目录不可用”三条路径都不启动服务。
             serviceManager.stopHealthMonitor()
             serviceManager.setState(.stopped)
+            let workspaceReasons = reasons.contains { reason in
+                if case .unusableWorkspace = reason { return true }
+                return false
+            }
             webViewController.showDependencyPage(
                 title: firstLaunchSetupIncomplete ? "首次启动环境检查" : "无法启动 Pi Web 服务",
-                message: DependencyReportPresenter.statusPageText(for: report, setupIncomplete: firstLaunchSetupIncomplete)
+                message: diagnosticsPageText(
+                    report: report,
+                    firstLaunchSetupIncomplete: firstLaunchSetupIncomplete,
+                    workspaceReasons: workspaceReasons
+                )
             )
             showDiagnostics(
                 report: report,
                 firstLaunchSetupIncomplete: firstLaunchSetupIncomplete,
-                canContinueToService: report.canStartService
+                canContinueToService: report.canStartService && workspaceValidation.isUsable
             )
         }
+    }
+
+    /// 诊断状态页正文：依赖报告文本 + （不可用时）工作目录修复提示。
+    private func diagnosticsPageText(
+        report: DependencyReport,
+        firstLaunchSetupIncomplete: Bool,
+        workspaceReasons: Bool
+    ) -> String {
+        // 依赖与首次设置都正常时，页面上只需要讲工作目录，不重复打印一遍
+        // “可以启动 Pi Web 服务”的结论。
+        var text = report.canStartService && !firstLaunchSetupIncomplete
+            ? ""
+            : DependencyReportPresenter.statusPageText(for: report, setupIncomplete: firstLaunchSetupIncomplete)
+        if workspaceReasons, let workspaceProblemMessage {
+            text = text.isEmpty ? workspaceProblemMessage : text + "\n\n" + workspaceProblemMessage
+        }
+        return text.isEmpty
+            ? DependencyReportPresenter.statusPageText(for: report, setupIncomplete: firstLaunchSetupIncomplete)
+            : text
     }
 
     private func showDiagnostics(report: DependencyReport, firstLaunchSetupIncomplete: Bool, canContinueToService: Bool) {
@@ -479,14 +572,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             controller.update(
                 report: report,
                 firstLaunchSetupIncomplete: firstLaunchSetupIncomplete,
-                canContinueToService: canContinueToService
+                canContinueToService: canContinueToService,
+                workspaceMessage: workspaceHintMessage
             )
             controller.window?.makeKeyAndOrderFront(nil)
         } else {
             let controller = DiagnosticsWindowController(
                 report: report,
                 firstLaunchSetupIncomplete: firstLaunchSetupIncomplete,
-                canContinueToService: canContinueToService
+                canContinueToService: canContinueToService,
+                workspaceMessage: workspaceHintMessage
             )
             controller.onRecheck = { [weak self] in self?.runDependencyCheck(triggeredByUser: true) }
             controller.onContinue = { [weak self] in self?.completeFirstLaunchSetup() }
@@ -524,6 +619,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func completeFirstLaunchSetup() {
         guard let report = dependencyReport,
               DiagnosticsRouting.completesFirstLaunchSetup(report: report),
+              workspaceValidation.isUsable,
               !appConfiguration.hasCompletedFirstLaunchSetup else { return }
         appConfiguration.markFirstLaunchSetupCompleted()
         applyDependencyReport(report, triggeredByUser: false, firstLaunchSetupJustCompleted: true)
@@ -725,7 +821,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func showPreferences(_ sender: Any?) {
-        let controller = PreferencesWindowController(configuration: serviceManager.configuration, keychain: keychain)
+        let controller = PreferencesWindowController(
+            configuration: serviceManager.configuration,
+            keychain: keychain,
+            defaultWorkspaceDirectory: appConfiguration.defaultWorkspaceDirectory.path,
+            workspaceProbe: workspaceProbe
+        )
         controller.onSave = { [weak self] newConfiguration in
             self?.applyPreferencesConfiguration(newConfiguration, credentialsChanged: false)
         }
@@ -747,10 +848,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// 子进程环境。删除密码已经把 hostname 收回 loopback，因此会走普通的重启
     /// 路径。
     private func applyPreferencesConfiguration(_ newConfiguration: ServiceConfiguration, credentialsChanged: Bool) {
+        let previous = serviceManager.configuration
         appConfiguration.save(newConfiguration)
-        let changed = serviceManager.configuration.runtimeSignature != newConfiguration.runtimeSignature
+        let changed = previous.runtimeSignature != newConfiguration.runtimeSignature
         let needsRestartForCredentials = credentialsChanged && !RemoteAccessPolicy.isLoopbackHostname(newConfiguration.hostname)
         let managed = (changed || needsRestartForCredentials) && serviceManager.managedServicePID() != nil
+        // 工作目录门控与菜单可用性读最新配置，但配置要等旧服务停止后才交给
+        // ServiceManager（否则停止校验会因端口/参数变化把旧进程误判为外部服务）。
+        refreshWorkspaceState(configuration: newConfiguration)
+        applyServiceControlAvailability()
 
         if managed {
             // 先停止旧参数启动的服务，再切换配置，避免旧端口和新端口同时留下实例。
@@ -840,7 +946,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             showDiagnostics(
                 report: report,
                 firstLaunchSetupIncomplete: !appConfiguration.hasCompletedFirstLaunchSetup,
-                canContinueToService: report.canStartService
+                canContinueToService: report.canStartService && workspaceValidation.isUsable
             )
         } else {
             // 首次检查还没返回：检查结束后无论如何都展示一次结果。
@@ -910,13 +1016,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.terminate(nil)
     }
 
+    /// ⌘Q：按设置里的“退出行为”退出（默认询问）。两个显式菜单项不受它影响。
+    @objc private func quitWithConfiguredBehavior(_ sender: Any?) {
+        NSApp.terminate(nil)
+    }
+
     @objc private func quitApp(_ sender: Any?) {
         quitAndStop(sender)
     }
 
     @objc private func quitAndStop(_ sender: Any?) {
         guard !serviceManager.isQuitting else { return }
-        serviceManager.stopAllServices {
+        // 只停止通过所有权校验的托管进程组；外部服务在任何退出行为下都不发信号。
+        serviceManager.stopManagedServiceOnQuit {
             NSApp.terminate(nil)
         }
     }
@@ -928,7 +1040,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        let controls = ServiceControlState(gate: dependencyGate)
+        let controls = ServiceControlState(gate: dependencyGate, workspaceIsReady: workspaceValidation.isUsable)
         switch menuItem.action {
         case #selector(startServiceAction(_:)):
             return controls.canStart && serviceManager.managedServicePID() == nil

@@ -20,6 +20,17 @@
 
 当前脚本生成 `build/Pi-Web-Desktop.app`，使用 Apple Silicon、macOS 14 目标和 ad-hoc 签名。源码目录中的图标可能携带 macOS 扩展属性；构建脚本会避免把不适合签名的 Finder 元数据复制进 app bundle。
 
+## Xcode 工程构建与测试
+
+标准 Xcode 工程使用 Apple Silicon、macOS 14 SDK，并包含 `PiWebDesktopTests` XCTest target：
+
+```bash
+xcodebuild -project PiWebDesktop.xcodeproj -scheme PiWebDesktop -sdk macosx build
+xcodebuild -project PiWebDesktop.xcodeproj -scheme PiWebDesktop -sdk macosx test
+```
+
+`xcodebuild test` 需要完整 Xcode（命令行工具目录本身不提供测试运行器）；若环境仅安装 Command Line Tools，请使用下方 alpha 脚本验证构建路径。构建产物应使用 `-derivedDataPath` 指向临时目录，避免提交 DerivedData。
+
 ## 本地运行
 
 ```bash

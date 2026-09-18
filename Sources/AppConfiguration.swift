@@ -41,7 +41,15 @@ struct AppConfiguration {
 
     var logURL: URL { logsRootURL.appendingPathComponent("Pi Web Desktop.log") }
     var serviceWorkingDirectory: URL { supportURL.appendingPathComponent("Workspace", isDirectory: true) }
-    var managedPIDURL: URL { supportURL.appendingPathComponent("service.pid") }
+
+    /// Ownership record of the app-managed service. It is the only evidence
+    /// that allows the app to stop a process (see `ServiceOwnershipRecord`).
+    var serviceOwnerURL: URL { supportURL.appendingPathComponent("service-owner.json") }
+
+    /// Legacy single-PID record written by older builds. It is only removed on
+    /// startup and never used as an ownership proof again.
+    var legacyServicePIDURL: URL { supportURL.appendingPathComponent("service.pid") }
+
     var appPIDURL: URL { supportURL.appendingPathComponent("app.pid") }
     var instanceLockURL: URL { supportURL.appendingPathComponent("instance.lock") }
 

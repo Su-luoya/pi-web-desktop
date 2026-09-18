@@ -143,10 +143,17 @@ struct ServiceLaunchSpecification: Equatable {
         }
         return ServiceLaunchSpecification(
             executablePath: piWebPath,
-            arguments: ["--hostname", configuration.hostname, "--port", String(configuration.port), "--no-open"],
+            arguments: arguments(configuration: configuration),
             workingDirectory: appConfiguration.serviceWorkingDirectory,
             environment: environment
         )
+    }
+
+    /// Canonical argument list for a configuration. The launcher and the
+    /// ownership record share it, so `argumentsDigest` always describes what
+    /// the app would actually launch.
+    static func arguments(configuration: ServiceConfiguration) -> [String] {
+        ["--hostname", configuration.hostname, "--port", String(configuration.port), "--no-open"]
     }
 }
 
@@ -169,36 +176,166 @@ protocol ServiceLaunching: AnyObject {
     ) throws -> ServiceProcessHandle
 }
 
-/// The only place in the app that starts a real `Process`.
+/// The only place in the app that starts a real service process.
+///
+/// `posix_spawn` replaces `Process` for one reason: the child must become the
+/// leader of its own process group (`POSIX_SPAWN_SETPGROUP` with `pgroup = 0`).
+/// That group is what the ownership record stores and what stop signals target,
+/// so helper processes of the service are covered and a single recycled PID is
+/// never signalled on its own.
+///
+/// stdin is `/dev/null`; stdout and stderr are the rotated log file; the child
+/// environment and working directory match the previous `Process` behaviour.
 final class SystemServiceLauncher: ServiceLaunching {
     func launch(
         _ specification: ServiceLaunchSpecification,
         logHandle: FileHandle,
         onTermination: @escaping () -> Void
     ) throws -> ServiceProcessHandle {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: specification.executablePath)
-        process.arguments = specification.arguments
-        process.currentDirectoryURL = specification.workingDirectory
-        process.environment = specification.environment
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = logHandle
-        process.standardError = logHandle
-        process.terminationHandler = { _ in onTermination() }
-        try process.run()
-        return SystemServiceProcess(process: process)
+        let pid = try spawn(specification, logHandle: logHandle)
+        // There is no Foundation `Process` object to attach a termination
+        // handler to, so reap the child on a background queue and report its
+        // exit exactly once. Reaping also keeps a zombie from looking alive.
+        DispatchQueue.global(qos: .utility).async {
+            var status: Int32 = 0
+            while waitpid(pid, &status, 0) == -1 && errno == EINTR {}
+            onTermination()
+        }
+        return POSIXServiceProcess(processIdentifier: pid)
+    }
+
+    private func spawn(_ specification: ServiceLaunchSpecification, logHandle: FileHandle) throws -> pid_t {
+        var fileActions: posix_spawn_file_actions_t?
+        var attributes: posix_spawnattr_t?
+        var status = posix_spawn_file_actions_init(&fileActions)
+        guard status == 0 else { throw ServiceSpawnError.fileActionsUnavailable(status) }
+        defer { posix_spawn_file_actions_destroy(&fileActions) }
+        status = posix_spawnattr_init(&attributes)
+        guard status == 0 else { throw ServiceSpawnError.attributesUnavailable(status) }
+        defer { posix_spawnattr_destroy(&attributes) }
+
+        // `POSIX_SPAWN_SETPGROUP` makes the child a process group leader.
+        // `POSIX_SPAWN_CLOEXEC_DEFAULT` keeps unrelated descriptors out of the
+        // child; the file actions below are what keeps stdin/stdout/stderr.
+        let flags = Int16(POSIX_SPAWN_SETPGROUP) | Int16(POSIX_SPAWN_CLOEXEC_DEFAULT)
+        status = posix_spawnattr_setflags(&attributes, flags)
+        guard status == 0 else { throw ServiceSpawnError.attributesUnavailable(status) }
+        // pgroup 0: the child's process group id becomes its own pid.
+        status = posix_spawnattr_setpgroup(&attributes, 0)
+        guard status == 0 else { throw ServiceSpawnError.attributesUnavailable(status) }
+
+        let nullDevice = open("/dev/null", O_RDONLY)
+        guard nullDevice >= 0 else { throw ServiceSpawnError.standardDescriptorsUnavailable(errno) }
+        defer { close(nullDevice) }
+        let logDescriptor = logHandle.fileDescriptor
+        status = posix_spawn_file_actions_adddup2(&fileActions, nullDevice, STDIN_FILENO)
+        guard status == 0 else { throw ServiceSpawnError.standardDescriptorsUnavailable(status) }
+        status = posix_spawn_file_actions_adddup2(&fileActions, logDescriptor, STDOUT_FILENO)
+        guard status == 0 else { throw ServiceSpawnError.standardDescriptorsUnavailable(status) }
+        status = posix_spawn_file_actions_adddup2(&fileActions, logDescriptor, STDERR_FILENO)
+        guard status == 0 else { throw ServiceSpawnError.standardDescriptorsUnavailable(status) }
+        status = posix_spawn_file_actions_addclose(&fileActions, nullDevice)
+        guard status == 0 else { throw ServiceSpawnError.standardDescriptorsUnavailable(status) }
+
+        // `posix_spawn` has no portable working-directory action. `addchdir`
+        // needs macOS 26 while the app targets macOS 14, so the `_np` variant
+        // is the only usable one here.
+        let workingDirectory = specification.workingDirectory.path
+        if !workingDirectory.isEmpty {
+            status = posix_spawn_file_actions_addchdir_np(&fileActions, workingDirectory)
+            guard status == 0 else { throw ServiceSpawnError.workingDirectoryUnavailable(status) }
+        }
+
+        var arguments = try duplicateCStrings([specification.executablePath] + specification.arguments)
+        defer { freeCStrings(arguments) }
+        var environment = try duplicateCStrings(
+            specification.environment.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
+        )
+        defer { freeCStrings(environment) }
+
+        var pid: pid_t = 0
+        status = posix_spawn(&pid, specification.executablePath, &fileActions, &attributes, &arguments, &environment)
+        guard status == 0 else { throw ServiceSpawnError.spawnFailed(status) }
+        guard pid > 1 else { throw ServiceSpawnError.spawnFailed(ECHILD) }
+        return pid
+    }
+
+    /// NULL-terminated C string array. A failed allocation throws instead of
+    /// silently truncating argv, and every element is released by the caller.
+    private func duplicateCStrings(_ strings: [String]) throws -> [UnsafeMutablePointer<CChar>?] {
+        var result: [UnsafeMutablePointer<CChar>?] = []
+        result.reserveCapacity(strings.count + 1)
+        for string in strings {
+            guard let duplicated = strdup(string) else {
+                freeCStrings(result)
+                throw ServiceSpawnError.spawnFailed(ENOMEM)
+            }
+            result.append(duplicated)
+        }
+        result.append(nil)
+        return result
+    }
+
+    private func freeCStrings(_ strings: [UnsafeMutablePointer<CChar>?]) {
+        for pointer in strings { free(pointer) }
     }
 }
 
-final class SystemServiceProcess: ServiceProcessHandle {
-    private let process: Process
+/// Failure modes of the `posix_spawn` path. They surface in the existing
+/// startup alert; nothing is signalled when a launch fails.
+enum ServiceSpawnError: LocalizedError, Equatable {
+    case fileActionsUnavailable(Int32)
+    case attributesUnavailable(Int32)
+    case standardDescriptorsUnavailable(Int32)
+    case workingDirectoryUnavailable(Int32)
+    case spawnFailed(Int32)
 
-    init(process: Process) {
-        self.process = process
+    var errorDescription: String? {
+        let reason: String
+        let code: Int32
+        switch self {
+        case .fileActionsUnavailable(let value):
+            reason = "无法准备文件重定向"
+            code = value
+        case .attributesUnavailable(let value):
+            reason = "无法设置进程组"
+            code = value
+        case .standardDescriptorsUnavailable(let value):
+            reason = "无法重定向标准输入输出"
+            code = value
+        case .workingDirectoryUnavailable(let value):
+            reason = "无法设置工作目录"
+            code = value
+        case .spawnFailed(let value):
+            reason = "启动进程失败"
+            code = value
+        }
+        return "\(reason)（errno \(code)：\(String(cString: strerror(code)))）"
+    }
+}
+
+/// Handle for a `posix_spawn`ed child.
+///
+/// `isRunning` reaps an exited child so a zombie is never reported as running,
+/// while the launcher's blocking waiter still calls the termination callback
+/// exactly once (it observes `ECHILD` in that case).
+final class POSIXServiceProcess: ServiceProcessHandle {
+    private let pid: pid_t
+
+    init(processIdentifier: pid_t) {
+        pid = processIdentifier
     }
 
-    var processIdentifier: pid_t { process.processIdentifier }
-    var isRunning: Bool { process.isRunning }
+    var processIdentifier: pid_t { pid }
+
+    var isRunning: Bool {
+        var status: Int32 = 0
+        switch waitpid(pid, &status, WNOHANG) {
+        case pid: return false // exited and reaped here
+        case 0: return true // still running
+        default: return false // already reaped by the launcher's waiter
+        }
+    }
 }
 
 /// What `startManagedService()` should do for the current configuration and
@@ -215,12 +352,18 @@ enum ServiceStartDecision: Equatable {
 }
 
 /// Owns the service lifecycle: start, stop, restart, health polling, retries,
-/// log redirection, managed PID bookkeeping and quit behaviour.
+/// log redirection, verified ownership bookkeeping and quit behaviour.
+///
+/// Ownership is defined by the on-disk `ServiceOwnershipRecord` written after a
+/// launch. A service is only ever stopped when that record still verifies
+/// against this app instance and the live process; an external service (or a
+/// record that fails any check) is read-only for this app and never receives a
+/// signal.
 ///
 /// All UI presentation is delegated through the callbacks below; AppDelegate
 /// only coordinates and shows state. Every side effect (commands, process
-/// launch, HTTP probe, timers, sleep) goes through an injected dependency so the
-/// state machine and the ownership checks are unit-testable.
+/// launch, HTTP probe, timers, sleep, signals) goes through an injected
+/// dependency so the state machine and the ownership checks are unit-testable.
 final class ServiceManager {
     // MARK: - UI callbacks (AppDelegate owns presentation)
 
@@ -237,8 +380,6 @@ final class ServiceManager {
     static let probeTimeout: TimeInterval = 1
     static let stopPollAttempts = 40
     static let stopPollInterval: TimeInterval = 0.1
-    static let listenerStopAttempts = 30
-    static let externalRestartDelay: TimeInterval = 1
     static let maxLogBytes = 10 * 1024 * 1024
 
     private(set) var configuration: ServiceConfiguration
@@ -248,6 +389,10 @@ final class ServiceManager {
     /// `beginQuitting()` / `keepRunningOnQuit()` / `stopAllServices(completion:)`.
     private(set) var isQuitting = false
 
+    /// Identifier of this app instance. It is part of every ownership record,
+    /// so a record written by an earlier launch can never be adopted again.
+    let instanceID: String
+
     private let appConfiguration: AppConfiguration
     private let processInspector: ProcessInspector
     private let commandRunner: CommandRunning
@@ -256,6 +401,8 @@ final class ServiceManager {
     private let scheduler: ServiceScheduling
     private let environment: () -> [String: String]
     private let fileManager: FileManager
+    private let ownershipStore: ServiceOwnershipStoring
+    private let signaler: ServiceSignaling
 
     private var serviceProcess: ServiceProcessHandle?
     private var launchGeneration = 0
@@ -275,7 +422,10 @@ final class ServiceManager {
         probe: ServiceProbing = URLSessionServiceProbe(),
         scheduler: ServiceScheduling = DispatchServiceScheduler(),
         environment: @escaping () -> [String: String] = { ProcessInfo.processInfo.environment },
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        ownershipStore: ServiceOwnershipStoring = FileServiceOwnershipStore(),
+        signaler: ServiceSignaling = POSIXServiceSignaler(),
+        instanceID: String = UUID().uuidString
     ) {
         self.configuration = configuration
         self.appConfiguration = appConfiguration
@@ -286,6 +436,9 @@ final class ServiceManager {
         self.scheduler = scheduler
         self.environment = environment
         self.fileManager = fileManager
+        self.ownershipStore = ownershipStore
+        self.signaler = signaler
+        self.instanceID = instanceID
     }
 
     // MARK: - Configuration
@@ -301,12 +454,58 @@ final class ServiceManager {
 
     // MARK: - Ownership and dependency lookup
 
-    /// PID of the app-managed pi-web instance: the running child process first,
-    /// then a live PID-file record whose process still looks like pi-web.
-    /// Stale or foreign records are removed by `ProcessInspector`.
+    /// PID of a service this app instance launched and can still verify.
+    ///
+    /// External services and unverifiable records return nil. No signal path
+    /// may run in that case. The record itself is the only authority: a child
+    /// handle without a record is unhosted as well.
     func managedServicePID() -> pid_t? {
-        if let process = serviceProcess, process.isRunning { return process.processIdentifier }
-        return processInspector.managedServicePID(pidFileURL: appConfiguration.managedPIDURL)
+        verifiedOwnershipRecord()?.pid
+    }
+
+    /// Expectation a stored record must satisfy for the current configuration.
+    func ownershipExpectation() -> ServiceOwnershipExpectation {
+        ServiceOwnershipExpectation(
+            argumentsDigest: ServiceOwnershipRecord.argumentsDigest(
+                of: ServiceLaunchSpecification.arguments(configuration: configuration)
+            ),
+            port: configuration.port,
+            instanceID: instanceID
+        )
+    }
+
+    /// The stored ownership record, but only when it verifies against this app
+    /// instance and the live process.
+    ///
+    /// Mismatched records are removed without sending any signal, and the
+    /// process they point at counts as external. A record that cannot be
+    /// checked right now (for example because `ps` failed) is kept for a later
+    /// check, but the answer is still "not managed", so no signal is sent.
+    func verifiedOwnershipRecord() -> ServiceOwnershipRecord? {
+        guard let record = ownershipStore.loadRecord(from: appConfiguration.serviceOwnerURL) else { return nil }
+        let verdict = ServiceOwnershipVerifier.verify(
+            record: record,
+            expectation: ownershipExpectation(),
+            processIsAlive: { self.processInspector.isProcessAlive($0) },
+            facts: { self.processInspector.processFacts(of: $0) }
+        )
+        if verdict.shouldRemoveRecord {
+            ownershipStore.removeRecord(at: appConfiguration.serviceOwnerURL)
+        }
+        guard case .managed = verdict else { return nil }
+        return record
+    }
+
+    /// Startup reconciliation for records left behind by an earlier run.
+    ///
+    /// The legacy single-PID file is removed immediately: a PID alone is not
+    /// ownership. A `service-owner.json` from an earlier app instance also
+    /// fails verification (the instance identifier differs), so it is dropped
+    /// and the still-running service is treated as external. Nothing is
+    /// signalled in either case.
+    func reconcileOwnershipRecord() {
+        try? fileManager.removeItem(at: appConfiguration.legacyServicePIDURL)
+        _ = verifiedOwnershipRecord()
     }
 
     func resolvePiWebPath() -> String? {
@@ -328,7 +527,7 @@ final class ServiceManager {
 
     func startDecision() -> ServiceStartDecision {
         guard !isStoppingService else { return .ignored }
-        if let process = serviceProcess, process.isRunning { return .existingProcess }
+        if managedServicePID() != nil { return .existingProcess }
         guard let piWebPath = configuration.piWebPath.nilIfEmpty ?? resolvePiWebPath() else {
             return .missingExecutable
         }
@@ -344,6 +543,9 @@ final class ServiceManager {
 
     /// Initial startup path used by `applicationDidFinishLaunching`.
     func startAtLaunch() {
+        // Records from earlier runs are evaluated (and cleaned) before any new
+        // launch decision, so a leftover file can never be adopted.
+        reconcileOwnershipRecord()
         if configuration.autoStart {
             ensureServerIsRunning()
         } else {
@@ -422,15 +624,44 @@ final class ServiceManager {
                     }
                 }
                 serviceProcess = process
-                didLaunchService = true
                 startupAttempts = 0
-                try "\(process.processIdentifier)\n".write(to: appConfiguration.managedPIDURL, atomically: true, encoding: .utf8)
+                // Without a written ownership record the process can never be
+                // verified later, so it is treated as external from the start:
+                // no stop signal and no automatic restart.
+                didLaunchService = writeOwnershipRecord(for: specification, process: process)
                 setState(.starting)
                 onPageMessage?("正在启动 Pi Web…")
                 pollUntilReady()
             } catch {
                 reportStartupFailure("无法启动 pi-web：\(error.localizedDescription)")
             }
+        }
+    }
+
+    /// Records the process this launch created.
+    ///
+    /// A PID that is not a process group leader, unreadable `ps` facts, or a
+    /// failed write all mean "unhosted": the service may keep running, but the
+    /// app will never signal it because ownership cannot be proven later.
+    private func writeOwnershipRecord(for specification: ServiceLaunchSpecification, process: ServiceProcessHandle) -> Bool {
+        guard process.processIdentifier > 1,
+              let facts = processInspector.processFacts(of: process.processIdentifier),
+              facts.processGroupID == process.processIdentifier else { return false }
+        let record = ServiceOwnershipRecord(
+            pid: process.processIdentifier,
+            processGroupID: facts.processGroupID,
+            launchedAt: facts.launchedAt,
+            resolvedExecutable: facts.resolvedExecutable,
+            argumentsDigest: ServiceOwnershipRecord.argumentsDigest(of: specification.arguments),
+            port: configuration.port,
+            instanceID: instanceID,
+            recordedAt: ISO8601DateFormatter().string(from: Date())
+        )
+        do {
+            try ownershipStore.save(record, to: appConfiguration.serviceOwnerURL)
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -460,108 +691,70 @@ final class ServiceManager {
 
     // MARK: - Stopping
 
+    /// Stops the managed service.
+    ///
+    /// The verified process group gets SIGTERM, a bounded wait, then SIGKILL.
+    /// Nothing is signalled unless the ownership record verifies against the
+    /// live process: external services are read-only for this app.
     func stopService(completion: (() -> Void)? = nil) {
         isStoppingService = true
-        guard let pid = managedServicePID() else {
-            isStoppingService = false
-            setState(.stopped)
-            completion?()
+        guard let record = verifiedOwnershipRecord() else {
+            finishStopping(completion: completion)
             return
         }
         scheduler.onBackground { [weak self] in
             guard let self else { return }
-            _ = self.commandRunner.run(["/bin/kill", "-TERM", "\(pid)"])
-            for _ in 0..<Self.stopPollAttempts {
-                guard self.processInspector.isProcessAlive(pid) else { break }
-                self.scheduler.sleep(seconds: Self.stopPollInterval)
-            }
-            if self.processInspector.isProcessAlive(pid) {
-                _ = self.commandRunner.run(["/bin/kill", "-KILL", "\(pid)"])
-            }
+            self.terminate(record: record)
             self.scheduler.onMain {
-                self.serviceProcess = nil
-                self.didLaunchService = false
-                self.isStoppingService = false
-                try? self.fileManager.removeItem(at: self.appConfiguration.managedPIDURL)
-                self.setState(.stopped)
-                completion?()
+                self.ownershipStore.removeRecord(at: self.appConfiguration.serviceOwnerURL)
+                self.finishStopping(completion: completion)
             }
         }
+    }
+
+    /// SIGTERM to the recorded process group, bounded wait, then SIGKILL to the
+    /// same group. The wait is bounded by `stopPollAttempts`, so at most two
+    /// signals are ever sent, both to the group.
+    private func terminate(record: ServiceOwnershipRecord) {
+        let processGroupID = record.processGroupID
+        signaler.sendGroupSignal(SIGTERM, toProcessGroup: processGroupID)
+        for _ in 0..<Self.stopPollAttempts {
+            guard signaler.isProcessGroupAlive(processGroupID) else { return }
+            scheduler.sleep(seconds: Self.stopPollInterval)
+        }
+        if signaler.isProcessGroupAlive(processGroupID) {
+            signaler.sendGroupSignal(SIGKILL, toProcessGroup: processGroupID)
+        }
+    }
+
+    /// Shared end of a stop: clear the child state, reset the flag and report
+    /// the stopped state. The ownership record is removed by the caller only
+    /// after it was verified.
+    private func finishStopping(completion: (() -> Void)?) {
+        serviceProcess = nil
+        didLaunchService = false
+        isStoppingService = false
+        setState(.stopped)
+        completion?()
     }
 
     func restartManagedService() {
         stopService { [weak self] in self?.startManagedService() }
     }
 
-    func stopExternalListener() {
-        guard let listener = processInspector.listenerPID(port: configuration.port),
-              processInspector.isPiWebProcess(listener) else { return }
-        let parent = processInspector.parentProcess(of: listener)
-        let candidate = parent > 1 && processInspector.isPiWebProcess(parent) ? parent : listener
-        _ = commandRunner.run(["/bin/kill", "-TERM", "\(candidate)"])
-        setState(.stopped)
-    }
-
-    func stopExternalListenerAndStart() {
-        stopExternalListener()
-        scheduler.after(Self.externalRestartDelay) { [weak self] in self?.startManagedService() }
-    }
-
-    /// Stops the managed service and then any remaining pi-web listener, then
-    /// calls `completion` on the main queue. AppDelegate terminates afterwards.
+    /// Stops the verified managed service and then calls `completion` on the
+    /// main queue. AppDelegate terminates afterwards.
+    ///
+    /// An external listener is never touched on quit: the app cannot prove it
+    /// started it, so it keeps running.
     func stopAllServices(completion: @escaping () -> Void) {
         beginQuitting()
         isStoppingService = true
-        let finish = { [weak self] in
-            guard let self else {
-                completion()
-                return
-            }
-            self.stopRemainingListener(completion: completion)
-        }
         if managedServicePID() != nil {
-            stopService(completion: finish)
+            stopService(completion: completion)
         } else {
-            finish()
-        }
-    }
-
-    private func stopRemainingListener(completion: @escaping () -> Void) {
-        guard let listener = processInspector.listenerPID(port: configuration.port),
-              processInspector.isPiWebProcess(listener) else {
             isStoppingService = false
             completion()
-            return
-        }
-        let parent = processInspector.parentProcess(of: listener)
-        let candidate = parent > 1 && processInspector.isPiWebProcess(parent) ? parent : listener
-        _ = commandRunner.run(["/bin/kill", "-TERM", "\(candidate)"])
-        if candidate != listener { _ = commandRunner.run(["/bin/kill", "-TERM", "\(listener)"]) }
-        waitForServerToStop(candidate: candidate, listener: listener, attempt: 0, completion: completion)
-    }
-
-    private func waitForServerToStop(candidate: pid_t, listener: pid_t, attempt: Int, completion: @escaping () -> Void) {
-        checkServer { [weak self] ready in
-            guard let self else {
-                completion()
-                return
-            }
-            self.scheduler.onMain {
-                if !ready {
-                    self.isStoppingService = false
-                    completion()
-                } else if attempt < Self.listenerStopAttempts {
-                    self.scheduler.after(Self.stopPollInterval) {
-                        self.waitForServerToStop(candidate: candidate, listener: listener, attempt: attempt + 1, completion: completion)
-                    }
-                } else {
-                    // 明确选择“退出并停止”时，同时结束包装进程和实际监听进程。
-                    _ = self.commandRunner.run(["/bin/kill", "-KILL", "\(candidate)"])
-                    if candidate != listener { _ = self.commandRunner.run(["/bin/kill", "-KILL", "\(listener)"]) }
-                    self.isStoppingService = false
-                    completion()
-                }
-            }
         }
     }
 
@@ -574,7 +767,9 @@ final class ServiceManager {
         stopHealthMonitor()
     }
 
-    /// "退出但保持服务运行": keep the child alive, do not remove its PID file.
+    /// "退出但保持服务运行": keep the child alive and keep its ownership
+    /// record. The next app instance will fail the instance check, clean the
+    /// record and treat the service as external.
     func keepRunningOnQuit() {
         beginQuitting()
         isStoppingService = false

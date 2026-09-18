@@ -23,9 +23,12 @@ final class ProcessInspectorTests: XCTestCase {
         XCTAssertNil(ProcessInspector.parseListenerPID(nil))
         XCTAssertNil(ProcessInspector.parseProcessDescription(""))
         XCTAssertNil(ProcessInspector.parseProcessDescription("  \n"))
-        XCTAssertEqual(ProcessInspector.parseParentPID(""), 0)
-        XCTAssertFalse(ProcessInspector.isPiWebCommand(""))
-        XCTAssertFalse(ProcessInspector.isPiWebCommand(nil))
+        XCTAssertNil(ProcessInspector.parseProcessGroupID(""))
+        XCTAssertNil(ProcessInspector.parseProcessGroupID(nil))
+        XCTAssertNil(ProcessInspector.parseProcessStartTime(""))
+        XCTAssertNil(ProcessInspector.parseProcessStartTime(" \n"))
+        XCTAssertNil(ProcessInspector.parseResolvedExecutable(""))
+        XCTAssertNil(ProcessInspector.parseResolvedExecutable(nil))
     }
 
     func testMalformedLinesAreRejected() {
@@ -36,9 +39,13 @@ final class ProcessInspectorTests: XCTestCase {
         XCTAssertNil(ProcessInspector.parseListenerPID("not-a-pid"))
         XCTAssertNil(ProcessInspector.parseListenerPID("0\n"))
         XCTAssertNil(ProcessInspector.parseListenerPID("1\n"))
-        XCTAssertEqual(ProcessInspector.parseParentPID("not-a-pid"), 0)
-        XCTAssertEqual(ProcessInspector.parseParentPID("  501\n"), 501)
+        XCTAssertNil(ProcessInspector.parseProcessGroupID("not-a-pid"))
+        XCTAssertNil(ProcessInspector.parseProcessGroupID("0"))
+        XCTAssertNil(ProcessInspector.parseProcessGroupID("1"))
+        XCTAssertNil(ProcessInspector.parseProcessGroupID("-5150"))
+        XCTAssertEqual(ProcessInspector.parseProcessGroupID("  5150\n"), 5150)
         XCTAssertEqual(ProcessInspector.parsePIDRecord("  4321\n"), 4321)
+        XCTAssertNil(ProcessInspector.parseResolvedExecutable("\n \n"))
     }
 
     func testListenerPIDUsesTheFirstLineOfMultiplePIDs() {
@@ -50,6 +57,24 @@ final class ProcessInspectorTests: XCTestCase {
     func testProcessDescriptionIsTrimmed() {
         XCTAssertEqual(ProcessInspector.parseProcessDescription("  node /opt/homebrew/bin/pi-web\n"), "node /opt/homebrew/bin/pi-web")
         XCTAssertNil(ProcessInspector.parseProcessDescription("\n \n"))
+    }
+
+    func testLaunchTimeWhitespaceIsCollapsed() {
+        XCTAssertEqual(
+            ProcessInspector.parseProcessStartTime("  Wed Jul 30 12:00:00 2025 \n"),
+            "Wed Jul 30 12:00:00 2025"
+        )
+        XCTAssertEqual(
+            ProcessInspector.parseProcessStartTime("Wed  Jul   30  12:00:00  2025"),
+            "Wed Jul 30 12:00:00 2025"
+        )
+    }
+
+    func testResolvedExecutableIsTrimmed() {
+        XCTAssertEqual(
+            ProcessInspector.parseResolvedExecutable("  /opt/homebrew/bin/pi-web\n"),
+            "/opt/homebrew/bin/pi-web"
+        )
     }
 
     // MARK: - Command wiring
@@ -76,97 +101,69 @@ final class ProcessInspectorTests: XCTestCase {
         XCTAssertEqual(inspector.listenerProcessDescription(port: 30141), "无")
     }
 
-    func testPiWebProcessNameMatching() {
-        XCTAssertTrue(ProcessInspector.isPiWebCommand("node /opt/homebrew/bin/pi-web --hostname 127.0.0.1 --port 30141 --no-open"))
-        XCTAssertTrue(ProcessInspector.isPiWebCommand("NODE /OPT/HOMEBREW/BIN/PI-WEB"))
-        XCTAssertFalse(ProcessInspector.isPiWebCommand("node /opt/homebrew/bin/other-server"))
-        XCTAssertFalse(ProcessInspector.isPiWebCommand("node /usr/local/bin/pi-server --port 3000"))
-
+    func testProcessDescriptionReadsTheCommandLine() {
         let runner = FakeCommandRunner()
         runner.handler = { _ in "node /opt/homebrew/bin/other-server\n" }
         let inspector = makeInspector(runner: runner)
-        XCTAssertFalse(inspector.isPiWebProcess(4321))
+
         XCTAssertEqual(inspector.processDescription(of: 4321), "node /opt/homebrew/bin/other-server")
 
         runner.handler = { _ in "" }
         XCTAssertEqual(inspector.processDescription(of: 4321), "未知")
-        XCTAssertEqual(inspector.parentProcess(of: 4321), 0)
     }
 
     func testInjectedLivenessIsUsedInsteadOfKill() {
-        let inspector = ProcessInspector(runner: FakeCommandRunner(), fileManager: .default) { pid in pid == 4321 }
+        let inspector = ProcessInspector(runner: FakeCommandRunner()) { pid in pid == 4321 }
         XCTAssertTrue(inspector.isProcessAlive(4321))
         XCTAssertFalse(inspector.isProcessAlive(9999))
     }
 
-    // MARK: - Managed PID records
+    // MARK: - Process facts
 
-    func testManagedPIDRecordIsAcceptedWhenAliveAndPiWeb() throws {
-        let directory = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let pidFile = directory.appendingPathComponent("service.pid")
-        try "4321\n".write(to: pidFile, atomically: true, encoding: .utf8)
-
+    func testProcessFactsCombineTheThreeQueries() {
         let runner = FakeCommandRunner()
-        runner.handler = { _ in "node /opt/homebrew/bin/pi-web --hostname 127.0.0.1\n" }
-        let inspector = makeInspector(runner: runner, alive: { $0 == 4321 })
+        runner.handler = { arguments in
+            guard let formatIndex = arguments.firstIndex(of: "-o"), formatIndex + 1 < arguments.count else { return nil }
+            switch arguments[formatIndex + 1] {
+            case "pgid=": return "5150\n"
+            case "lstart=": return "Wed Jul 30 12:00:00 2025\n"
+            case "comm=": return "/opt/homebrew/bin/pi-web\n"
+            default: return nil
+            }
+        }
+        let inspector = makeInspector(runner: runner)
 
-        XCTAssertEqual(inspector.managedServicePID(pidFileURL: pidFile), 4321)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: pidFile.path))
+        XCTAssertEqual(
+            inspector.processFacts(of: 5150),
+            ServiceProcessFacts(
+                pid: 5150,
+                processGroupID: 5150,
+                launchedAt: "Wed Jul 30 12:00:00 2025",
+                resolvedExecutable: "/opt/homebrew/bin/pi-web"
+            )
+        )
+        XCTAssertEqual(runner.invocations, [
+            ["/bin/ps", "-o", "pgid=", "-p", "5150"],
+            ["/bin/ps", "-o", "lstart=", "-p", "5150"],
+            ["/bin/ps", "-o", "comm=", "-p", "5150"]
+        ])
     }
 
-    func testStaleManagedPIDRecordIsRemoved() throws {
-        let directory = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let pidFile = directory.appendingPathComponent("service.pid")
-        try "4321\n".write(to: pidFile, atomically: true, encoding: .utf8)
-
+    func testMissingSingleFactMakesProcessFactsUnavailable() {
         let runner = FakeCommandRunner()
-        runner.handler = { _ in "node /opt/homebrew/bin/pi-web\n" }
-        let inspector = makeInspector(runner: runner, alive: { _ in false })
+        runner.handler = { arguments in arguments.contains("pgid=") ? "5150\n" : nil }
+        let inspector = makeInspector(runner: runner)
 
-        XCTAssertNil(inspector.managedServicePID(pidFileURL: pidFile))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: pidFile.path))
+        XCTAssertNil(inspector.processFacts(of: 5150))
     }
 
-    func testForeignProcessRecordIsRemoved() throws {
-        let directory = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let pidFile = directory.appendingPathComponent("service.pid")
-        try "4321\n".write(to: pidFile, atomically: true, encoding: .utf8)
-
+    func testProcessFactsRejectUnusablePIDsWithoutProbing() {
         let runner = FakeCommandRunner()
-        runner.handler = { _ in "node /opt/homebrew/bin/other-server\n" }
-        let inspector = makeInspector(runner: runner, alive: { _ in true })
+        let inspector = makeInspector(runner: runner)
 
-        XCTAssertNil(inspector.managedServicePID(pidFileURL: pidFile))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: pidFile.path))
-    }
-
-    func testUnparsableRecordIsRemovedWithoutProbingLiveness() throws {
-        let directory = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let pidFile = directory.appendingPathComponent("service.pid")
-        try "not-a-pid\n".write(to: pidFile, atomically: true, encoding: .utf8)
-
-        let runner = FakeCommandRunner()
-        let inspector = makeInspector(runner: runner, alive: { _ in
-            XCTFail("liveness must not be probed for an unparsable record")
-            return true
-        })
-
-        XCTAssertNil(inspector.managedServicePID(pidFileURL: pidFile))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: pidFile.path))
+        XCTAssertNil(inspector.processFacts(of: 1))
+        XCTAssertNil(inspector.processFacts(of: 0))
         XCTAssertTrue(runner.invocations.isEmpty)
-    }
-
-    func testMissingRecordFileIsNil() throws {
-        let directory = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let pidFile = directory.appendingPathComponent("service.pid")
-
-        let inspector = makeInspector(runner: FakeCommandRunner(), alive: { _ in true })
-        XCTAssertNil(inspector.managedServicePID(pidFileURL: pidFile))
     }
 
     // MARK: - Helpers
@@ -175,13 +172,6 @@ final class ProcessInspectorTests: XCTestCase {
         runner: CommandRunning,
         alive: @escaping (pid_t) -> Bool = { _ in true }
     ) -> ProcessInspector {
-        ProcessInspector(runner: runner, fileManager: .default, processIsAlive: alive)
-    }
-
-    private func makeTemporaryDirectory() throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("PiWebDesktopTests-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
+        ProcessInspector(runner: runner, processIsAlive: alive)
     }
 }

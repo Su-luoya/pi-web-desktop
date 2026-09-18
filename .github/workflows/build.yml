@@ -20,7 +20,6 @@ jobs:
         run: |
           set -euo pipefail
           DERIVED_DATA_PATH="$(mktemp -d "${RUNNER_TEMP}/PiWebDesktopDerivedData.XXXXXX")"
-          trap 'rm -rf "$DERIVED_DATA_PATH"' EXIT
           XCODEBUILD_ARGS=(
             -project PiWebDesktop.xcodeproj
             -scheme PiWebDesktop
@@ -31,12 +30,25 @@ jobs:
           )
           xcodebuild "${XCODEBUILD_ARGS[@]}" build
           xcodebuild "${XCODEBUILD_ARGS[@]}" test
+          XCODE_APP_PATH="$DERIVED_DATA_PATH/Build/Products/Debug/PiWebDesktop.app"
+          if [ ! -d "$XCODE_APP_PATH" ]; then
+            XCODE_APP_PATH="$(find "$DERIVED_DATA_PATH/Build/Products" -maxdepth 2 -type d -name PiWebDesktop.app -print -quit)"
+          fi
+          test -d "$XCODE_APP_PATH"
+          {
+            echo "DERIVED_DATA_PATH=$DERIVED_DATA_PATH"
+            echo "XCODE_APP_PATH=$XCODE_APP_PATH"
+          } >> "$GITHUB_ENV"
+          echo "Xcode product: $XCODE_APP_PATH"
       - name: Build app
         run: ./Scripts/build.sh
       - name: Verify ad-hoc signature
         run: codesign --verify --deep --strict build/Pi-Web-Desktop.app
-      - name: Check application identity
-        run: ./Scripts/check-identity.sh
+      - name: Check application identity of Xcode and script builds
+        run: |
+          set -euo pipefail
+          trap 'rm -rf "$DERIVED_DATA_PATH"' EXIT
+          ./Scripts/check-identity.sh "$XCODE_APP_PATH" build/Pi-Web-Desktop.app
       - name: Check for accidental personal data
         run: |
           ! git grep -nE 'taila|127\.0\.0\.1:7890|/Users/[^/]+' -- ':!*.icns' ':!.github/workflows/build.yml' ':!Scripts/check-identity.sh'

@@ -39,7 +39,7 @@ xcodebuild "${XCODEBUILD_ARGS[@]}" build
 xcodebuild "${XCODEBUILD_ARGS[@]}" test
 ```
 
-CI 在 `macos-14` 上使用同样的临时 `derivedDataPath` 和 ad-hoc `CODE_SIGN_IDENTITY=-`，不需要开发者账号或 provisioning profile。`xcodebuild` 的工程构建和测试验证需要完整 Xcode（命令行工具目录本身不提供完整的 Xcode 工程构建/测试环境）。当前环境若只有 Command Line Tools，则 `xcodebuild` 不可验证，会因 active developer directory 不是完整 Xcode 而失败；此时请使用下方 alpha 脚本验证构建路径。临时目录会在命令完成后删除，避免提交 DerivedData。
+CI 在 `macos-14` 上使用同样的临时 `derivedDataPath` 和 ad-hoc `CODE_SIGN_IDENTITY=-`，不需要开发者账号或 provisioning profile。`xcodebuild` 的工程构建和测试验证需要完整 Xcode（命令行工具目录本身不提供完整的 Xcode 工程构建/测试环境）。当前环境若只有 Command Line Tools，则 `xcodebuild` 不可验证，会因 active developer directory 不是完整 Xcode 而失败；此时请使用下方 alpha 脚本验证构建路径。该临时目录不再在 `xcodebuild` 步骤结束时删除：步骤会把 `Build/Products/Debug/PiWebDesktop.app` 作为 `XCODE_APP_PATH` 导出，下一步在脚本产物和 Xcode 产物上同时运行 `./Scripts/check-identity.sh`，再清理临时目录，因此 DerivedData 不会被提交。
 
 ## 身份与版本单一来源
 
@@ -52,17 +52,29 @@ CI 在 `macos-14` 上使用同样的临时 `derivedDataPath` 和 ad-hoc `CODE_SI
 ```bash
 ./Scripts/build.sh
 ./Scripts/check-identity.sh
+./Scripts/check-identity.sh /path/to/Xcode_Products/PiWebDesktop.app build/Pi-Web-Desktop.app
 ```
 
-`Scripts/check-identity.sh` 退出码 0 表示全部通过，非 0 表示至少一项失败；也可以传入 bundle 路径检查指定产物：`./Scripts/check-identity.sh /path/to/Pi-Web-Desktop.app`。它检查：
+`Scripts/check-identity.sh` 退出码 0 表示全部通过，非 0 表示至少一项失败。它接受多个 bundle 路径（位置参数列表，默认 `build/Pi-Web-Desktop.app`），对每个 bundle 独立检查并给出带具体路径的结论，所以同一个命令可以同时校验 Xcode 产物和发布脚本产物。它检查：
 
 - xcconfig 存在，且显示名、可执行名、图标名、最低系统版本、bundle identifier、`MARKETING_VERSION`、`CURRENT_PROJECT_VERSION` 均非空；
 - `project.pbxproj` 通过 `baseConfigurationReference` 引用该 xcconfig，所有 build configuration 都继承它，且 `MARKETING_VERSION`、`CURRENT_PROJECT_VERSION`、`PRODUCT_BUNDLE_IDENTIFIER`、`PRODUCT_NAME`、`MACOSX_DEPLOYMENT_TARGET`、`INFOPLIST_KEY_CFBundle*` 没有任何字面值，版本与 bundle id 字面值也不出现在工程文件中；
-- 已构建 bundle 的 `CFBundleShortVersionString`、`CFBundleVersion`、`CFBundleIdentifier`、`CFBundleName`、`CFBundleDisplayName`、`CFBundleExecutable`、`CFBundleIconFile`、`LSMinimumSystemVersion` 与 xcconfig 一致（需要先运行 `./Scripts/build.sh`）；
+- 每个传入的 bundle 分别断言 `CFBundleShortVersionString`、`CFBundleVersion`、`CFBundleIdentifier`、`CFBundleDisplayName`、`CFBundleExecutable`、`CFBundleIconFile`、`LSMinimumSystemVersion` 与 xcconfig 一致（需要先运行 `./Scripts/build.sh` 或先执行 `xcodebuild`）；bundle 不存在或 `Info.plist` 缺失时以该 bundle 路径报错；
+- `CFBundleName` 只输出信息行，不参与成败判定；
 - `Sources/ServiceConfiguration.swift` 默认 hostname 为 `127.0.0.1`、默认 proxy 为空、noProxy 只包含 loopback 条目；
 - 仓库文本中不出现私人默认值：Tailscale 主机名（小写形式）、tailnet DNS 后缀、CGNAT 私网地址、`/Users` 下的绝对路径、固定本地代理端点；`MARKETING_VERSION` 的字面值也不得出现在 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/`。
 
 脚本通过路径排除与字符串拼接保证自身文本不会触发这些模式，`.github/workflows/build.yml` 里的 personal-data grep 同样排除该脚本。
+
+### CI 上的两类产物
+
+CI 的 `Build and test Xcode project` 步骤导出 `XCODE_APP_PATH`（`$DERIVED_DATA_PATH/Build/Products/Debug/PiWebDesktop.app`），然后 `Check application identity of Xcode and script builds` 步骤运行：
+
+```bash
+./Scripts/check-identity.sh "$XCODE_APP_PATH" build/Pi-Web-Desktop.app
+```
+
+两个产物都要满足上面列出的 7 个 `Info.plist` 字段；只有静态推断而没有真实构建产物的检查不再算通过。`CFBundleName` 在两类产物中本来就不同：Xcode 生成的 plist 取 `PRODUCT_NAME`（`PiWebDesktop`），而发布产物由 `./Scripts/build.sh` 打包，`CFBundleName` 与 `CFBundleDisplayName` 都是 `Pi Web Desktop`。因此检查脚本只把 `CFBundleName` 当作信息行输出，也不用 `INFOPLIST_KEY_CFBundleName` 去覆盖 Xcode 的默认行为。
 
 ## 本地运行
 

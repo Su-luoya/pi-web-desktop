@@ -5,7 +5,11 @@ set -eu
 # (Configuration/AppIdentity.xcconfig) and that the Xcode project, the packaging
 # script, the built app bundle and the service defaults all agree with it.
 #
-# Usage: ./Scripts/check-identity.sh [path/to/Pi-Web-Desktop.app]
+# Usage: ./Scripts/check-identity.sh [path/to/App.app ...]
+#
+# Every bundle path given on the command line is checked; with no argument the
+# default script build (build/Pi-Web-Desktop.app) is checked. CI passes both the
+# Xcode product and the script product in one run.
 #
 # Exit status: 0 when every check passes, 1 when at least one check fails.
 #
@@ -24,8 +28,7 @@ PBXPROJ="$ROOT/$PBXPROJ_REL"
 SERVICE_CONFIG_REL="Sources/ServiceConfiguration.swift"
 SERVICE_CONFIG="$ROOT/$SERVICE_CONFIG_REL"
 SELF_REL="Scripts/check-identity.sh"
-BUNDLE=${1:-"$ROOT/build/Pi-Web-Desktop.app"}
-PLIST="$BUNDLE/Contents/Info.plist"
+DEFAULT_BUNDLE="$ROOT/build/Pi-Web-Desktop.app"
 
 checks=0
 failures=0
@@ -39,6 +42,11 @@ fail() {
   checks=$((checks + 1))
   failures=$((failures + 1))
   printf 'FAIL %s\n' "$1"
+}
+
+# Information only: printed for context, does not affect the exit status.
+info() {
+  printf 'info %s\n' "$1"
 }
 
 # Read one value from the single-source xcconfig and expand $(VAR) references.
@@ -119,16 +127,58 @@ scan_forbidden() {
   fi
 }
 
-check_plist_value() {
-  key=$1
-  expected=$2
-  actual=$(plutil -extract "$key" raw -o - "$PLIST" 2>/dev/null || true)
+bundle_plist_value() {
+  # $1 = Info.plist path, $2 = key
+  plutil -extract "$2" raw -o - "$1" 2>/dev/null || true
+}
+
+check_bundle_value() {
+  # $1 = bundle path, $2 = Info.plist path, $3 = key, $4 = expected value
+  bundle=$1
+  plist=$2
+  key=$3
+  expected=$4
+  actual=$(bundle_plist_value "$plist" "$key")
   if [ -z "$actual" ]; then
-    fail "Info.plist $key is missing or empty (expected '$expected')"
+    fail "bundle $bundle: Info.plist $key is missing or empty (xcconfig expects '$expected')"
   elif [ "$actual" = "$expected" ]; then
-    pass "Info.plist $key matches the xcconfig ($actual)"
+    pass "bundle $bundle: $key = $actual"
   else
-    fail "Info.plist $key is '$actual' but the xcconfig expects '$expected'"
+    fail "bundle $bundle: $key is '$actual' but the xcconfig expects '$expected'"
+  fi
+}
+
+check_bundle() {
+  bundle=$1
+  plist="$bundle/Contents/Info.plist"
+
+  if [ ! -f "$plist" ]; then
+    fail "bundle $bundle: Info.plist not found at $plist (build it first, or pass the correct bundle path)"
+    return
+  fi
+
+  if plutil -lint "$plist" >/dev/null 2>&1; then
+    pass "bundle $bundle: Info.plist is a valid property list"
+  else
+    fail "bundle $bundle: Info.plist is not a valid property list ($plist)"
+  fi
+
+  check_bundle_value "$bundle" "$plist" CFBundleShortVersionString "$APP_VERSION"
+  check_bundle_value "$bundle" "$plist" CFBundleVersion "$APP_BUILD"
+  check_bundle_value "$bundle" "$plist" CFBundleIdentifier "$APP_BUNDLE_IDENTIFIER"
+  check_bundle_value "$bundle" "$plist" CFBundleDisplayName "$APP_DISPLAY_NAME"
+  check_bundle_value "$bundle" "$plist" CFBundleExecutable "$APP_EXECUTABLE_NAME"
+  check_bundle_value "$bundle" "$plist" CFBundleIconFile "$APP_ICON_NAME"
+  check_bundle_value "$bundle" "$plist" LSMinimumSystemVersion "$APP_MINIMUM_SYSTEM_VERSION"
+
+  # CFBundleName is information only. Xcode's generated Info.plist takes it from
+  # PRODUCT_NAME, while the release script writes the display name into the
+  # bundle it packages, so the two products are allowed to differ here.
+  reported_name=$(bundle_plist_value "$plist" CFBundleName)
+  if [ "$reported_name" = "$APP_BUNDLE_NAME" ]; then
+    info "bundle $bundle: CFBundleName = $reported_name (same as the packaging script; not asserted)"
+  else
+    info "bundle $bundle: CFBundleName = ${reported_name:-<missing>} (information only; Xcode uses PRODUCT_NAME, the packaging script writes '$APP_BUNDLE_NAME')"
   fi
 }
 
@@ -239,26 +289,16 @@ for literal in "$APP_BUNDLE_IDENTIFIER" "$APP_DISPLAY_NAME" "$APP_VERSION"; do
   fi
 done
 
-# --- 3. built bundle --------------------------------------------------------
-printf '\n== built bundle ==\n'
-if [ ! -f "$PLIST" ]; then
-  fail "bundle Info.plist not found: $PLIST (run ./Scripts/build.sh first)"
-else
-  if plutil -lint "$PLIST" >/dev/null 2>&1; then
-    pass "Info.plist is a valid property list"
-  else
-    fail "Info.plist is not a valid property list: $PLIST"
-  fi
-
-  check_plist_value CFBundleShortVersionString "$APP_VERSION"
-  check_plist_value CFBundleVersion "$APP_BUILD"
-  check_plist_value CFBundleIdentifier "$APP_BUNDLE_IDENTIFIER"
-  check_plist_value CFBundleName "$APP_BUNDLE_NAME"
-  check_plist_value CFBundleDisplayName "$APP_DISPLAY_NAME"
-  check_plist_value CFBundleExecutable "$APP_EXECUTABLE_NAME"
-  check_plist_value CFBundleIconFile "$APP_ICON_NAME"
-  check_plist_value LSMinimumSystemVersion "$APP_MINIMUM_SYSTEM_VERSION"
+# --- 3. app bundles ---------------------------------------------------------
+printf '\n== app bundles ==\n'
+if [ "$#" -eq 0 ]; then
+  info "no bundle argument given; checking the default script build $DEFAULT_BUNDLE"
+  set -- "$DEFAULT_BUNDLE"
 fi
+
+for bundle in "$@"; do
+  check_bundle "$bundle"
+done
 
 # --- 4. service defaults ----------------------------------------------------
 printf '\n== service defaults ==\n'

@@ -109,6 +109,8 @@ pi-web --version
 
 无头环境里也可以用假命令输出和假文件系统探针覆盖同样的判定：`PiWebDesktopTests/DependencyCheckerTests.swift` 使用 `DependencyFakeRunner`（命令）、`DependencyFakeFileSystem`（磁盘）和固定的架构/系统版本，覆盖缺少命令、Node 版本过低、符号链接、安装来源未知、版本无法解析、`canStartService` 门控和脱敏断言；测试不执行真实 npm/pi/pi-web，不访问网络、`~/.pi`、用户 Home 或真实 npm 前缀。
 
+门控在 `ServiceManager` 层面也是硬前置：`isDependencyGateOpen` 默认关闭，启动/重启、配置变更重载、启动失败重试、启动轮询和健康检查的入口与异步回调都会重新确认它；`AppDelegate` 只在 `canStartService == true` 时打开，并在阻塞时调用 `stopHealthMonitor()`。这些行为由 `PiWebDesktopTests/ServiceManagerTests.swift` 的假启动器/假探测/假调度器覆盖，不需要真实进程或网络。
+
 ## Smoke 运行
 
 ```bash
@@ -138,7 +140,7 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 
 服务生命周期、依赖诊断、版本解析、安装来源、脱敏和所有权判定应使用单元测试和本地假服务测试。测试不得访问真实 npm、GitHub、用户 Keychain 或 `~/.pi`。
 
-`PiWebDesktopTests/ServiceOwnershipTests.swift` 覆盖所有权记录与判定表（匹配/不匹配、PID 复用、启动时间、端口、实时命令文本摘要与空白归一化、可执行标识与来源、进程组、过期记录、`ps` 事实不可读、损坏记录清理、JSON 存取）；`PiWebDesktopTests/DependencyCheckerTests.swift` 覆盖依赖诊断（语义化版本解析与比较、缺少命令、Node 版本边界与 prerelease、符号链接路径/真实路径/链接目标、安装来源 npm-global/homebrew/local-path/unknown、package.json 与 CLI 版本的优先级、版本无法解析为 unknown、`canStartService`/`blockingFindings` 门控矩阵、脱敏与 URL 清洗、命令白名单与只读断言）；`PiWebDesktopTests/ServiceManagerTests.swift` 覆盖磁盘记录的生命周期（启动写入并即时校验、旧 `service.pid` 清理、旧实例记录清理、写入/即时校验失败时终止刚启动的进程组且不重复启动、过期记录只删文件）和启动决策（完整命令行与环境变量、找不到可执行文件、停止中忽略启动、复用已验证的进程或在飞子进程）、停止与退出行为（只对验证通过的进程组发送有限次信号、外部服务零信号且状态不变）、描述符保护（fd ≤ stderr 时先复制到 stderr 之上）、健康检查重试；所有副作用都走注入的 `CommandRunning`/`ServiceLaunching`/`ServiceOwnershipStoring`/`ServiceSignaling`/`ServiceProbing`/`ServiceScheduling`，可执行标识读取也可注入，断言不依赖真实的进程、网络或墙钟时间。`PiWebDesktopTests/WebViewNavigationPolicyTests.swift` 覆盖本地/外链 URL 判定。
+`PiWebDesktopTests/ServiceOwnershipTests.swift` 覆盖所有权记录与判定表（匹配/不匹配、PID 复用、启动时间、端口、实时命令文本摘要与空白归一化、可执行标识与来源、进程组、过期记录、`ps` 事实不可读、损坏记录清理、JSON 存取）；`PiWebDesktopTests/DependencyCheckerTests.swift` 覆盖依赖诊断（语义化版本解析与比较、缺少命令、Node 版本边界与 prerelease、候选路径不可运行时不借用其他 node 的版本、进程 PATH 回退记录真正的可执行路径、`uname` 失败时系统项置信度为 unknown、符号链接路径/真实路径/链接目标、安装来源 npm-global/homebrew/local-path/unknown、package.json 与 CLI 版本的优先级、版本无法解析为 unknown、`canStartService`/`blockingFindings` 门控矩阵、脱敏与 URL 清洗、命令白名单与只读断言）；`PiWebDesktopTests/ServiceManagerTests.swift` 覆盖磁盘记录的生命周期（启动写入并即时校验、旧 `service.pid` 清理、旧实例记录清理、写入/即时校验失败时终止刚启动的进程组且不重复启动、过期记录只删文件）和启动决策（完整命令行与环境变量、找不到可执行文件、停止中忽略启动、复用已验证的进程或在飞子进程）、停止与退出行为（只对验证通过的进程组发送有限次信号、外部服务零信号且状态不变）、描述符保护（fd ≤ stderr 时先复制到 stderr 之上）、健康检查重试，以及依赖门控（默认关闭、所有启动入口与异步回调在 blocked 时不启动/不加载/不改状态、启动轮询期间关闭门控、blocked 时健康 ready 回调不覆盖诊断页、重新打开门控后恢复启动）；所有副作用都走注入的 `CommandRunning`/`ServiceLaunching`/`ServiceOwnershipStoring`/`ServiceSignaling`/`ServiceProbing`/`ServiceScheduling`，可执行标识读取也可注入，断言不依赖真实的进程、网络或墙钟时间。`PiWebDesktopTests/WebViewNavigationPolicyTests.swift` 覆盖本地/外链 URL 判定。
 
 ## 开发约束
 

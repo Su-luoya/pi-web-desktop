@@ -321,6 +321,72 @@ final class DependencyCheckerTests: XCTestCase {
         XCTAssertFalse(report.canStartService)
     }
 
+    /// 候选路径存在但 `--version` 失败时，不得用另一个 node 的版本把它放行：
+    /// 版本必须与报告的路径同源，否则记为 unknown 并阻塞启动。
+    func testUnusableNodePathIsNotRescuedByAnotherNodesVersion() {
+        let harness = DependencyHarness()
+        harness.fileSystem.executables = ["/opt/homebrew/bin/node", "/usr/local/bin/node"]
+        harness.runner.handler = { arguments in
+            switch arguments.joined(separator: " ") {
+            case "/opt/homebrew/bin/node --version": return nil
+            // 旧实现会回退到这个命令并把结果贴到候选路径上（路径/版本不同源）。
+            case "/usr/bin/env node --version": return "v24.21.0\n"
+            case "/usr/bin/env node -p process.execPath": return "/usr/local/bin/node\n"
+            case "/usr/local/bin/node --version": return "v24.21.0\n"
+            default: return nil
+            }
+        }
+
+        let report = harness.checker().run()
+        let node = report.finding(for: .node)
+        XCTAssertEqual(node?.status, .unknown)
+        XCTAssertNil(node?.version)
+        XCTAssertEqual(node?.path, "/opt/homebrew/bin/node")
+        XCTAssertEqual(node?.remediationID, "install.node")
+        XCTAssertFalse(report.canStartService)
+        XCTAssertFalse(
+            harness.runner.invocationLines.contains("/usr/bin/env node --version"),
+            "不得用另一个 node 的版本放行不可运行的候选路径"
+        )
+        XCTAssertFalse(
+            harness.runner.invocationLines.contains("/usr/local/bin/node --version"),
+            "不得用另一个 node 的版本放行不可运行的候选路径"
+        )
+    }
+
+    /// 候选路径完全不存在时才走进程 PATH 回退，并记录真正产出该版本的可执行路径。
+    func testNodeFallbackRecordsTheResolvedPathAndItsOwnVersion() {
+        let harness = DependencyHarness()
+        harness.fileSystem.executables = ["/tmp/env-node/bin/node"]
+        harness.runner.handler = { arguments in
+            switch arguments.joined(separator: " ") {
+            case "/usr/bin/env node -p process.execPath": return "/tmp/env-node/bin/node\n"
+            case "/tmp/env-node/bin/node --version": return "v22.19.0\n"
+            default: return nil
+            }
+        }
+
+        let report = harness.checker().run()
+        let node = report.finding(for: .node)
+        XCTAssertEqual(node?.path, "/tmp/env-node/bin/node")
+        XCTAssertEqual(node?.version, "22.19.0")
+        XCTAssertEqual(node?.status, .ok)
+        XCTAssertNil(node?.remediationID)
+    }
+
+    /// 回退解析不出可执行路径时不采信任何版本（不阻塞也不放行）。
+    func testNodeFallbackWithoutAResolvablePathIsMissing() {
+        let harness = DependencyHarness()
+        harness.runner.handler = { arguments in
+            arguments.joined(separator: " ") == "/usr/bin/env node -p process.execPath" ? "/tmp/ghost/bin/node\n" : nil
+        }
+
+        let report = harness.checker().run()
+        XCTAssertEqual(report.finding(for: .node)?.status, .missing)
+        XCTAssertNil(report.finding(for: .node)?.version)
+        XCTAssertFalse(report.canStartService)
+    }
+
     // MARK: - 符号链接与安装来源
 
     func testSymlinkedPiWebReportsPathResolvedPathAndTarget() {
@@ -476,6 +542,7 @@ final class DependencyCheckerTests: XCTestCase {
         supported.runner.handler = { _ in nil }
         XCTAssertEqual(supported.checker().run().finding(for: .system)?.status, .ok)
         XCTAssertTrue(supported.checker().run().finding(for: .system)?.version?.contains("arm64") == true)
+        XCTAssertEqual(supported.checker().run().finding(for: .system)?.confidence, .verified)
 
         var intel = DependencyHarness()
         intel.architecture = "x86_64"
@@ -486,6 +553,24 @@ final class DependencyCheckerTests: XCTestCase {
         oldSystem.osVersion = OperatingSystemVersion(majorVersion: 13, minorVersion: 6, patchVersion: 0)
         oldSystem.runner.handler = { _ in nil }
         XCTAssertEqual(oldSystem.checker().run().finding(for: .system)?.status, .outdated)
+    }
+
+    /// `uname` 失败时 machineArchitecture 为 "unknown"：系统项不能声称已验证。
+    func testUnknownArchitectureIsReportedWithUnknownConfidence() {
+        var harness = DependencyHarness()
+        harness.architecture = "unknown"
+        harness.runner.handler = { _ in nil }
+
+        let report = harness.checker().run()
+        let system = report.finding(for: .system)
+        XCTAssertEqual(system?.status, .missing)
+        XCTAssertEqual(system?.confidence, .unknown)
+        XCTAssertTrue(system?.version?.contains("unknown") == true)
+        // 系统项本来就不阻塞，置信度不影响启动结论。
+        XCTAssertFalse(report.blockingFindings.contains { $0.kind == .system })
+
+        harness.architecture = ""
+        XCTAssertEqual(harness.checker().run().finding(for: .system)?.confidence, .unknown)
     }
 
     func testUnsupportedSystemDoesNotBlockServiceStart() {

@@ -62,6 +62,7 @@ private final class ManagerFakeScheduler: ServiceScheduling {
     private(set) var sleeps: [TimeInterval] = []
     private var backgroundIndex = 0
     private var delayedIndex = 0
+    private var mainIndex = 0
 
     func onMain(_ work: @escaping () -> Void) {
         if runsMainInline { work() } else { mainWork.append(work) }
@@ -97,6 +98,21 @@ private final class ManagerFakeScheduler: ServiceScheduling {
 
     func runAllBackgroundWork() {
         while runNextBackgroundWork() {}
+    }
+
+    /// Runs queued main-queue work in order; used to prove that callbacks which
+    /// were queued before the dependency gate closed do nothing when they run.
+    @discardableResult
+    func runNextMainWork() -> Bool {
+        guard mainIndex < mainWork.count else { return false }
+        let work = mainWork[mainIndex]
+        mainIndex += 1
+        work()
+        return true
+    }
+
+    func runAllMainWork() {
+        while runNextMainWork() {}
     }
 
     @discardableResult
@@ -288,6 +304,8 @@ private final class ServiceManagerHarness {
             signaler: signaler,
             instanceID: Self.instanceID
         )
+        // 既有测试覆盖的是依赖门控打开后的行为；门控本身的测试会显式关闭它。
+        manager.isDependencyGateOpen = true
 
         manager.onStateChange = { [weak self] state in self?.states.append(state) }
         manager.onPageMessage = { [weak self] message in self?.pageMessages.append(message) }
@@ -1083,5 +1101,165 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(harness.launcher.launchCount, 0)
         XCTAssertEqual(harness.pageMessages, ["Pi Web 服务已断开，正在尝试恢复…"])
         XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
+    }
+
+    // MARK: Dependency gate (GitHub #6)
+
+    /// 门控 blocked 时所有启动入口（启动/重启、配置重载、健康恢复收敛点）都不得
+    /// 启动子进程、加载页面或改变状态。
+    func testClosedDependencyGateBlocksEveryStartEntry() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = false
+        harness.scheduler.runsMainInline = false
+        harness.manager.isDependencyGateOpen = false
+
+        harness.manager.startAtLaunch()
+        harness.manager.ensureServerIsRunning()
+        harness.manager.startService()
+        harness.manager.startManagedService()
+        harness.manager.restartManagedService()
+        harness.manager.reloadAfterConfigurationChange()
+        harness.scheduler.runAllMainWork()
+
+        XCTAssertEqual(harness.launcher.launchCount, 0)
+        XCTAssertEqual(harness.loadRequests, 0)
+        XCTAssertTrue(harness.states.isEmpty)
+        XCTAssertTrue(harness.startupFailures.isEmpty)
+        XCTAssertTrue(harness.scheduler.repeatingWork.isEmpty, "门控关闭时不得开始健康轮询")
+    }
+
+    /// 探测回调排队后门控才关闭：主队列回调必须再次确认门控。
+    func testGateClosedWhileStartChecksAreInFlightBlocksAsyncCallbacks() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = false
+        harness.scheduler.runsMainInline = false
+
+        harness.manager.ensureServerIsRunning()
+        harness.manager.startService()
+        harness.manager.reloadAfterConfigurationChange()
+        XCTAssertFalse(harness.scheduler.mainWork.isEmpty)
+
+        harness.manager.isDependencyGateOpen = false
+        harness.scheduler.runAllMainWork()
+
+        XCTAssertEqual(harness.launcher.launchCount, 0)
+        XCTAssertEqual(harness.loadRequests, 0)
+        XCTAssertTrue(harness.states.isEmpty)
+    }
+
+    /// `autoStart` 关闭时 `startAtLaunch()` 也会探测外部服务：探测期间门控
+    /// 关闭时回调不得把外部服务当成 running 或加载服务页。
+    func testGateClosedWhileStartAtLaunchChecksAnExternalServiceBlocksAdoption() throws {
+        var configuration = ServiceConfiguration.default
+        configuration.autoStart = false
+        let harness = try makeHarness(configuration: configuration)
+        defer { harness.cleanUp() }
+        harness.probe.ready = true
+        harness.scheduler.runsMainInline = false
+
+        harness.manager.startAtLaunch()
+        harness.manager.isDependencyGateOpen = false
+        harness.scheduler.runAllMainWork()
+
+        XCTAssertTrue(harness.states.isEmpty)
+        XCTAssertEqual(harness.loadRequests, 0)
+        XCTAssertTrue(harness.pageMessages.isEmpty)
+    }
+
+    /// 启动轮询是延迟回调：轮询期间门控关闭时不得采信 ready。
+    func testGateClosedWhilePollingDoesNotAdoptTheService() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = false
+
+        harness.manager.startManagedService()
+        XCTAssertEqual(harness.launcher.launchCount, 1)
+        XCTAssertEqual(harness.manager.currentState, .starting)
+
+        harness.probe.ready = true
+        harness.manager.isDependencyGateOpen = false
+        XCTAssertTrue(harness.scheduler.runNextDelayedWork())
+
+        XCTAssertEqual(harness.manager.currentState, .starting)
+        XCTAssertEqual(harness.loadRequests, 0)
+    }
+
+    /// 门控关闭时不开始健康轮询，也不采纳外部服务。
+    func testClosedDependencyGateSkipsHealthPolling() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+        harness.manager.isDependencyGateOpen = false
+
+        harness.manager.startHealthMonitor()
+
+        XCTAssertTrue(harness.scheduler.repeatingWork.isEmpty)
+        XCTAssertFalse(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.manager.currentState, .checking)
+        XCTAssertEqual(harness.loadRequests, 0)
+    }
+
+    /// 健康探测就绪时门控已关闭：回调不得把状态改成 running 或加载服务页
+    /// （否则会覆盖诊断页）。
+    func testHealthCheckReadyCallbackDoesNothingWhenTheGateIsClosed() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+        harness.manager.startHealthMonitor()
+        harness.probe.ready = true
+        harness.scheduler.runsMainInline = false
+
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        harness.manager.isDependencyGateOpen = false
+        harness.scheduler.runAllMainWork()
+
+        XCTAssertTrue(harness.states.isEmpty)
+        XCTAssertEqual(harness.manager.currentState, .checking)
+        XCTAssertEqual(harness.loadRequests, 0)
+        XCTAssertEqual(harness.launcher.launchCount, 0)
+    }
+
+    /// 健康轮询已经在运行，随后诊断把门控切成 blocked（AppDelegate 会把状态
+    /// 改成 stopped 并显示诊断页）：下一次 ready 检查不得把它改回 running
+    /// 或重新加载服务页。
+    func testRunningHealthMonitorStopsAffectingStateWhenTheGateCloses() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+        harness.manager.startHealthMonitor()
+        harness.probe.ready = true
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.manager.currentState, .running)
+        XCTAssertEqual(harness.loadRequests, 1)
+
+        harness.manager.isDependencyGateOpen = false
+        harness.manager.setState(.stopped)   // AppDelegate blocked 分支
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+
+        XCTAssertEqual(harness.manager.currentState, .stopped)
+        XCTAssertEqual(harness.loadRequests, 1)
+        XCTAssertEqual(harness.launcher.launchCount, 0)
+    }
+
+    /// 重新检测通过后门控打开，启动入口恢复工作。
+    func testOpeningTheGateRestoresStartBehaviour() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+
+        harness.manager.isDependencyGateOpen = false
+        harness.manager.startManagedService()
+        XCTAssertEqual(harness.launcher.launchCount, 0)
+
+        harness.manager.isDependencyGateOpen = true
+        harness.manager.startManagedService()
+        XCTAssertEqual(harness.launcher.launchCount, 1)
+        XCTAssertEqual(harness.manager.currentState, .starting)
     }
 }

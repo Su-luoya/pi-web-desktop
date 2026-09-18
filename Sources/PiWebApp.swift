@@ -324,6 +324,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// 决定服务是否可启动。检查期间启动/重启菜单项保持禁用。
     private func runDependencyCheck() {
         dependencyGate = .checking
+        // 检查期间即使有异步回调到达，服务启动入口也必须保持关闭。
+        serviceManager.isDependencyGateOpen = false
         serviceStartMenuItems.forEach { $0.isEnabled = false }
         dependencyCheckGeneration += 1
         let generation = dependencyCheckGeneration
@@ -351,6 +353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if report.canStartService {
             let wasReady = dependencyGate == .ready
             dependencyGate = .ready
+            serviceManager.isDependencyGateOpen = true
             serviceStartMenuItems.forEach { $0.isEnabled = true }
             if !presentDiagnostics {
                 diagnosticsWindowController?.close()
@@ -363,6 +366,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         } else {
             dependencyGate = .blocked
+            // 阻塞时关掉服务启动入口并停止健康轮询：不能在诊断页上把状态改回
+            // running，也不能重新加载服务页。
+            serviceManager.isDependencyGateOpen = false
+            serviceManager.stopHealthMonitor()
             serviceStartMenuItems.forEach { $0.isEnabled = false }
             serviceManager.setState(.stopped)
             webViewController.showDependencyPage(message: DependencyReportPresenter.blockingSummary(for: report))

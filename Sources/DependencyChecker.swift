@@ -470,20 +470,46 @@ struct DependencyChecker {
             symlinkTarget: nil,
             version: "macOS \(osText) (\(architecture))",
             installSource: .unknown,
-            confidence: .verified,
+            // `uname` 失败时 architecture 是占位值，不能声称已验证。
+            confidence: architecture == "unknown" ? .unknown : .verified,
             remediationID: nil,
             packageName: nil,
             packageVersion: nil
         )
     }
 
-    private func makeNodeFinding(npmPrefix: String?, redactor: DependencyPathRedactor) -> DependencyFinding {
-        let path = resolveExecutable(named: "node", candidates: defaultCandidates(named: "node"))
-        var versionOutput = path.flatMap { trimmed(commandRunner.run([$0, "--version"])) }
-        if versionOutput == nil {
-            versionOutput = trimmed(commandRunner.run([Self.runnerPath, "node", "--version"]))
+    /// Node 探针结果：路径与版本必须同源（版本必须由该路径自己产出）。
+    private struct NodeProbe {
+        var path: String?
+        var version: SemanticVersion?
+    }
+
+    /// 解析 node，并只采信“该路径自己”报告的版本。
+    ///
+    /// 候选路径（含登录 shell 的 `command -v`）存在时只使用它的 `--version`：
+    /// 如果它不可运行，就不允许用另一个 node 的版本把它放行。候选路径完全不存在
+    /// 时，才按进程 PATH 重新解析（`/usr/bin/env node -p process.execPath`），并
+    /// 把真正产出该版本的可执行路径记入报告；解析不出路径就不采信版本。
+    private func resolveNode() -> NodeProbe {
+        if let path = resolveExecutable(named: "node", candidates: defaultCandidates(named: "node")) {
+            return NodeProbe(path: path, version: version(of: path))
         }
-        let version = versionOutput.flatMap { SemanticVersion.firstVersion(in: $0) }
+        guard let path = trimmed(commandRunner.run([Self.runnerPath, "node", "-p", "process.execPath"])),
+              fileSystem.isExecutableFile(atPath: path) else {
+            return NodeProbe(path: nil, version: nil)
+        }
+        return NodeProbe(path: path, version: version(of: path))
+    }
+
+    private func version(of executablePath: String) -> SemanticVersion? {
+        trimmed(commandRunner.run([executablePath, "--version"]))
+            .flatMap { SemanticVersion.firstVersion(in: $0) }
+    }
+
+    private func makeNodeFinding(npmPrefix: String?, redactor: DependencyPathRedactor) -> DependencyFinding {
+        let probe = resolveNode()
+        let path = probe.path
+        let version = probe.version
         let source = installSource(
             path: path ?? "",
             resolvedPath: path.flatMap { fileSystem.resolvedPath(atPath: $0) },
@@ -503,7 +529,7 @@ struct DependencyChecker {
                 remediationID = nil
             }
             statusEvidence = .verified
-        } else if path == nil && versionOutput == nil {
+        } else if path == nil {
             status = .missing
             statusEvidence = .unknown
             remediationID = InstallCommandManifest.node.id

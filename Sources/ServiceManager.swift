@@ -435,6 +435,14 @@ final class ServiceManager {
     private(set) var configuration: ServiceConfiguration
     private(set) var currentState: ServiceState = .checking
 
+    /// 依赖诊断门控（GitHub #6）。
+    ///
+    /// 为 false 时任何启动入口（启动/重启、配置变更重载、启动重试、健康恢复）
+    /// 都不得启动子进程、加载服务页或把状态改成 running；异步回调执行前会再次
+    /// 确认这个门控。默认关闭：`AppDelegate` 在依赖诊断完成前保持关闭，
+    /// `DependencyReport.canStartService` 为 true 时打开、为 false 时重新关闭。
+    var isDependencyGateOpen = false
+
     /// True once a quit sequence started. AppDelegate drives this through
     /// `beginQuitting()` / `keepRunningOnQuit()` / `stopAllServices(completion:)`.
     private(set) var isQuitting = false
@@ -500,6 +508,11 @@ final class ServiceManager {
     func setState(_ state: ServiceState) {
         currentState = state
         onStateChange?(state)
+    }
+
+    /// 允许启动服务与加载服务页的前置条件：依赖门控打开，且不在停止/退出流程中。
+    private var isStartPermitted: Bool {
+        isDependencyGateOpen && !isStoppingService && !isQuitting
     }
 
     // MARK: - Ownership and dependency lookup
@@ -597,12 +610,15 @@ final class ServiceManager {
         // Records from earlier runs are evaluated (and cleaned) before any new
         // launch decision, so a leftover file can never be adopted.
         reconcileOwnershipRecord()
+        guard isStartPermitted else { return }
         if configuration.autoStart {
             ensureServerIsRunning()
         } else {
             checkServer { [weak self] ready in
                 guard let self else { return }
                 self.scheduler.onMain {
+                    // 与 autoStart 分支一致：探测期间门控关闭就不能再改状态或加载页面。
+                    guard self.isStartPermitted else { return }
                     if ready {
                         self.setState(.running)
                         self.requestLoad()
@@ -617,9 +633,12 @@ final class ServiceManager {
     }
 
     func ensureServerIsRunning() {
+        guard isStartPermitted else { return }
         checkServer { [weak self] ready in
             guard let self else { return }
             self.scheduler.onMain {
+                // 门控可能在探测期间被关掉（例如重新检测），回调必须再确认。
+                guard self.isStartPermitted else { return }
                 if ready {
                     self.setState(.running)
                     self.requestLoad()
@@ -631,11 +650,14 @@ final class ServiceManager {
     }
 
     /// Menu action "启动服务": connect to a ready service, otherwise start the
-    /// managed one.
+    /// managed one. The dependency gate is enforced again inside the async
+    /// callback and in `startManagedService()`.
     func startService() {
+        guard isStartPermitted else { return }
         checkServer { [weak self] ready in
             guard let self else { return }
             self.scheduler.onMain {
+                guard self.isStartPermitted else { return }
                 if ready {
                     self.setState(.running)
                     self.requestLoad()
@@ -646,7 +668,10 @@ final class ServiceManager {
         }
     }
 
+    /// 唯一的受托管启动入口：启动、重启、配置变更、重试和健康恢复都收敛到这里，
+    /// 依赖门控关闭时直接返回，不产生任何进程或页面副作用。
     func startManagedService() {
+        guard isStartPermitted else { return }
         switch startDecision() {
         case .ignored:
             return
@@ -774,6 +799,8 @@ final class ServiceManager {
             guard let self else { return }
             self.checkServer { ready in
                 self.scheduler.onMain {
+                    // 启动轮询是异步的：门控在轮询期间关闭时不再改状态或加载页面。
+                    guard self.isStartPermitted else { return }
                     if ready {
                         self.restartAttempts = 0
                         self.setState(.running)
@@ -883,10 +910,15 @@ final class ServiceManager {
 
     func startHealthMonitor() {
         healthToken?.invalidate()
+        healthToken = nil
+        // 门控关闭时不轮询：既不采纳外部服务，也不会触发受托管重启。
+        guard isStartPermitted else { return }
         healthToken = scheduler.repeating(interval: Self.healthCheckInterval) { [weak self] in
-            guard let self, !self.isQuitting, !self.isStoppingService else { return }
+            guard let self, self.isStartPermitted else { return }
             self.checkServer { ready in
                 self.scheduler.onMain {
+                    // 门控 blocked 时不得改变状态或加载服务页，覆盖诊断页。
+                    guard self.isStartPermitted else { return }
                     if ready {
                         if case .running = self.currentState {
                             self.restartAttempts = 0
@@ -918,11 +950,14 @@ final class ServiceManager {
     }
 
     /// Re-checks the (possibly changed) configuration after preferences were
-    /// saved.
+    /// saved. Gated like every other start entry: while the dependency gate is
+    /// closed only the state message is updated, never a launch or page load.
     func reloadAfterConfigurationChange() {
+        guard isStartPermitted else { return }
         checkServer { [weak self] ready in
             guard let self else { return }
             self.scheduler.onMain {
+                guard self.isStartPermitted else { return }
                 if ready {
                     self.setState(.running)
                     self.requestLoad()

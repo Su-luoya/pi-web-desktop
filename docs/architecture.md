@@ -57,10 +57,14 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 
 `DependencyFinding.status` 取值：`ok`、`missing`、`outdated`（Node.js 低于最低版本，或 macOS 低于 14）、`unknown`（版本无法解析）。`confidence` 取整条结论各项证据里最弱的一项：探针直接确认是 `verified`，只能由候选路径或路径前缀推断是 `inferred`（pi-web 的 package.json `name` 与预期不符也计为 `inferred`），没有可用证据是 `unknown`。安装来源按固定优先级推断：Homebrew Cellar（verified）→ npm 前缀 `lib/node_modules`（verified）→ npm 前缀 `bin`（inferred）→ `~/.npm-global`（inferred）→ Homebrew 前缀（inferred）→ 用户目录（inferred）→ unknown。`remediationID` 只指向 `InstallCommandManifest` 的静态条目。
 
+版本证据必须与报告的路径同源：Node.js 候选路径（含登录 shell 的 `command -v`）存在时只采信它自己的 `--version`，即使它不可运行也不会用 PATH 上另一个 node 的版本来放行；只有候选路径完全不存在时才按进程 PATH 重新解析（`/usr/bin/env node -p process.execPath`），并把真正产出该版本的可执行路径记入报告，解析不出可执行路径就只报 `unknown`。系统项在 `uname` 失败（`machineArchitecture()` 为 `"unknown"`）时 `confidence` 降为 `unknown`，不再声称已验证；系统项本就不阻塞启动。
+
 门控结果：
 
 - `canStartService == true`：与拆分前一致——显示“正在检查 Pi Web 服务…”，调用 `serviceManager.startAtLaunch()`；诊断窗口只在用户主动打开时显示。
 - `canStartService == false`：启动/重启菜单项由 `validateMenuItem` 与显式 `isEnabled` 双重禁用，不调用 `startAtLaunch()`，WebView 显示诊断提示页而不是服务地址，并打开诊断窗口。点击“重新检测”只是重新运行 `DependencyChecker`；前置满足后恢复上面的正常路径并关闭窗口。
+
+门控不只在菜单层生效：`ServiceManager.isDependencyGateOpen`（默认关闭，`AppDelegate` 在诊断期间保持关闭、结果通过后打开）是所有服务启动入口的硬前置。`startAtLaunch()`、`ensureServerIsRunning()`、`startService()`、`startManagedService()`、`reloadAfterConfigurationChange()`、启动轮询（`pollUntilReady()`）和健康检查在入口以及每个异步主队列回调执行前都重新确认门控，因此配置变更重载、启动失败重试、外部服务恢复和健康恢复都不能绕过诊断结果；门控关闭时既不启动子进程、不加载服务页，也不改变状态或报启动失败。诊断判定阻塞时 `AppDelegate` 还会调用 `stopHealthMonitor()`（健康轮询本身也在入口拒绝启动），避免健康检查把状态改回 `running`、把诊断页覆盖回服务页。
 
 `PI_WEB_DESKTOP_SMOKE=1` 在 `applicationDidFinishLaunching` 的第一个分支返回，因此 smoke 启动完全跳过依赖门控（不运行 checker、不等待后台结果），只验证窗口建立与退出路径。
 

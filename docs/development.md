@@ -22,7 +22,7 @@
 
 ## Xcode 工程构建与测试
 
-标准 Xcode 工程使用 Apple Silicon、macOS 14 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让测试在没有 host app 的情况下仍可编译，target 会把被测源码直接加入测试源：`Sources/ServiceConfiguration.swift`、`Sources/AppConfiguration.swift`、`Sources/ProcessInspector.swift`、`Sources/DiagnosticsCollector.swift`、`Sources/ServiceManager.swift`、`Sources/ServiceOwnership.swift`、`Sources/WebViewNavigationPolicy.swift`；因此测试文件直接使用该 target 内编译的这些类型，不通过 `@testable import PiWebDesktop` 引入 app target。`Sources/WebViewController.swift` 依赖 AppKit/WebKit 且需要真实窗口，只进 app target；它使用的 URL 判定规则因此拆在 `WebViewNavigationPolicy.swift` 里，可以在 unhosted 目标里测试。这些测试使用假的 `ps`/`lsof` 输出、注入的存活判定、假的进程启动器、即时执行的调度器和临时目录，不访问真实进程、网络、Keychain 或 `~/.pi`。
+标准 Xcode 工程使用 Apple Silicon、macOS 14 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让测试在没有 host app 的情况下仍可编译，target 会把被测源码直接加入测试源：`Sources/ServiceConfiguration.swift`、`Sources/AppConfiguration.swift`、`Sources/ProcessInspector.swift`、`Sources/DiagnosticsCollector.swift`、`Sources/DependencyChecker.swift`、`Sources/InstallCommandManifest.swift`、`Sources/ServiceManager.swift`、`Sources/ServiceOwnership.swift`、`Sources/WebViewNavigationPolicy.swift`；因此测试文件直接使用该 target 内编译的这些类型，不通过 `@testable import PiWebDesktop` 引入 app target。`Sources/WebViewController.swift` 与 `Sources/DiagnosticsWindowController.swift` 依赖 AppKit/WebKit 且需要真实窗口，只进 app target；依赖诊断的纯文本呈现（`DependencyReportPresenter`）因此放在 `DependencyChecker.swift` 里，可以在 unhosted 目标里测试。这些测试使用假的 `ps`/`lsof` 输出、注入的存活判定、假的进程启动器、即时执行的调度器和临时目录，不访问真实进程、网络、Keychain 或 `~/.pi`。
 
 ```bash
 DERIVED_DATA_PATH="$(mktemp -d /tmp/PiWebDesktopDerivedData.XXXXXX)"
@@ -94,6 +94,23 @@ open build/Pi-Web-Desktop.app
 
 默认服务地址是 `http://127.0.0.1:30141/`。首版基线默认 loopback，不开放局域网监听。
 
+## 依赖诊断
+
+启动时应用会先运行 `DependencyChecker`，检查 Apple Silicon / macOS 14+、Node.js `>=22.19.0`、Pi CLI 和 Pi Web（可执行文件、版本、真实路径、符号链接目标、pi-web 的 package.json）与安装来源。前置不满足时应用不会启动服务或加载服务页面，而是显示诊断提示页并打开“依赖与环境诊断”窗口；满足时行为与拆分前一致。
+
+诊断窗口也可以随时从菜单“服务 → 依赖与环境诊断…”打开。窗口里的“复制安装命令”只把 `Sources/InstallCommandManifest.swift` 的静态命令写入剪贴板，“重新检测”只重新运行一次 `DependencyChecker`；应用不会执行安装命令、不会调用 `sudo`、不联网，也不读取认证内容。手工排查时可以单独运行只读命令：
+
+```bash
+node --version
+npm prefix -g
+pi --version
+pi-web --version
+```
+
+无头环境里也可以用假命令输出和假文件系统探针覆盖同样的判定：`PiWebDesktopTests/DependencyCheckerTests.swift` 使用 `DependencyFakeRunner`（命令）、`DependencyFakeFileSystem`（磁盘）和固定的架构/系统版本，覆盖缺少命令、Node 版本过低、符号链接、安装来源未知、版本无法解析、`canStartService` 门控和脱敏断言；测试不执行真实 npm/pi/pi-web，不访问网络、`~/.pi`、用户 Home 或真实 npm 前缀。
+
+门控在 `ServiceManager` 层面也是硬前置：`isDependencyGateOpen` 默认关闭，启动/重启、配置变更重载、启动失败重试、启动轮询和健康检查的入口与异步回调都会重新确认它；`AppDelegate` 只在 `canStartService == true` 时打开，并在阻塞时调用 `stopHealthMonitor()`。这些行为由 `PiWebDesktopTests/ServiceManagerTests.swift` 的假启动器/假探测/假调度器覆盖，不需要真实进程或网络。
+
 ## Smoke 运行
 
 ```bash
@@ -106,6 +123,7 @@ open build/Pi-Web-Desktop.app
 
 - support 目录改为 `$TMPDIR/pi-web-desktop-smoke-<pid>`，日志也写在该临时目录下，退出前删除；不写 `~/Library/Application Support/Pi Web Desktop`，也不写 `~/Library/Logs`。
 - 跳过单实例锁与 `service.autoStart` 的服务自动启动，不启动真实 pi-web，也不启动健康检查。
+- 跳过依赖门控：`applicationDidFinishLaunching` 在 smoke 分支直接返回，不运行 `DependencyChecker`、不等待后台结果、不显示诊断窗口；因此即使本机缺少 Node.js/Pi/Pi Web，`./Scripts/smoke.sh` 仍然验证主窗口建立与退出路径。
 - 建立主菜单与主窗口后向 stdout 打印 `smoke: ready` 并以 0 退出；临时目录创建失败或主窗口未建立时向 stderr 报错并以 1 退出，不打印标记。
 
 变量未设置时行为完全不变。smoke 只验证窗口建立与退出路径，不验证服务功能，也不替代 `xcodebuild` 的构建和 `xcodebuild test` 的单元测试：本机只有 Command Line Tools 时无法运行 XCTest，smoke 不声称覆盖测试用例。
@@ -122,7 +140,7 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 
 服务生命周期、依赖诊断、版本解析、安装来源、脱敏和所有权判定应使用单元测试和本地假服务测试。测试不得访问真实 npm、GitHub、用户 Keychain 或 `~/.pi`。
 
-`PiWebDesktopTests/ServiceOwnershipTests.swift` 覆盖所有权记录与判定表（匹配/不匹配、PID 复用、启动时间、端口、实时命令文本摘要与空白归一化、可执行标识与来源、进程组、过期记录、`ps` 事实不可读、损坏记录清理、JSON 存取）；`PiWebDesktopTests/ServiceManagerTests.swift` 覆盖磁盘记录的生命周期（启动写入并即时校验、旧 `service.pid` 清理、旧实例记录清理、写入/即时校验失败时终止刚启动的进程组且不重复启动、过期记录只删文件）和启动决策（完整命令行与环境变量、找不到可执行文件、停止中忽略启动、复用已验证的进程或在飞子进程）、停止与退出行为（只对验证通过的进程组发送有限次信号、外部服务零信号且状态不变）、描述符保护（fd ≤ stderr 时先复制到 stderr 之上）、健康检查重试；所有副作用都走注入的 `CommandRunning`/`ServiceLaunching`/`ServiceOwnershipStoring`/`ServiceSignaling`/`ServiceProbing`/`ServiceScheduling`，可执行标识读取也可注入，断言不依赖真实的进程、网络或墙钟时间。`PiWebDesktopTests/WebViewNavigationPolicyTests.swift` 覆盖本地/外链 URL 判定。
+`PiWebDesktopTests/ServiceOwnershipTests.swift` 覆盖所有权记录与判定表（匹配/不匹配、PID 复用、启动时间、端口、实时命令文本摘要与空白归一化、可执行标识与来源、进程组、过期记录、`ps` 事实不可读、损坏记录清理、JSON 存取）；`PiWebDesktopTests/DependencyCheckerTests.swift` 覆盖依赖诊断（语义化版本解析与比较、缺少命令、Node 版本边界与 prerelease、候选路径不可运行时不借用其他 node 的版本、进程 PATH 回退记录真正的可执行路径、`uname` 失败时系统项置信度为 unknown、符号链接路径/真实路径/链接目标、安装来源 npm-global/homebrew/local-path/unknown、package.json 与 CLI 版本的优先级、版本无法解析为 unknown、`canStartService`/`blockingFindings` 门控矩阵、脱敏与 URL 清洗、命令白名单与只读断言）；`PiWebDesktopTests/ServiceManagerTests.swift` 覆盖磁盘记录的生命周期（启动写入并即时校验、旧 `service.pid` 清理、旧实例记录清理、写入/即时校验失败时终止刚启动的进程组且不重复启动、过期记录只删文件）和启动决策（完整命令行与环境变量、找不到可执行文件、停止中忽略启动、复用已验证的进程或在飞子进程）、停止与退出行为（只对验证通过的进程组发送有限次信号、外部服务零信号且状态不变）、描述符保护（fd ≤ stderr 时先复制到 stderr 之上）、健康检查重试，以及依赖门控（默认关闭、所有启动入口与异步回调在 blocked 时不启动/不加载/不改状态、启动轮询期间关闭门控、blocked 时健康 ready 回调不覆盖诊断页、重新打开门控后恢复启动）；所有副作用都走注入的 `CommandRunning`/`ServiceLaunching`/`ServiceOwnershipStoring`/`ServiceSignaling`/`ServiceProbing`/`ServiceScheduling`，可执行标识读取也可注入，断言不依赖真实的进程、网络或墙钟时间。`PiWebDesktopTests/WebViewNavigationPolicyTests.swift` 覆盖本地/外链 URL 判定。
 
 ## 开发约束
 

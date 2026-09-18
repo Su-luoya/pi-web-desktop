@@ -65,13 +65,31 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKD
     // MARK: - Status pages
 
     func showLoadingPage(message: String) {
-        let safe = message.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
+        let safe = Self.escapedHTML(message)
         let html = """
         <!doctype html><meta charset="utf-8"><style>
         html,body{height:100%;margin:0;background:#0b1020;color:#d7fff8;font:15px -apple-system,BlinkMacSystemFont,sans-serif}body{display:grid;place-items:center}.box{text-align:center}.pi{font:700 88px ui-monospace,monospace;color:#7fffe8;text-shadow:0 0 28px #21d9cc88}.msg{margin-top:18px;color:#a8b3cc}.dot{display:inline-block;animation:pulse 1s infinite alternate}@keyframes pulse{to{opacity:.25}}</style>
         <div class="box"><div class="pi">π</div><div class="msg">\(safe) <span class="dot">●</span></div></div>
         """
         webView.loadHTMLString(html, baseURL: nil)
+    }
+
+    /// 依赖前置不满足时的占位页：不加载服务页面，也不执行任何安装命令。
+    func showDependencyPage(message: String) {
+        let safe = Self.escapedHTML(message)
+        let html = """
+        <!doctype html><meta charset="utf-8"><style>
+        html,body{height:100%;margin:0;background:#0b1020;color:#d7fff8;font:15px -apple-system,BlinkMacSystemFont,sans-serif}body{display:grid;place-items:center}.box{max-width:640px;padding:24px}.pi{font:700 64px ui-monospace,monospace;color:#7fffe8;text-shadow:0 0 28px #21d9cc88}h1{margin:14px 0 10px;font-size:18px}pre{margin:0;white-space:pre-wrap;color:#a8b3cc;font:13px ui-monospace,monospace;line-height:1.6}</style>
+        <div class="box"><div class="pi">π</div><h1>无法启动 Pi Web 服务</h1><pre>\(safe)</pre></div>
+        """
+        webView.loadHTMLString(html, baseURL: nil)
+    }
+
+    private static func escapedHTML(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
     }
 
     func showErrorPage(message: String) {

@@ -1,6 +1,16 @@
 import CryptoKit
 import Foundation
 
+/// Where a recorded executable path came from.
+///
+/// `procPidPath` is the real binary image path from libproc; `psComm` is the
+/// `ps -o comm=` fallback, which is weaker evidence because it reports the
+/// command name rather than the resolved image.
+enum ServiceExecutableSource: String, Codable, Equatable {
+    case procPidPath = "proc_pidpath"
+    case psComm = "ps-comm"
+}
+
 /// Ownership record written when this app instance launches the managed
 /// `pi-web` service.
 ///
@@ -18,9 +28,12 @@ struct ServiceOwnershipRecord: Codable, Equatable {
     var processGroupID: pid_t
     /// `ps -o lstart=` value observed immediately after the launch.
     var launchedAt: String
-    /// `ps -o comm=` value observed immediately after the launch.
+    /// Executable identity observed immediately after the launch: the real
+    /// image path from `proc_pidpath`, or the `ps -o comm=` fallback.
     var resolvedExecutable: String
-    /// SHA-256 digest of the normalized launch arguments.
+    /// Provenance of `resolvedExecutable` (`proc_pidpath` or `ps-comm`).
+    var resolvedExecutableSource: ServiceExecutableSource
+    /// SHA-256 digest of the normalized command text at launch time.
     var argumentsDigest: String
     /// TCP port the managed service was launched with.
     var port: Int
@@ -29,34 +42,52 @@ struct ServiceOwnershipRecord: Codable, Equatable {
     /// ISO-8601 timestamp of the record write.
     var recordedAt: String
 
-    /// Canonical digest of launch arguments.
+    /// Canonical command text for a launch: executable path plus arguments
+    /// joined with single spaces, with whitespace runs collapsed.
     ///
-    /// Each argument is length-prefixed and arguments are joined with U+001F, so
-    /// the encoding stays unambiguous even when an argument contains the
-    /// separator. `argv[0]` is intentionally excluded: the same configuration
-    /// must produce the same digest regardless of how the executable path is
-    /// spelled.
-    static func argumentsDigest(of arguments: [String]) -> String {
-        let canonical = arguments
-            .map { "\($0.utf8.count):\($0)" }
-            .joined(separator: "\u{1F}")
-        let digest = SHA256.hash(data: Data(canonical.utf8))
+    /// For a native executable this is exactly what `ps -o args=` reports. For
+    /// npm/shebang installs the kernel replaces `argv[0]` with the interpreter
+    /// (`node /opt/homebrew/bin/pi-web …`), so the launch path records the
+    /// observed live text instead; this function is the fallback used when the
+    /// live text cannot be read.
+    static func commandText(executablePath: String, arguments: [String]) -> String {
+        normalizedCommandText(([executablePath] + arguments).joined(separator: " "))
+    }
+
+    /// Whitespace-normalized form of a command line: leading/trailing whitespace
+    /// removed and internal whitespace runs collapsed to single spaces. `ps`
+    /// does not preserve quoting, so this is the strongest canonical form the
+    /// live process text can be compared in.
+    static func normalizedCommandText(_ text: String) -> String {
+        text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+
+    /// SHA-256 of a command line, normalized the same way as the record.
+    static func commandDigest(ofCommandText commandText: String) -> String {
+        let digest = SHA256.hash(data: Data(normalizedCommandText(commandText).utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// SHA-256 of the canonical command text for an executable and arguments.
+    static func commandDigest(executablePath: String, arguments: [String]) -> String {
+        commandDigest(ofCommandText: commandText(executablePath: executablePath, arguments: arguments))
     }
 }
 
-/// Facts read from `ps` for one live process.
+/// Facts read from `ps`/libproc for one live process.
 struct ServiceProcessFacts: Equatable {
     var pid: pid_t
     var processGroupID: pid_t
     var launchedAt: String
     var resolvedExecutable: String
+    var resolvedExecutableSource: ServiceExecutableSource
+    /// Normalized `ps -o args=` text; empty when the command line could not be
+    /// read, which the verifier treats as a mismatch.
+    var commandLine: String
 }
 
 /// What the current app instance expects a valid record to contain.
 struct ServiceOwnershipExpectation: Equatable {
-    /// Digest of the arguments the current configuration would launch.
-    var argumentsDigest: String
     /// Port the current configuration would launch on.
     var port: Int
     /// Random identifier of the running app instance.
@@ -119,7 +150,6 @@ enum ServiceOwnershipVerifier {
               !record.argumentsDigest.isEmpty,
               !record.instanceID.isEmpty,
               (1...65535).contains(record.port),
-              !expectation.argumentsDigest.isEmpty,
               !expectation.instanceID.isEmpty,
               (1...65535).contains(expectation.port) else {
             return .external(.invalidRecord)
@@ -128,15 +158,23 @@ enum ServiceOwnershipVerifier {
         // when the process is still the one this app launched.
         guard record.instanceID == expectation.instanceID else { return .external(.instanceMismatch) }
         guard record.port == expectation.port else { return .external(.portMismatch) }
-        // The configuration changed since the launch: the running process no
-        // longer matches what the app would start, so it is external.
-        guard record.argumentsDigest == expectation.argumentsDigest else { return .external(.argumentsMismatch) }
         guard processIsAlive(record.pid) else { return .external(.processNotAlive) }
         // `ps` hides other users' processes; without facts nothing can be
         // proven, so no signal is allowed.
         guard let facts = facts(record.pid) else { return .external(.processFactsUnavailable) }
         guard facts.processGroupID == record.processGroupID else { return .external(.processGroupMismatch) }
         guard facts.launchedAt == record.launchedAt else { return .external(.launchTimeMismatch) }
+        // Live command line: the recorded digest must match what the process
+        // currently reports through `ps -o args=`. Empty or unparsable output
+        // is a mismatch, not a pass.
+        guard !facts.commandLine.isEmpty,
+              ServiceOwnershipRecord.commandDigest(ofCommandText: facts.commandLine) == record.argumentsDigest else {
+            return .external(.argumentsMismatch)
+        }
+        // When the executable path came from the `ps -o comm=` fallback it is
+        // weak evidence on its own; the command-line digest above is what keeps
+        // the verdict sound, so the path is still compared but never trusted
+        // alone.
         guard facts.resolvedExecutable == record.resolvedExecutable else { return .external(.executableMismatch) }
         return .managed
     }
@@ -167,7 +205,15 @@ final class FileServiceOwnershipStore: ServiceOwnershipStoring {
 
     func loadRecord(from url: URL) -> ServiceOwnershipRecord? {
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? decoder.decode(ServiceOwnershipRecord.self, from: data)
+        do {
+            return try decoder.decode(ServiceOwnershipRecord.self, from: data)
+        } catch {
+            // An undecodable record (for example one written by an older
+            // format) is never an ownership proof; drop it instead of leaving
+            // it behind forever. No signal is sent for the file's process.
+            removeRecord(at: url)
+            return nil
+        }
     }
 
     func save(_ record: ServiceOwnershipRecord, to url: URL) throws {

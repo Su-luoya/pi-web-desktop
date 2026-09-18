@@ -537,7 +537,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             serviceManager.stopService()
         } else {
             // 外部服务只读：保留原有警告文案，但确认后 stopService() 找不到可验证的
-            // 所有权记录，只会更新状态，不会向任何进程发送 TERM/KILL。
+            // 所有权记录，不会向任何进程发送 TERM/KILL，也不会把状态改成“已停止”。
             presentExternalServiceWarning(action: "停止") { [weak self] in
                 self?.serviceManager.stopService()
             }

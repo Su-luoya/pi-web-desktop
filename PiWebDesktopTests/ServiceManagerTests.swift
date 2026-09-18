@@ -194,14 +194,19 @@ private final class ManagerFailingOwnershipStore: ServiceOwnershipStoring {
 
 private let fakeLaunchedAt = "Wed Jul 30 12:00:00 2025"
 private let fakeExecutable = "/opt/homebrew/bin/pi-web"
+/// What the launched pi-web reports through `ps -o args=`. The npm install is
+/// a `#!/usr/bin/env node` script, so argv[0] is the interpreter.
+private let fakeCommandLine = "node /opt/homebrew/bin/pi-web --hostname 127.0.0.1 --port 30141 --no-open"
 
 /// Simulates `ps -o <format> -p <pid>` (and `lsof` for `listenerPort`) output
-/// for one PID.
+/// for one PID. `liveCommandLine` is a closure so a test can change the command
+/// line the process reports after a launch.
 private func processOutput(
     for pid: pid_t,
     command: String = fakeExecutable,
     launchedAt: String = fakeLaunchedAt,
     processGroupID: pid_t? = nil,
+    liveCommandLine: @escaping () -> String = { fakeCommandLine },
     listenerPort: Int? = nil
 ) -> ([String]) -> String? {
     { arguments in
@@ -214,6 +219,7 @@ private func processOutput(
         case "comm=": return "\(command)\n"
         case "pgid=": return "\(processGroupID ?? pid)\n"
         case "lstart=": return "\(launchedAt)\n"
+        case "args=": return "\(liveCommandLine())\n"
         default: return nil
         }
     }
@@ -241,6 +247,7 @@ private final class ServiceManagerHarness {
         configuration: ServiceConfiguration,
         alive: @escaping (pid_t) -> Bool,
         processOutput: @escaping ([String]) -> String?,
+        processExecutablePath: @escaping (pid_t) -> String? = { _ in nil },
         fileManager: FileManager,
         baseEnvironment: [String: String],
         ownershipStore: ServiceOwnershipStoring? = nil
@@ -262,7 +269,11 @@ private final class ServiceManagerHarness {
         signaler = ManagerFakeSignaler()
         store = ownershipStore ?? FileServiceOwnershipStore(fileManager: fileManager)
 
-        let inspector = ProcessInspector(runner: runner, processIsAlive: alive)
+        let inspector = ProcessInspector(
+            runner: runner,
+            processIsAlive: alive,
+            processExecutablePath: processExecutablePath
+        )
         manager = ServiceManager(
             configuration: configuration,
             appConfiguration: appConfiguration,
@@ -305,6 +316,7 @@ private final class ServiceManagerHarness {
         processGroupID: pid_t = 5150,
         launchedAt: String = fakeLaunchedAt,
         resolvedExecutable: String = fakeExecutable,
+        resolvedExecutableSource: ServiceExecutableSource = .psComm,
         argumentsDigest: String? = nil,
         port: Int = 30141,
         instanceID: String = ServiceManagerHarness.instanceID
@@ -314,9 +326,8 @@ private final class ServiceManagerHarness {
             processGroupID: processGroupID,
             launchedAt: launchedAt,
             resolvedExecutable: resolvedExecutable,
-            argumentsDigest: argumentsDigest ?? ServiceOwnershipRecord.argumentsDigest(
-                of: ["--hostname", "127.0.0.1", "--port", "30141", "--no-open"]
-            ),
+            resolvedExecutableSource: resolvedExecutableSource,
+            argumentsDigest: argumentsDigest ?? ServiceOwnershipRecord.commandDigest(ofCommandText: fakeCommandLine),
             port: port,
             instanceID: instanceID,
             recordedAt: "2025-07-30T12:00:00Z"
@@ -354,6 +365,7 @@ private func makeHarness(
     configuration: ServiceConfiguration = .default,
     alive: @escaping (pid_t) -> Bool = { _ in false },
     processOutput: @escaping ([String]) -> String? = { _ in nil },
+    processExecutablePath: @escaping (pid_t) -> String? = { _ in nil },
     fileManager: FileManager = .default,
     ownershipStore: ServiceOwnershipStoring? = nil
 ) throws -> ServiceManagerHarness {
@@ -361,6 +373,7 @@ private func makeHarness(
         configuration: configuration,
         alive: alive,
         processOutput: processOutput,
+        processExecutablePath: processExecutablePath,
         fileManager: fileManager,
         baseEnvironment: fakeBaseEnvironment,
         ownershipStore: ownershipStore
@@ -444,12 +457,15 @@ final class ServiceManagerTests: XCTestCase {
 
         XCTAssertNil(harness.manager.managedServicePID())
 
+        harness.manager.setState(.running)
         harness.manager.stopService()
         harness.scheduler.runAllBackgroundWork()
 
         XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
         XCTAssertNil(harness.readOwnershipRecord())
-        XCTAssertEqual(harness.manager.currentState, .stopped)
+        // An external service is not "stopped" by this app: the previous state
+        // stays visible instead of claiming the service is gone.
+        XCTAssertEqual(harness.manager.currentState, .running)
     }
 
     func testUnverifiableProcessFactsAreNeverSignalledAndKeepTheRecord() throws {
@@ -460,12 +476,101 @@ final class ServiceManagerTests: XCTestCase {
         defer { harness.cleanUp() }
         try harness.writeOwnershipRecord(harness.makeOwnershipRecord())
 
+        harness.manager.setState(.running)
         harness.manager.stopService()
         harness.scheduler.runAllBackgroundWork()
 
         XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
         XCTAssertNotNil(harness.readOwnershipRecord())
-        XCTAssertEqual(harness.manager.currentState, .stopped)
+        XCTAssertEqual(harness.manager.currentState, .running)
+    }
+
+    func testChangedLiveCommandLineMakesTheServiceExternalAndSendsNoSignal() throws {
+        // The record was written for the command line read at launch. If the
+        // live process now reports a different one, it is no longer provably
+        // the process this app launched, so it becomes external and no signal
+        // may be sent.
+        var liveCommandLine = fakeCommandLine
+        let harness = try makeHarness(
+            alive: { $0 == 5150 },
+            processOutput: processOutput(for: 5150, liveCommandLine: { liveCommandLine })
+        )
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = false
+        harness.manager.startManagedService()
+        XCTAssertEqual(harness.manager.managedServicePID(), 5150)
+
+        liveCommandLine = "node /opt/homebrew/bin/pi-web --hostname 0.0.0.0 --port 30141 --no-open"
+
+        XCTAssertNil(harness.manager.managedServicePID())
+        harness.manager.stopService()
+        harness.scheduler.runAllBackgroundWork()
+
+        XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
+        XCTAssertNil(harness.readOwnershipRecord())
+        XCTAssertEqual(harness.manager.currentState, .starting)
+    }
+
+    func testChangedResolvedExecutableMakesTheServiceExternalAndSendsNoSignal() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        var record = harness.makeOwnershipRecord()
+        record.resolvedExecutable = "/opt/homebrew/bin/other-server"
+        try harness.writeOwnershipRecord(record)
+
+        XCTAssertNil(harness.manager.managedServicePID())
+        harness.manager.setState(.running)
+        harness.manager.stopService()
+        harness.scheduler.runAllBackgroundWork()
+
+        XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
+        XCTAssertNil(harness.readOwnershipRecord())
+        XCTAssertEqual(harness.manager.currentState, .running)
+    }
+
+    func testProcPidPathProvenanceIsRecordedWhenAvailable() throws {
+        let harness = try makeHarness(
+            alive: { $0 == 5150 },
+            processOutput: processOutput(for: 5150),
+            processExecutablePath: { pid in pid == 5150 ? "/opt/homebrew/bin/node" : nil }
+        )
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = false
+
+        harness.manager.startManagedService()
+
+        let record = try XCTUnwrap(harness.readOwnershipRecord())
+        XCTAssertEqual(record.resolvedExecutable, "/opt/homebrew/bin/node")
+        XCTAssertEqual(record.resolvedExecutableSource, .procPidPath)
+        XCTAssertEqual(harness.manager.managedServicePID(), 5150)
+    }
+
+    func testStartManagedServiceWithoutArgumentsProvenanceIsRejectedAndTerminated() throws {
+        // `ps -o args=` yields nothing, so the command line cannot be proven:
+        // the launch is terminated instead of being adopted unverified.
+        let harness = try makeHarness(
+            alive: { $0 == 5150 },
+            processOutput: processOutput(for: 5150, liveCommandLine: { "" })
+        )
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+
+        harness.manager.startManagedService()
+        harness.scheduler.runAllBackgroundWork()
+
+        XCTAssertNil(harness.readOwnershipRecord())
+        XCTAssertNil(harness.manager.managedServicePID())
+        XCTAssertEqual(
+            harness.signaler.groupSignals,
+            [ManagerFakeSignaler.GroupSignal(signal: SIGTERM, processGroupID: 5150)]
+        )
+        XCTAssertEqual(harness.startupFailures.count, 1)
+        XCTAssertTrue(harness.startupFailures.first?.hasPrefix("无法登记 pi-web 的所有权信息") == true)
     }
 
     func testStartManagedServiceWritesAVerifiableOwnershipRecord() throws {
@@ -483,9 +588,10 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(record.processGroupID, 5150)
         XCTAssertEqual(record.launchedAt, fakeLaunchedAt)
         XCTAssertEqual(record.resolvedExecutable, fakeExecutable)
+        XCTAssertEqual(record.resolvedExecutableSource, .psComm)
         XCTAssertEqual(
             record.argumentsDigest,
-            ServiceOwnershipRecord.argumentsDigest(of: ["--hostname", "127.0.0.1", "--port", "30141", "--no-open"])
+            ServiceOwnershipRecord.commandDigest(ofCommandText: fakeCommandLine)
         )
         XCTAssertEqual(record.port, 30141)
         XCTAssertEqual(record.instanceID, ServiceManagerHarness.instanceID)
@@ -493,7 +599,7 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(harness.manager.startDecision(), .existingProcess)
     }
 
-    func testOwnershipRecordWriteFailureDowngradesTheServiceToExternal() throws {
+    func testOwnershipRecordWriteFailureTerminatesTheFreshGroupAndBlocksASecondLaunch() throws {
         let harness = try makeHarness(
             alive: { $0 == 5150 },
             processOutput: processOutput(for: 5150),
@@ -505,19 +611,36 @@ final class ServiceManagerTests: XCTestCase {
 
         harness.manager.startManagedService()
 
-        // The child runs, but without a record the app cannot prove ownership:
-        // no stop signal and no automatic restart.
+        // The record could not be written: the fresh process group is killed
+        // and no ownership record exists.
         XCTAssertEqual(harness.launcher.launchCount, 1)
+        XCTAssertNil(harness.readOwnershipRecord())
         XCTAssertNil(harness.manager.managedServicePID())
-        XCTAssertNotEqual(harness.manager.startDecision(), .existingProcess)
-        harness.manager.stopService()
+        // A second start must not spawn another service while the unrecorded
+        // launch is still alive.
+        harness.manager.startManagedService()
+        XCTAssertEqual(harness.launcher.launchCount, 1)
+
         harness.scheduler.runAllBackgroundWork()
-        XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
+
+        // Group-only signal, startup failure reported, nothing adopted.
+        XCTAssertEqual(
+            harness.signaler.groupSignals,
+            [ManagerFakeSignaler.GroupSignal(signal: SIGTERM, processGroupID: 5150)]
+        )
+        XCTAssertEqual(harness.startupFailures.count, 1)
+        XCTAssertTrue(harness.startupFailures.first?.hasPrefix("无法登记 pi-web 的所有权信息") == true)
+        if case .failed = harness.manager.currentState {} else {
+            XCTFail("expected .failed, got \(harness.manager.currentState)")
+        }
+        // The fake child survived the signal, so it still blocks a new launch.
+        XCTAssertEqual(harness.manager.startDecision(), .existingProcess)
     }
 
-    func testNonLeaderChildIsTreatedAsUnhosted() throws {
-        // A child that is not its own process group leader cannot be signalled
-        // safely, so the record is never written.
+    func testNonLeaderChildIsTerminatedInsteadOfBeingAdopted() throws {
+        // A child that is not its own process group leader cannot be
+        // verified, so it is terminated rather than kept as a half-managed
+        // service.
         let harness = try makeHarness(
             alive: { $0 == 5150 },
             processOutput: processOutput(for: 5150, processGroupID: 4000)
@@ -527,9 +650,15 @@ final class ServiceManagerTests: XCTestCase {
         harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
 
         harness.manager.startManagedService()
+        harness.scheduler.runAllBackgroundWork()
 
         XCTAssertNil(harness.readOwnershipRecord())
         XCTAssertNil(harness.manager.managedServicePID())
+        // The signal still targets the child's real group (its own pid).
+        XCTAssertEqual(
+            harness.signaler.groupSignals,
+            [ManagerFakeSignaler.GroupSignal(signal: SIGTERM, processGroupID: 5150)]
+        )
     }
 
     // MARK: Start decisions
@@ -733,18 +862,40 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(harness.manager.currentState, .stopped)
     }
 
-    func testStopServiceWithoutAVerifiedRecordOnlyResetsTheState() throws {
+    func testStopServiceWithoutAVerifiedRecordSendsNothingAndKeepsTheState() throws {
         let harness = try makeHarness()
         defer { harness.cleanUp() }
 
         var completionRan = false
         harness.manager.stopService { completionRan = true }
 
-        XCTAssertEqual(harness.manager.currentState, .stopped)
+        XCTAssertEqual(harness.manager.currentState, .checking)
         XCTAssertTrue(completionRan)
         XCTAssertEqual(harness.scheduler.backgroundWork.count, 0)
         XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
         XCTAssertTrue(harness.runner.invocations.isEmpty)
+    }
+
+    func testExternalServiceStopKeepsTheRunningStateAndSendsNoSignal() throws {
+        // The app adopted an external service (its health probe answered).
+        // Confirming "stop" for it must not kill it and must not pretend it
+        // is gone.
+        let harness = try makeHarness(
+            alive: { $0 == 4321 },
+            processOutput: processOutput(for: 4321, listenerPort: 30141)
+        )
+        defer { harness.cleanUp() }
+        harness.manager.setState(.running)
+
+        var completionRan = false
+        harness.manager.stopService { completionRan = true }
+        harness.scheduler.runAllBackgroundWork()
+
+        XCTAssertTrue(completionRan)
+        XCTAssertEqual(harness.manager.currentState, .running)
+        XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
+        XCTAssertTrue(harness.scheduler.backgroundWork.isEmpty)
+        XCTAssertNil(harness.readOwnershipRecord())
     }
 
     func testExternalListenerIsNeverSignalled() throws {
@@ -755,6 +906,7 @@ final class ServiceManagerTests: XCTestCase {
             processOutput: processOutput(for: 4321, listenerPort: 30141)
         )
         defer { harness.cleanUp() }
+        harness.manager.setState(.running)
 
         harness.manager.stopService()
         harness.manager.stopAllServices {}
@@ -764,6 +916,7 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertFalse(harness.runner.invocations.contains { $0.first == "/bin/kill" })
         XCTAssertFalse(harness.runner.invocations.contains { $0.contains("-TERM") || $0.contains("-KILL") })
         XCTAssertNil(harness.readOwnershipRecord())
+        XCTAssertEqual(harness.manager.currentState, .running)
     }
 
     func testRecordedPortChangeMakesTheRunningServiceExternal() throws {
@@ -776,12 +929,14 @@ final class ServiceManagerTests: XCTestCase {
         var configuration = ServiceConfiguration.default
         configuration.port = 30142
         harness.manager.updateConfiguration(configuration)
+        harness.manager.setState(.running)
 
         harness.manager.stopService()
         harness.scheduler.runAllBackgroundWork()
 
         XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
         XCTAssertNil(harness.readOwnershipRecord())
+        XCTAssertEqual(harness.manager.currentState, .running)
     }
 
     // MARK: Quit behaviour
@@ -839,13 +994,52 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
     }
 
+    // MARK: Spawn descriptors
+
+    func testSpawnDescriptorAboveStandardErrorIsPassedThrough() throws {
+        let pipe = Pipe()
+        defer {
+            try? pipe.fileHandleForReading.close()
+            try? pipe.fileHandleForWriting.close()
+        }
+        let descriptor = pipe.fileHandleForWriting.fileDescriptor
+        XCTAssertGreaterThan(descriptor, STDERR_FILENO)
+
+        let guarded = try XCTUnwrap(SpawnFileDescriptor.aboveStandardError(descriptor))
+
+        XCTAssertEqual(guarded.descriptor, descriptor)
+        XCTAssertFalse(guarded.isDuplicate)
+        // Closing a pass-through descriptor must leave the caller's fd open.
+        guarded.closeIfDuplicate()
+        XCTAssertEqual(write(descriptor, "x", 1), 1)
+        XCTAssertNil(SpawnFileDescriptor.aboveStandardError(-1))
+    }
+
+    func testSpawnDescriptorAtOrBelowStandardErrorIsDuplicatedAboveIt() throws {
+        // A descriptor that `open` handed out as 0/1/2 must not be passed to
+        // `posix_spawn` directly, because closing it would clobber the child's
+        // stdin/stdout/stderr. It is copied above stderr instead. fd 1 is used
+        // here because it is guaranteed to be open and only the copy is ever
+        // closed.
+        let guarded = try XCTUnwrap(SpawnFileDescriptor.aboveStandardError(STDOUT_FILENO))
+
+        XCTAssertGreaterThan(guarded.descriptor, STDERR_FILENO)
+        XCTAssertTrue(guarded.isDuplicate)
+        guarded.closeIfDuplicate()
+        // The caller's descriptor survived the copy being closed.
+        XCTAssertEqual(write(STDOUT_FILENO, "", 0), 0)
+    }
+
     // MARK: Health monitoring
 
     func testHealthMonitorRestartsAManagedServiceThatDisappeared() throws {
         // The liveness probe follows the fake child, so the ownership record
         // stops verifying exactly like a real dead process.
         let liveness = ManagerFakeLiveness()
-        let harness = try makeHarness(alive: { _ in liveness.isAlive }, processOutput: processOutput(for: 5150))
+        let harness = try makeHarness(
+            alive: { pid in pid == 5150 ? liveness.isAlive : true },
+            processOutput: processOutput(for: 5150)
+        )
         defer { harness.cleanUp() }
         harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
         harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
@@ -860,6 +1054,10 @@ final class ServiceManagerTests: XCTestCase {
         process.isRunning = false
         liveness.isAlive = false
         harness.probe.ready = false
+        // The restart spawns a new process with a new PID, which is alive and
+        // whose `ps` facts are readable.
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5200))
+        harness.runner.handler = processOutput(for: 5200)
         XCTAssertTrue(harness.scheduler.runHealthCheck())
 
         XCTAssertEqual(harness.states.suffix(2), [.stopped, .starting])

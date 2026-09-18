@@ -8,19 +8,22 @@ import XCTest
 /// injected store. No test touches, signals or terminates a real process.
 final class ServiceOwnershipTests: XCTestCase {
     private let executable = "/opt/homebrew/bin/pi-web"
+    private let realExecutable = "/opt/homebrew/bin/node"
     private let launchArguments = ["--hostname", "127.0.0.1", "--port", "30141", "--no-open"]
+    /// What `/opt/homebrew/bin/pi-web` reports through `ps -o args=` after
+    /// `exec`: the npm install is a `#!/usr/bin/env node` script, so argv[0] is
+    /// the interpreter and the recorded digest is over this text.
+    private let liveCommandText = "node /opt/homebrew/bin/pi-web --hostname 127.0.0.1 --port 30141 --no-open"
     private let launchedAt = "Wed Jul 30 12:00:00 2025"
     private let instanceID = "instance-A"
 
     // MARK: - Builders
 
     private func makeExpectation(
-        arguments: [String]? = nil,
         port: Int = 30141,
         instanceID: String? = nil
     ) -> ServiceOwnershipExpectation {
         ServiceOwnershipExpectation(
-            argumentsDigest: ServiceOwnershipRecord.argumentsDigest(of: arguments ?? launchArguments),
             port: port,
             instanceID: instanceID ?? self.instanceID
         )
@@ -31,6 +34,7 @@ final class ServiceOwnershipTests: XCTestCase {
         processGroupID: pid_t = 5150,
         launchedAt: String? = nil,
         resolvedExecutable: String? = nil,
+        resolvedExecutableSource: ServiceExecutableSource = .procPidPath,
         argumentsDigest: String? = nil,
         port: Int = 30141,
         instanceID: String? = nil
@@ -39,8 +43,9 @@ final class ServiceOwnershipTests: XCTestCase {
             pid: pid,
             processGroupID: processGroupID,
             launchedAt: launchedAt ?? self.launchedAt,
-            resolvedExecutable: resolvedExecutable ?? executable,
-            argumentsDigest: argumentsDigest ?? ServiceOwnershipRecord.argumentsDigest(of: launchArguments),
+            resolvedExecutable: resolvedExecutable ?? realExecutable,
+            resolvedExecutableSource: resolvedExecutableSource,
+            argumentsDigest: argumentsDigest ?? ServiceOwnershipRecord.commandDigest(ofCommandText: liveCommandText),
             port: port,
             instanceID: instanceID ?? self.instanceID,
             recordedAt: "2025-07-30T12:00:00Z"
@@ -51,13 +56,17 @@ final class ServiceOwnershipTests: XCTestCase {
         pid: pid_t = 5150,
         processGroupID: pid_t = 5150,
         launchedAt: String? = nil,
-        resolvedExecutable: String? = nil
+        resolvedExecutable: String? = nil,
+        resolvedExecutableSource: ServiceExecutableSource = .procPidPath,
+        commandLine: String? = nil
     ) -> ServiceProcessFacts {
         ServiceProcessFacts(
             pid: pid,
             processGroupID: processGroupID,
             launchedAt: launchedAt ?? self.launchedAt,
-            resolvedExecutable: resolvedExecutable ?? executable
+            resolvedExecutable: resolvedExecutable ?? realExecutable,
+            resolvedExecutableSource: resolvedExecutableSource,
+            commandLine: commandLine ?? liveCommandText
         )
     }
 
@@ -132,25 +141,65 @@ final class ServiceOwnershipTests: XCTestCase {
         XCTAssertEqual(verdict, .external(.portMismatch))
     }
 
-    // MARK: - Arguments
+    // MARK: - Live arguments
 
-    func testChangedArgumentsAreExternal() {
-        let record = makeRecord(
-            argumentsDigest: ServiceOwnershipRecord.argumentsDigest(of: ["--hostname", "0.0.0.0", "--port", "30141", "--no-open"])
+    func testChangedLiveCommandLineIsExternal() {
+        // The record was written for one command line; the live process now
+        // reports another one (for example a second instance on the same port).
+        let verdict = verify(
+            record: makeRecord(),
+            facts: makeFacts(commandLine: "node /opt/homebrew/bin/pi-web --hostname 0.0.0.0 --port 30141 --no-open")
         )
-        let verdict = verify(record: record, expectation: makeExpectation())
+        XCTAssertEqual(verdict, .external(.argumentsMismatch))
+        XCTAssertTrue(verdict.shouldRemoveRecord)
+    }
+
+    func testEmptyLiveCommandLineIsExternal() {
+        // `ps -o args=` yielded nothing: unreadable output is a mismatch, never
+        // a pass, even though every other fact matches.
+        let verdict = verify(record: makeRecord(), facts: makeFacts(commandLine: ""))
+        XCTAssertEqual(verdict, .external(.argumentsMismatch))
+        XCTAssertTrue(verdict.shouldRemoveRecord)
+    }
+
+    func testLiveCommandLineWhitespaceRunsAreNormalized() throws {
+        // `ps` pads columns; the comparison collapses whitespace runs so it
+        // cannot produce a false mismatch.
+        let padded = try XCTUnwrap(ProcessInspector.parseCommandLine(
+            "node   /opt/homebrew/bin/pi-web   --hostname   127.0.0.1 --port 30141 --no-open"
+        ))
+        let verdict = verify(record: makeRecord(), facts: makeFacts(commandLine: padded))
+        XCTAssertEqual(verdict, .managed)
+    }
+
+    func testReorderedArgumentsAreExternal() {
+        let verdict = verify(
+            record: makeRecord(),
+            facts: makeFacts(commandLine: "node /opt/homebrew/bin/pi-web --port 30141 --hostname 127.0.0.1 --no-open")
+        )
         XCTAssertEqual(verdict, .external(.argumentsMismatch))
     }
 
-    func testArgumentsDigestIsStableAndSeparatesArguments() {
-        let digest = ServiceOwnershipRecord.argumentsDigest(of: launchArguments)
+    func testCommandDigestIsStableAndNormalizesWhitespace() {
+        let digest = ServiceOwnershipRecord.commandDigest(ofCommandText: liveCommandText)
         XCTAssertEqual(digest.count, 64)
-        XCTAssertEqual(digest, ServiceOwnershipRecord.argumentsDigest(of: launchArguments))
-        XCTAssertNotEqual(digest, ServiceOwnershipRecord.argumentsDigest(of: Array(launchArguments.dropLast())))
-        // Length prefixing keeps "a\u{1F}b" and "ab" apart.
-        XCTAssertNotEqual(
-            ServiceOwnershipRecord.argumentsDigest(of: ["a", "b"]),
-            ServiceOwnershipRecord.argumentsDigest(of: ["a\u{1F}b"])
+        XCTAssertEqual(digest, ServiceOwnershipRecord.commandDigest(ofCommandText: liveCommandText))
+        XCTAssertEqual(digest, ServiceOwnershipRecord.commandDigest(ofCommandText: "  node   /opt/homebrew/bin/pi-web --hostname 127.0.0.1  --port 30141 --no-open  "))
+        XCTAssertNotEqual(digest, ServiceOwnershipRecord.commandDigest(ofCommandText: "node /opt/homebrew/bin/pi-web --hostname 127.0.0.1 --port 30142 --no-open"))
+        XCTAssertNotEqual(digest, ServiceOwnershipRecord.commandDigest(ofCommandText: ""))
+    }
+
+    func testCommandTextIsTheCanonicalExecutablePlusArgumentsForm() {
+        // Native executables report exactly this text through `ps -o args=`;
+        // npm/shebang installs report the interpreter instead, which is why the
+        // launch path records the observed live text.
+        XCTAssertEqual(
+            ServiceOwnershipRecord.commandText(executablePath: executable, arguments: launchArguments),
+            "/opt/homebrew/bin/pi-web --hostname 127.0.0.1 --port 30141 --no-open"
+        )
+        XCTAssertEqual(
+            ServiceOwnershipRecord.commandDigest(executablePath: executable, arguments: launchArguments),
+            ServiceOwnershipRecord.commandDigest(ofCommandText: "/opt/homebrew/bin/pi-web --hostname 127.0.0.1 --port 30141 --no-open")
         )
     }
 
@@ -159,6 +208,24 @@ final class ServiceOwnershipTests: XCTestCase {
     func testChangedExecutableIsExternal() {
         let verdict = verify(record: makeRecord(), facts: makeFacts(resolvedExecutable: "/opt/homebrew/bin/other-server"))
         XCTAssertEqual(verdict, .external(.executableMismatch))
+    }
+
+    func testFallbackExecutableSourceStillRequiresTheCommandLineToMatch() {
+        // `ps -o comm=` provenance is weak evidence on its own; the recorded
+        // command-line digest is what keeps the verdict sound.
+        let record = makeRecord(resolvedExecutable: "pi-web", resolvedExecutableSource: .psComm)
+        XCTAssertEqual(verify(record: record, facts: makeFacts(resolvedExecutable: "pi-web", resolvedExecutableSource: .psComm)), .managed)
+        XCTAssertEqual(
+            verify(
+                record: record,
+                facts: makeFacts(
+                    resolvedExecutable: "pi-web",
+                    resolvedExecutableSource: .psComm,
+                    commandLine: "node /opt/homebrew/bin/pi-web --hostname 0.0.0.0 --port 30141 --no-open"
+                )
+            ),
+            .external(.argumentsMismatch)
+        )
     }
 
     func testChangedProcessGroupIsExternal() {
@@ -232,18 +299,22 @@ final class ServiceOwnershipTests: XCTestCase {
 
         XCTAssertEqual(store.loadRecord(from: url), record)
         let json = try XCTUnwrap(String(data: try Data(contentsOf: url), encoding: .utf8))
-        for key in ["pid", "processGroupID", "launchedAt", "resolvedExecutable", "argumentsDigest", "port", "instanceID", "recordedAt"] {
+        for key in ["pid", "processGroupID", "launchedAt", "resolvedExecutable", "resolvedExecutableSource", "argumentsDigest", "port", "instanceID", "recordedAt"] {
             XCTAssertTrue(json.contains("\"\(key)\""), "record JSON is missing \(key)")
         }
+        XCTAssertTrue(json.contains("\"proc_pidpath\""), "record JSON is missing the provenance value")
     }
 
-    func testCorruptRecordIsTreatedAsMissing() throws {
+    func testCorruptRecordIsTreatedAsMissingAndRemoved() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("service-owner.json")
         try "not json\n".write(to: url, atomically: true, encoding: .utf8)
 
         XCTAssertNil(FileServiceOwnershipStore().loadRecord(from: url))
+        // An undecodable record is never an ownership proof; it is dropped
+        // instead of lingering forever. Nothing is signalled for it.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
     }
 
     func testRemovingARecordFileLeavesNoTrace() throws {

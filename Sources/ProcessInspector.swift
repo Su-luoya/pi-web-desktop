@@ -45,13 +45,16 @@ struct ProcessInspector {
 
     private let runner: CommandRunning
     private let processIsAlive: (pid_t) -> Bool
+    private let processExecutablePath: (pid_t) -> String?
 
     init(
         runner: CommandRunning = SystemCommandRunner(),
-        processIsAlive: @escaping (pid_t) -> Bool = ProcessInspector.defaultProcessIsAlive
+        processIsAlive: @escaping (pid_t) -> Bool = ProcessInspector.defaultProcessIsAlive,
+        processExecutablePath: @escaping (pid_t) -> String? = ProcessInspector.defaultProcessExecutablePath
     ) {
         self.runner = runner
         self.processIsAlive = processIsAlive
+        self.processExecutablePath = processExecutablePath
     }
 
     // MARK: - Pure parsing
@@ -59,6 +62,21 @@ struct ProcessInspector {
     /// `kill(pid, 0)` liveness probe. PIDs 0 and 1 are never treated as app-owned.
     static func defaultProcessIsAlive(_ pid: pid_t) -> Bool {
         pid > 1 && kill(pid, 0) == 0
+    }
+
+    /// Real executable image path through libproc (`proc_pidpath`).
+    ///
+    /// This is stronger evidence than `ps -o comm=` and resolves the actual
+    /// binary behind symlinks and shebang scripts. It only works for the
+    /// current user's processes; other users' processes make it fail, which
+    /// callers treat as "fall back to `ps -o comm=`".
+    static func defaultProcessExecutablePath(_ pid: pid_t) -> String? {
+        guard pid > 1 else { return nil }
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return nil }
+        let path = String(cString: buffer)
+        return path.isEmpty ? nil : path
     }
 
     /// Parses a PID record file (`app.pid`, or the legacy `service.pid` while
@@ -110,6 +128,18 @@ struct ProcessInspector {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    /// Parses `ps -o args=` output: the command line the process reports.
+    ///
+    /// Whitespace runs are collapsed to single spaces, which is the same
+    /// normalization used for the recorded digest. `ps` does not preserve
+    /// quoting, so argument boundaries inside the text are not recoverable
+    /// (see docs/security-ownership.md).
+    static func parseCommandLine(_ output: String?) -> String? {
+        let trimmed = output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        return trimmed.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+
     // MARK: - Commands
 
     func isProcessAlive(_ pid: pid_t) -> Bool {
@@ -139,18 +169,41 @@ struct ProcessInspector {
         Self.parseResolvedExecutable(runner.run([Self.processCommand, "-o", "comm=", "-p", "\(pid)"]))
     }
 
-    /// Facts needed to verify an ownership record. Any missing fact means
-    /// "unverifiable", which callers treat like an external service: no signal.
+    /// `ps -o args=` for a PID (normalized), or nil when `ps` cannot read the
+    /// process or reports nothing. This is the live argv the ownership record
+    /// is verified against.
+    func commandLine(of pid: pid_t) -> String? {
+        Self.parseCommandLine(runner.run([Self.processCommand, "-o", "args=", "-p", "\(pid)"]))
+    }
+
+    /// Executable identity for a PID: `proc_pidpath` first, `ps -o comm=` as a
+    /// fallback. The provenance is returned with the path so records can mark
+    /// weak evidence.
+    func resolvedExecutableInfo(of pid: pid_t) -> (path: String, source: ServiceExecutableSource)? {
+        if let path = processExecutablePath(pid), !path.isEmpty {
+            return (path, .procPidPath)
+        }
+        guard let fallback = resolvedExecutable(of: pid) else { return nil }
+        return (fallback, .psComm)
+    }
+
+    /// Facts needed to verify an ownership record.
+    ///
+    /// `pgid`, `lstart` and an executable identity are required; `commandLine`
+    /// may be empty when `ps -o args=` yields nothing, and the verifier then
+    /// treats the record as a mismatch (an empty argv is not ownership proof).
     func processFacts(of pid: pid_t) -> ServiceProcessFacts? {
         guard pid > 1,
               let processGroupID = processGroupID(of: pid),
               let launchedAt = processLaunchTime(of: pid),
-              let resolvedExecutable = resolvedExecutable(of: pid) else { return nil }
+              let executable = resolvedExecutableInfo(of: pid) else { return nil }
         return ServiceProcessFacts(
             pid: pid,
             processGroupID: processGroupID,
             launchedAt: launchedAt,
-            resolvedExecutable: resolvedExecutable
+            resolvedExecutable: executable.path,
+            resolvedExecutableSource: executable.source,
+            commandLine: commandLine(of: pid) ?? ""
         )
     }
 

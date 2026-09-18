@@ -224,18 +224,34 @@ final class SystemServiceLauncher: ServiceLaunching {
         status = posix_spawnattr_setpgroup(&attributes, 0)
         guard status == 0 else { throw ServiceSpawnError.attributesUnavailable(status) }
 
-        let nullDevice = open("/dev/null", O_RDONLY)
-        guard nullDevice >= 0 else { throw ServiceSpawnError.standardDescriptorsUnavailable(errno) }
-        defer { close(nullDevice) }
-        let logDescriptor = logHandle.fileDescriptor
-        status = posix_spawn_file_actions_adddup2(&fileActions, nullDevice, STDIN_FILENO)
+        let rawNullDevice = open("/dev/null", O_RDONLY)
+        guard rawNullDevice >= 0 else { throw ServiceSpawnError.standardDescriptorsUnavailable(errno) }
+        // Owned by this function and always closed again; when `open` handed
+        // out fd 0-2 those descriptors were closed before, so closing them
+        // restores the previous state instead of leaking a descriptor.
+        defer { close(rawNullDevice) }
+        guard let nullDevice = SpawnFileDescriptor.aboveStandardError(rawNullDevice) else {
+            throw ServiceSpawnError.standardDescriptorsUnavailable(EMFILE)
+        }
+        defer { nullDevice.closeIfDuplicate() }
+        guard let logDevice = SpawnFileDescriptor.aboveStandardError(logHandle.fileDescriptor) else {
+            throw ServiceSpawnError.standardDescriptorsUnavailable(EMFILE)
+        }
+        defer { logDevice.closeIfDuplicate() }
+        status = posix_spawn_file_actions_adddup2(&fileActions, nullDevice.descriptor, STDIN_FILENO)
         guard status == 0 else { throw ServiceSpawnError.standardDescriptorsUnavailable(status) }
-        status = posix_spawn_file_actions_adddup2(&fileActions, logDescriptor, STDOUT_FILENO)
+        status = posix_spawn_file_actions_adddup2(&fileActions, logDevice.descriptor, STDOUT_FILENO)
         guard status == 0 else { throw ServiceSpawnError.standardDescriptorsUnavailable(status) }
-        status = posix_spawn_file_actions_adddup2(&fileActions, logDescriptor, STDERR_FILENO)
+        status = posix_spawn_file_actions_adddup2(&fileActions, logDevice.descriptor, STDERR_FILENO)
         guard status == 0 else { throw ServiceSpawnError.standardDescriptorsUnavailable(status) }
-        status = posix_spawn_file_actions_addclose(&fileActions, nullDevice)
-        guard status == 0 else { throw ServiceSpawnError.standardDescriptorsUnavailable(status) }
+        if nullDevice.isDuplicate {
+            status = posix_spawn_file_actions_addclose(&fileActions, nullDevice.descriptor)
+            guard status == 0 else { throw ServiceSpawnError.standardDescriptorsUnavailable(status) }
+        }
+        if logDevice.isDuplicate {
+            status = posix_spawn_file_actions_addclose(&fileActions, logDevice.descriptor)
+            guard status == 0 else { throw ServiceSpawnError.standardDescriptorsUnavailable(status) }
+        }
 
         // `posix_spawn` has no portable working-directory action. `addchdir`
         // needs macOS 26 while the app targets macOS 14, so the `_np` variant
@@ -278,6 +294,39 @@ final class SystemServiceLauncher: ServiceLaunching {
 
     private func freeCStrings(_ strings: [UnsafeMutablePointer<CChar>?]) {
         for pointer in strings { free(pointer) }
+    }
+}
+
+/// A descriptor passed to `posix_spawn` that is guaranteed to be above
+/// stderr.
+///
+/// When the app's standard descriptors are closed, `open` can hand out fd 0, 1
+/// or 2. Using such a descriptor as a `dup2` source and then closing it with a
+/// file action would clobber the redirection targets instead of the temporary
+/// descriptor, so it is first copied above stderr with `F_DUPFD_CLOEXEC`.
+struct SpawnFileDescriptor {
+    let descriptor: Int32
+    /// True when `descriptor` is a copy that has to be closed by this caller.
+    let isDuplicate: Bool
+
+    /// Returns `descriptor` unchanged when it is above stderr, otherwise a
+    /// `F_DUPFD_CLOEXEC` copy starting at fd 3; nil when neither is possible.
+    static func aboveStandardError(_ descriptor: Int32) -> SpawnFileDescriptor? {
+        guard descriptor >= 0 else { return nil }
+        guard descriptor <= STDERR_FILENO else {
+            return SpawnFileDescriptor(descriptor: descriptor, isDuplicate: false)
+        }
+        let duplicate = fcntl(descriptor, F_DUPFD_CLOEXEC, STDERR_FILENO + 1)
+        guard duplicate > STDERR_FILENO else {
+            if duplicate >= 0 { close(duplicate) }
+            return nil
+        }
+        return SpawnFileDescriptor(descriptor: duplicate, isDuplicate: true)
+    }
+
+    /// Closes the copy and leaves a pass-through descriptor untouched.
+    func closeIfDuplicate() {
+        if isDuplicate { close(descriptor) }
     }
 }
 
@@ -343,7 +392,8 @@ final class POSIXServiceProcess: ServiceProcessHandle {
 enum ServiceStartDecision: Equatable {
     /// A stop is in flight; starting now would race with it.
     case ignored
-    /// A managed process is already running; keep polling it instead.
+    /// A managed process is already running, or a launch is in flight: keep
+    /// polling/using it instead of starting a second service.
     case existingProcess
     /// No pi-web executable could be resolved.
     case missingExecutable
@@ -466,9 +516,6 @@ final class ServiceManager {
     /// Expectation a stored record must satisfy for the current configuration.
     func ownershipExpectation() -> ServiceOwnershipExpectation {
         ServiceOwnershipExpectation(
-            argumentsDigest: ServiceOwnershipRecord.argumentsDigest(
-                of: ServiceLaunchSpecification.arguments(configuration: configuration)
-            ),
             port: configuration.port,
             instanceID: instanceID
         )
@@ -528,6 +575,10 @@ final class ServiceManager {
     func startDecision() -> ServiceStartDecision {
         guard !isStoppingService else { return .ignored }
         if managedServicePID() != nil { return .existingProcess }
+        // A launch that has not produced a record yet is still in flight (or is
+        // an unrecorded child that survived cleanup). Starting another one
+        // would leave two services competing for the same port.
+        if let process = serviceProcess, process.isRunning { return .existingProcess }
         guard let piWebPath = configuration.piWebPath.nilIfEmpty ?? resolvePiWebPath() else {
             return .missingExecutable
         }
@@ -625,10 +676,15 @@ final class ServiceManager {
                 }
                 serviceProcess = process
                 startupAttempts = 0
-                // Without a written ownership record the process can never be
-                // verified later, so it is treated as external from the start:
-                // no stop signal and no automatic restart.
-                didLaunchService = writeOwnershipRecord(for: specification, process: process)
+                // A process without a verifiable ownership record can never be
+                // managed: kill the fresh group and report the startup failure
+                // instead of leaving an unmanageable service behind.
+                let recorded = writeOwnershipRecord(for: specification, process: process)
+                guard recorded, verifiedOwnershipRecord() != nil else {
+                    abandonUnhostedLaunch(process: process)
+                    return
+                }
+                didLaunchService = true
                 setState(.starting)
                 onPageMessage?("正在启动 Pi Web…")
                 pollUntilReady()
@@ -641,18 +697,29 @@ final class ServiceManager {
     /// Records the process this launch created.
     ///
     /// A PID that is not a process group leader, unreadable `ps` facts, or a
-    /// failed write all mean "unhosted": the service may keep running, but the
-    /// app will never signal it because ownership cannot be proven later.
+    /// failed write all mean "unhosted": the caller terminates the fresh
+    /// process group, because an unverifiable service must never survive as a
+    /// half-managed child. The digest is over the normalized command text:
+    /// the live `ps -o args=` text when it is readable, otherwise the canonical
+    /// `executablePath + arguments` text (which a later verification then
+    /// rejects, since an empty live command line is a mismatch).
     private func writeOwnershipRecord(for specification: ServiceLaunchSpecification, process: ServiceProcessHandle) -> Bool {
         guard process.processIdentifier > 1,
               let facts = processInspector.processFacts(of: process.processIdentifier),
               facts.processGroupID == process.processIdentifier else { return false }
+        let commandText = facts.commandLine.isEmpty
+            ? ServiceOwnershipRecord.commandText(
+                executablePath: specification.executablePath,
+                arguments: specification.arguments
+            )
+            : facts.commandLine
         let record = ServiceOwnershipRecord(
             pid: process.processIdentifier,
             processGroupID: facts.processGroupID,
             launchedAt: facts.launchedAt,
             resolvedExecutable: facts.resolvedExecutable,
-            argumentsDigest: ServiceOwnershipRecord.argumentsDigest(of: specification.arguments),
+            resolvedExecutableSource: facts.resolvedExecutableSource,
+            argumentsDigest: ServiceOwnershipRecord.commandDigest(ofCommandText: commandText),
             port: configuration.port,
             instanceID: instanceID,
             recordedAt: ISO8601DateFormatter().string(from: Date())
@@ -662,6 +729,38 @@ final class ServiceManager {
             return true
         } catch {
             return false
+        }
+    }
+
+    /// Terminates a launch whose ownership record was not written or did not
+    /// verify immediately after the launch.
+    ///
+    /// This path owns the cleanup of that launch (`launchGeneration` is bumped
+    /// so its termination callback is ignored), signals only the fresh process
+    /// group and reports a startup failure. A child that survives the kill is
+    /// kept as the current handle, so `startDecision()` still sees a live child
+    /// and refuses to launch a second service.
+    private func abandonUnhostedLaunch(process: ServiceProcessHandle) {
+        launchGeneration &+= 1
+        didLaunchService = false
+        isStoppingService = true
+        let processGroupID = process.processIdentifier
+        scheduler.onBackground { [weak self] in
+            guard let self else { return }
+            self.terminate(processGroupID: processGroupID)
+            self.scheduler.onMain {
+                // The launch is gone and its record (if one was written before
+                // the immediate verification failed) must not linger.
+                self.ownershipStore.removeRecord(at: self.appConfiguration.serviceOwnerURL)
+                self.closeLog()
+                if self.serviceProcess === process, !process.isRunning {
+                    self.serviceProcess = nil
+                }
+                self.isStoppingService = false
+                self.reportStartupFailure(
+                    "无法登记 pi-web 的所有权信息，已终止本次启动的进程。请查看日志：\(self.appConfiguration.logURL.path)"
+                )
+            }
         }
     }
 
@@ -695,16 +794,20 @@ final class ServiceManager {
     ///
     /// The verified process group gets SIGTERM, a bounded wait, then SIGKILL.
     /// Nothing is signalled unless the ownership record verifies against the
-    /// live process: external services are read-only for this app.
+    /// live process: external services are read-only for this app, so a stop
+    /// request for them completes without a signal and without changing the
+    /// reported state.
     func stopService(completion: (() -> Void)? = nil) {
-        isStoppingService = true
+        // Verification happens before the stopping flag is set: an external
+        // service must leave the state machine exactly as it was.
         guard let record = verifiedOwnershipRecord() else {
-            finishStopping(completion: completion)
+            completion?()
             return
         }
+        isStoppingService = true
         scheduler.onBackground { [weak self] in
             guard let self else { return }
-            self.terminate(record: record)
+            self.terminate(processGroupID: record.processGroupID)
             self.scheduler.onMain {
                 self.ownershipStore.removeRecord(at: self.appConfiguration.serviceOwnerURL)
                 self.finishStopping(completion: completion)
@@ -712,11 +815,11 @@ final class ServiceManager {
         }
     }
 
-    /// SIGTERM to the recorded process group, bounded wait, then SIGKILL to the
-    /// same group. The wait is bounded by `stopPollAttempts`, so at most two
-    /// signals are ever sent, both to the group.
-    private func terminate(record: ServiceOwnershipRecord) {
-        let processGroupID = record.processGroupID
+    /// SIGTERM to a process group, bounded wait, then SIGKILL to the same
+    /// group. The wait is bounded by `stopPollAttempts`, so at most two signals
+    /// are ever sent, both to the group. PIDs and groups 0 and 1 are refused.
+    private func terminate(processGroupID: pid_t) {
+        guard processGroupID > 1 else { return }
         signaler.sendGroupSignal(SIGTERM, toProcessGroup: processGroupID)
         for _ in 0..<Self.stopPollAttempts {
             guard signaler.isProcessGroupAlive(processGroupID) else { return }

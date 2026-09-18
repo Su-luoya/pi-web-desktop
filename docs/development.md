@@ -122,7 +122,7 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 
 服务生命周期、依赖诊断、版本解析、安装来源、脱敏和所有权判定应使用单元测试和本地假服务测试。测试不得访问真实 npm、GitHub、用户 Keychain 或 `~/.pi`。
 
-`PiWebDesktopTests/ServiceOwnershipTests.swift` 覆盖所有权记录与判定表（匹配/不匹配、PID 复用、启动时间、端口、参数摘要、executable、进程组、过期记录、`ps` 事实不可读、JSON 存取）；`PiWebDesktopTests/ServiceManagerTests.swift` 覆盖磁盘记录的生命周期（启动写入、旧 `service.pid` 清理、旧实例记录清理、写入失败降级为不可托管、过期记录只删文件）和启动决策（完整命令行与环境变量、找不到可执行文件、停止中忽略启动、复用已验证的进程）、停止与退出行为（只对验证通过的进程组发送有限次信号、外部服务零信号）、健康检查重试；所有副作用都走注入的 `CommandRunning`/`ServiceLaunching`/`ServiceOwnershipStoring`/`ServiceSignaling`/`ServiceProbing`/`ServiceScheduling`，断言不依赖真实的进程、网络或墙钟时间。`PiWebDesktopTests/WebViewNavigationPolicyTests.swift` 覆盖本地/外链 URL 判定。
+`PiWebDesktopTests/ServiceOwnershipTests.swift` 覆盖所有权记录与判定表（匹配/不匹配、PID 复用、启动时间、端口、实时命令文本摘要与空白归一化、可执行标识与来源、进程组、过期记录、`ps` 事实不可读、损坏记录清理、JSON 存取）；`PiWebDesktopTests/ServiceManagerTests.swift` 覆盖磁盘记录的生命周期（启动写入并即时校验、旧 `service.pid` 清理、旧实例记录清理、写入/即时校验失败时终止刚启动的进程组且不重复启动、过期记录只删文件）和启动决策（完整命令行与环境变量、找不到可执行文件、停止中忽略启动、复用已验证的进程或在飞子进程）、停止与退出行为（只对验证通过的进程组发送有限次信号、外部服务零信号且状态不变）、描述符保护（fd ≤ stderr 时先复制到 stderr 之上）、健康检查重试；所有副作用都走注入的 `CommandRunning`/`ServiceLaunching`/`ServiceOwnershipStoring`/`ServiceSignaling`/`ServiceProbing`/`ServiceScheduling`，可执行标识读取也可注入，断言不依赖真实的进程、网络或墙钟时间。`PiWebDesktopTests/WebViewNavigationPolicyTests.swift` 覆盖本地/外链 URL 判定。
 
 ## 开发约束
 

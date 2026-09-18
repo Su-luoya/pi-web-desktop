@@ -29,6 +29,9 @@ final class ProcessInspectorTests: XCTestCase {
         XCTAssertNil(ProcessInspector.parseProcessStartTime(" \n"))
         XCTAssertNil(ProcessInspector.parseResolvedExecutable(""))
         XCTAssertNil(ProcessInspector.parseResolvedExecutable(nil))
+        XCTAssertNil(ProcessInspector.parseCommandLine(""))
+        XCTAssertNil(ProcessInspector.parseCommandLine(nil))
+        XCTAssertNil(ProcessInspector.parseCommandLine("  \n"))
     }
 
     func testMalformedLinesAreRejected() {
@@ -77,6 +80,15 @@ final class ProcessInspectorTests: XCTestCase {
         )
     }
 
+    func testCommandLineIsTrimmedAndWhitespaceIsCollapsed() {
+        XCTAssertEqual(
+            ProcessInspector.parseCommandLine("  node   /opt/homebrew/bin/pi-web  --no-open \n"),
+            "node /opt/homebrew/bin/pi-web --no-open"
+        )
+        // A single-token command line is a valid observation.
+        XCTAssertEqual(ProcessInspector.parseCommandLine("pi-web\n"), "pi-web")
+    }
+
     // MARK: - Command wiring
 
     func testListenerQueryUsesTheConfiguredPort() {
@@ -120,7 +132,67 @@ final class ProcessInspectorTests: XCTestCase {
 
     // MARK: - Process facts
 
-    func testProcessFactsCombineTheThreeQueries() {
+    func testProcessFactsCombineAllQueries() {
+        let runner = FakeCommandRunner()
+        runner.handler = { arguments in
+            guard let formatIndex = arguments.firstIndex(of: "-o"), formatIndex + 1 < arguments.count else { return nil }
+            switch arguments[formatIndex + 1] {
+            case "pgid=": return "5150\n"
+            case "lstart=": return "Wed Jul 30 12:00:00 2025\n"
+            case "comm=": return "/opt/homebrew/bin/pi-web\n"
+            case "args=": return "node /opt/homebrew/bin/pi-web --hostname 127.0.0.1 --port 30141 --no-open\n"
+            default: return nil
+            }
+        }
+        let inspector = makeInspector(runner: runner)
+
+        XCTAssertEqual(
+            inspector.processFacts(of: 5150),
+            ServiceProcessFacts(
+                pid: 5150,
+                processGroupID: 5150,
+                launchedAt: "Wed Jul 30 12:00:00 2025",
+                resolvedExecutable: "/opt/homebrew/bin/pi-web",
+                resolvedExecutableSource: .psComm,
+                commandLine: "node /opt/homebrew/bin/pi-web --hostname 127.0.0.1 --port 30141 --no-open"
+            )
+        )
+        XCTAssertEqual(runner.invocations, [
+            ["/bin/ps", "-o", "pgid=", "-p", "5150"],
+            ["/bin/ps", "-o", "lstart=", "-p", "5150"],
+            ["/bin/ps", "-o", "comm=", "-p", "5150"],
+            ["/bin/ps", "-o", "args=", "-p", "5150"]
+        ])
+    }
+
+    func testProcPidPathIsPreferredOverPsComm() {
+        let runner = FakeCommandRunner()
+        runner.handler = { arguments in
+            guard let formatIndex = arguments.firstIndex(of: "-o"), formatIndex + 1 < arguments.count else { return nil }
+            switch arguments[formatIndex + 1] {
+            case "pgid=": return "5150\n"
+            case "lstart=": return "Wed Jul 30 12:00:00 2025\n"
+            case "comm=": return "pi-web\n"
+            case "args=": return "node /opt/homebrew/bin/pi-web --no-open\n"
+            default: return nil
+            }
+        }
+        let inspector = ProcessInspector(
+            runner: runner,
+            processIsAlive: { _ in true },
+            processExecutablePath: { _ in "/opt/homebrew/bin/node" }
+        )
+
+        let facts = inspector.processFacts(of: 5150)
+        XCTAssertEqual(facts?.resolvedExecutable, "/opt/homebrew/bin/node")
+        XCTAssertEqual(facts?.resolvedExecutableSource, .procPidPath)
+        // The weak `ps -o comm=` query is not even needed in this case.
+        XCTAssertFalse(runner.invocations.contains(["/bin/ps", "-o", "comm=", "-p", "5150"]))
+    }
+
+    func testEmptyArgsQueryStillReturnsFactsWithAnEmptyCommandLine() {
+        // An empty `ps -o args=` is an observation (nothing to compare), not a
+        // missing fact: the verifier turns it into a mismatch and never signals.
         let runner = FakeCommandRunner()
         runner.handler = { arguments in
             guard let formatIndex = arguments.firstIndex(of: "-o"), formatIndex + 1 < arguments.count else { return nil }
@@ -133,20 +205,39 @@ final class ProcessInspectorTests: XCTestCase {
         }
         let inspector = makeInspector(runner: runner)
 
-        XCTAssertEqual(
-            inspector.processFacts(of: 5150),
-            ServiceProcessFacts(
-                pid: 5150,
-                processGroupID: 5150,
-                launchedAt: "Wed Jul 30 12:00:00 2025",
-                resolvedExecutable: "/opt/homebrew/bin/pi-web"
-            )
-        )
-        XCTAssertEqual(runner.invocations, [
-            ["/bin/ps", "-o", "pgid=", "-p", "5150"],
-            ["/bin/ps", "-o", "lstart=", "-p", "5150"],
-            ["/bin/ps", "-o", "comm=", "-p", "5150"]
-        ])
+        XCTAssertEqual(inspector.processFacts(of: 5150)?.commandLine, "")
+    }
+
+    func testFailedProcPidPathFallsBackToPsComm() {
+        let runner = FakeCommandRunner()
+        runner.handler = { arguments in
+            guard let formatIndex = arguments.firstIndex(of: "-o"), formatIndex + 1 < arguments.count else { return nil }
+            switch arguments[formatIndex + 1] {
+            case "pgid=": return "5150\n"
+            case "lstart=": return "Wed Jul 30 12:00:00 2025\n"
+            case "comm=": return "pi-web\n"
+            case "args=": return "pi-web --no-open\n"
+            default: return nil
+            }
+        }
+        let inspector = makeInspector(runner: runner)
+
+        let facts = inspector.processFacts(of: 5150)
+        XCTAssertEqual(facts?.resolvedExecutable, "pi-web")
+        XCTAssertEqual(facts?.resolvedExecutableSource, .psComm)
+    }
+
+    func testExecutableQueryWithoutAnySourceMakesProcessFactsUnavailable() {
+        let runner = FakeCommandRunner()
+        runner.handler = { arguments in
+            guard let formatIndex = arguments.firstIndex(of: "-o"), formatIndex + 1 < arguments.count else { return nil }
+            switch arguments[formatIndex + 1] {
+            case "pgid=": return "5150\n"
+            case "lstart=": return "Wed Jul 30 12:00:00 2025\n"
+            default: return nil
+            }
+        }
+        XCTAssertNil(makeInspector(runner: runner).processFacts(of: 5150))
     }
 
     func testMissingSingleFactMakesProcessFactsUnavailable() {
@@ -172,6 +263,8 @@ final class ProcessInspectorTests: XCTestCase {
         runner: CommandRunning,
         alive: @escaping (pid_t) -> Bool = { _ in true }
     ) -> ProcessInspector {
-        ProcessInspector(runner: runner, processIsAlive: alive)
+        // `proc_pidpath` is never called from tests: the fallback source keeps
+        // the fake `ps` output authoritative and the real process table untouched.
+        ProcessInspector(runner: runner, processIsAlive: alive, processExecutablePath: { _ in nil })
     }
 }

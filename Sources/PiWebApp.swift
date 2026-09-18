@@ -31,29 +31,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var findBar: NSView?
     private var findField: NSSearchField?
     private var preferencesWindowController: PreferencesWindowController?
-    private var configuration = ServiceConfiguration.load()
+    private var configuration: ServiceConfiguration
+
+    private let appConfiguration: AppConfiguration
+    private let commandRunner: CommandRunning
+    private let processInspector: ProcessInspector
 
     private var startURL: URL { configuration.serviceURL }
-    private let supportURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/Pi Web Desktop", isDirectory: true)
-    private let logURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/Pi Web Desktop.log")
-    private let serviceWorkingDirectory = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/Pi Web Desktop/Workspace", isDirectory: true)
     private let maxStartupAttempts = 150
 
-    private var managedPIDURL: URL { supportURL.appendingPathComponent("service.pid") }
-    private var appPIDURL: URL { supportURL.appendingPathComponent("app.pid") }
-    private var instanceLockURL: URL { supportURL.appendingPathComponent("instance.lock") }
     private var instanceLockHandle: FileHandle?
 
+    init(
+        appConfiguration: AppConfiguration = AppConfiguration.forCurrentProcess(),
+        commandRunner: CommandRunning = SystemCommandRunner()
+    ) {
+        self.appConfiguration = appConfiguration
+        self.commandRunner = commandRunner
+        self.processInspector = ProcessInspector(runner: commandRunner)
+        self.configuration = appConfiguration.serviceConfiguration
+        super.init()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        try? FileManager.default.createDirectory(at: supportURL, withIntermediateDirectories: true)
+        if appConfiguration.isSmokeLaunch {
+            runSmokeLaunch()
+            return
+        }
+        try? FileManager.default.createDirectory(at: appConfiguration.supportURL, withIntermediateDirectories: true)
         guard acquireSingleInstanceLock() else {
             NSApp.terminate(nil)
             return
         }
-        try? "\(ProcessInfo.processInfo.processIdentifier)\n".write(to: appPIDURL, atomically: true, encoding: .utf8)
+        try? "\(ProcessInfo.processInfo.processIdentifier)\n".write(to: appConfiguration.appPIDURL, atomically: true, encoding: .utf8)
         NSApp.mainMenu = nil
         installQuitShortcuts()
         installScreenChangeObserver()
@@ -80,9 +90,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         startHealthMonitor()
     }
 
+    // MARK: - Smoke launch
+
+    /// `PI_WEB_DESKTOP_SMOKE=1` startup: temporary support directory, no
+    /// single-instance lock and no service auto-start. Prints the fixed marker
+    /// and exits 0 once the main window exists; any failure exits non-zero
+    /// without printing it. Without the variable this path is never taken.
+    private func runSmokeLaunch() {
+        do {
+            try FileManager.default.createDirectory(at: appConfiguration.supportURL, withIntermediateDirectories: true)
+        } catch {
+            failSmokeLaunch("cannot create \(appConfiguration.supportURL.path): \(error.localizedDescription)")
+        }
+        installMainMenu()
+        createWindow()
+        guard window != nil, webView != nil else {
+            failSmokeLaunch("main window was not created")
+        }
+        let supportURL = appConfiguration.supportURL
+        DispatchQueue.main.async {
+            FileHandle.standardOutput.write(Data((AppConfiguration.smokeReadyMarker + "\n").utf8))
+            try? FileManager.default.removeItem(at: supportURL)
+            exit(0)
+        }
+    }
+
+    private func failSmokeLaunch(_ message: String) -> Never {
+        FileHandle.standardError.write(Data("smoke launch failed: \(message)\n".utf8))
+        exit(1)
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         healthTimer?.invalidate()
-        try? FileManager.default.removeItem(at: appPIDURL)
+        try? FileManager.default.removeItem(at: appConfiguration.appPIDURL)
         try? logHandle?.close()
         if let eventMonitor {
             NSEvent.removeMonitor(eventMonitor)
@@ -128,17 +168,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     private func acquireSingleInstanceLock() -> Bool {
-        let existingPID = (try? String(contentsOf: appPIDURL, encoding: .utf8))
-            .flatMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-        if let existingPID, existingPID > 1, kill(existingPID, 0) == 0 {
+        let existingPID = (try? String(contentsOf: appConfiguration.appPIDURL, encoding: .utf8))
+            .flatMap { ProcessInspector.parsePIDRecord($0) }
+        if let existingPID, processInspector.isProcessAlive(existingPID) {
             return false
         }
-        if FileManager.default.fileExists(atPath: instanceLockURL.path) {
-            try? FileManager.default.removeItem(at: instanceLockURL)
+        if FileManager.default.fileExists(atPath: appConfiguration.instanceLockURL.path) {
+            try? FileManager.default.removeItem(at: appConfiguration.instanceLockURL)
         }
-        FileManager.default.createFile(atPath: instanceLockURL.path, contents: nil)
+        FileManager.default.createFile(atPath: appConfiguration.instanceLockURL.path, contents: nil)
         do {
-            instanceLockHandle = try FileHandle(forWritingTo: instanceLockURL)
+            instanceLockHandle = try FileHandle(forWritingTo: appConfiguration.instanceLockURL)
             hasInstanceLock = true
             return true
         } catch {
@@ -458,20 +498,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
 
         do {
-            try FileManager.default.createDirectory(at: serviceWorkingDirectory, withIntermediateDirectories: true)
-            try FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if !FileManager.default.fileExists(atPath: logURL.path) {
-                FileManager.default.createFile(atPath: logURL.path, contents: nil)
+            try FileManager.default.createDirectory(at: appConfiguration.serviceWorkingDirectory, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: appConfiguration.logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if !FileManager.default.fileExists(atPath: appConfiguration.logURL.path) {
+                FileManager.default.createFile(atPath: appConfiguration.logURL.path, contents: nil)
             }
             rotateLogsIfNeeded()
-            let handle = try FileHandle(forWritingTo: logURL)
+            let handle = try FileHandle(forWritingTo: appConfiguration.logURL)
             try handle.seekToEnd()
             logHandle = handle
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: piWebPath)
         process.arguments = ["--hostname", configuration.hostname, "--port", String(configuration.port), "--no-open"]
-        process.currentDirectoryURL = serviceWorkingDirectory
+        process.currentDirectoryURL = appConfiguration.serviceWorkingDirectory
             var environment = ProcessInfo.processInfo.environment
             environment["PI_WEB_NO_OPEN"] = "1"
             if !configuration.allowedHosts.isEmpty {
@@ -511,7 +551,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             serviceProcess = process
             didLaunchService = true
             startupAttempts = 0
-            try "\(process.processIdentifier)\n".write(to: managedPIDURL, atomically: true, encoding: .utf8)
+            try "\(process.processIdentifier)\n".write(to: appConfiguration.managedPIDURL, atomically: true, encoding: .utf8)
             setState(.starting)
             showLoadingPage(message: "正在启动 Pi Web…")
             pollUntilReady()
@@ -523,7 +563,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private func pollUntilReady() {
         startupAttempts += 1
         guard startupAttempts <= maxStartupAttempts else {
-            showStartupError("Pi Web 在 30 秒内未能启动。请查看日志：\(logURL.path)")
+            showStartupError("Pi Web 在 30 秒内未能启动。请查看日志：\(appConfiguration.logURL.path)")
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
@@ -535,7 +575,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                         self.setState(.running)
                         self.loadPiWeb()
                     } else if let process = self.serviceProcess, !process.isRunning {
-                        self.showStartupError("pi-web 进程已退出。请查看日志：\(self.logURL.path)")
+                        self.showStartupError("pi-web 进程已退出。请查看日志：\(self.appConfiguration.logURL.path)")
                     } else {
                         self.pollUntilReady()
                     }
@@ -556,18 +596,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         DispatchQueue.global().async { [weak self] in
             _ = self?.shell(["/bin/kill", "-TERM", "\(pid)"])
             for _ in 0..<40 {
-                if kill(pid, 0) != 0 { break }
+                guard let self, self.processInspector.isProcessAlive(pid) else { break }
                 usleep(100_000)
             }
-            if kill(pid, 0) == 0 {
-                _ = self?.shell(["/bin/kill", "-KILL", "\(pid)"])
+            if let self, self.processInspector.isProcessAlive(pid) {
+                _ = self.shell(["/bin/kill", "-KILL", "\(pid)"])
             }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.serviceProcess = nil
                 self.didLaunchService = false
                 self.isStoppingService = false
-                try? FileManager.default.removeItem(at: self.managedPIDURL)
+                try? FileManager.default.removeItem(at: self.appConfiguration.managedPIDURL)
                 self.setState(.stopped)
                 completion?()
             }
@@ -576,23 +616,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     private func managedServicePID() -> pid_t? {
         if let process = serviceProcess, process.isRunning { return process.processIdentifier }
-        guard let text = try? String(contentsOf: managedPIDURL, encoding: .utf8),
-              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
-              pid > 1, kill(pid, 0) == 0,
-              isPiWebProcess(pid) else {
-            try? FileManager.default.removeItem(at: managedPIDURL)
-            return nil
-        }
-        return pid
-    }
-
-    private func isPiWebProcess(_ pid: pid_t) -> Bool {
-        let command = shell(["/bin/ps", "-o", "command=", "-p", "\(pid)"])?.lowercased() ?? ""
-        return command.contains("pi-web")
+        return processInspector.managedServicePID(pidFileURL: appConfiguration.managedPIDURL)
     }
 
     private func rotateLogsIfNeeded() {
         let maxBytes = 10 * 1024 * 1024
+        let logURL = appConfiguration.logURL
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: logURL.path),
               let size = attributes[.size] as? NSNumber,
               size.intValue >= maxBytes else { return }
@@ -612,6 +641,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let controller = PreferencesWindowController(configuration: configuration)
         controller.onSave = { [weak self] newConfiguration in
             guard let self else { return }
+            self.appConfiguration.save(newConfiguration)
             let changed = self.configuration.runtimeSignature != newConfiguration.runtimeSignature
             let managed = changed && self.managedServicePID() != nil
 
@@ -651,11 +681,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 }
             }
         }
-    }
-
-    private func serviceListenerPID() -> String {
-        let output = shell(["/usr/sbin/lsof", "-nP", "-t", "-iTCP:\(configuration.port)", "-sTCP:LISTEN"])?.split(whereSeparator: { $0.isNewline }).first.map(String.init)
-        return output?.nilIfEmpty ?? "无"
     }
 
     private func checkServer(completion: @escaping (Bool) -> Void) {
@@ -766,10 +791,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     private func stopExternalListener() {
-        let listener = Int32(serviceListenerPID().trimmingCharacters(in: .whitespacesAndNewlines))
-        guard let listener, listener > 1, isPiWebProcess(listener) else { return }
-        let parent = processParent(of: listener)
-        let candidate = parent > 1 && isPiWebProcess(parent) ? parent : listener
+        guard let listener = processInspector.listenerPID(port: configuration.port),
+              processInspector.isPiWebProcess(listener) else { return }
+        let parent = processInspector.parentProcess(of: listener)
+        let candidate = parent > 1 && processInspector.isPiWebProcess(parent) ? parent : listener
         _ = shell(["/bin/kill", "-TERM", "\(candidate)"])
         setState(.stopped)
     }
@@ -779,14 +804,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.startManagedService() }
     }
 
-    private func serviceProcessDescription() -> String {
-        guard let pid = Int32(serviceListenerPID()), pid > 1 else { return "无" }
-        return shell(["/bin/ps", "-o", "command=", "-p", "\(pid)"])?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "未知"
-    }
-
     @objc private func openInBrowser(_ sender: Any?) { NSWorkspace.shared.open(startURL) }
     @objc private func copyLocalAddress(_ sender: Any?) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(startURL.absoluteString, forType: .string) }
     @objc private func openLog(_ sender: Any?) {
+        let logURL = appConfiguration.logURL
         if !FileManager.default.fileExists(atPath: logURL.path) { FileManager.default.createFile(atPath: logURL.path, contents: nil) }
         NSWorkspace.shared.open(logURL)
     }
@@ -806,19 +827,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let piWebPath = resolvePiWebPath() ?? "未找到"
         let piWebVersion = shell([piWebPath, "--version"])?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "未知"
         let nodeVersion = shell(["/usr/bin/env", "node", "--version"])?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "未知"
-        let diagnostics = """
-        Pi Web Desktop: \(appVersionDescription)
-        pi-web: \(piWebVersion)
-        Node.js: \(nodeVersion)
-        服务地址: \(startURL.absoluteString)
-        状态: \(statusDescription())
-        监听 PID: \(serviceListenerPID())
-        监听进程: \(serviceProcessDescription())
-        托管 PID: \(managedServicePID().map(String.init) ?? "无（外部服务或未运行）")
-        pi-web 路径: \(piWebPath)
-        配置目录: ~/.pi/agent
-        日志: \(logURL.path)
-        """
+        let diagnostics = DiagnosticsCollector.text(for: DiagnosticsInput(
+            appVersion: appVersionDescription,
+            piWebVersion: piWebVersion,
+            nodeVersion: nodeVersion,
+            serviceAddress: startURL.absoluteString,
+            status: statusDescription(),
+            listenerPID: processInspector.listenerPIDDescription(port: configuration.port),
+            listenerProcess: processInspector.listenerProcessDescription(port: configuration.port),
+            managedPID: managedServicePID().map(String.init) ?? "无（外部服务或未运行）",
+            piWebPath: piWebPath,
+            configurationDirectory: "~/.pi/agent",
+            logPath: appConfiguration.logURL.path
+        ))
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(diagnostics, forType: .string)
     }
@@ -921,14 +942,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     private func stopRemainingListenerAndQuit() {
-        let listener = Int32(serviceListenerPID().trimmingCharacters(in: .whitespacesAndNewlines))
-        guard let listener, listener > 1, isPiWebProcess(listener) else {
+        guard let listener = processInspector.listenerPID(port: configuration.port),
+              processInspector.isPiWebProcess(listener) else {
             isStoppingService = false
             NSApp.terminate(nil)
             return
         }
-        let parent = processParent(of: listener)
-        let candidate = parent > 1 && isPiWebProcess(parent) ? parent : listener
+        let parent = processInspector.parentProcess(of: listener)
+        let candidate = parent > 1 && processInspector.isPiWebProcess(parent) ? parent : listener
         _ = shell(["/bin/kill", "-TERM", "\(candidate)"])
         if candidate != listener { _ = shell(["/bin/kill", "-TERM", "\(listener)"]) }
         waitForServerToStop(candidate: candidate, listener: listener, attempt: 0)
@@ -1058,21 +1079,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     @discardableResult private func shell(_ arguments: [String]) -> String? {
-        guard let executable = arguments.first else { return nil }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = Array(arguments.dropFirst())
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do { try process.run(); process.waitUntilExit() } catch { return nil }
-        guard process.terminationStatus == 0 else { return nil }
-        return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
-    }
-
-    private func processParent(of pid: pid_t) -> pid_t {
-        let output = shell(["/bin/ps", "-o", "ppid=", "-p", "\(pid)"])?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return pid_t(output) ?? 0
+        commandRunner.run(arguments)
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {

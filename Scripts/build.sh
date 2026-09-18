@@ -85,6 +85,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 swiftc "$ROOT/Sources/PiWebApp.swift" \
+  "$ROOT/Sources/AppConfiguration.swift" \
+  "$ROOT/Sources/DiagnosticsCollector.swift" \
+  "$ROOT/Sources/ProcessInspector.swift" \
   "$ROOT/Sources/ServiceConfiguration.swift" \
   "$ROOT/Sources/PreferencesWindowController.swift" \
   "$ROOT/Sources/main.swift" \

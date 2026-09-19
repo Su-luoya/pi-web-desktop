@@ -4,7 +4,7 @@
 
 > 写文档或注释时的注意：personal-data 门禁是一条 `git grep` 字面量检查，所以**不要在文案里原样写出被检查的字面量**（例如用户主目录绝对路径前缀、代理端点、个人主机名）——用描述性的说法代替，否则文档本身会让门禁失败。
 
-首版目标是 Apple Silicon 和 macOS 14 或以上。构建需要 Xcode Command Line Tools、Swift 编译器和 Cocoa/WebKit SDK。`PiWebDesktop.xcodeproj` 的 6 个 build configuration 与 `Scripts/build.sh` 都只构建 arm64；应用只使用 Apple 系统框架（Cocoa/AppKit、WebKit、Security、CryptoKit、Foundation、Darwin），没有第三方运行时依赖。支持矩阵与“未承诺”事项（无 Intel 产物、ad-hoc 签名且未公证、无 SLA）见 [README 支持矩阵](../README.md#支持矩阵)。
+首版目标是 Apple Silicon 和 macOS 14 或以上。构建需要 Xcode Command Line Tools、Swift 编译器和 Cocoa/WebKit SDK。`PiWebDesktop.xcodeproj` 的 6 个 build configuration 与 `Scripts/build.sh` 都只构建 arm64；应用只使用 Apple 系统框架（Cocoa/AppKit、WebKit、Security、CryptoKit、Foundation、Darwin），没有第三方运行时依赖。
 
 运行服务还需要用户自行安装：
 
@@ -12,7 +12,29 @@
 - Pi CLI。
 - `@agegr/pi-web`。
 
-应用不会自动安装这些依赖，也不会调用 `sudo`。
+应用不会自动安装这些依赖，也不会调用 `sudo`。用户侧的下载、首次启动与日常使用步骤见 [README](../README.md)；本文件与下面的支持矩阵只描述仓库能验证的范围。
+
+## 支持矩阵与非承诺
+
+以 `Configuration/AppIdentity.xcconfig`、`Scripts/build.sh` 和最近一次本地验证为准；下表中的“未承诺”表示项目不做出该保证，也不在自动验证范围内。
+
+| 维度 | 当前状态 |
+| --- | --- |
+| CPU | Apple Silicon（arm64）。Xcode 工程的 6 个 build configuration 与 `Scripts/build.sh` 都只构建 arm64 单一架构 |
+| 系统 | macOS 14.0 或更高（`APP_MINIMUM_SYSTEM_VERSION = 14.0`） |
+| Intel Mac | 不在支持范围，也没有支持承诺；没有 x86_64 产物，未做验证 |
+| 框架 | 只使用 Apple 系统框架（Cocoa/AppKit、WebKit、Security、CryptoKit、Foundation、Darwin）；没有第三方 Swift 包、CocoaPod 或 npm 运行时依赖 |
+| 构建工具 | 系统 Swift 编译器（`swiftc`）+ Xcode Command Line Tools；`xcodebuild build/test` 需要完整 Xcode |
+| 签名 | ad-hoc 签名（`codesign --sign -`），没有 Developer ID 证书，`TeamIdentifier` 为空 |
+| 公证 | 未公证。Gatekeeper 默认拒绝（`spctl --assess` 返回 rejected），需要用户在“系统设置 → 隐私与安全性”里手动批准 |
+| 发行状态 | 当前最新是早期 alpha（prerelease），没有正式发行版；更早的 alpha 资产仍然可以下载 |
+| 分发现状 | alpha 以 prerelease 形式发布在 [GitHub Releases](https://github.com/Su-luoya/pi-web-desktop/releases)：自 `v0.1.0-alpha.1` 起提供预编译 ZIP、`.sha256` 与签名/公证证据 Markdown；也可以按 [发布说明](releasing.md) 从源码构建。所有资产都是 **ad-hoc 签名、未公证** |
+| 应用内更新 | 桌面应用自身更新未实现（后续 issue）。当前 alpha 只做只读版本检查并按设置提示：四类可分别关闭 / 每日 / 每周（扩展包：关闭 / 检查并通知 / 询问后更新），可忽略某个具体版本；桌面应用自身不下载、不安装、不降级。GitHub #20 起，设置里的“启动前自动更新 Pi Web”开关可以在启动前自动更新 Pi Web 依赖，但仅限来源为已验证的 npm 全局安装（默认关闭，其它来源只显示命令）。见 [隐私说明](privacy.md) 的“版本检查、提示与忽略版本”与 [设置说明](settings-and-workspace.md) |
+| 支持承诺 | 无 SLA，无响应或修复时限。Issue 和 PR 按维护者可用时间处理 |
+| 远程访问 | 默认只监听 loopback；远程访问必须自备加密隧道或 HTTPS 反向代理，密码认证 ≠ 传输加密 |
+| 日志与诊断 | 日志写在 `~/Library/Logs/Pi Web Desktop/`，10 MB 轮转、保留 5 份；日志行、错误消息、环境变量/命令行展示与“复制诊断”导出共用同一个脱敏器。规则与字段见 [日志与诊断导出](logging-and-diagnostics.md) |
+
+未在表中列出的组合（Intel、更旧的系统版本、正式发行版、应用内更新）都视为未支持：文档、Issue 和 Release 说明里都不能暗示它们已经可用。
 
 ## 构建
 
@@ -143,6 +165,15 @@ CI 的 `Build and test Xcode project` 步骤导出 `XCODE_APP_PATH`（`$DERIVED_
 open build/Pi-Web-Desktop.app
 ```
 
+把构建产物装到用户目录（可选）：
+
+```bash
+./Scripts/install.sh
+open "$HOME/Applications/Pi-Web-Desktop.app"
+```
+
+`Scripts/install.sh` 会把 `build/Pi-Web-Desktop.app` 复制到 `~/Applications/`，覆盖前把已有同名 app 改名为带时间戳的备份，然后重新做 ad-hoc 签名与校验。它要求 `~/Applications` 已存在（脚本不会创建目录），目录缺失时先执行 `mkdir -p ~/Applications`，否则复制会以 No such file or directory 失败。
+
 默认服务地址是 `http://127.0.0.1:30141/`。默认监听 loopback，不开放局域网监听：要改成远程地址，必须在“设置…→远程访问”里先在 Keychain 中保存密码（输入或点“生成高强度密码”）。密码认证只验证访问者，不加密传输；远程访问请自行配置受信任的加密隧道或 HTTPS 反向代理。删除密码会自动把监听地址改回 `127.0.0.1`（若远程服务正在运行，会先停止它再回落）。设置界面也拒绝 `0.0.0.0` 这类“所有接口”地址。
 
 ## 依赖诊断与首次启动
@@ -261,6 +292,7 @@ sh -c "$SCAN" && echo "personal-data scan: PASS"
 - 一个 GitHub Issue 对应一个主要实现 task、worktree、分支和 PR。
 - 修改前先确认 Issue 的 Target、Change、Constraints、Ownership 和 Observable acceptance。
 - worker 默认只提交本地 commit；coordinator 验证后 push、创建 PR 和映射 GitHub 状态。
-- 新增第三方依赖必须单独记录许可证、维护状态和供应链理由；CI 只使用 GitHub 托管的 runner，Actions 按提交 SHA 固定，升级由 `.github/dependabot.yml` 每周提出。
+- 应用不引入第三方 Swift 包、CocoaPod 或 npm 运行时依赖；新增依赖前必须在 Issue 或 PR 里记录许可证、维护状态和供应链理由。
+- CI 只使用 GitHub 托管的 `macos-14` runner，工作流权限是只读的 `contents: read`，不使用 secrets；所有 GitHub Actions 按**提交 SHA 固定**（例如 `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`），不使用浮动 tag。`.github/dependabot.yml` 每周检查 GitHub Actions 固定版本的更新，并通过带 `dependencies`、`github_actions` 标签的 PR 提出升级，必须走正常评审和 CI。发布工作流同一条策略见 [发布说明的 CI 与依赖固定策略](releasing.md#ci-与依赖固定策略)。
 - 文档里新增的命令必须实际执行过，并在 PR 中给出结果；无法在当前环境执行的命令要显式标注为未执行。
 - 不得写入未验证的兼容承诺。支持矩阵、签名与公证状态以 `Configuration/AppIdentity.xcconfig`、`Scripts/build.sh` 和实际产物检查为准。

@@ -17,6 +17,7 @@ final class UpdateSettingsWindowController: NSWindowController {
     private var statuses: [UpdateCategoryStatus] = []
     private var ignorableVersions: [UpdateCheckCategory: String] = [:]
     private var piCLIStatusText = ""
+    private var piPackageStatusText = ""
 
     private var policyPopups: [UpdateCheckCategory: NSPopUpButton] = [:]
     private var statusLabels: [UpdateCheckCategory: NSTextField] = [:]
@@ -37,6 +38,13 @@ final class UpdateSettingsWindowController: NSWindowController {
         + "检测到运行中的 Pi 进程或进程状态不确定时，自动更新会推迟到下一次判定，"
         + "应用不会结束、暂停或接管任何 Pi 进程与会话。手动更新入口在菜单“服务 → 更新检查设置 → 立即更新 Pi CLI…”。")
     private let piCLIStatusLabel = NSTextField(labelWithString: "")
+    private let piPackageHintLabel = NSTextField(labelWithString:
+        "Pi 扩展包只允许三种策略（关闭 / 检查并通知 / 询问后更新），不做无人值守更新："
+        + "“检查并通知”只提示版本；“询问后更新”只对来源为已验证的 npm 全局安装提供执行入口，"
+        + "并在菜单“服务 → 更新检查设置 → 查看 Pi 扩展包更新…”里显示包名、当前/目标版本、"
+        + "完整参数数组与风险说明，取消是默认按钮；只调用 Pi 官方命令 pi update npm:<包名>。"
+        + "检测到运行中的 Pi 进程或进程状态不确定时拒绝执行；应用不会结束或信号任何 Pi 进程。")
+    private let piPackageStatusLabel = NSTextField(labelWithString: "")
 
     private static let timestampFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -59,12 +67,14 @@ final class UpdateSettingsWindowController: NSWindowController {
         preferences: UpdateCheckPreferences,
         statuses: [UpdateCategoryStatus],
         ignorableVersions: [UpdateCheckCategory: String] = [:],
-        piCLIStatus: String = ""
+        piCLIStatus: String = "",
+        piPackageStatus: String = ""
     ) {
         self.preferences = preferences
         self.statuses = statuses
         self.ignorableVersions = ignorableVersions
         self.piCLIStatusText = piCLIStatus
+        self.piPackageStatusText = piPackageStatus
         for category in UpdateCheckCategory.allCases {
             let policy = preferences.policy(for: category)
             let popup = policyPopups[category]
@@ -82,6 +92,7 @@ final class UpdateSettingsWindowController: NSWindowController {
         autoUpdateButton.state = preferences.autoUpdatePiWebBeforeLaunch ? .on : .off
         autoUpdatePiCLIButton.state = preferences.autoUpdatePiBeforeLaunch ? .on : .off
         piCLIStatusLabel.stringValue = piCLIStatus
+        piPackageStatusLabel.stringValue = piPackageStatus
     }
 
     private func status(for category: UpdateCheckCategory) -> UpdateCategoryStatus {
@@ -99,7 +110,8 @@ final class UpdateSettingsWindowController: NSWindowController {
         let intro = NSTextField(labelWithString:
             "更新检查只做只读的版本查询：不下载、不安装、不修改任何组件。关闭某一类后，"
             + "应用不再为该类发起请求，也不安排复查；应用退出后不检查（不安装 LaunchAgent）。"
-            + "发现可用更新时使用应用内提示框（不使用系统通知中心），提示内容只含组件名与版本。")
+            + "发现可用更新时使用应用内提示框（不使用系统通知中心），提示内容只含组件名与版本。"
+            + "扩展包更新不做无人值守更新：只有在菜单里显式确认后才会执行一次官方命令。")
         intro.lineBreakMode = .byWordWrapping
         intro.maximumNumberOfLines = 0
         intro.textColor = .secondaryLabelColor
@@ -160,9 +172,20 @@ final class UpdateSettingsWindowController: NSWindowController {
         piCLIStatusLabel.maximumNumberOfLines = 0
         piCLIStatusLabel.textColor = .secondaryLabelColor
         piCLIStatusLabel.font = NSFont.systemFont(ofSize: 11)
+        piPackageHintLabel.lineBreakMode = .byWordWrapping
+        piPackageHintLabel.maximumNumberOfLines = 0
+        piPackageHintLabel.textColor = .secondaryLabelColor
+        piPackageHintLabel.font = NSFont.systemFont(ofSize: 11)
+        piPackageStatusLabel.lineBreakMode = .byWordWrapping
+        piPackageStatusLabel.maximumNumberOfLines = 0
+        piPackageStatusLabel.textColor = .secondaryLabelColor
+        piPackageStatusLabel.font = NSFont.systemFont(ofSize: 11)
 
         let reservedHeader = NSTextField(labelWithString: "启动前自动更新（受限）")
         reservedHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+
+        let piPackageHeader = NSTextField(labelWithString: "Pi 扩展包更新（不做无人值守更新）")
+        piPackageHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
 
         let explanationButton = NSButton(title: "更新检查说明…", target: self, action: #selector(showExplanation(_:)))
         let closeButton = NSButton(title: "完成", target: self, action: #selector(closeWindow(_:)))
@@ -179,6 +202,9 @@ final class UpdateSettingsWindowController: NSWindowController {
             autoUpdatePiCLIButton,
             autoUpdatePiCLIHintLabel,
             piCLIStatusLabel,
+            piPackageHeader,
+            piPackageHintLabel,
+            piPackageStatusLabel,
             buttons
         ])
 
@@ -199,6 +225,8 @@ final class UpdateSettingsWindowController: NSWindowController {
             autoUpdateHintLabel.widthAnchor.constraint(equalToConstant: 620),
             autoUpdatePiCLIHintLabel.widthAnchor.constraint(equalToConstant: 620),
             piCLIStatusLabel.widthAnchor.constraint(equalToConstant: 620),
+            piPackageHintLabel.widthAnchor.constraint(equalToConstant: 620),
+            piPackageStatusLabel.widthAnchor.constraint(equalToConstant: 620),
             buttons.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
         for category in UpdateCheckCategory.allCases {
@@ -206,7 +234,7 @@ final class UpdateSettingsWindowController: NSWindowController {
         }
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 668, height: 620),
+            contentRect: NSRect(x: 0, y: 0, width: 668, height: 700),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -214,7 +242,7 @@ final class UpdateSettingsWindowController: NSWindowController {
         window.title = "更新检查偏好设置"
         window.contentView = content
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 668, height: 560)
+        window.minSize = NSSize(width: 668, height: 620)
         window.center()
         self.window = window
     }
@@ -234,7 +262,8 @@ final class UpdateSettingsWindowController: NSWindowController {
             preferences: updated,
             statuses: statuses,
             ignorableVersions: ignorableVersions,
-            piCLIStatus: piCLIStatusText
+            piCLIStatus: piCLIStatusText,
+            piPackageStatus: piPackageStatusText
         )
         onPreferencesChanged?(updated)
     }
@@ -248,7 +277,8 @@ final class UpdateSettingsWindowController: NSWindowController {
             preferences: updated,
             statuses: statuses,
             ignorableVersions: ignorableVersions,
-            piCLIStatus: piCLIStatusText
+            piCLIStatus: piCLIStatusText,
+            piPackageStatus: piPackageStatusText
         )
         onPreferencesChanged?(updated)
     }
@@ -263,7 +293,8 @@ final class UpdateSettingsWindowController: NSWindowController {
             preferences: updated,
             statuses: statuses,
             ignorableVersions: ignorableVersions,
-            piCLIStatus: piCLIStatusText
+            piCLIStatus: piCLIStatusText,
+            piPackageStatus: piPackageStatusText
         )
         onPreferencesChanged?(updated)
     }

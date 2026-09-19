@@ -186,6 +186,17 @@ struct AppConfiguration {
         PiCLIUpdateWarningStore.save(warning, to: defaults)
     }
 
+    /// 最近一次失败的 Pi 扩展包更新的持久警告（GitHub #22）。只含类别、包名（已
+    /// 通过 npm 包名校验）、旧/新/目标版本、固定原因文案与时间戳。
+    func piPackageUpdateWarning() -> PiPackageUpdateWarning? {
+        PiPackageUpdateWarningStore.load(from: defaults)
+    }
+
+    /// 保存或清除 Pi 扩展包更新警告（`nil` 表示更新成功，清除旧告警）。
+    func savePiPackageUpdateWarning(_ warning: PiPackageUpdateWarning?) {
+        PiPackageUpdateWarningStore.save(warning, to: defaults)
+    }
+
     /// Persists service settings through the same injected UserDefaults.
     func save(_ configuration: ServiceConfiguration) { configuration.save(to: defaults) }
 

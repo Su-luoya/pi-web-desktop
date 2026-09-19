@@ -89,6 +89,30 @@ enum UpdateSettingKeys {
         ]
     }
 
+    /// 启动前自动更新 Pi CLI（GitHub #21）。打开后也只有“没有运行中的 Pi 进程 +
+    /// 已验证的 npm/pnpm 全局安装 + 已验证且更高的目标版本”时才自动执行。
+    static let autoUpdatePiBeforeLaunch = "updateChecks.pi.autoUpdateBeforeLaunch"
+
+    /// 最近一次失败的 Pi CLI 更新的持久记录（GitHub #21）。字段与 #20 的警告
+    /// 同构：只含类别、旧/新/目标版本、固定原因文案与时间戳。
+    static let piCLIUpdateWarningKind = "updateChecks.pi.lastUpdateWarning.kind"
+    static let piCLIUpdateWarningOldVersion = "updateChecks.pi.lastUpdateWarning.oldVersion"
+    static let piCLIUpdateWarningNewVersion = "updateChecks.pi.lastUpdateWarning.newVersion"
+    static let piCLIUpdateWarningTargetVersion = "updateChecks.pi.lastUpdateWarning.targetVersion"
+    static let piCLIUpdateWarningReason = "updateChecks.pi.lastUpdateWarning.reason"
+    static let piCLIUpdateWarningRecordedAt = "updateChecks.pi.lastUpdateWarning.recordedAt"
+
+    static var allPiCLIUpdateWarningKeys: [String] {
+        [
+            piCLIUpdateWarningKind,
+            piCLIUpdateWarningOldVersion,
+            piCLIUpdateWarningNewVersion,
+            piCLIUpdateWarningTargetVersion,
+            piCLIUpdateWarningReason,
+            piCLIUpdateWarningRecordedAt
+        ]
+    }
+
     static func stem(for category: UpdateCheckCategory) -> String {
         switch category {
         case .desktopApp: return "updateChecks.desktopApp"
@@ -108,9 +132,10 @@ enum UpdateSettingKeys {
         writtenPreferencesKeys + legacyPreferenceKeys
     }
 
-    /// `UpdateCheckPreferences.save` 实际写入的键（策略 + 启动前自动更新开关）。
+    /// `UpdateCheckPreferences.save` 实际写入的键（策略 + 两个启动前自动更新开关）。
     static var writtenPreferencesKeys: [String] {
-        UpdateCheckCategory.allCases.map { policy(for: $0) } + [autoUpdatePiWebBeforeLaunch]
+        UpdateCheckCategory.allCases.map { policy(for: $0) }
+            + [autoUpdatePiWebBeforeLaunch, autoUpdatePiBeforeLaunch]
     }
 
     /// GitHub #17 的旧布尔键：只读兼容，保存新设置时删除。
@@ -123,8 +148,11 @@ enum UpdateSettingKeys {
     }
 
     /// 更新检查会写入的全部键（测试用它断言 UserDefaults 里没有额外数据）。
-    /// 警告键由 `PiWebUpdateWarningStore` 单独读写：保存策略不会清掉警告。
-    static var allKeys: [String] { allPreferencesKeys + allIgnoredVersionKeys + allPiWebUpdateWarningKeys }
+    /// 警告键由 `PiWebUpdateWarningStore` / `PiCLIUpdateWarningStore` 单独读写：
+    /// 保存策略不会清掉警告。
+    static var allKeys: [String] {
+        allPreferencesKeys + allIgnoredVersionKeys + allPiWebUpdateWarningKeys + allPiCLIUpdateWarningKeys
+    }
 }
 
 // MARK: - 设置模型
@@ -148,9 +176,14 @@ struct UpdateCheckPreferences: Equatable {
     /// alpha.3 预留：启动前自动更新（Pi Web 范围）。alpha.2 只保存值。
     var autoUpdatePiWebBeforeLaunch: Bool
 
+    /// 启动前自动更新 Pi CLI（GitHub #18 预留、GitHub #21 生效）。
+    /// 默认关闭；打开后也受进程保护与来源/可信度前置条件约束。
+    var autoUpdatePiBeforeLaunch: Bool
+
     init(
         policies: [UpdateCheckCategory: UpdateCheckPolicy] = [:],
-        autoUpdatePiWebBeforeLaunch: Bool = UpdateCheckPreferences.defaultAutoUpdatePiWebBeforeLaunch
+        autoUpdatePiWebBeforeLaunch: Bool = UpdateCheckPreferences.defaultAutoUpdatePiWebBeforeLaunch,
+        autoUpdatePiBeforeLaunch: Bool = UpdateCheckPreferences.defaultAutoUpdatePiBeforeLaunch
     ) {
         var normalized: [UpdateCheckCategory: UpdateCheckPolicy] = [:]
         for category in UpdateCheckCategory.allCases {
@@ -160,6 +193,7 @@ struct UpdateCheckPreferences: Equatable {
         }
         self.policies = normalized
         self.autoUpdatePiWebBeforeLaunch = autoUpdatePiWebBeforeLaunch
+        self.autoUpdatePiBeforeLaunch = autoUpdatePiBeforeLaunch
     }
 
     /// 出厂默认设置。
@@ -215,6 +249,7 @@ struct UpdateCheckPreferences: Equatable {
             defaults.removeObject(forKey: UpdateSettingKeys.legacyEnabled(for: category))
         }
         defaults.set(autoUpdatePiWebBeforeLaunch, forKey: UpdateSettingKeys.autoUpdatePiWebBeforeLaunch)
+        defaults.set(autoUpdatePiBeforeLaunch, forKey: UpdateSettingKeys.autoUpdatePiBeforeLaunch)
     }
 }
 
@@ -280,6 +315,14 @@ enum UpdateCheckSettingsMigration {
                 preferences.autoUpdatePiWebBeforeLaunch = enabled
             } else {
                 note(UpdateSettingKeys.autoUpdatePiWebBeforeLaunch, "已回退到关闭")
+            }
+        }
+
+        if let raw = values[UpdateSettingKeys.autoUpdatePiBeforeLaunch] {
+            if let enabled = booleanValue(raw) {
+                preferences.autoUpdatePiBeforeLaunch = enabled
+            } else {
+                note(UpdateSettingKeys.autoUpdatePiBeforeLaunch, "已回退到关闭")
             }
         }
 

@@ -5,6 +5,7 @@
 - **执行环境**：macOS 27.0（build 26A428），arm64，`swiftc` Apple Swift 6.4；`xcode-select -p` = `/Library/Developer/CommandLineTools`（**无完整 Xcode**，因此本地不能运行 `xcodebuild test`，见文末“未能验证的部分”）。
 - **结论摘要**：**阻断项 0 项**；非阻断残余风险 11 项（最高为“低—中”）；建议后续 Issue 6 项。
 - **本文档引用约定**：样例秘密值统一写作“16 位字母”（实测用 16 个 `A`）；输出中的本机 Home 路径已替换为 `~`。这样既保持可复现，又不会让本报告自身触发 `Scripts/scan-secrets.sh`、CI 的 personal-data `git grep` 与 `check-identity.sh` 的仓库文本扫描。
+- **行号约定**：除 R-3 相关条目已按 Issue #39 修复后的代码更新外，行号以审查时修订（上记提交）为准；符号名（如 `hostnameValidationMessage`）可用于在当前代码中定位。
 
 ---
 
@@ -193,20 +194,23 @@ after 2nd scrubExisting : {"token": <redacted> trailing-context
 
 ## 4. 网络边界
 
-**结论：通过（无阻断项），1 项非阻断风险（R-3）。**
+**结论：通过（无阻断项）。审查当时记录 1 项非阻断风险（R-3），已于 Issue #39 修复。**
 
 | 检查项 | 结论 | 证据（文件:行号 / 命令输出） |
 | --- | --- | --- |
 | 默认 loopback | 通过 | `ServiceConfiguration.defaultHostname = "127.0.0.1"`（`Sources/ServiceConfiguration.swift:31`），`defaultNoProxy = "localhost,127.0.0.1,::1"`（:35）；`./Scripts/check-identity.sh` 输出 `ok   service default hostname is 127.0.0.1` |
-| 非 loopback 必须有非空密码 | 通过 | `allowsRemoteListening`（`KeychainStore.swift:243-245`）；启动门控 `ServiceManager.swift:601-606`、`:759-762`、`:872-877`（缺密码 → `.missingRemotePassword` / 可读失败，不启动） |
-| `0.0.0.0` / `::` / `[::]` 不可默认、界面不可保存 | 通过（界面路径） | `allInterfacesHostnames`（`KeychainStore.swift:192`）+ `hostnameValidationMessage`（:248-268，在保存路径被调用：`PreferencesWindowController.swift:371-375`） |
-| `allowedHosts` 校验 | 通过 | `hostnameValidationMessage` 限制字符集为字母/数字/点/连字符/下划线/方括号/冒号，拒绝协议、路径、空格与 `host:port` 混写（`KeychainStore.swift:259-267`）；`PI_WEB_ALLOWED_HOSTS` 只在非空时注入（`ServiceManager.swift:140-144`） |
-| IPv6 处理 | 通过 | 保存与子进程参数用不带方括号的 `::1`，拼 URL 时由 `urlHost` 加方括号（`KeychainStore.swift:206-224`；`ServiceConfiguration.swift:99-107`）；冒号只在合法 IPv6 字面量时允许（`isIPv6Literal`，:226-231） |
-| loopback 判定是否可能把非 loopback 误判为 loopback | 通过（方向安全） | `isLoopbackHostname`（`KeychainStore.swift:233-241`）只覆盖空值、`localhost`、`*.localhost`、`::1` 与 `127.0.0.0/8`（4 段且每段可解析为 `UInt8`）。`localhost.`、`LOCALHOST.`、`127.1`、`0177.0.0.1`、`0:0:0:0:0:0:0:1` 等形态**不会**被判为 loopback → 退化为“要求密码”的保守方向，不会静默放开 |
-| 密码认证 vs 传输加密的表述是否如实 | 通过 | `README.md:100`、`docs/privacy.md:53`、`docs/architecture.md:135` 与 `:139` 均明写“密码认证不等于传输加密”，并要求用户自备加密隧道或 HTTPS 反向代理 |
+| 非 loopback 必须有非空密码 | 通过 | `allowsRemoteListening`（`KeychainStore.swift:286-288`）；启动门控 `ServiceManager.swift:601-603`、`:791-793`、`:911-913`（缺密码 → `.missingRemotePassword` / 可读失败，不启动） |
+| `0.0.0.0` / `::` / `[::]` / `*` 不可默认、所有入口都不可用 | 通过（所有入口） | 唯一判定 `RemoteAccessPolicy.addressVerdict(hostname:)`（`KeychainStore.swift:295-361`，拒绝集合 `:230`）被保存路径（`hostnameValidationMessage` `:420-422`、`RemoteAccessSetup.apply` `:471-473`）、`ServiceConfiguration.load`（`ServiceConfiguration.swift:72-74`、`:76`）与 `ServiceManager.startDecision(credentials:)`（`ServiceManager.swift:783-788`，启动门控 `:601-609`）共用（Issue #39 修复 R-3） |
+| 通配地址的等价写法 | 通过 | `isWildcardIPv6Literal`（`KeychainStore.swift:376-384`）拒绝全零与 IPv4-mapped 全零 IPv6（`0:0:0:0:0:0:0:0`、`::ffff:0.0.0.0`），`isAmbiguousNumericHostname`（`:390-405`）拒绝会被 `getaddrinfo` 按 inet_aton 语义解析的纯数值写法（`0`、`0x0`、`000.000.000.000`）与空标签（`0.0.0.0.`）；macOS 实测这些写法都绑定所有接口 |
+| `allowedHosts` 校验 | 通过 | `addressVerdict` 限制字符集为字母/数字/点/连字符/下划线/方括号/冒号，拒绝协议、路径、空格与 `host:port` 混写（`KeychainStore.swift:312-316`、`:331-339`）；`PI_WEB_ALLOWED_HOSTS` 只在非空时注入（`ServiceManager.swift:141-144`） |
+| IPv6 处理 | 通过 | 保存与子进程参数用不带方括号的 `::1`，拼 URL 时由 `urlHost` 加方括号（`KeychainStore.swift:244-267`；`ServiceConfiguration.swift:118-127`）；冒号只在合法 IPv6 字面量时允许（`isIPv6Literal`，`:264-267`） |
+| loopback 判定是否可能把非 loopback 误判为 loopback | 通过（方向安全） | `isLoopbackHostname`（`KeychainStore.swift:271-279`）只覆盖空值、`localhost`、`*.localhost`、`::1` 与 `127.0.0.0/8`（4 段且每段可解析为 `UInt8`）。`localhost.`、`LOCALHOST.`、`127.1`、`0177.0.0.1`、`0:0:0:0:0:0:0:1` 等形态**不会**被判为 loopback → 退化为“要求密码”的保守方向，不会静默放开；显式空值与上述歧义数值写法在保存/加载/启动都被 `addressVerdict` 拒绝（Issue #39） |
+| 密码认证 vs 传输加密的表述是否如实 | 通过 | `README.md:100`、`docs/privacy.md:53`、`docs/architecture.md:137` 与 `:141` 均明写“密码认证不等于传输加密”，并要求用户自备加密隧道或 HTTPS 反向代理 |
 | WebView 导航边界 | 通过 | `WebViewNavigationPolicy.isLocalURL`（`Sources/WebViewNavigationPolicy.swift:16-19`）只允许 http(s) + loopback host + 当前端口；其余一律外开（:31-36） |
 
-**R-3（低）**：`0.0.0.0` 等“所有接口”地址的拒绝只存在于**设置界面保存路径**。`ServiceConfiguration.load`（`ServiceConfiguration.swift:67-83`）直接读取 UserDefaults，不做地址校验；启动/门控路径只强制“非 loopback 需要密码”，不重新校验地址本身。因此 `defaults write <bundle-id> service.hostname -string "0.0.0.0"` 这类同用户直接写入，再配合 Keychain 中已有密码，应用会以该地址启动 pi-web。威胁模型上这不增加能力（同一非特权用户本来就能自己运行 `pi-web --hostname 0.0.0.0`），但它绕过了“应用永不启动所有接口监听”的设计声明。建议：在 `ServiceManager.startDecision`（`ServiceManager.swift:755`）或 `ServiceConfiguration.load` 处复用 `hostnameValidationMessage`/`allInterfacesHostnames`。
+**R-3（低，已于 Issue #39 修复）**：`0.0.0.0` 等“所有接口”地址的拒绝原先只存在于**设置界面保存路径**。`ServiceConfiguration.load`（当时的 `ServiceConfiguration.swift:67-83`）直接读取 UserDefaults，不做地址校验；启动/门控路径只强制“非 loopback 需要密码”，不重新校验地址本身。因此 `defaults write <bundle-id> service.hostname -string "0.0.0.0"` 这类同用户直接写入，再配合 Keychain 中已有密码，应用会以该地址启动 pi-web。威胁模型上这不增加能力（同一非特权用户本来就能自己运行 `pi-web --hostname 0.0.0.0`），但它绕过了“应用永不启动所有接口监听”的设计声明。
+
+**修复（Issue #39）：** 地址校验抽成 `RemoteAccessPolicy.addressVerdict(hostname:)`（`KeychainStore.swift:295-361`，结果类型 `ServiceAddressVerdict`），保存路径（`hostnameValidationMessage`、`RemoteAccessSetup.apply`）、`ServiceConfiguration.load` 与 `ServiceManager.startDecision(credentials:)` 三处共用：`load` 把 `[::1]` 规范化为 `::1`、非法值原样保留并由 `ServiceConfiguration.hostnameProblem` 标记为不可用（不静默替换成 loopback 或其他地址）；`ServiceManager.isStartPermitted` 与 `startManagedService()` 要求地址可用，非法地址返回 `.invalidAddress`，不启动进程、不探测外部服务、不加载页面，失败提示给出非法值与允许范围。除了 `0.0.0.0`、`::`、`[::]`、`*`，会被 `getaddrinfo` 解析成通配地址的写法（`0`、`0x0`、`000.000.000.000`、`0.0.0.0.`、`0:0:0:0:0:0:0:0`、`::ffff:0.0.0.0`）与歧义数值写法也一律拒绝（只接受规范点分四段、规范 IPv6 字面量与主机名）。威胁模型结论不变：同一非特权用户仍可自行运行 `pi-web --hostname 0.0.0.0`。
 
 ---
 
@@ -452,7 +456,7 @@ $ git log --all -p --unified=0 | grep -E '^\+' | grep -nE '<凭据/路径/私网
 | 对手 | 能力 | 是否在防护范围 |
 | --- | --- | --- |
 | **A. 远程网络攻击者** | 能访问用户主动暴露的地址 | 在范围内：默认 loopback、非 loopback 强制密码、`0.0.0.0` 界面拒绝、文档明写需自备加密隧道 |
-| **B. 同机同用户进程** | 可读写该用户文件、可 `kill` 自己的进程、可 `defaults write` | 部分在范围内（R-3、R-6）：应用不因此获得额外能力，故接受为残余风险 |
+| **B. 同机同用户进程** | 可读写该用户文件、可 `kill` 自己的进程、可 `defaults write` | 部分在范围内（R-6）：应用不因此获得额外能力，故接受为残余风险；R-3（直接改写 UserDefaults 进入通配监听）已在 Issue #39 修复 |
 | **C. 其他用户进程** | `ps` 读不到、无 `sudo` | 在范围内：读不到事实即判外部、零信号、不提权 |
 | **D. 被篡改/被替换的服务二进制** | 替换磁盘上的 `pi-web` | 部分在范围内：重启后 `launchedAt` 变化即判外部；“同进程内已被替换”不在范围 |
 | **E. 供应链/CI 攻击者** | 提交 PR、试图写入仓库或改发布产物 | 在范围内：只读 token、Actions 固定 SHA、发布仅由 tag 触发、打包前强制 adhoc 断言 |
@@ -465,7 +469,7 @@ $ git log --all -p --unified=0 | grep -E '^\+' | grep -nE '<凭据/路径/私网
 | 误杀/误停他人进程 | 所有权逐项验证 + 只发组信号 + 无可验证记录零信号（§1） | TOCTOU、`lstart` 秒粒度（R-5） |
 | 密码外泄到磁盘/参数/日志 | 只进子进程环境；诊断只有状态；错误消息二次清理（§2） | 上游子进程自身打印的内容（R-2） |
 | 日志中的敏感信息 | 统一 `LogRedactor` + 每次启动就地脱敏 + 轮转（§3） | 规则缺口与幂等缺陷（R-1、R-2） |
-| 非本机监听在无认证下启动 | loopback 默认 + 非 loopback 强制非空密码 + 运行中收敛（§4） | 直接改 UserDefaults 写入的通配地址（R-3） |
+| 非本机监听在无认证下启动 | loopback 默认 + 非 loopback 强制非空密码 + 运行中收敛（§4） | 直接改 UserDefaults 写入的通配地址曾能绕过校验（R-3）；已在 Issue #39 修复（保存/加载/启动三处共用地址校验） |
 | 明文传输被误认为加密 | 三处文档明写“密码认证不等于传输加密”（§4） | 无速率限制（属上游 pi-web 认证范围，alpha 限制） |
 | 发布产物被替换/误标 | 只读权限 + SHA 固定 Actions + adhoc 强制断言 + SHA-256（§5、§6） | 非 bit-for-bit 可复现（既有文档已声明） |
 | 凭据进入仓库 | 规则化 scanner + CI 门禁 + personal-data grep（§8） | 未覆盖的凭据类型、不扫历史（R-8） |
@@ -478,7 +482,7 @@ $ git log --all -p --unified=0 | grep -E '^\+' | grep -nE '<凭据/路径/私网
 | --- | --- | --- | --- | --- |
 | R-1 | 脱敏非幂等：第二次就地脱敏会吞掉 JSON 引号键后紧跟的字符（`}`） | 低 | 否 | 后续 Issue：修 `LogRedactor` 值分支或跳过已含占位符的片段；把 JSON 形态加进幂等用例。文档声明已在本 PR 修正 |
 | R-2 | 脱敏规则缺口：`password="a b"` / `secret = "…"` / `key:` 换行值 / 含空格值仅部分替换 | 低—中 | 否 | 后续 Issue：值分支支持引号与多行续行；文档规则表已在本 PR 改为实测覆盖范围 |
-| R-3 | `0.0.0.0` 等通配地址只在界面保存路径被拒绝，加载/启动路径不校验 | 低 | 否 | 后续 Issue：在 `ServiceConfiguration.load` 或 `ServiceManager.startDecision` 复用地址校验 |
+| R-3 | `0.0.0.0` 等通配地址只在界面保存路径被拒绝，加载/启动路径不校验 | 低 | 否 | **已修复（Issue #39）**：`RemoteAccessPolicy.addressVerdict(hostname:)` 由保存/加载/启动三处共用；非法地址返回 `.invalidAddress` 且不启动。本行保留审查当时的判定与编号（参见 §12 后续处理） |
 | R-4 | 远程访问仅密码认证、无传输加密、无暴力破解防护（上游 pi-web 范围） | 低 | 否 | 保持在 README/privacy/architecture 的显著位置说明；alpha 与 beta 阶段继续作为已知限制 |
 | R-5 | 所有权验证与 `kill(-pgid)` 之间的 TOCTOU、`lstart` 秒粒度、控制行摘要丢失引号边界 | 低 | 否 | 保持现有文档记录；如需进一步收紧可改用 `proc_pidinfo` 微秒启动时间（后续 Issue） |
 | R-6 | `service-owner.json` 不校验权限/所有者/签名 | 低 | 否 | 保持现状（同用户本可直接 `kill`）；如需加固可校验文件属主与 mode |
@@ -542,6 +546,13 @@ committed secrets` 两步门禁、只扫已跟踪文件（先 `git add` 再扫�
 `scan-secrets: suppressed N lines` 记入证据。相关记录见 [alpha 发布门槛清单](alpha-release-checklist.md)
 的“本次发布执行记录”一节与 [v0.1.0-alpha.1 Release 说明](release-notes-v0.1.0-alpha.1.md)。
 本报告 §10 的 R-7 行保留审查当时的判定，不再代表现状。
+
+**后续处理（#39，启动与加载路径复用监听地址校验，本报告写完之后）：** R-3 已解决。`Sources/` 新增唯一的地址判定
+`RemoteAccessPolicy.addressVerdict(hostname:)`（结果类型 `ServiceAddressVerdict`），保存路径、`ServiceConfiguration.load`
+与 `ServiceManager.startDecision(credentials:)` 三处共用：通配地址（`0.0.0.0`、`::`、`[::]`、`*`）及其会被 `getaddrinfo` 解析成通配地址的等价写法（`0`、`0x0`、`000.000.000.000`、`0.0.0.0.`、`0:0:0:0:0:0:0:0`、`::ffff:0.0.0.0`）、空地址、前后空白与
+非法字符在任何入口都被拒绝；`load` 规范化 `[::1]` 并把非法值原样标记为 `hostnameProblem`（不静默回退）；启动入口返回
+`.invalidAddress` 并不启动进程、不探测外部服务、不加载页面，提示包含非法值与允许范围。本报告 §10 的 R-3 行保留审查当时
+的判定与编号，已在“建议”列标注修复。相关文档同步在 `docs/architecture.md` 与 `docs/settings-and-workspace.md`。
 
 本报告自身也做了两处“以防自伤”的处理：报告里展示的扫描器模式字面值全部按本仓库脚本惯用的拆段写法给出（避免报告命中这些门禁），且加入文档后在**暂存之后**重新跑过 CI personal-data `git grep`、`./Scripts/check-identity.sh`、`./Scripts/scan-secrets.sh`（均退出 0）。这个盲点本身记入 R-11。
 

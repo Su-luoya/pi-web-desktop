@@ -64,13 +64,32 @@ struct ServiceConfiguration: Equatable {
         )
     }
 
+    /// 加载或直接构造后“监听地址是否可用”的判定（GitHub #39 / 安全审查 R-3）。
+    ///
+    /// 计算属性而不是存档字段：界面保存路径在写入前已经校验，这里对“直接改写
+    /// UserDefaults”与“直接构造配置”给出同一个结论，也不会出现过期标记。nil 表示
+    /// 地址可用；非 nil 是包含非法值与允许范围的可读诊断。
+    var hostnameProblem: String? {
+        RemoteAccessPolicy.unusableHostnameMessage(hostname)
+    }
+
     static func load(from defaults: UserDefaults = .standard) -> ServiceConfiguration {
         let fallback = Self.default
         let behavior = QuitBehavior(rawValue: defaults.string(forKey: Key.quitBehavior) ?? "") ?? fallback.quitBehavior
         let storedPort = defaults.object(forKey: Key.port) as? Int
+        let storedHostname = defaults.string(forKey: Key.hostname) ?? fallback.hostname
+        // 读入时做与保存路径同一套判定（GitHub #39 / R-3）：`[::1]` 这类可规范化的
+        // 合法输入统一成不带方括号的形式；非法值原样保留，由 `hostnameProblem`
+        // 标记为不可用，绝不静默替换成 loopback 或其他地址。
+        let hostname: String
+        if case .allowed(let normalized) = RemoteAccessPolicy.addressVerdict(hostname: storedHostname) {
+            hostname = normalized
+        } else {
+            hostname = storedHostname
+        }
 
         return ServiceConfiguration(
-            hostname: defaults.string(forKey: Key.hostname) ?? fallback.hostname,
+            hostname: hostname,
             port: storedPort.flatMap { (1...65535).contains($0) ? $0 : nil } ?? fallback.port,
             piWebPath: defaults.string(forKey: Key.piWebPath) ?? fallback.piWebPath,
             allowedHosts: defaults.string(forKey: Key.allowedHosts) ?? fallback.allowedHosts,

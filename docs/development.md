@@ -101,7 +101,7 @@ CI 在 `macos-14` 上使用同样的临时 `derivedDataPath` 和 ad-hoc `CODE_SI
 ./Scripts/check-identity.sh --test-bundle /path/to/Xcode_Products/PiWebDesktopTests.xctest /path/to/Xcode_Products/PiWebDesktop.app build/Pi-Web-Desktop.app
 ```
 
-`Scripts/check-identity.sh` 退出码 0 表示全部通过，非 0 表示至少一项失败（参数错误为 2）。它接受多个 bundle 路径（位置参数列表，默认 `build/Pi-Web-Desktop.app`），对每个 bundle 独立检查并给出带具体路径的结论，所以同一个命令可以同时校验 Xcode 产物和发布脚本产物。`--test-bundle <X.xctest>` 只接受一个测试 bundle，用于断言测试 target 的 identifier 与版本。它检查：
+`Scripts/check-identity.sh` 退出码 0 表示全部通过，非 0 表示至少一项失败（参数错误为 2；仓库文本扫描遇到落在扫描范围内的未跟踪文件时也按失败计，见下文）。它接受多个 bundle 路径（位置参数列表，默认 `build/Pi-Web-Desktop.app`），对每个 bundle 独立检查并给出带具体路径的结论，所以同一个命令可以同时校验 Xcode 产物和发布脚本产物。`--test-bundle <X.xctest>` 只接受一个测试 bundle，用于断言测试 target 的 identifier 与版本。它检查：
 
 - xcconfig 存在，且 `APP_BUNDLE_IDENTIFIER`（基础变量）、`PRODUCT_BUNDLE_IDENTIFIER`、`APP_TEST_BUNDLE_IDENTIFIER`、显示名、可执行名、图标名、最低系统版本、`MARKETING_VERSION`、`CURRENT_PROJECT_VERSION` 均非空；`APP_TEST_BUNDLE_IDENTIFIER` 的未展开模板里不得出现 `$(PRODUCT_BUNDLE_IDENTIFIER)`（循环引用回归防护，出现即失败）；
 - `project.pbxproj` 通过 `baseConfigurationReference` 引用该 xcconfig，所有 build configuration 都继承它，且 `MARKETING_VERSION`、`CURRENT_PROJECT_VERSION`、`PRODUCT_BUNDLE_IDENTIFIER`、`PRODUCT_NAME`、`MACOSX_DEPLOYMENT_TARGET`、`INFOPLIST_KEY_CFBundleDisplayName`、`INFOPLIST_KEY_CFBundleShortVersionString`、`INFOPLIST_KEY_CFBundleVersion` 没有任何字面值，版本与 bundle id 字面值也不出现在工程文件中；
@@ -111,7 +111,8 @@ CI 在 `macos-14` 上使用同样的临时 `derivedDataPath` 和 ad-hoc `CODE_SI
 - `CFBundleName` 只输出信息行，不参与成败判定；
 - 传入 `--test-bundle <X.xctest>` 时，额外断言该 bundle 的 `CFBundleIdentifier` 等于解析后的 `APP_TEST_BUNDLE_IDENTIFIER`，并断言其 `CFBundleShortVersionString`、`CFBundleVersion` 与 xcconfig 一致；不传该参数时行为与之前完全一致；
 - `Sources/ServiceConfiguration.swift` 默认 hostname 为 `127.0.0.1`、默认 proxy 为空、noProxy 只包含 loopback 条目；
-- 仓库文本中不出现私人默认值：Tailscale 主机名（小写形式）、tailnet DNS 后缀、CGNAT 私网地址、`/Users` 下的绝对路径、固定本地代理端点；`MARKETING_VERSION` 的字面值也不得出现在 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/`。
+- 仓库文本中不出现私人默认值：Tailscale 主机名（小写形式）、tailnet DNS 后缀、CGNAT 私网地址、`/Users` 下的绝对路径、固定本地代理端点；`MARKETING_VERSION` 的字面值也不得出现在 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/`；
+- 未跟踪文件不给出假绿：本节扫描基于 `git grep`，只读已跟踪内容，所以扫描前先用 `git ls-files --others --exclude-standard` 列出未跟踪且未被 `.gitignore` 忽略的文件。落在扫描范围内的未跟踪文件判定为**失败**（列出前 5 条，提示 `git add` 后重跑或删除），因为脚本不能为它没有读过的文本担保；扫描本来就排除的 `*.icns` 只输出 info 行，不改变退出码。CI 在干净 checkout 上运行，不存在未跟踪文件。
 
 脚本通过路径排除与字符串拼接保证自身文本不会触发这些模式，`.github/workflows/build.yml` 里的 personal-data grep 同样排除该脚本。
 
@@ -202,33 +203,34 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 ./Scripts/smoke.sh
 ```
 
-`./Scripts/check-identity.sh` 退出 0 表示身份、版本与服务默认值一致，并且仓库文本扫描通过。`./Scripts/scan-secrets.sh --self-test` 必须证明每条规则都会命中、抑制标记只跳过带标记的那一行且计数正确，`./Scripts/scan-secrets.sh` 必须退出 0（没有已跟踪文件命中）。`xcodebuild build` / `xcodebuild test` 需要完整 Xcode：`xcode-select -p` 指向 Command Line Tools 时这两条命令会失败，此时以上面的脚本链替代（脚本链不运行 XCTest），并在 PR 中说明 XCTest 由 CI 的 `macos-14` job 覆盖。
+`./Scripts/check-identity.sh` 退出 0 表示身份、版本与服务默认值一致，仓库文本扫描通过，且工作区没有落在扫描范围内的未跟踪文件。`./Scripts/scan-secrets.sh --self-test` 必须证明每条规则都会命中、抑制标记只跳过带标记的那一行且计数正确，以及未跟踪文件门禁（默认退出 3、加 `--include-untracked` 能扫到未跟踪文件里的样例凭据、没有未跟踪文件时行为不变）；`./Scripts/scan-secrets.sh` 必须退出 0（没有已跟踪文件命中，且工作区没有未跟踪文件：有未跟踪文件时它如实退出 3，先 `git add` 或删除后再重跑）。`xcodebuild build` / `xcodebuild test` 需要完整 Xcode：`xcode-select -p` 指向 Command Line Tools 时这两条命令会失败，此时以上面的脚本链替代（脚本链不运行 XCTest），并在 PR 中说明 XCTest 由 CI 的 `macos-14` job 覆盖。
 
 ### personal-data 与 secret 扫描能力
 
-仓库与 CI 共有三层自动文本检查，覆盖的是固定模式和已跟踪内容，不是通用泄露检测：
+仓库与 CI 共有三层自动文本检查，覆盖的是固定模式，不是通用泄露检测（CI 的步骤只覆盖 checkout 出来的已跟踪内容，本地运行见下面的未跟踪文件处理）：
 
-- **CI 的 personal-data 步骤**（`.github/workflows/build.yml` 的 `Check for accidental personal data` 步骤）：一条 `git grep -nE`，匹配几个固定字面量（一个私有 VPN 厂商名的小写形式、一个固定本地代理端点、以 `/Users` 开头的主目录路径），并排除 `*.icns`、该 workflow 自身和 `Scripts/check-identity.sh`。
-- **`Scripts/check-identity.sh` 的仓库文本扫描**（脚本里 `# --- 6. repository text scan ---` 一节）：用另一组模式：小写的私有 VPN 主机名、tailnet DNS 后缀、CGNAT 私网地址段、以 `/Users` 开头的路径、固定本地代理端点，再加 `MARKETING_VERSION` 字面值（限 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/`）。
-- **`Scripts/scan-secrets.sh`**（#11 新增；CI 的 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 两步）：按形状扫描**已跟踪文件**里的高信号凭据：AWS access key ID（`AKIA` + 16 位大写字母/数字）、GitHub token（`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_` + 长后缀）、PEM 私钥头、JWT（三段 base64url，`eyJ` 开头）、以及 `password=`/`passwd=`/`secret=`/`api_key=`/`access_token=`/`auth_token=`/`token=` 这类**紧贴等号且值至少 12 个字符**的赋值。规则、样本和匹配器本身也受同一条扫描约束。命中行只在同一行带 `scan-secrets: allow` 内联标记时才被跳过，每次运行结尾输出 `scan-secrets: suppressed N lines`。
+- **CI 的 personal-data 步骤**（`.github/workflows/build.yml` 的 `Check for accidental personal data` 步骤）：一条 `git grep -nE`，匹配几个固定字面量（一个私有 VPN 厂商名的小写形式、一个固定本地代理端点、以 `/Users` 开头的主目录路径），并排除 `*.icns`、该 workflow 自身和 `Scripts/check-identity.sh`。它只覆盖 checkout 出来的已跟踪提交；CI 上不存在未跟踪文件，所以这条门禁不受本节的未跟踪问题影响。
+- **`Scripts/check-identity.sh` 的仓库文本扫描**（脚本里 `# --- 6. repository text scan ---` 一节）：用另一组模式：小写的私有 VPN 主机名、tailnet DNS 后缀、CGNAT 私网地址段、以 `/Users` 开头的路径、固定本地代理端点，再加 `MARKETING_VERSION` 字面值（限 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/`）。扫描前它用 `git ls-files --others --exclude-standard` 检查未跟踪文件：落在上述扫描范围内的未跟踪文件直接判失败（无法为未扫描的文本担保），被 pathspec 排除的 `*.icns` 只输出 info 行。
+- **`Scripts/scan-secrets.sh`**（#11 新增；CI 的 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 两步）：按形状扫描**已跟踪文件**里的高信号凭据：AWS access key ID（`AKIA` + 16 位大写字母/数字）、GitHub token（`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_` + 长后缀）、PEM 私钥头、JWT（三段 base64url，`eyJ` 开头）、以及 `password=`/`passwd=`/`secret=`/`api_key=`/`access_token=`/`auth_token=`/`token=` 这类**紧贴等号且值至少 12 个字符**的赋值。规则、样本和匹配器本身也受同一条扫描约束。命中行只在同一行带 `scan-secrets: allow` 内联标记时才被跳过。默认的仓库级扫描在发现未跟踪且未被 `.gitignore` 忽略的文件时**拒绝给出结论并退出 3**，消息列出前 5 条并提示 `git add <path>` 或 `--include-untracked`；`--include-untracked` 把未跟踪文件就地一并扫描，仅用于本地排查（未 `git add` 的文件 CI 永远看不到）。每次实际执行的扫描在结尾输出 `scan-secrets: suppressed N lines`（退出 3 的拒绝在扫描前结束，不打印该行）。
 
 ```bash
-./Scripts/scan-secrets.sh --self-test    # 在临时目录里证明每条规则都会命中、误报不会被报告、抑制标记与计数正确
-./Scripts/scan-secrets.sh                # 扫描所有已跟踪文件
-./Scripts/scan-secrets.sh path/to/file   # 提交前扫描待提交文件
+./Scripts/scan-secrets.sh --self-test         # 在临时目录里证明每条规则都会命中、误报不会被报告、抑制标记与计数正确，并在临时 Git 仓库里验证未跟踪文件门禁（因此需要 git）
+./Scripts/scan-secrets.sh                     # 扫描所有已跟踪文件；存在未跟踪文件时拒绝给出结论（退出 3）
+./Scripts/scan-secrets.sh --include-untracked # 本地排查：连同未跟踪且未被 .gitignore 忽略的文件一起扫
+./Scripts/scan-secrets.sh path/to/file        # 提交前扫描单个文件（未跟踪也可以，不受门禁影响）
 ```
 
-退出码 0 表示没有命中，1 表示至少命中一处，2 表示用法/环境错误（例如不在 Git work tree 里）。自检和仓库扫描在 CI 上是两个独立步骤，所以“规则失效”与“仓库里真有凭据”不会互相掩盖。
+退出码 0 表示没有命中，1 表示至少命中一处，2 表示用法/环境错误（例如不在 Git work tree 里），3 表示工作区存在未跟踪且未被 `.gitignore` 忽略的文件、仓库级扫描因此拒绝给出结论（消息里列出前 5 条，并给出 `git add` 与 `--include-untracked` 两条出路）。退出 3 是刻意的：`git grep` 只读已跟踪内容，直接通过就会把从未扫描过的文件说成“没问题”（安全审查 R-11）；`--self-test` 在临时 Git 仓库里断言这条契约（默认拒绝、加开关后能扫到未跟踪文件里的样例凭据、没有未跟踪文件时行为不变）。显式传入 FILE 时不检查未跟踪状态：扫描命名文件本来就只覆盖这些文件，单个未跟踪文件也可以直接指定。自检和仓库扫描在 CI 上是两个独立步骤，所以“规则失效”与“仓库里真有凭据”不会互相掩盖。
 
 内联抑制（`scan-secrets: allow`）：
 
 - 只对**匹配行自身**生效：同一行里既有命中形状又有标记才跳过；标记出现在同文件的其他行、其他文件或注释段落里都不生效。脚本没有按文件、目录或 pathspec 整体放行的开关。
 - 只用于**样例数据**：脱敏测试夹具（例如 `PiWebDesktopTests/LogRedactorTests.swift`、`PiWebDesktopTests/LogWriterTests.swift` 里的假 token/JWT/私钥）这类“形状像凭据但本来就不是”的行。真实凭据、疑似凭据和来源不明的字面值不得加标记。
 - 多行字符串里的夹具（Swift `"""` 块）把标记写在夹具行尾；单行字面量把标记写在语句行尾。标记只作为代码注释或夹具文本出现，不参与被断言的内容。
-- 每次运行结尾都打印 `scan-secrets: suppressed N lines`（没有抑制时为 0），CI 日志里能直接看到；`--self-test` 额外断言“带标记的行不报错、同一行去掉标记后报错、标记在别的行不影响、计数不多不少”。
+- 每次实际执行的扫描都在结尾打印 `scan-secrets: suppressed N lines`（没有抑制时为 0），CI 日志里能直接看到；未跟踪文件导致的退出 3 在扫描前结束，不打印这一行。`--self-test` 额外断言“带标记的行不报错、同一行去掉标记后报错、标记在别的行不影响、计数不多不少”。
 - 评审要求：把 N 与本次 diff 新增的标记数量对照，并逐条确认加标记的行确实是样例数据；标记出现在夹具之外（`Sources/`、`Scripts/`、`docs/` 等）时先质疑再合并。
 
-三层检查都只看文本模式、只看已跟踪内容（CI 上是已 checkout 的提交），不做熵分析、扫描 Git 历史、检查二进制/加密载荷或未列出的凭据类型；命中不等于一定泄漏（例如文档里的示例形状），漏报也不等于安全。凭据泄漏防线仍然是评审和作者自查，不要把“scan-secrets 通过”写成“没有秘密”。
+三层检查都只看文本模式；CI 的 personal-data `git grep` 仍然只覆盖 checkout 出来的已跟踪内容（CI 上不存在未跟踪文件，所以不涉及假绿）。本地运行不再静默跳过未跟踪文件：`./Scripts/scan-secrets.sh` 默认退出 3 并要求先 `git add`（或显式用 `--include-untracked` 做本地排查），`./Scripts/check-identity.sh` 对落在扫描范围内的未跟踪文件判失败、对本来就排除的 `*.icns` 只输出 info 行。三层都不做熵分析、扫描 Git 历史、检查二进制/加密载荷或未列出的凭据类型；命中不等于一定泄漏（例如文档里的示例形状），漏报也不等于安全。凭据泄漏防线仍然是评审和作者自查，不要把“scan-secrets 通过”写成“没有秘密”。
 
 本地复现 CI 的 personal-data 那条命令时，从工作流里取出再执行，避免在文档、注释或脚本里复制模式字面值：
 

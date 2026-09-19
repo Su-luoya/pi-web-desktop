@@ -22,11 +22,28 @@
 # marker suppresses exactly its own line and that the counter is right.
 #
 # Usage:
-#   Scripts/scan-secrets.sh                 # scan every git-tracked file
+#   Scripts/scan-secrets.sh                 # scan every git-tracked file; refuse
+#                                           #   to report a pass while untracked
+#                                           #   files exist
+#   Scripts/scan-secrets.sh --include-untracked
+#                                           # also scan untracked, non-ignored
+#                                           #   files in place (local triage)
 #   Scripts/scan-secrets.sh FILE [FILE...]  # scan explicit files
 #   Scripts/scan-secrets.sh --self-test     # prove every rule fires, in a temp dir
 #
-# Exit codes: 0 = no matches, 1 = at least one match, 2 = usage/environment error.
+# Untracked-file gate: `git grep` reads tracked content only, so a new file
+# that has not been `git add`ed is invisible and a local run could report a
+# clean work tree that was never scanned (security review R-11). The default
+# repository scan therefore refuses to run (exit 3) while untracked, non-ignored
+# files exist, and prints both how to stage them and the explicit escape hatch.
+# `--include-untracked` scans those files in place and is meant for local
+# triage only: a file that is never added is never scanned by CI. Explicit FILE
+# arguments are unaffected, because scanning named files never claimed to cover
+# the work tree.
+#
+# Exit codes: 0 = no matches, 1 = at least one match, 2 = usage/environment
+# error, 3 = untracked files present, so the repository scan refused to run
+# (see the untracked-file gate above).
 #
 # The rules and the self-test samples are assembled from adjacent shell string
 # literals, so this file never contains a contiguous example of its own
@@ -125,6 +142,67 @@ report_suppressed() {
     printf 'scan-secrets: suppressed %s lines\n' "$(suppressed_count)"
 }
 
+# --- untracked files -------------------------------------------------------
+
+# How many untracked paths the refusal message lists before summarizing.
+UNTRACKED_PREVIEW_LIMIT=5
+
+# untracked_repository_files: print the untracked files that are not ignored by
+# .gitignore, one path relative to the repository root per line. `git grep`
+# never sees these files, so the default scan has to decide about them
+# explicitly instead of silently scanning a subset of the work tree.
+untracked_repository_files() {
+    git -C "$ROOT" -c core.quotePath=false ls-files --others --exclude-standard
+}
+
+# report_untracked_refusal LIST_FILE COUNT: the readable message for the default
+# repository scan while untracked files exist. It names the files (bounded, so
+# a large untracked tree cannot flood the log) and then both ways forward.
+report_untracked_refusal() {
+    untracked_list=$1
+    untracked_total=$2
+    printf 'scan-secrets: error: %s untracked file(s) exist, so this scan cannot claim the work tree is clean\n' \
+        "$untracked_total" >&2
+    untracked_shown=0
+    while IFS= read -r untracked_path && [ "$untracked_shown" -lt "$UNTRACKED_PREVIEW_LIMIT" ]; do
+        printf 'scan-secrets:   %s\n' "$untracked_path" >&2
+        untracked_shown=$((untracked_shown + 1))
+    done < "$untracked_list"
+    if [ "$untracked_total" -gt "$untracked_shown" ]; then
+        printf 'scan-secrets:   ... and %s more\n' "$((untracked_total - untracked_shown))" >&2
+    fi
+    printf 'scan-secrets: hint: run `git add <path>` so the file is tracked and scanned,\n' >&2
+    printf 'scan-secrets:       or re-run with --include-untracked to scan untracked files in place.\n' >&2
+    printf 'scan-secrets:       A file that is never added is never scanned by CI either.\n' >&2
+}
+
+# scan_untracked_files LIST_FILE: print `<path>:<line>:<text>` records for the
+# untracked files in LIST_FILE, in the same shape `git grep -n` produces so
+# filter_hits parses them identically. It runs with the repository root as the
+# working directory on purpose: the printed paths stay repository-relative, so
+# the output never carries the local absolute path of the work tree. Binary
+# files are skipped with -I, as `git grep` does. Returns 0 when every file was
+# read and 2 when at least one file could not be scanned.
+scan_untracked_files() {
+    untracked_list=$1
+    untracked_failures=0
+    while IFS= read -r untracked_path; do
+        [ -n "$untracked_path" ] || continue
+        untracked_status=0
+        (cd "$ROOT" && grep -HnIE -e "$RULE_ALL" -- "$untracked_path") || untracked_status=$?
+        case $untracked_status in
+            0|1) : ;;
+            *)
+                printf 'scan-secrets: error: grep failed for untracked file %s (status %s)\n' \
+                    "$untracked_path" "$untracked_status" >&2
+                untracked_failures=$((untracked_failures + 1))
+                ;;
+        esac
+    done < "$untracked_list"
+    [ "$untracked_failures" -eq 0 ] || return 2
+    return 0
+}
+
 # --- scanning --------------------------------------------------------------
 
 # filter_hits RECORD_FILE: print the records that are not suppressed and count
@@ -174,22 +252,63 @@ scan_file() {
     esac
 }
 
-# scan_repository: `git grep` over every tracked file; 0 = at least one match
-# printed, 1 = clean or fully suppressed, 2 = the scan itself could not run.
+# scan_repository INCLUDE_UNTRACKED: `git grep` over every tracked file, plus
+# the untracked, non-ignored files when INCLUDE_UNTRACKED is 1. Returns 0 when
+# nothing was printed, 1 when at least one match was printed, 2 when the scan
+# itself could not run, and 3 when untracked files exist and INCLUDE_UNTRACKED
+# is 0. The refusal is deliberate: a pass here would claim coverage the scan
+# does not have (security review R-11).
 scan_repository() {
+    include_untracked=$1
     if ! git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         printf 'scan-secrets: error: %s is not a git work tree\n' "$ROOT" >&2
         return 2
     fi
     ensure_scan_tmp
+
+    untracked_list="$TMP_SCAN/untracked-files"
+    if ! untracked_repository_files > "$untracked_list"; then
+        printf 'scan-secrets: error: git ls-files failed, cannot check for untracked files\n' >&2
+        return 2
+    fi
+    untracked_total=$(wc -l < "$untracked_list" | tr -d '[:space:]')
+    if [ "$untracked_total" -gt 0 ]; then
+        if [ "$include_untracked" -eq 0 ]; then
+            report_untracked_refusal "$untracked_list" "$untracked_total"
+            return 3
+        fi
+        printf 'scan-secrets: note: --include-untracked: also scanning %s untracked file(s)\n' \
+            "$untracked_total"
+    fi
+
     records="$TMP_SCAN/repository-matches"
-    status=0
-    git -C "$ROOT" grep -nIE -e "$RULE_ALL" -- . > "$records" || status=$?
-    case $status in
-        0) filter_hits "$records" ;;
-        1) return 1 ;;
+    : > "$records"
+    grep_status=0
+    git -C "$ROOT" grep -nIE -e "$RULE_ALL" -- . > "$records" || grep_status=$?
+    case $grep_status in
+        0|1) : ;;
         *)
-            printf 'scan-secrets: error: git grep failed with status %s\n' "$status" >&2
+            printf 'scan-secrets: error: git grep failed with status %s\n' "$grep_status" >&2
+            return 2
+            ;;
+    esac
+
+    if [ "$include_untracked" -eq 1 ]; then
+        untracked_scan_status=0
+        scan_untracked_files "$untracked_list" >> "$records" || untracked_scan_status=$?
+        if [ "$untracked_scan_status" -ne 0 ]; then
+            return 2
+        fi
+    fi
+
+    filter_status=0
+    filter_hits "$records" || filter_status=$?
+    case $filter_status in
+        0) return 1 ;;
+        1) return 0 ;;
+        *)
+            printf 'scan-secrets: error: filtering match records failed with status %s\n' \
+                "$filter_status" >&2
             return 2
             ;;
     esac
@@ -197,21 +316,178 @@ scan_repository() {
 
 usage() {
     cat <<'USAGE'
-Usage: Scripts/scan-secrets.sh [FILE...]
+Usage: Scripts/scan-secrets.sh [--include-untracked]
+       Scripts/scan-secrets.sh FILE [FILE...]
        Scripts/scan-secrets.sh --self-test
 
-Without arguments every git-tracked file is scanned. Explicit files are useful
-for checking a candidate file before it is committed. A matched line is skipped
-only when that same line contains `scan-secrets: allow`; the run always ends
-with `scan-secrets: suppressed N lines`. --self-test writes sample files into a
-temporary directory outside the repository, asserts that each rule fires there,
-asserts that harmless sample text is not reported, asserts that the inline
-marker suppresses exactly its own line and is counted correctly, and removes
-the directory again.
+Without arguments every git-tracked file is scanned. Untracked means "not
+tracked and not ignored by .gitignore": when such files exist the default scan
+refuses to run and exits 3 instead of reporting a clean work tree that was
+never scanned. The refusal lists the first few paths and explains both ways
+forward: run `git add <path>` so the file is tracked and scanned, or pass
+--include-untracked to scan the untracked files in place for local triage. A
+file only ever scanned through --include-untracked is never scanned by CI, so
+stage it before relying on that result.
+
+Explicit FILE arguments are scanned as given, tracked or not, and are useful
+for checking a candidate file before it is committed; they are deliberately
+not gated on the untracked state of the rest of the work tree.
+
+Exit codes: 0 = no matches; 1 = at least one match; 2 = usage or environment
+error; 3 = untracked files exist, so the repository scan refused to run.
+
+A matched line is skipped only when that same line contains
+`scan-secrets: allow`; every scan that actually runs ends with
+`scan-secrets: suppressed N lines` (a refusal exits before scanning and prints
+no counter). --self-test writes sample files into a temporary directory outside
+the repository, asserts that each rule fires there, asserts that harmless
+sample text is not reported, asserts that the inline marker suppresses exactly
+its own line and is counted correctly, then builds a throwaway Git repository
+(it therefore needs git) to prove the untracked-file gate: refusal by default,
+detection with --include-untracked, and unchanged behavior without untracked
+files. Both temporary directories are removed again.
 USAGE
 }
 
 # --- self-test -------------------------------------------------------------
+
+# self_test_untracked_gate SAMPLE_DIR: prove the untracked-file gate with a
+# throwaway Git repository inside SAMPLE_DIR (already outside the work tree, so
+# no repository state is touched). The scanner is copied into that repository
+# so the copy resolves its own ROOT there; every case runs the copy as a
+# subprocess and asserts its exit code and output. This is the only part of
+# --self-test that needs git.
+self_test_untracked_gate() {
+    gate_samples=$1
+    gate_repo="$gate_samples/untracked-repo"
+    gate_status=0
+    gate_output=''
+
+    if ! mkdir -p "$gate_repo/Scripts"; then
+        printf 'self-test: FAIL: cannot create the untracked-gate repository under %s\n' \
+            "$gate_samples" >&2
+        failures=$((failures + 1))
+        return
+    fi
+    if ! cp "$SCRIPT_DIR/scan-secrets.sh" "$gate_repo/Scripts/scan-secrets.sh"; then
+        printf 'self-test: FAIL: cannot copy the scanner into the untracked-gate repository\n' >&2
+        failures=$((failures + 1))
+        return
+    fi
+
+    # One tracked file and one ignored file: the ignored file must not count as
+    # untracked, because the gate excludes paths covered by .gitignore. The
+    # empty excludes file is a local override so a contributor's global
+    # core.excludesFile cannot hide the sample files from the gate.
+    printf 'ignored.txt\n' > "$gate_repo/.gitignore"
+    printf 'ordinary tracked content\n' > "$gate_repo/tracked.txt"
+    printf 'local scratch content is ignored\n' > "$gate_repo/ignored.txt"
+    printf '' > "$gate_samples/untracked-gate-empty-excludes"
+
+    if ! git -C "$gate_repo" init -q \
+        || ! git -C "$gate_repo" config core.excludesFile "$gate_samples/untracked-gate-empty-excludes" \
+        || ! git -C "$gate_repo" add -A; then
+        printf 'self-test: FAIL: cannot initialise the untracked-gate repository\n' >&2
+        failures=$((failures + 1))
+        return
+    fi
+
+    run_gate_scan() {
+        gate_status=0
+        gate_output=$(CDPATH= cd -- "$gate_repo" && sh ./Scripts/scan-secrets.sh "$@" 2>&1) || gate_status=$?
+    }
+
+    expect_gate_status() {
+        expect_status=$1
+        expect_label=$2
+        if [ "$gate_status" -eq "$expect_status" ]; then
+            printf 'self-test: ok: %s (exit %s)\n' "$expect_label" "$gate_status"
+        else
+            printf 'self-test: FAIL: %s: exit %s, expected %s\n' \
+                "$expect_label" "$gate_status" "$expect_status" >&2
+            printf '%s\n' "$gate_output" | sed 's/^/     /' >&2
+            failures=$((failures + 1))
+        fi
+    }
+
+    expect_gate_output() {
+        expect_needle=$1
+        expect_label=$2
+        case $gate_output in
+            *"$expect_needle"*)
+                printf 'self-test: ok: %s\n' "$expect_label"
+                ;;
+            *)
+                printf 'self-test: FAIL: %s: output does not mention %s\n' \
+                    "$expect_label" "$expect_needle" >&2
+                printf '%s\n' "$gate_output" | sed 's/^/     /' >&2
+                failures=$((failures + 1))
+                ;;
+        esac
+    }
+
+    # Case 1: no untracked file (the ignored one does not count) -- the default
+    # scan keeps its previous behavior and reports the covered scope.
+    run_gate_scan
+    expect_gate_status 0 "no untracked files: the default scan still passes"
+    expect_gate_output 'scan-secrets: PASS (no matches in tracked files; no untracked files)' \
+        "no untracked files: the PASS line names the covered scope"
+    expect_gate_output 'scan-secrets: suppressed 0 lines' \
+        "no untracked files: the suppression summary is printed"
+
+    # Case 2: a sample credential in an untracked file blocks the default scan.
+    gate_untracked_credential='ghp_'"0123456789abcdefghijABCDEFGHIJ"
+    printf 'leaked: %s\n' "$gate_untracked_credential" > "$gate_repo/untracked-leak.txt"
+    run_gate_scan
+    expect_gate_status 3 "an untracked file makes the default scan refuse (exit 3)"
+    expect_gate_output 'untracked-leak.txt' "the refusal names the untracked file"
+    expect_gate_output 'git add' "the refusal explains how to stage the file"
+    expect_gate_output '--include-untracked' "the refusal names the explicit escape hatch"
+
+    # Case 3: the switch scans the untracked file and reports its credential.
+    run_gate_scan --include-untracked
+    expect_gate_status 1 "--include-untracked reports the untracked credential"
+    expect_gate_output 'untracked-leak.txt:1:' \
+        "--include-untracked reports the untracked file and line"
+
+    # Case 4: explicit FILE arguments stay independent of untracked files.
+    run_gate_scan tracked.txt
+    expect_gate_status 0 "explicit FILE mode ignores untracked files elsewhere"
+    run_gate_scan untracked-leak.txt
+    expect_gate_status 1 "an untracked file can always be checked by naming it"
+
+    # Case 5: mixing the switch with explicit files is a usage error.
+    run_gate_scan --include-untracked tracked.txt
+    expect_gate_status 2 "--include-untracked with explicit FILE arguments is a usage error"
+
+    # Case 6: staged content is still detected by the default scan.
+    if git -C "$gate_repo" add untracked-leak.txt; then
+        run_gate_scan
+        expect_gate_status 1 "the same credential is reported once the file is staged"
+        expect_gate_output 'untracked-leak.txt:1:' "the staged file is reported with its line"
+    else
+        printf 'self-test: FAIL: cannot stage the sample file in the untracked-gate repository\n' >&2
+        failures=$((failures + 1))
+    fi
+
+    # Case 7: a clean tree passes with the switch too -- the switch only widens
+    # the scanned set, it does not change the rules.
+    if git -C "$gate_repo" rm --cached -q untracked-leak.txt; then
+        rm -f "$gate_repo/untracked-leak.txt"
+        run_gate_scan --include-untracked
+        expect_gate_status 0 "--include-untracked on a clean tree passes"
+    else
+        printf 'self-test: FAIL: cannot unstage the sample file in the untracked-gate repository\n' >&2
+        failures=$((failures + 1))
+    fi
+
+    # The gate is only usable when its contract is discoverable, so --help must
+    # document both the switch and the new exit code.
+    run_gate_scan --help
+    expect_gate_status 0 "--help exits 0"
+    expect_gate_output '--include-untracked' "--help documents the untracked switch"
+    expect_gate_output '3 = untracked files exist' "--help documents exit code 3"
+}
 
 self_test() {
     TMP_SAMPLES=$(make_temp_dir)
@@ -342,6 +618,11 @@ self_test() {
         failures=$((failures + 1))
     fi
 
+    # The untracked-file gate is a contract of the entry point (options, exit
+    # codes, output), so exercise it against a throwaway repository instead of
+    # calling an internal helper.
+    self_test_untracked_gate "$tmp"
+
     # Remove the samples here instead of relying on the EXIT trap and prove
     # that they are gone; the raw match records are removed by the trap as well.
     rm -rf "$tmp"
@@ -357,48 +638,80 @@ self_test() {
         printf 'self-test: FAILED (%s failure(s))\n' "$failures" >&2
         return 1
     fi
-    printf 'self-test: PASS (all rules fired, suppression verified, samples cleaned up)\n'
+    printf 'self-test: PASS (all rules fired, suppression verified, untracked-file gate verified, samples cleaned up)\n'
     return 0
 }
 
 # --- entry point -----------------------------------------------------------
 
-if [ "$#" -eq 0 ]; then
-    if scan_repository; then
-        report_suppressed
-        printf 'scan-secrets: FAIL: matches listed above\n' >&2
-        exit 1
-    else
-        status=$?
+INCLUDE_UNTRACKED=0
+SELF_TEST=0
+while [ "$#" -gt 0 ]; do
+    case $1 in
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        --self-test)
+            SELF_TEST=1
+            shift
+            ;;
+        --include-untracked)
+            INCLUDE_UNTRACKED=1
+            shift
+            ;;
+        -*)
+            printf 'scan-secrets: error: unknown option %s\n' "$1" >&2
+            usage >&2
+            exit 2
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+if [ "$SELF_TEST" -eq 1 ]; then
+    if [ "$#" -ne 0 ]; then
+        printf 'scan-secrets: error: --self-test takes no further arguments\n' >&2
+        exit 2
     fi
-    if [ "$status" -ne 1 ]; then
-        exit "$status"
+    if [ "$INCLUDE_UNTRACKED" -ne 0 ]; then
+        printf 'scan-secrets: error: --include-untracked applies to the repository scan, not to --self-test\n' >&2
+        exit 2
     fi
-    report_suppressed
-    printf 'scan-secrets: PASS (no matches in tracked files)\n'
-    exit 0
+    self_test
+    exit $?
 fi
 
-case $1 in
-    --self-test)
-        shift
-        if [ "$#" -ne 0 ]; then
-            printf 'scan-secrets: error: --self-test takes no further arguments\n' >&2
-            exit 2
-        fi
-        self_test
-        exit $?
-        ;;
-    --help|-h)
-        usage
-        exit 0
-        ;;
-    -*)
-        printf 'scan-secrets: error: unknown option %s\n' "$1" >&2
-        usage >&2
-        exit 2
-        ;;
-esac
+if [ "$#" -eq 0 ]; then
+    status=0
+    scan_repository "$INCLUDE_UNTRACKED" || status=$?
+    case $status in
+        0)
+            report_suppressed
+            if [ "$INCLUDE_UNTRACKED" -eq 1 ]; then
+                printf 'scan-secrets: PASS (no matches in tracked or untracked files)\n'
+            else
+                printf 'scan-secrets: PASS (no matches in tracked files; no untracked files)\n'
+            fi
+            exit 0
+            ;;
+        1)
+            report_suppressed
+            printf 'scan-secrets: FAIL: matches listed above\n' >&2
+            exit 1
+            ;;
+        *)
+            exit "$status"
+            ;;
+    esac
+fi
+
+if [ "$INCLUDE_UNTRACKED" -ne 0 ]; then
+    printf 'scan-secrets: error: --include-untracked cannot be combined with explicit FILE arguments (named files are scanned whether or not they are tracked)\n' >&2
+    exit 2
+fi
 
 found=0
 for path in "$@"; do

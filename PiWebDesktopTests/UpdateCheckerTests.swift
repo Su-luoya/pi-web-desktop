@@ -1369,12 +1369,14 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertEqual(newer?.status, .updateAvailable)
         XCTAssertEqual(newer?.latestVersion, "2.1.0")
         XCTAssertNil(newer?.ignoredVersion)
-        XCTAssertEqual(UpdateNotificationPlanner.plan(
+        // 其他组件此刻也可能有可用更新，所以这里只断言本类别重新进入通知名单。
+        let newerPlans = UpdateNotificationPlanner.plan(
             results: newerWorld.checker.summary.results,
             preferences: newerWorld.checker.preferences,
             ignoredVersions: ignored,
             alreadyNotified: [:]
-        ).count, 1)
+        )
+        XCTAssertEqual(newerPlans.filter { $0.category == .piWeb }.map(\.latestVersion), ["2.1.0"])
     }
 
     func testScheduledResultsProduceAtMostOneNotificationPerVersion() {

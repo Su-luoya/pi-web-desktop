@@ -534,6 +534,15 @@ $ git log --all -p --unified=0 | grep -E '^\+' | grep -nE '<凭据/路径/私网
 
 `README.md:125` 属于仓库根文件，超出本任务允许的写范围，列入 R-7 后续 Issue。
 
+**后续处理（#15，v0.1.0-alpha.1 发布文档，本报告写完之后）：** R-7 已解决。`README.md` 里“没有通用
+secret scanning”那一条已改为与 `docs/development.md` 及 CI 门禁一致的描述：三层固定模式文本检查、
+`Scripts/scan-secrets.sh` 已实现且由 `Self-test the secret scanner` 与 `Scan tracked files for
+committed secrets` 两步门禁、只扫已跟踪文件（先 `git add` 再扫）、不扫 Git 历史、通过不等于
+“没有秘密”；发布门槛把 `./Scripts/scan-secrets.sh` 与 `--self-test` 的退出码及结尾的
+`scan-secrets: suppressed N lines` 记入证据。相关记录见 [alpha 发布门槛清单](alpha-release-checklist.md)
+的“本次发布执行记录”一节与 [v0.1.0-alpha.1 Release 说明](release-notes-v0.1.0-alpha.1.md)。
+本报告 §10 的 R-7 行保留审查当时的判定，不再代表现状。
+
 本报告自身也做了两处“以防自伤”的处理：报告里展示的扫描器模式字面值全部按本仓库脚本惯用的拆段写法给出（避免报告命中这些门禁），且加入文档后在**暂存之后**重新跑过 CI personal-data `git grep`、`./Scripts/check-identity.sh`、`./Scripts/scan-secrets.sh`（均退出 0）。这个盲点本身记入 R-11。
 
 ---

@@ -176,3 +176,62 @@ shasum -a 256 -c Pi-Web-Desktop-<MARKETING_VERSION>.zip.sha256
   在 Release 说明中标注问题，必要时发布新的 alpha（`v0.1.0-alpha.2`）并在 Issue 中说明回退路径。
 - 安全相关阻断项按 [SECURITY.md](https://github.com/Su-luoya/pi-web-desktop/blob/main/SECURITY.md)
   的渠道处理，不要写进公开 issue。
+
+## 本次发布执行记录（v0.1.0-alpha.1）
+
+本节记录 `v0.1.0-alpha.1` 候选提交上**实际执行过**的本地门槛与输出摘要，供 Release Issue 与草稿
+Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不要把它们写成已实测。
+
+- 被测候选提交：`f195f26`（`docs(release): v0.1.0-alpha.1 发布说明与 README 扫描能力修正 (#15)`）
+- 执行环境：Apple M4（Mac mini，`Mac16,10`）、macOS 27.0（`26A428`）、arm64；Node.js v24.21.0、
+  npm 11.19.0、Pi CLI（`@earendil-works/pi-coding-agent`）0.85.1、`@agegr/pi-web` 0.9.1
+  （Homebrew 前缀下的 npm 全局安装）；`xcode-select -p` 指向 `/Library/Developer/CommandLineTools`
+- 版本与 build 的唯一来源仍是 `Configuration/AppIdentity.xcconfig`（`0.1.0-alpha.1` / `1`）；
+  下面所有命令都在该提交上重跑，输出摘要为本次实际输出
+- 同一批事实也写在 [v0.1.0-alpha.1 Release 说明](release-notes-v0.1.0-alpha.1.md) 的
+  “本机实测环境与版本”与“构建与签名验证记录”两节
+
+### 已在候选提交上实测
+
+| # | 门槛 | 命令 | 实测输出摘要 | 判定 |
+| --- | --- | --- | --- | --- |
+| 1 | 脚本语法 | `sh -n Scripts/*.sh` | 无输出 | 退出 0，通过 |
+| 2 | 空白与补丁格式 | `git diff --check` | 无输出 | 退出 0，通过 |
+| 3 | 构建 | `./Scripts/build.sh` | `Built: build/Pi-Web-Desktop.app`；`Mach-O 64-bit executable arm64` | 退出 0，通过 |
+| 4 | 身份与版本一致性 | `./Scripts/check-identity.sh` | `check-identity: PASSED (45 checks)`；bundle `CFBundleShortVersionString=0.1.0-alpha.1`、`CFBundleVersion=1`、`LSMinimumSystemVersion=14.0`、`CFBundleIdentifier=io.github.su-luoya.pi-web-desktop` | 退出 0，通过 |
+| 5 | tag 与 bundle 版本一致 | `sh Scripts/check-release-version.sh v0.1.0-alpha.1` | `PASSED (tag v0.1.0-alpha.1, MARKETING_VERSION 0.1.0-alpha.1, CURRENT_PROJECT_VERSION 1)` | 退出 0，通过 |
+| 6 | 签名校验 | `codesign --verify --deep --strict build/Pi-Web-Desktop.app` | `valid on disk`、`satisfies its Designated Requirement` | 退出 0，通过 |
+| 7 | 签名身份与公证状态 | `codesign -dv --verbose=4 build/Pi-Web-Desktop.app` | `Signature=adhoc`、`TeamIdentifier=not set`、`Format=app bundle with Mach-O thin (arm64)` | 预期结果：ad-hoc、未公证 |
+| 8 | Gatekeeper 行为 | `spctl -a -vv build/Pi-Web-Desktop.app` | `rejected`；本机不打印拒绝原因（已记入审查报告 R-10） | 退出 3；未公证 ad-hoc 产物的预期结果 |
+| 9 | smoke 启动模式 | `./Scripts/smoke.sh` | app exit 0（0s）；标记 `smoke: ready` | 通过 |
+| 10 | smoke 诊断模式 | `./Scripts/smoke.sh` | app exit 0（1s）；标记 `smoke: diagnostics items=6 blockers=3` 与 `smoke: diagnostics ready` | 通过（脚本整体退出 0） |
+| 11 | 扫描器自检 | `./Scripts/scan-secrets.sh --self-test` | `self-test: PASS (all rules fired, suppression verified, samples cleaned up)` | 退出 0，通过 |
+| 12 | 仓库 secret 扫描 | `./Scripts/scan-secrets.sh` | `scan-secrets: suppressed 11 lines`、`scan-secrets: PASS (no matches in tracked files)`；N=11 为仓库现有夹具标记数，本提交没有新增标记 | 退出 0，通过（先 `git add`，见 R-11） |
+| 13 | 本地打包与证据 | `./Scripts/package-release.sh --tag v0.1.0-alpha.1` | 退出 0；产出 `Pi-Web-Desktop-0.1.0-alpha.1.zip`、`.zip.sha256`、`.evidence.md`、`release-metadata.env`；证据段落含 `Signature=adhoc`、`spctl` 退出码与 `COMMIT=f195f26…` | 通过 |
+| 14 | ZIP 内容清单 | `unzip -l dist/Pi-Web-Desktop-0.1.0-alpha.1.zip` | 23 项，只有 `Pi-Web-Desktop.app/`（含 `_CodeSignature/`、`Info.plist`、`MacOS/`、`Resources/ApplicationIcon.icns`）与 `__MACOSX/` AppleDouble 元数据；无源码、测试、`.git`、日志或用户路径 | 通过 |
+| 15 | checksum 复验 | `cd dist && shasum -a 256 -c Pi-Web-Desktop-0.1.0-alpha.1.zip.sha256` | `Pi-Web-Desktop-0.1.0-alpha.1.zip: OK` | 退出 0，通过 |
+| 16 | 文档过期表述复查 | `git grep -n 'secret scan' docs README.md CONTRIBUTING.md` | README 的 R-7 旧表述已删除，其余命中均为“已实现 + 能力边界”描述 | 通过 |
+
+本地演练的 checksum 只用于验证流程：同一提交、同一工作树上多次打包每次都得到不同的 SHA-256
+（本机实测四次分别为 `6956bc46…`、`184df997…`、`f6939c05…`、`b7ac408c…`；本机演练不承诺
+bit-for-bit 可复现，见 [发布流程](releasing.md#可复现性与诚实的边界)）。因此**发布说明里的
+SHA-256 必须从 workflow 产出的资产复制**，不要使用上表任何本地值；本地证据文件的 `COMMIT`
+也只能证明“哪个提交被本机打包”。
+
+### 仍需 CI / 发布 workflow 完成
+
+| # | 门槛 | 覆盖位置 | 本机状态 |
+| --- | --- | --- | --- |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-14` job 覆盖 |
+| C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds`（`check-identity.sh --test-bundle …`） | 本机只检查了脚本产物，由 CI 覆盖 |
+| C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`；该步骤由 CI 覆盖（本地复现命令见[开发说明](development.md#personal-data-与-secret-扫描能力)） |
+| C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；Issue 中记录 run 链接 |
+| C5 | Release 资产校验：ZIP/`.sha256`/证据 Markdown 上传、`sha256sum -c`、Release 说明渲染 | `release.yml` 的 `Package ZIP, checksum, signature evidence and identity checks`、`Render the release notes from the template`、`publish` job | 由 workflow 覆盖（tag push 时执行；`workflow_dispatch` 只产出 artifact，不建 Release） |
+| C6 | 草稿 prerelease 创建与发布前人工复核（assets 名称、checksum 与 Issue 一致、prerelease 勾选） | `release.yml` 的 `publish` job（`gh release create --prerelease --draft`） | 由 workflow + 维护者完成；草稿的 Release 正文可用 [v0.1.0-alpha.1 Release 说明](release-notes-v0.1.0-alpha.1.md)（需先填入实际 SHA-256） |
+| C7 | 真机 smoke 的机器与依赖版本写入 Release Issue | Release Issue 的“真机 smoke 记录” | `./Scripts/smoke.sh` 已在本机（Apple Silicon 真机）通过，版本值见 Release 说明的“本机实测环境与版本”一节；仍待填入 Issue |
+| C8 | 上一版资产的回退路径确认 | Release Issue 的“回退路径确认” | `v0.1.0-alpha.1` 是本项目第一个 alpha，没有上一版资产可回退；Issue 中记为“不适用（首个 alpha）” |
+
+本节的边界：C1–C4 只在 CI 上运行，本机没有对应的实测输出，不要写成已在本机验证；C5–C6 的产物
+（ZIP、checksum、证据、Release 正文）由 workflow 生成，本机 `dist/` 下的同名文件只是演练产物。
+本节新增后按同一命令链重跑过一次以上本地命令，退出码与标记均与表中一致（只有本地打包的
+SHA-256 每次都不同，原因见上）。

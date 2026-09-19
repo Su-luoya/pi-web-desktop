@@ -16,6 +16,7 @@ final class UpdateSettingsWindowController: NSWindowController {
     private var preferences: UpdateCheckPreferences = .factoryDefaults
     private var statuses: [UpdateCategoryStatus] = []
     private var ignorableVersions: [UpdateCheckCategory: String] = [:]
+    private var piCLIStatusText = ""
 
     private var policyPopups: [UpdateCheckCategory: NSPopUpButton] = [:]
     private var statusLabels: [UpdateCheckCategory: NSTextField] = [:]
@@ -26,6 +27,16 @@ final class UpdateSettingsWindowController: NSWindowController {
         action: nil
     )
     private let autoUpdateHintLabel = NSTextField(labelWithString: UpdateAutomationBoundary.restrictedExplanation)
+    private let autoUpdatePiCLIButton = NSButton(
+        checkboxWithTitle: "启动前自动更新 Pi CLI（有运行中的 Pi 进程时自动推迟）",
+        target: nil,
+        action: nil
+    )
+    private let autoUpdatePiCLIHintLabel = NSTextField(labelWithString:
+        "只调用 Pi 官方命令 pi update --self（参数数组，不使用 shell、不调用 sudo）；"
+        + "检测到运行中的 Pi 进程或进程状态不确定时，自动更新会推迟到下一次判定，"
+        + "应用不会结束、暂停或接管任何 Pi 进程与会话。手动更新入口在菜单“服务 → 更新检查设置 → 立即更新 Pi CLI…”。")
+    private let piCLIStatusLabel = NSTextField(labelWithString: "")
 
     private static let timestampFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -42,15 +53,18 @@ final class UpdateSettingsWindowController: NSWindowController {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     /// 刷新设置与每类组件状态。`ignorableVersions` 是当前可以“忽略”的版本；
-    /// 没有可忽略版本的分类按钮置灰。
+    /// 没有可忽略版本的分类按钮置灰。`piCLIStatus` 是 Pi CLI 进程保护与自动更新
+    /// 决策的状态文本（由 `AppDelegate` 用同一份检查结果生成）。
     func update(
         preferences: UpdateCheckPreferences,
         statuses: [UpdateCategoryStatus],
-        ignorableVersions: [UpdateCheckCategory: String] = [:]
+        ignorableVersions: [UpdateCheckCategory: String] = [:],
+        piCLIStatus: String = ""
     ) {
         self.preferences = preferences
         self.statuses = statuses
         self.ignorableVersions = ignorableVersions
+        self.piCLIStatusText = piCLIStatus
         for category in UpdateCheckCategory.allCases {
             let policy = preferences.policy(for: category)
             let popup = policyPopups[category]
@@ -66,6 +80,8 @@ final class UpdateSettingsWindowController: NSWindowController {
             ignoreButtons[category]?.title = hasCandidate ? "忽略此版本" : "无可忽略版本"
         }
         autoUpdateButton.state = preferences.autoUpdatePiWebBeforeLaunch ? .on : .off
+        autoUpdatePiCLIButton.state = preferences.autoUpdatePiBeforeLaunch ? .on : .off
+        piCLIStatusLabel.stringValue = piCLIStatus
     }
 
     private func status(for category: UpdateCheckCategory) -> UpdateCategoryStatus {
@@ -134,6 +150,17 @@ final class UpdateSettingsWindowController: NSWindowController {
         autoUpdateHintLabel.textColor = .secondaryLabelColor
         autoUpdateHintLabel.font = NSFont.systemFont(ofSize: 11)
 
+        autoUpdatePiCLIButton.target = self
+        autoUpdatePiCLIButton.action = #selector(autoUpdatePiCLIChanged(_:))
+        autoUpdatePiCLIHintLabel.lineBreakMode = .byWordWrapping
+        autoUpdatePiCLIHintLabel.maximumNumberOfLines = 0
+        autoUpdatePiCLIHintLabel.textColor = .secondaryLabelColor
+        autoUpdatePiCLIHintLabel.font = NSFont.systemFont(ofSize: 11)
+        piCLIStatusLabel.lineBreakMode = .byWordWrapping
+        piCLIStatusLabel.maximumNumberOfLines = 0
+        piCLIStatusLabel.textColor = .secondaryLabelColor
+        piCLIStatusLabel.font = NSFont.systemFont(ofSize: 11)
+
         let reservedHeader = NSTextField(labelWithString: "启动前自动更新（受限）")
         reservedHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
 
@@ -145,7 +172,15 @@ final class UpdateSettingsWindowController: NSWindowController {
         buttons.spacing = 8
         buttons.alignment = .centerY
 
-        rows.append(contentsOf: [reservedHeader, autoUpdateButton, autoUpdateHintLabel, buttons])
+        rows.append(contentsOf: [
+            reservedHeader,
+            autoUpdateButton,
+            autoUpdateHintLabel,
+            autoUpdatePiCLIButton,
+            autoUpdatePiCLIHintLabel,
+            piCLIStatusLabel,
+            buttons
+        ])
 
         let stack = NSStackView(views: rows)
         stack.orientation = .vertical
@@ -162,6 +197,8 @@ final class UpdateSettingsWindowController: NSWindowController {
             title.widthAnchor.constraint(equalTo: stack.widthAnchor),
             intro.widthAnchor.constraint(equalToConstant: 620),
             autoUpdateHintLabel.widthAnchor.constraint(equalToConstant: 620),
+            autoUpdatePiCLIHintLabel.widthAnchor.constraint(equalToConstant: 620),
+            piCLIStatusLabel.widthAnchor.constraint(equalToConstant: 620),
             buttons.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
         for category in UpdateCheckCategory.allCases {
@@ -193,7 +230,12 @@ final class UpdateSettingsWindowController: NSWindowController {
         var updated = preferences
         guard updated.setPolicy(allowed[index], for: category) else { return }
         // 先同步本地状态，避免连续点击时用旧值覆盖。
-        update(preferences: updated, statuses: statuses, ignorableVersions: ignorableVersions)
+        update(
+            preferences: updated,
+            statuses: statuses,
+            ignorableVersions: ignorableVersions,
+            piCLIStatus: piCLIStatusText
+        )
         onPreferencesChanged?(updated)
     }
 
@@ -202,7 +244,27 @@ final class UpdateSettingsWindowController: NSWindowController {
         // 只写入值；是否真的自动安装由 `PiWebUpdatePlanner` 的前置条件与来源
         // 判定决定（只有已验证的 npm 全局安装才会执行）。
         updated.autoUpdatePiWebBeforeLaunch = sender.state == .on
-        update(preferences: updated, statuses: statuses, ignorableVersions: ignorableVersions)
+        update(
+            preferences: updated,
+            statuses: statuses,
+            ignorableVersions: ignorableVersions,
+            piCLIStatus: piCLIStatusText
+        )
+        onPreferencesChanged?(updated)
+    }
+
+    @objc private func autoUpdatePiCLIChanged(_ sender: NSButton) {
+        var updated = preferences
+        // 只写入值；是否真的执行由 `PiCLIUpdatePlanner` 的前置条件与进程保护决定
+        // （只有“没有运行中的 Pi 进程 + 已验证的 npm/pnpm 全局安装 + 已验证的目标
+        // 版本”同时成立才会执行 pi update --self）。
+        updated.autoUpdatePiBeforeLaunch = sender.state == .on
+        update(
+            preferences: updated,
+            statuses: statuses,
+            ignorableVersions: ignorableVersions,
+            piCLIStatus: piCLIStatusText
+        )
         onPreferencesChanged?(updated)
     }
 

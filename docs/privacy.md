@@ -8,15 +8,21 @@ Pi Web Desktop 不收集或上传遥测、使用统计、会话内容、认证�
 
 ## 版本检查、提示与忽略版本
 
-Pi Web Desktop 在应用运行期间做只读的版本查询，只提示、不下载、不安装任何东西。版本查询**不是项目遥测**：请求只用于比较“本机版本”与“上游最新版”，不携带使用数据、会话内容、认证信息或诊断报告。应用退出后不检查（不安装 LaunchAgent，也不在后台常驻）。唯一的例外是下面“启动前自动更新 Pi Web”（**默认关闭**）：它只对来源为已验证的 npm 全局安装的 Pi Web 执行一次受限的 `npm install -g`，不改动桌面应用自身、也不更新其它组件。
+Pi Web Desktop 在应用运行期间做只读的版本查询，只提示、不下载、不安装任何东西。版本查询**不是项目遥测**：请求只用于比较“本机版本”与“上游最新版”，不携带使用数据、会话内容、认证信息或诊断报告。应用退出后不检查（不安装 LaunchAgent，也不在后台常驻）。唯一的例外是下面两个启动前自动更新（**默认关闭**）：它们只对来源为已验证的 npm 全局（Pi CLI 还允许 pnpm 全局）安装的组件执行一次受限更新，不改动桌面应用自身。
 
 - 访问的域名与请求内容：`api.github.com`（`GET /repos/Su-luoya/pi-web-desktop/releases?per_page=20`，桌面应用发布）与 `registry.npmjs.org`（`GET /<包名>/latest`，Pi CLI、Pi Web 与 `pi list` 得到的扩展包）。只有 GET + JSON 解析；`User-Agent` 固定为应用名 + 版本 + bundle identifier（来自应用自身的 Info.plist，不含用户名或主机名）。不发送 cookies、账号凭据、会话内容或诊断字段；`Cookie`、`Authorization` 这类头即使被误加也会在发出前丢弃；应用侧客户端不跟随重定向，因此请求不会落到这两个域名之外。响应只保留 `etag`、`last-modified` 与 `content-type`，`Set-Cookie` 等响应头不读取也不保存。
-- 频率与设置：应用启动后立即检查一次。之后四类组件各自按设置复查，默认值与 [发布说明](releasing.md) 的 alpha.2 更新策略一致：桌面应用 / Pi CLI / Pi Web 默认“每日”（24 小时），可选“每周”或“关闭”；Pi 扩展包默认“检查并通知”（7 天，与 GitHub #17 的节奏相同），可选“询问后更新”或“关闭”。“询问后更新”同样只按 7 天复查，发现可用更新时询问用户是否更新；询问后更新本身仍不执行安装，只有下面“启动前自动更新 Pi Web”会（默认关闭）。
+- 频率与设置：应用启动后立即检查一次。之后四类组件各自按设置复查，默认值与 [发布说明](releasing.md) 的 alpha.2 更新策略一致：桌面应用 / Pi CLI / Pi Web 默认“每日”（24 小时），可选“每周”或“关闭”；Pi 扩展包默认“检查并通知”（7 天，与 GitHub #17 的节奏相同），可选“询问后更新”或“关闭”。“询问后更新”同样只按 7 天复查，发现可用更新时询问用户是否更新；询问后更新本身仍不执行安装，只有下面两个启动前自动更新会（默认关闭，Pi Web 仅限已验证的 npm 全局安装，Pi CLI 仅限已验证的 npm/pnpm 全局安装且当次确认没有运行中的 Pi 进程）。
 - 关闭与调度：关闭某一类后应用不再发起该类请求，也不为该类安排复查；四类全部关闭时不发任何请求。设置在“服务 → 更新检查设置 → 更新检查偏好设置…”里修改，键与默认值见下表与 [设置、工作目录与退出行为](settings-and-workspace.md)。
 - 提示方式（取舍）：发现可用更新时使用应用内提示框（`NSAlert`），**不使用 `UNUserNotificationCenter`，也不申请系统通知权限**。取舍：应用内提示不需要额外权限、内容不会进入“通知中心”或被系统持久化、文案完全由应用控制且只含组件名与版本；代价是应用不在运行时不提示——应用本来也不在后台运行，因此这一点不降低现有隐私边界。提示内容不含本机路径、包名、安装来源、凭据或诊断内容。手动“检查更新…”显示完整结果；自动检查（启动 / 周期）对同一版本在一次运行里最多提示一次。
 - 忽略版本：每类组件可以“忽略当前提示的版本”。忽略只抑制那一个具体版本，上游发布更高版本时会重新提示；忽略与安装来源无关，只保存版本字符串与时间戳（`updateChecks.<组件>.ignoredVersion` 与 `.ignoredVersionAt`），不实现任意版本锁定，也不实现降级。提示框与“更新检查偏好设置”窗口里的“忽略此版本”按钮都只记录忽略，不执行安装。
 - 状态显示：诊断窗口与“更新检查偏好设置”窗口显示每类组件的最近检查时间、结果（最新 / 可更新 / 未知 / 失败）、被忽略版本与下次检查时间。
 - 启动前自动更新 Pi Web（GitHub #20，默认关闭）：打开后，应用启动时（且只在本机 Pi Web 的来源为**已验证的 npm 全局安装**、目标版本为已验证且高于本机版本、服务未在运行时）执行一次 `npm install -g @agegr/pi-web@<版本>`。命令通过参数数组直接执行，**不使用 shell、不调用 `sudo`**；子进程环境只传白名单键（`PATH` / `HOME` / `TMPDIR` / `LANG` / `LC_ALL` / `LC_CTYPE`），因此 `PI_WEB_PASSWORD`、`NODE_OPTIONS`、`npm_config_*` 与代理变量都不会传递给安装器。安装用的是用户自己的 `npm` 与 `~/.npmrc`（应用不读它），所以这一步产生的网络请求与凭据由 npm 自己按用户的 npm 配置发出，应用不代发；默认 registry 是 `registry.npmjs.org`。安装后应用会重新检测版本并做健康检查，失败时只写持久警告与日志，**不会自动回滚**、不卸载也不重装。其它来源（pnpm、Homebrew、nvm/mise、git checkout、本地路径、未知）仍只显示更新命令，绝不自动安装。手动“立即更新 Pi Web…”同样只在设置打开且来源为已验证的 npm 全局安装时可用，并且必须先在确认框里确认（会展示可执行文件路径、参数与版本）。
+- 启动前自动更新 Pi CLI 与运行进程保护（GitHub #21，默认关闭）：打开后，应用在拿到当次版本检查结果后（只在本机 Pi CLI 的来源为**已验证的 npm/pnpm 全局安装**、目标版本已验证且高于本机版本、并且当次进程检查确认**没有运行中的 Pi CLI** 时）执行一次 `pi update --self`。
+  - **如何判断“有运行中的 Pi CLI”**：应用只读地枚举本机进程（`proc_listpids` / `proc_pidinfo` / `proc_pidpath`，脚本与进程标题靠 `sysctl KERN_PROCARGS2` 得到的 argv 判定），**不看、不写其它进程的任何内容**；判定只做精确的可执行名比较（`pi-web`、`pip`、`pi-helper` 不会命中）。只要有任何 Pi CLI 在运行、或者枚举/读取失败因而无法确认，应用就**不自动更新**（推迟到下次启动或下一次判定），并把原因写入日志与状态页。
+  - **不发信号**：应用从不向 Pi 进程（或任何其它进程）发送 `SIGTERM`/`SIGKILL`，也不结束、暂停或接管任何 Pi 会话；超时和应用退出都只是“不再等这个子进程”，命令按自己的方式结束。
+  - **命令与子进程环境**：只执行官方自更新参数数组 `update --self`（参数数组直接执行，**不使用 shell、不调用 `sudo`**，不拼接 npm/pnpm 命令）；子进程环境只保留白名单键（`PATH` / `HOME` / `TMPDIR` / `LANG` / `LC_ALL` / `LC_CTYPE`），因此凭据类变量（例如 `PI_WEB_PASSWORD`）、`NODE_OPTIONS`、`npm_config_*` 与代理变量都不会传递。这一步的网络请求与凭据由用户自己的 `pi` 按它自己的配置发出，应用不代发（也不读取 `~/.pi` 的认证内容）。
+  - **只读磁盘的部分**：判断“名为 `pi` 的脚本路径是否真的可执行”只查一个可执行位（读文件元数据），不读文件内容、不写任何文件。
+  - **记录的内容**：进程记录（诊断页与手动更新的确认框）只包含 PID、父进程 PID、启动时间、判定依据、**已脱敏**的镜像路径与**已脱敏且有长度上限**的命令摘要；凭据（`token=` / `password=` / `api_key=` 等形状、URL 查询串、`Bearer`）在进入记录前就换成占位符，Home 路径换成 `~`，`KEY=VALUE` 环境片段直接丢弃。执行结果只记录退出码、耗时与**脱敏后**的输出尾部（截断），失败只写持久警告（类别、旧/新/目标版本、原因、时间戳），**不含路径、环境变量值、凭据或完整命令输出**。手动入口需先在确认框里看到这些信息并显式确认；自动路径失败或版本未变时同样只写日志与告警，**不会自动回滚**、不降级，也不做无上限重试（一次运行最多一次）。
 - 结果缓存：`~/Library/Application Support/Pi Web Desktop/update-check-cache.json`（见下表），只含版本号、时间戳与 etag/条件请求字段；**不含**凭据、cookies、会话、URL、响应体或诊断内容。删除该文件只会让下一次检查重新发起普通 GET。
 - 可信度：只有响应来自预期域名且结构可解析时才将上游版本标为“已验证”；网络失败、超时、限流（HTTP 429）与 5xx 沿用 24 小时/7 天内上一次成功结果并标注为缓存结果；超过有效期、响应无法解析或来自非预期主机时显示“无法确定”。检查失败只影响提示文案，不影响正在运行的服务，也不改变服务状态。
 
@@ -29,7 +35,7 @@ Pi Web Desktop 在应用运行期间做只读的版本查询，只提示、不�
 - 只有远程模式（监听地址不是 loopback）启动托管服务时，密码才经子进程环境变量 `PI_WEB_PASSWORD` 传给 pi-web；loopback 模式不注入，并会清除继承来的同名变量。
 - 删除 Keychain 密码条目会立即关闭远程模式：监听地址回到 `127.0.0.1` 并更新配置；若密码是在服务运行期间被删除或变成不可读，应用会先停止本应用启动且仍可验证所有权的远程进程组（外部服务不发信号），再把配置收回到 `127.0.0.1` 并显示可读提示。
 - 运行状态写入 `~/Library/Application Support/Pi Web Desktop/`。
-- 日志写入 `~/Library/Logs/Pi Web Desktop/Pi Web Desktop.log`（见 `Sources/AppPaths.swift`），超过 10 MB 轮转为 `.1.log` … `.5.log`。写入日志的每一行、错误消息、环境变量与命令行展示、诊断导出都经过同一个 `LogRedactor` 实例；启动前自动更新的决策、参数数组、退出码与前后版本也走同一实例，环境变量只记键名、不记值，安装器输出只保留截断尾部。规则与边界见 [日志与诊断导出](logging-and-diagnostics.md)。
+- 日志写入 `~/Library/Logs/Pi Web Desktop/Pi Web Desktop.log`（见 `Sources/AppPaths.swift`），超过 10 MB 轮转为 `.1.log` … `.5.log`。写入日志的每一行、错误消息、环境变量与命令行展示、诊断导出都经过同一个 `LogRedactor` 实例；启动前自动更新的决策、参数数组、退出码与前后版本也走同一实例，环境变量只记键名、不记值，子进程输出只保留截断尾部（Pi CLI 更新的进程记录同样先完成凭据与 Home 脱敏再写入日志）。规则与边界见 [日志与诊断导出](logging-and-diagnostics.md)。
 - `WKWebView` 使用系统默认的持久化网站数据存储：`Sources/WebViewController.swift:37` 设置 `configuration.websiteDataStore = .default()`，`Sources/` 里没有任何 `WKWebsiteDataStore` 的删除调用。WebKit 因此会以 bundle identifier 为键，在应用自己的 UserDefaults/Application Support 之外持久化网站数据：`~/Library/WebKit/io.github.su-luoya.pi-web-desktop/WebsiteData/`（本机观察到 `Default/`、`IndexedDB/`、`LocalStorage/`、`SearchHistory/`、`ResourceLoadStatistics/`、`EnhancedSecurity/` 等子目录）和 `~/Library/Caches/io.github.su-luoya.pi-web-desktop/WebKit/`（观察到 `NetworkCache/`、`CacheStorage/`、`ServiceWorkers/`、`HSTS/`、`AlternativeServices/`）。这些文件（WebKit 保存的 cookies、缓存、local storage、IndexedDB、Service Worker 记录等，具体取决于服务页面和 WebKit 版本；本机未在 `~/Library/Cookies/` 或 `~/Library/HTTPStorages/` 下观察到属于本 bundle id 的独立文件）由 WebKit 管理，应用自身不读取也不解析它们。当前构建未启用 App Sandbox，所以路径就在用户的 `~/Library` 下，而不是沙盒容器里。
 - 应用不读取、复制或迁移 `~/.pi/agent/auth.json` 等 Pi 认证内容。
 - 首次启动诊断只检查 `~/.pi/agent` 是否存在与可读（不列目录、不读取任何文件），报告里只出现脱敏后的路径 `~/.pi/agent`。
@@ -40,7 +46,7 @@ Pi Web Desktop 在应用运行期间做只读的版本查询，只提示、不�
 
 | 数据 | 位置 | 删除方式 |
 | --- | --- | --- |
-| 服务配置、首次设置状态、窗口位置、更新检查设置 | UserDefaults（domain 为 bundle identifier `io.github.su-luoya.pi-web-desktop`） | 先 `defaults read io.github.su-luoya.pi-web-desktop` 确认内容，再 `defaults delete io.github.su-luoya.pi-web-desktop`。更新检查设置包括策略键 `updateChecks.<组件>.policy`、启动前自动更新开关 `updateChecks.piWeb.autoUpdateBeforeLaunch`、忽略版本键 `updateChecks.<组件>.ignoredVersion` / `.ignoredVersionAt`（只含版本字符串与时间戳）与最近一次更新失败警告 `updateChecks.piWeb.lastUpdateWarning.*`（只含类别、旧/新/目标版本、固定原因文案与时间戳，不含路径、环境变量值、凭据或子进程输出） |
+| 服务配置、首次设置状态、窗口位置、更新检查设置 | UserDefaults（domain 为 bundle identifier `io.github.su-luoya.pi-web-desktop`） | 先 `defaults read io.github.su-luoya.pi-web-desktop` 确认内容，再 `defaults delete io.github.su-luoya.pi-web-desktop`。更新检查设置包括策略键 `updateChecks.<组件>.policy`、启动前自动更新开关 `updateChecks.piWeb.autoUpdateBeforeLaunch` 与 `updateChecks.pi.autoUpdateBeforeLaunch`、忽略版本键 `updateChecks.<组件>.ignoredVersion` / `.ignoredVersionAt`（只含版本字符串与时间戳）与最近一次更新失败警告 `updateChecks.piWeb.lastUpdateWarning.*` 和 `updateChecks.pi.lastUpdateWarning.*`（只含类别、旧/新/目标版本、固定原因文案与时间戳，不含路径、环境变量值、凭据或子进程输出；进程检查结果不落盘，只在内存与界面/日志里存在） |
 | 运行状态与所有权记录 | `~/Library/Application Support/Pi Web Desktop/` | 退出应用后删除该目录 |
 | 日志（含轮转文件） | `~/Library/Logs/Pi Web Desktop/`（`Pi Web Desktop.log` 与 `.1.log` … `.5.log`） | 退出应用后删除该目录 |
 | 更新检查缓存 | `~/Library/Application Support/Pi Web Desktop/update-check-cache.json` | 退出应用后删除该文件；在“服务 → 更新检查设置”里关闭四类可停止后续请求（已存缓存不会自动删除），忽略版本记录在 UserDefaults 里、不影响缓存 |

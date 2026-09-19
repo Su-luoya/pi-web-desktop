@@ -60,6 +60,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 安装后的版本重检测输入（每次更新前在主线程写入）。
     private var piWebUpdateRedetectionPath: String?
 
+    // MARK: - Pi CLI 更新与运行进程保护（GitHub #21）
+
+    /// Pi CLI 进程检查器：只读 libproc 枚举（`proc_listpids` / `proc_pidinfo` /
+    /// `proc_pidpath` / `sysctl`），不向任何进程发送信号。init 里换成与日志/
+    /// 诊断共用的同一个 `LogRedactor`。
+    private var piProcessInspector = PiProcessInspector()
+    /// Pi CLI 更新命令执行器：`Process` + 参数数组（`update --self`），不使用
+    /// shell、不调用 sudo、不发送信号；超时只放弃等待（见 `PiCLIUpdateAdapter`）。
+    private let piCLIUpdateRunner: PiCLIUpdateRunning = ProcessPiCLIUpdateCommand()
+    /// Pi CLI 更新编排器（进程检查、命令执行、版本重检测、日志、投递队列注入）。
+    private var piCLIUpdateCoordinator: PiCLIUpdateCoordinator?
+    /// 最近一次 Pi 进程检查结果；nil = 本次运行还没有检查过（smoke 启动不检查）。
+    private var piProcessInspection: PiProcessInspection?
+    /// 最近一次自动更新决策（诊断/设置页展示用）。
+    private var piCLIUpdateDecision: PiCLIUpdateDecision?
+    /// 最近一次失败的 Pi CLI 更新的持久警告（跨启动保留）。
+    private var piCLIUpdateWarning: PiCLIUpdateWarning?
+    /// 本次运行是否已经执行过自动更新（无论成败，最多一次；推迟不算执行）。
+    private var piCLIUpdateAttemptedInThisRun = false
+    /// 自动更新进行中。
+    private var piCLIUpdateInProgress = false
+    /// 重新检测 Pi 版本的输入路径（每次更新前写入）。
+    private var piCLIUpdateRedetectionPath: String?
+    /// 菜单里的持久告警项与手动更新入口项。
+    private var piCLIUpdateWarningMenuItem: NSMenuItem?
+    private var piCLIUpdateMenuItem: NSMenuItem?
+
     /// 诊断页/设置窗口的状态时间格式。
     private static let updateTimestampFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -150,6 +177,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             log: { [logWriter] message in _ = logWriter.append(message) },
             deliver: { work in DispatchQueue.main.async(execute: work) },
             timeout: PiWebUpdateCoordinator.defaultTimeout
+        ))
+        // Pi CLI 更新与运行进程保护（GitHub #21）：进程检查复用同一个脱敏器；
+        // 执行器不发送任何信号（超时只放弃等待）；版本重检测复用 #16 识别器。
+        self.piProcessInspector = PiProcessInspector(redactor: logRedactor)
+        self.piCLIUpdateWarning = appConfiguration.piCLIUpdateWarning()
+        self.piCLIUpdateCoordinator = PiCLIUpdateCoordinator(environment: PiCLIUpdateCoordinator.Environment(
+            inspectProcesses: { [weak self] in
+                self?.refreshPiProcessInspection() ?? .unknown(.enumerationFailed)
+            },
+            runner: piCLIUpdateRunner,
+            detectInstallation: { [weak self] in
+                guard let self else { return nil }
+                return PiCLIUpdateRedetection.detect(
+                    piPath: self.piCLIUpdateRedetectionPath,
+                    commandRunner: self.commandRunner
+                )
+            },
+            redactor: logRedactor,
+            log: { [logWriter] message in _ = logWriter.append(message) },
+            deliver: { work in DispatchQueue.main.async(execute: work) },
+            timeout: PiCLIUpdateCoordinator.defaultTimeout
         ))
     }
 
@@ -260,6 +308,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         updateChecker?.stop()
         // 进行中的受限自动安装也必须终止：取消按失败处理，不留孤儿进程。
         piWebUpdateInstaller.cancel()
+        // Pi CLI 更新命令只放弃等待：本应用不向任何进程发送信号。
+        piCLIUpdateRunner.abandon()
         serviceManager.stopHealthMonitor()
         try? FileManager.default.removeItem(at: appConfiguration.appPIDURL)
         serviceManager.closeLog()
@@ -691,12 +741,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             controller.onRecheck = { [weak self] in self?.runDependencyCheck(triggeredByUser: true) }
             controller.onContinue = { [weak self] in self?.completeFirstLaunchSetup() }
             controller.onSelectPiWebPath = { [weak self] path in self?.applySelectedPiWebPath(path) }
+            controller.onUpdatePiCLI = { [weak self] in self?.updatePiCLINow(nil) }
             // 与菜单“复制诊断”完全同一条导出路径与同一份文本。
             controller.diagnosticsTextProvider = { [weak self] in self?.diagnosticsExportText() ?? "" }
             // 更新检查状态（GitHub #18）：诊断页只渲染同一份状态快照。
             controller.updateStatusTextProvider = { [weak self] in self?.updateCheckStatusBlockText() ?? "" }
             diagnosticsWindowController = controller
             controller.showWindow(nil)
+        }
+        // 诊断页每次都刷新一次 Pi 进程检查（只读枚举；smoke 启动不枚举）。
+        if !appConfiguration.isSmokeLaunch {
+            refreshPiProcessInspection()
+            diagnosticsWindowController?.refreshUpdateStatus()
         }
         if !NSApp.isActive {
             NSApp.activate(ignoringOtherApps: true)
@@ -806,6 +862,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard case .automatic(let plan) = decision, let coordinator = piWebUpdateCoordinator else {
             preLaunchUpdateInProgress = false
             proceed()
+            // 检查结果已经到达，只是不安装 Pi Web：顺便判定一次 Pi CLI（GitHub #21）。
+            attemptPiCLIAutomaticUpdateIfNeeded()
             return
         }
         piWebUpdateRedetectionPath = serviceManager.configuration.piWebPath
@@ -824,6 +882,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             default:
                 self.presentPiWebUpdateFailure(outcome)
             }
+            // Pi Web 的启动前流程结束了：现在可以把因它而跳过的 Pi CLI 判定补上
+            // （设置关闭时这个调用会立即返回）。
+            self.attemptPiCLIAutomaticUpdateIfNeeded()
         }
     }
 
@@ -1071,6 +1132,250 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         text += "\n\n自动更新只对已验证的 npm 全局安装生效；应用不承诺所有来源都能回滚。"
         return text
+    }
+
+    // MARK: - Pi CLI 更新与运行进程保护（GitHub #21）
+
+    /// 刷新 Pi 进程检查（只读枚举）。smoke 启动不枚举真实进程，返回缓存值。
+    @discardableResult
+    private func refreshPiProcessInspection() -> PiProcessInspection {
+        guard !appConfiguration.isSmokeLaunch else {
+            return piProcessInspection ?? .unknown(.enumerationFailed)
+        }
+        let inspection = piProcessInspector.inspect()
+        piProcessInspection = inspection
+        _ = logWriter.append(logRedactor.redact("Pi 进程检查：\(inspection.statusText)"))
+        return inspection
+    }
+
+    /// 决策输入：全部来自 #16 识别结果、#17/#18 检查结果与最近一次进程检查。
+    private func piCLIPlanningInput() -> PiCLIUpdatePlanningInput {
+        let installation = dependencyReport?.components.first { $0.kind == .piCLI }
+        let result = updateChecker?.summary.result(for: UpdateCheckTarget(category: .piCLI, packageName: nil).id)
+        return PiCLIUpdatePlanningInput(
+            preferences: updateChecker?.preferences ?? appConfiguration.updateCheckPreferences(),
+            installation: installation,
+            targetVersion: result?.latestVersion,
+            targetStatus: result?.status ?? .unknown,
+            targetConfidence: result?.confidence ?? .unknown,
+            processes: piProcessInspection ?? .unknown(.enumerationFailed)
+        )
+    }
+
+    /// 手动更新可以用的目标版本：优先本次运行已验证的检查结果，其次缓存里的
+    /// “可更新”状态；都没有时为 nil（`pi update --self` 自己决定版本）。
+    private func piCLIManualTargetVersion() -> String? {
+        let target = UpdateCheckTarget(category: .piCLI, packageName: nil)
+        if let result = updateChecker?.summary.result(for: target.id), result.status == .updateAvailable {
+            return result.latestVersion
+        }
+        guard let updateChecker else { return nil }
+        let status = statusSnapshot(for: updateChecker).first { $0.category == .piCLI }
+        return status?.status == .updateAvailable ? status?.latestVersion : nil
+    }
+
+    /// 启动/周期检查完成后尝试一次自动更新。只有决策为 `.automatic` 且本次运行
+    /// 还没有执行过时才会执行；推迟只记录原因，下一次检查结果到达时再判定。
+    private func attemptPiCLIAutomaticUpdateIfNeeded() {
+        guard let updateChecker,
+              updateChecker.preferences.autoUpdatePiBeforeLaunch,
+              !piCLIUpdateInProgress,
+              !preLaunchUpdateInProgress else { return }
+        // 判定前刷新一次进程检查：决策必须基于“刚刚”的事实，而不是上一次打开诊断页
+        // 时的缓存（设置关闭时不会走到这里，也就不做任何进程枚举）。
+        _ = refreshPiProcessInspection()
+        let input = piCLIPlanningInput()
+        let decision = PiCLIUpdatePlanner.decide(input)
+        piCLIUpdateDecision = decision
+        switch decision {
+        case .automatic(let plan):
+            guard !piCLIUpdateAttemptedInThisRun, let coordinator = piCLIUpdateCoordinator else { return }
+            piCLIUpdateAttemptedInThisRun = true
+            piCLIUpdateInProgress = true
+            piCLIUpdateRedetectionPath = plan.executablePath
+            logPiCLIUpdate(decision.logLine(redactingWith: logRedactor))
+            coordinator.run(input) { [weak self] outcome in
+                guard let self else { return }
+                self.piCLIUpdateInProgress = false
+                self.handlePiCLIUpdateOutcome(outcome, manual: false)
+            }
+        case .deferred:
+            logPiCLIUpdate(decision.logLine(redactingWith: logRedactor))
+            refreshUpdateMenuState()
+        case .manualOnly, .unavailable:
+            break
+        }
+    }
+
+    /// 手动“立即更新 Pi CLI…”：先展示计划、运行中的 Pi 进程与风险说明，用户
+    /// 显式确认后才执行。执行内容只有 `pi update --self`，不操作任何进程。
+    @objc private func updatePiCLINow(_ sender: Any?) {
+        guard dependencyGate == .ready, let report = dependencyReport else {
+            presentPiCLIUpdateInfo("环境检查尚未完成", detail: "请等待依赖诊断完成后再试。")
+            return
+        }
+        let installation = report.components.first { $0.kind == .piCLI }
+        guard let plan = PiCLIUpdatePlanner.manualPlan(
+            installation: installation,
+            targetVersion: piCLIManualTargetVersion()
+        ) else {
+            presentPiCLIUpdateInfo(
+                "当前不能立即更新 Pi CLI",
+                detail: piCLIManualUnavailableText(installation: installation)
+            )
+            return
+        }
+        let inspection = refreshPiProcessInspection()
+        let alert = NSAlert()
+        alert.messageText = "立即更新 Pi CLI"
+        alert.informativeText = PiCLIManualUpdateConfirmation.text(
+            plan: plan,
+            commandText: plan.commandText,
+            inspection: inspection,
+            redactingWith: logRedactor
+        )
+        alert.addButton(withTitle: "确认更新")
+        alert.addButton(withTitle: "取消")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.performPiCLIManualUpdate(plan: plan)
+        }
+    }
+
+    private func piCLIManualUnavailableText(installation: ComponentInstallation?) -> String {
+        var text = "原因："
+        if installation == nil {
+            text += PiCLIUpdateRefusal.missingInstallation.text
+        } else if installation?.executablePath == nil {
+            text += PiCLIUpdateRefusal.executableUnresolved.text
+        } else if installation?.version == nil {
+            text += "没有可用的 Pi CLI 版本信息"
+        } else {
+            text += PiCLIUpdateRefusal.unsafeCommand.text
+        }
+        text += "。请先在诊断页确认 Pi CLI 的路径与版本，然后重新检测。"
+        return text
+    }
+
+    private func performPiCLIManualUpdate(plan: PiCLIUpdatePlan) {
+        guard let coordinator = piCLIUpdateCoordinator else { return }
+        piCLIUpdateRedetectionPath = plan.executablePath
+        logPiCLIUpdate("手动更新 Pi CLI：用户已确认（参数数组 \(plan.arguments.joined(separator: " "))）。")
+        showPiCLIUpdateProgressPage(plan: plan)
+        coordinator.runManual(plan) { [weak self] outcome in
+            self?.handlePiCLIUpdateOutcome(outcome, manual: true)
+        }
+    }
+
+    private func handlePiCLIUpdateOutcome(_ outcome: PiCLIUpdateRunOutcome, manual: Bool) {
+        switch outcome {
+        case .succeeded(_, let oldVersion, let newVersion):
+            clearPiCLIUpdateWarning()
+            logPiCLIUpdate("Pi CLI 更新完成：\(oldVersion) → \(newVersion)。")
+            presentPiCLIUpdateInfo("Pi CLI 已更新", detail: "已从 \(oldVersion) 更新到 \(newVersion)。")
+        case .versionUnchanged(_, let detectedVersion, let oldVersion, let targetVersion):
+            recordPiCLIUpdateWarning(outcome.warning)
+            logPiCLIUpdate(
+                "Pi CLI 更新未通过版本验证：当前 \(oldVersion)，目标 \(targetVersion ?? "未知")，"
+                    + "重新检测到 \(detectedVersion ?? "未知")。"
+            )
+            presentPiCLIUpdateInfo("Pi CLI 更新未完成", detail: outcome.warning?.text ?? "")
+        case .commandFailed(_, let failure, let oldVersion, _, let outputTail):
+            // 应用退出时的“放弃等待”不算更新失败：命令可能仍在后台自己完成，下次
+            // 启动的检查会给出结论，因此只记日志，不写持久告警也不弹框。
+            if failure == .abandoned {
+                logPiCLIUpdate("Pi CLI 更新已放弃等待（应用退出）：\(oldVersion) 保持不变，下次启动重新检测。")
+                break
+            }
+            recordPiCLIUpdateWarning(outcome.warning)
+            var detail = outcome.warning?.text ?? failure.text
+            if let outputTail {
+                detail += "\n\n命令输出片段（已脱敏）：\(outputTail)"
+            }
+            presentPiCLIUpdateInfo("Pi CLI 更新未完成", detail: detail)
+        case .deferred(let reason):
+            logPiCLIUpdate("Pi CLI 自动更新已推迟：\(reason.text)")
+            if manual {
+                presentPiCLIUpdateInfo("已推迟 Pi CLI 更新", detail: reason.text)
+            }
+        case .notAttempted(let reason, let commandText):
+            logPiCLIUpdate("Pi CLI 更新未执行：\(reason.text)")
+            if manual {
+                var detail = "原因：\(reason.text)"
+                if let commandText {
+                    detail += "\n\n可以手动执行：\(logRedactor.redact(commandText))"
+                }
+                presentPiCLIUpdateInfo("Pi CLI 更新未执行", detail: detail)
+            }
+        }
+        refreshUpdateMenuState()
+        diagnosticsWindowController?.refreshUpdateStatus()
+        syncUpdateSettingsWindow()
+    }
+
+    private func recordPiCLIUpdateWarning(_ warning: PiCLIUpdateWarning?) {
+        guard let warning else { return }
+        piCLIUpdateWarning = warning
+        appConfiguration.savePiCLIUpdateWarning(warning)
+        logPiCLIUpdate(warning.text)
+    }
+
+    private func clearPiCLIUpdateWarning() {
+        guard piCLIUpdateWarning != nil else { return }
+        piCLIUpdateWarning = nil
+        appConfiguration.savePiCLIUpdateWarning(nil)
+        refreshUpdateMenuState()
+        diagnosticsWindowController?.refreshUpdateStatus()
+    }
+
+    /// 菜单里的持久告警项：展开完整告警文本，并提供“清除警告”。
+    @objc private func showPiCLIUpdateWarning(_ sender: Any?) {
+        guard let warning = piCLIUpdateWarning else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = warning.shortText
+        alert.informativeText = warning.text
+            + "\n\n应用不会自动回滚，也不会重试无上限；可以手动重试“立即更新 Pi CLI…”。"
+        alert.addButton(withTitle: "好")
+        alert.addButton(withTitle: "清除警告")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertSecondButtonReturn else { return }
+            self?.clearPiCLIUpdateWarning()
+        }
+    }
+
+    /// 手动更新的执行页：在真正执行前展示同一个计划与“不发送信号”的说明。
+    private func showPiCLIUpdateProgressPage(plan: PiCLIUpdatePlan) {
+        var lines = plan.displayLines(redactingWith: logRedactor)
+        lines.append("")
+        lines.append("正在执行 pi update --self；更新期间请不要退出应用。"
+            + "命令有超时限制，超时只放弃等待，不会向任何进程发送信号，也不会结束 Pi 会话。")
+        webViewController.showDependencyPage(title: "正在更新 Pi CLI", message: lines.joined(separator: "\n"))
+    }
+
+    private func presentPiCLIUpdateInfo(_ title: String, detail: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = detail
+        alert.addButton(withTitle: "好")
+        alert.beginSheetModal(for: window)
+    }
+
+    private func logPiCLIUpdate(_ message: String) {
+        _ = logWriter.append(logRedactor.redact(message))
+    }
+
+    /// 诊断页/设置页的 Pi CLI 进程保护与更新状态块（已脱敏）。smoke 启动返回空串：
+    /// 不为诊断 fixture 枚举真实进程。
+    private func piCLIStatusBlockText() -> String {
+        guard !appConfiguration.isSmokeLaunch else { return "" }
+        let input = piCLIPlanningInput()
+        return PiCLIUpdateStatusPresenter.lines(
+            preferences: input.preferences,
+            inspection: piProcessInspection,
+            decision: PiCLIUpdatePlanner.decide(input),
+            warning: piCLIUpdateWarning
+        ).joined(separator: "\n")
     }
 
     // MARK: - Window and WebView
@@ -1640,7 +1945,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         controller.update(
             preferences: updateChecker.preferences,
             statuses: statusSnapshot(for: updateChecker),
-            ignorableVersions: ignorableVersionCandidates()
+            ignorableVersions: ignorableVersionCandidates(),
+            piCLIStatus: piCLIStatusBlockText()
         )
     }
 
@@ -1714,6 +2020,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         warningItem.isHidden = true
         piWebUpdateWarningMenuItem = warningItem
         menu.addItem(warningItem)
+        // Pi CLI 更新的持久告警项（GitHub #21）。
+        let piCLIWarningItem = NSMenuItem(
+            title: "",
+            action: #selector(showPiCLIUpdateWarning(_:)),
+            keyEquivalent: ""
+        )
+        piCLIWarningItem.target = self
+        piCLIWarningItem.isHidden = true
+        piCLIUpdateWarningMenuItem = piCLIWarningItem
+        menu.addItem(piCLIWarningItem)
         menu.addItem(.separator())
         for category in UpdateCheckCategory.allCases {
             let toggle = NSMenuItem(
@@ -1744,6 +2060,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         manualUpdateItem.target = self
         piWebUpdateMenuItem = manualUpdateItem
         menu.addItem(manualUpdateItem)
+        // 手动“立即更新 Pi CLI…”：只调用官方 pi update --self，执行前显示计划、
+        // 运行中的 Pi 进程与风险说明并要求确认（GitHub #21）。
+        let manualPiCLIItem = NSMenuItem(
+            title: "立即更新 Pi CLI…",
+            action: #selector(updatePiCLINow(_:)),
+            keyEquivalent: ""
+        )
+        manualPiCLIItem.target = self
+        piCLIUpdateMenuItem = manualPiCLIItem
+        menu.addItem(manualPiCLIItem)
         menu.addItem(withTitle: "更新检查说明…", action: #selector(showUpdateCheckExplanation(_:)), keyEquivalent: "")
         item.submenu = menu
         updateSettingsMenu = menu
@@ -1762,6 +2088,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             piWebUpdateWarningMenuItem.isHidden = piWebUpdateWarning == nil
         }
         piWebUpdateMenuItem?.isEnabled = dependencyGate == .ready
+        if let piCLIUpdateWarningMenuItem {
+            piCLIUpdateWarningMenuItem.title = piCLIUpdateWarning?.shortText ?? ""
+            piCLIUpdateWarningMenuItem.isHidden = piCLIUpdateWarning == nil
+        }
+        piCLIUpdateMenuItem?.isEnabled = dependencyGate == .ready
         let preferences = updateChecker?.preferences ?? .factoryDefaults
         for (category, item) in updateCategoryMenuItems {
             item.state = preferences.isEnabled(category) ? .on : .off
@@ -1788,6 +2119,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             lines.append("")
             lines.append(warning.text)
         }
+        let piCLIStatus = piCLIStatusBlockText()
+        if !piCLIStatus.isEmpty {
+            lines.append("")
+            lines.append(piCLIStatus)
+        }
         return lines.joined(separator: "\n")
     }
 
@@ -1798,6 +2134,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         refreshUpdateMenuState()
         syncUpdateSettingsWindow()
         diagnosticsWindowController?.refreshUpdateStatus()
+        // Pi CLI 的受限自动更新（GitHub #21）：只在拿到本次检查结果后判定一次。
+        attemptPiCLIAutomaticUpdateIfNeeded()
         guard pendingManualUpdateCheck else {
             notifyAboutAutomaticUpdates(summary)
             return

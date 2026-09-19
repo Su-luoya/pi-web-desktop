@@ -175,6 +175,17 @@ struct AppConfiguration {
         PiWebUpdateWarningStore.save(warning, to: defaults)
     }
 
+    /// 最近一次失败的 Pi CLI 更新的持久警告（GitHub #21）。字段与 #20 的警告
+    /// 同构：只含类别、旧/新/目标版本、固定原因文案与时间戳。
+    func piCLIUpdateWarning() -> PiCLIUpdateWarning? {
+        PiCLIUpdateWarningStore.load(from: defaults)
+    }
+
+    /// 保存或清除 Pi CLI 更新警告（`nil` 表示更新成功，清除旧告警）。
+    func savePiCLIUpdateWarning(_ warning: PiCLIUpdateWarning?) {
+        PiCLIUpdateWarningStore.save(warning, to: defaults)
+    }
+
     /// Persists service settings through the same injected UserDefaults.
     func save(_ configuration: ServiceConfiguration) { configuration.save(to: defaults) }
 

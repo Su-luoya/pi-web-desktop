@@ -52,6 +52,9 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
     /// 由 `AppDelegate` 注入：更新检查状态行（GitHub #18：策略、最近检查、
     /// 结果、忽略版本、下次检查）。窗口只渲染，不读设置、不联网、不安装。
     var updateStatusTextProvider: (() -> String)?
+    /// 由 `AppDelegate` 注入：手动“立即更新 Pi CLI…”入口（GitHub #21）。
+    /// 窗口不执行命令：确认框、进程信息与执行都由 `AppDelegate` 负责。
+    var onUpdatePiCLI: (() -> Void)?
 
     private let tableView = NSTableView()
     private let detailLabel = NSTextField(labelWithString: "")
@@ -62,6 +65,7 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
     private let copyButton = NSButton(title: "复制安装命令", target: nil, action: nil)
     private let copyDiagnosticsButton = NSButton(title: "复制诊断", target: nil, action: nil)
     private let continueButton = NSButton(title: "开始使用 Pi Web", target: nil, action: nil)
+    private let updatePiCLIButton = NSButton(title: "立即更新 Pi CLI…", target: nil, action: nil)
     private var report: DependencyReport
     private var firstLaunchSetupIncomplete: Bool
     private var canContinueToService: Bool
@@ -177,7 +181,7 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         let componentsHeader = NSTextField(labelWithString: "组件安装（路径 / 包名 / 版本 / 来源 / 可信度 / 建议命令；只展示，应用不会执行更新）")
         componentsHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
 
-        let updateHeader = NSTextField(labelWithString: "更新检查（策略 / 最近检查 / 结果 / 忽略版本 / 下次检查；只展示，应用不会自动安装）")
+        let updateHeader = NSTextField(labelWithString: "更新检查（策略 / 最近检查 / 结果 / 忽略版本 / 下次检查；Pi CLI 的启动前自动更新受运行进程保护限制）")
         updateHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         updateStatusTextView.isEditable = false
         updateStatusTextView.isSelectable = true
@@ -233,12 +237,15 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         copyDiagnosticsButton.action = #selector(copyDiagnostics(_:))
         continueButton.target = self
         continueButton.action = #selector(continueToService(_:))
+        updatePiCLIButton.target = self
+        updatePiCLIButton.action = #selector(updatePiCLI(_:))
+        updatePiCLIButton.toolTip = "执行前显示计划、运行中的 Pi 进程与风险说明，并要求确认；只调用 pi update --self"
         let selectButton = NSButton(title: "选择 pi-web 路径…", target: self, action: #selector(selectPiWebPath(_:)))
         let recheckButton = NSButton(title: "重新检测", target: self, action: #selector(recheck(_:)))
         let closeButton = NSButton(title: "关闭", target: self, action: #selector(closeWindow(_:)))
         closeButton.keyEquivalent = "\u{1b}"
 
-        let buttons = NSStackView(views: [selectButton, recheckButton, copyButton, copyDiagnosticsButton, continueButton, NSView(), closeButton])
+        let buttons = NSStackView(views: [selectButton, recheckButton, copyButton, copyDiagnosticsButton, updatePiCLIButton, continueButton, NSView(), closeButton])
         buttons.orientation = .horizontal
         buttons.alignment = .centerY
         buttons.spacing = 8
@@ -334,6 +341,11 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
     @objc private func continueToService(_ sender: Any?) {
         guard canContinueToService else { return }
         onContinue?()
+    }
+
+    /// 手动更新 Pi CLI 的入口：窗口只转发，确认与执行都在 `AppDelegate` 里。
+    @objc private func updatePiCLI(_ sender: Any?) {
+        onUpdatePiCLI?()
     }
 
     /// 面板只负责选择文件；可执行性校验与写入配置由 `AppDelegate` 完成，

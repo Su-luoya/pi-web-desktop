@@ -45,6 +45,8 @@ final class UpdateSettingsWindowController: NSWindowController {
         + "完整参数数组与风险说明，取消是默认按钮；只调用 Pi 官方命令 pi update npm:<包名>。"
         + "检测到运行中的 Pi 进程或进程状态不确定时拒绝执行；应用不会结束或信号任何 Pi 进程。")
     private let piPackageStatusLabel = NSTextField(labelWithString: "")
+    /// 「已放弃」记录（GitHub #62）：超时/放弃等待之后可能仍在运行的命令。
+    private let abandonedStatusLabel = NSTextField(labelWithString: "")
 
     private static let timestampFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -68,7 +70,8 @@ final class UpdateSettingsWindowController: NSWindowController {
         statuses: [UpdateCategoryStatus],
         ignorableVersions: [UpdateCheckCategory: String] = [:],
         piCLIStatus: String = "",
-        piPackageStatus: String = ""
+        piPackageStatus: String = "",
+        abandonedStatus: String = ""
     ) {
         self.preferences = preferences
         self.statuses = statuses
@@ -93,6 +96,7 @@ final class UpdateSettingsWindowController: NSWindowController {
         autoUpdatePiCLIButton.state = preferences.autoUpdatePiBeforeLaunch ? .on : .off
         piCLIStatusLabel.stringValue = piCLIStatus
         piPackageStatusLabel.stringValue = piPackageStatus
+        abandonedStatusLabel.stringValue = abandonedStatus
     }
 
     private func status(for category: UpdateCheckCategory) -> UpdateCategoryStatus {
@@ -180,6 +184,10 @@ final class UpdateSettingsWindowController: NSWindowController {
         piPackageStatusLabel.maximumNumberOfLines = 0
         piPackageStatusLabel.textColor = .secondaryLabelColor
         piPackageStatusLabel.font = NSFont.systemFont(ofSize: 11)
+        abandonedStatusLabel.lineBreakMode = .byWordWrapping
+        abandonedStatusLabel.maximumNumberOfLines = 0
+        abandonedStatusLabel.textColor = .secondaryLabelColor
+        abandonedStatusLabel.font = NSFont.systemFont(ofSize: 11)
 
         let reservedHeader = NSTextField(labelWithString: "启动前自动更新（受限）")
         reservedHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
@@ -205,6 +213,7 @@ final class UpdateSettingsWindowController: NSWindowController {
             piPackageHeader,
             piPackageHintLabel,
             piPackageStatusLabel,
+            abandonedStatusLabel,
             buttons
         ])
 

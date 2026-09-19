@@ -767,7 +767,7 @@ final class PiWebUpdateAdapterTests: XCTestCase {
 
         let box = ResultBox()
         let finished = expectation(description: "installer finished")
-        let installer = ProcessPiWebUpdateInstaller(terminationGrace: 0.2)
+        let installer = ProcessPiWebUpdateInstaller()
         installer.install(plan, timeout: 30) { result in
             box.value = result
             finished.fulfill()
@@ -777,6 +777,7 @@ final class PiWebUpdateAdapterTests: XCTestCase {
 
         XCTAssertEqual(box.value?.failure, nil)
         XCTAssertEqual(box.value?.exitCode, 0)
+        XCTAssertNil(box.value?.childProcessAction, "正常结束时没有“已放弃”状态")
         let lines = try String(contentsOf: output, encoding: .utf8)
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
@@ -792,7 +793,7 @@ final class PiWebUpdateAdapterTests: XCTestCase {
 
         let box = ResultBox()
         let finished = expectation(description: "installer finished")
-        let installer = ProcessPiWebUpdateInstaller(terminationGrace: 0.2)
+        let installer = ProcessPiWebUpdateInstaller()
         installer.install(plan, timeout: 30) { result in
             box.value = result
             finished.fulfill()
@@ -812,7 +813,7 @@ final class PiWebUpdateAdapterTests: XCTestCase {
 
         let box = ResultBox()
         let finished = expectation(description: "installer timed out")
-        let installer = ProcessPiWebUpdateInstaller(terminationGrace: 0.2)
+        let installer = ProcessPiWebUpdateInstaller()
         installer.install(plan, timeout: 0.3) { result in
             box.value = result
             finished.fulfill()
@@ -823,6 +824,9 @@ final class PiWebUpdateAdapterTests: XCTestCase {
         XCTAssertEqual(box.value?.failure, .timedOut)
         XCTAssertEqual(box.value?.timedOut, true)
         XCTAssertLessThan(box.value?.duration ?? .infinity, 5, "超时必须按注入的值提前结束")
+        // GitHub #62：超时只终止本次启动的子进程组（真实 posix_spawn + 独立进程组），
+        // 并把这件事如实写进结果（不声称派生进程已经结束）。
+        XCTAssertEqual(box.value?.childProcessAction, .terminatedOwnProcessGroup)
     }
 
     func testProcessInstallerReportsLaunchFailureForMissingExecutable() throws {
@@ -834,7 +838,7 @@ final class PiWebUpdateAdapterTests: XCTestCase {
         )
         let box = ResultBox()
         let finished = expectation(description: "installer failed to launch")
-        let installer = ProcessPiWebUpdateInstaller(terminationGrace: 0.2)
+        let installer = ProcessPiWebUpdateInstaller()
         installer.install(plan, timeout: 30) { result in
             box.value = result
             finished.fulfill()
@@ -862,7 +866,7 @@ final class PiWebUpdateAdapterTests: XCTestCase {
             ]
         )
         let finished = expectation(description: "installer finished")
-        let installer = ProcessPiWebUpdateInstaller(terminationGrace: 0.2)
+        let installer = ProcessPiWebUpdateInstaller()
         installer.install(plan, timeout: 30) { _ in
             finished.fulfill()
         }

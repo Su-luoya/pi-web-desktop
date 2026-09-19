@@ -80,12 +80,15 @@ enum PiCLIUpdateRefusal: Equatable {
     }
 }
 
-/// 推迟自动更新的原因：前置条件都已满足，但进程保护要求这次不执行。
+/// 推迟自动更新的原因：前置条件都已满足，但进程保护或「已放弃」记录要求这次不执行。
 enum PiCLIUpdateDeferral: Equatable {
     /// 有运行中的 Pi 进程：推迟到它们结束后的下一次判定（下次启动或等待状态）。
     case piRunning([PiProcessRecord])
     /// 进程状态不确定：按不安全处理，推迟到下一次判定。
     case processStateUnknown(PiProcessInspectionUnknown)
+    /// 同一组件存在未清除的「已放弃」记录（GitHub #62）：推迟到下次启动；手动
+    /// 入口不受影响，但必须在确认框里先看到这条记录。
+    case abandonedAttemptPending(UpdateAbandonedAttempt)
 
     var text: String {
         switch self {
@@ -95,6 +98,8 @@ enum PiCLIUpdateDeferral: Equatable {
                 + "因此推迟到它们结束后的下一次判定（下次启动或等待状态）。应用不会结束任何 Pi 进程。"
         case .processStateUnknown(let reason):
             return "无法确定 Pi 进程状态（\(reason.text)）：按不安全处理，推迟到下一次判定。应用不会结束任何进程。"
+        case .abandonedAttemptPending(let attempt):
+            return UpdateAbandonedAttemptPresenter.automaticRefusalText(attempt)
         }
     }
 
@@ -268,6 +273,10 @@ struct PiCLIUpdatePlanningInput: Equatable {
     var targetCacheWrittenAt: Date? = nil
     /// Pi 进程检查结果。默认值是“枚举失败”，即不安全：漏传时不会退化成允许自动更新。
     var processes: PiProcessInspection = .unknown(.enumerationFailed)
+    /// 同一组件未清除的「已放弃」记录（GitHub #62）。有值时不允许自动执行
+    /// （推迟到下次启动）；手动入口仍然可用但必须先看到这条记录。
+    /// 默认 nil，旧调用点保持不变。
+    var abandonedAttempt: UpdateAbandonedAttempt? = nil
 }
 
 /// 前置条件与命令构造的纯逻辑（GitHub #21 第 3 项）。
@@ -359,6 +368,12 @@ enum PiCLIUpdatePlanner {
             confidence: installation.confidence
         ) else {
             return .unavailable(reason: .unsafeCommand)
+        }
+        // 「已放弃」记录硬前置（GitHub #62 / alpha.3 安全审查 A-6、A-7）：同一组件
+        // 存在未清除的记录时不允许自动执行，推迟到下次启动。进程保护只在这一条
+        // 满足之后才参与判定；手动入口单独经 `manualPlan` 走。
+        if let attempt = input.abandonedAttempt {
+            return .deferred(plan: plan, reason: .abandonedAttemptPending(attempt))
         }
         // 进程保护：唯一允许自动执行的情况是“确认没有任何 Pi 进程”。
         switch input.processes {
@@ -482,8 +497,12 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
     private let stateQueue = DispatchQueue(label: "io.github.su-luoya.pi-web-desktop.pi-cli-update-command")
     private let clock: () -> Date
     private let baseEnvironment: [String: String]
+    private let redact: (String) -> String
+    private let recordAbandonedAttempt: (UpdateAbandonedAttempt) -> Void
 
     private var process: Process?
+    private var plan: PiCLIUpdatePlan?
+    private var timeout: TimeInterval = 0
     private var timer: DispatchSourceTimer?
     private var drainTimer: DispatchSourceTimer?
     private var completion: ((PiCLIUpdateCommandResult) -> Void)?
@@ -495,15 +514,21 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
     private var stderrTail = ""
     private var stdoutDrained = false
     private var stderrDrained = false
+    /// 本次命令是否已经写过「已放弃」记录（至多一条）。
+    private var didRecordAbandonedAttempt = false
     /// 进程已经结束、但还在等管道读完时的暂存结果。
     private var pendingFinish: (exitCode: Int32?, launchFailed: Bool)?
 
     init(
         clock: @escaping () -> Date = { Date() },
-        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        redact: @escaping (String) -> String = { LogRedactor().redact($0) },
+        recordAbandonedAttempt: @escaping (UpdateAbandonedAttempt) -> Void = { _ in }
     ) {
         self.clock = clock
         self.baseEnvironment = baseEnvironment
+        self.redact = redact
+        self.recordAbandonedAttempt = recordAbandonedAttempt
     }
 
     func run(
@@ -520,6 +545,7 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
         stateQueue.async { [weak self] in
             guard let self, !self.finished else { return }
             self.abandoned = true
+            self.recordAbandonedAttemptLocked(reason: .abandonedWaiting)
             self.finishLocked(exitCode: nil)
         }
     }
@@ -533,6 +559,8 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
     ) {
         guard !finished else { return }
         self.completion = completion
+        self.plan = plan
+        self.timeout = timeout
         self.startedAt = clock()
 
         let process = Process()
@@ -575,12 +603,38 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
         timer.schedule(deadline: .now() + max(0.05, timeout))
         timer.setEventHandler { [weak self] in
             guard let self, !self.finished else { return }
-            // 超时只放弃等待：不发送信号、不终止子进程。
+            // 超时只放弃等待：不发送信号、不终止子进程；同时写一条「已放弃」记录。
             self.timedOut = true
+            self.recordAbandonedAttemptLocked(reason: .timedOut)
             self.finishLocked(exitCode: nil)
         }
         timer.resume()
         self.timer = timer
+    }
+
+    /// 写一条「已放弃」记录（GitHub #62）：组件、脱敏命令摘要、开始时间、超时值、
+    /// 结束时间未知（`finishedAt == nil`）与实际动作“没有发送任何信号”。
+    private func recordAbandonedAttemptLocked(reason: UpdateAbandonedAttempt.Reason) {
+        guard !didRecordAbandonedAttempt, let plan else { return }
+        didRecordAbandonedAttempt = true
+        let recordedAt = clock()
+        recordAbandonedAttempt(UpdateAbandonedAttempt(
+            componentKind: .piCLI,
+            packageName: nil,
+            reason: reason,
+            commandSummary: UpdateAbandonedAttempt.makeCommandSummary(
+                executablePath: plan.executablePath,
+                arguments: plan.arguments,
+                redactingWith: redact
+            ),
+            startedAt: startedAt ?? recordedAt,
+            timeout: timeout,
+            finishedAt: nil,
+            source: plan.source,
+            recordedAt: recordedAt,
+            childProcessAction: .waitedWithoutSignals,
+            derivedProcessesConfirmedEnded: nil
+        ))
     }
 
     /// 管道回调统一入口：空数据 = 读到 EOF，标记已经读完（可能触发暂存的结束）。
@@ -819,6 +873,9 @@ final class PiCLIUpdateCoordinator {
         var timeout: TimeInterval
         /// 共享更新事务（GitHub #23）：文件系统探针、统一历史与降级应用。
         var transaction: UpdateTransactionEnvironment
+        /// 该组件成功完成一次更新后清除它的「已放弃」记录（GitHub #62）。
+        /// 默认什么都不做（旧调用点保持不变）。
+        var clearAbandonedAttempt: (UpdateTransactionComponent) -> Void
 
         init(
             inspectProcesses: @escaping () -> PiProcessInspection,
@@ -828,7 +885,8 @@ final class PiCLIUpdateCoordinator {
             log: @escaping (String) -> Void,
             deliver: @escaping (@escaping () -> Void) -> Void,
             timeout: TimeInterval = PiCLIUpdateCoordinator.defaultTimeout,
-            transaction: UpdateTransactionEnvironment = .disabled
+            transaction: UpdateTransactionEnvironment = .disabled,
+            clearAbandonedAttempt: @escaping (UpdateTransactionComponent) -> Void = { _ in }
         ) {
             self.inspectProcesses = inspectProcesses
             self.runner = runner
@@ -838,6 +896,7 @@ final class PiCLIUpdateCoordinator {
             self.deliver = deliver
             self.timeout = timeout
             self.transaction = transaction
+            self.clearAbandonedAttempt = clearAbandonedAttempt
         }
     }
 
@@ -1029,6 +1088,8 @@ final class PiCLIUpdateCoordinator {
                 advice: advice,
                 resultingVersion: newVersion
             )
+            // 该组件成功完成了一次更新：清除它的「已放弃」记录（GitHub #62）。
+            self.environment.clearAbandonedAttempt(component)
             self.logOutcome("Pi CLI 更新完成：\(plan.installedVersion) → \(newVersion)，耗时 \(Self.durationText(result.duration))。")
             let outcome = PiCLIUpdateRunOutcome.succeeded(
                 plan: plan,
@@ -1083,6 +1144,7 @@ enum PiCLIManualUpdateConfirmation {
         plan: PiCLIUpdatePlan?,
         commandText: String?,
         inspection: PiProcessInspection,
+        abandonedAttempt: UpdateAbandonedAttempt? = nil,
         redactingWith redactor: LogRedactor
     ) -> String {
         var lines: [String] = []
@@ -1092,6 +1154,10 @@ enum PiCLIManualUpdateConfirmation {
             lines.append("将执行的命令：\(redactor.redact(commandText))")
         } else {
             lines.append("没有可用的 Pi CLI 更新命令。")
+        }
+        if let abandonedAttempt {
+            lines.append("")
+            lines.append(UpdateAbandonedAttemptPresenter.confirmationBlock(for: abandonedAttempt))
         }
         lines.append("")
         lines.append("当前 Pi 进程状态：\(inspection.statusText)")

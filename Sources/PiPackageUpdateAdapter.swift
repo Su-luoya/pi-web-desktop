@@ -182,6 +182,10 @@ struct PiPackageUpdatePlanningInput: Equatable {
     var processes: PiProcessInspection = .unknown(.enumerationFailed)
     /// 已通过可执行位确认的 `pi` 可执行文件路径（#16 检测结果里 `piCLI` 的路径）。
     var piExecutablePath: String?
+    /// 各包未清除的「已放弃」记录（GitHub #62）。存在记录的包不会被自动执行；
+    /// 用户必须在确认框里先看到这条记录，确认后才执行一次。
+    /// 默认空数组，旧调用点保持不变。
+    var abandonedAttempts: [UpdateAbandonedAttempt] = []
 }
 
 // MARK: - 拒绝原因
@@ -226,6 +230,9 @@ enum PiPackageUpdateRefusal: Equatable {
     case processStateUnknown(PiProcessInspectionUnknown)
     /// 用户没有确认（取消或关闭对话框），不执行、不改状态。
     case userCancelled
+    /// 同一组件存在未清除的「已放弃」记录（GitHub #62）：不允许自动执行；只有
+    /// 用户在确认框里看到这条记录并确认后才执行一次。
+    case abandonedAttemptPending(UpdateAbandonedAttempt)
 
     /// 单行原因文案（固定文本 + 已脱敏的进程记录摘要）。
     var text: String {
@@ -267,6 +274,8 @@ enum PiPackageUpdateRefusal: Equatable {
             return "无法确定 Pi 进程状态（\(reason.text)）：按不安全处理，拒绝执行。应用不会结束任何进程，也不会发送任何信号。"
         case .userCancelled:
             return "用户取消了更新（未确认）：不执行、不改状态"
+        case .abandonedAttemptPending(let attempt):
+            return UpdateAbandonedAttemptPresenter.automaticRefusalText(attempt)
         }
     }
 }
@@ -526,6 +535,9 @@ enum PiPackageUpdateDecision: Equatable {
     case notifyOnly(PiPackageUpdateNotice)
     /// 询问后更新：计划就绪，必须由用户确认；确认前不执行。
     case awaitingConfirmation(PiPackageUpdatePlan)
+    /// 计划就绪，但同一包存在未清除的「已放弃」记录：不允许自动/常规执行。
+    /// 确认框必须先展示这条记录，用户显式确认后才执行一次（GitHub #62）。
+    case awaitingAbandonedConfirmation(plan: PiPackageUpdatePlan, attempt: UpdateAbandonedAttempt)
     /// 计划就绪但被拒绝执行（进程保护）：给出可读原因，不执行。
     case executeBlocked(plan: PiPackageUpdatePlan, reason: PiPackageUpdateRefusal)
     /// 没有执行入口，只展示官方命令文本（来源/可信度不可接受等）。
@@ -541,6 +553,8 @@ enum PiPackageUpdateDecision: Equatable {
             return notice.packageName
         case .awaitingConfirmation(let plan), .executeBlocked(let plan, _):
             return plan.packageName
+        case .awaitingAbandonedConfirmation(let plan, _):
+            return plan.packageName
         }
     }
 
@@ -550,10 +564,17 @@ enum PiPackageUpdateDecision: Equatable {
         return nil
     }
 
-    /// 任何计划（包含被进程保护拒绝的），用于展示与诊断。
+    /// 需要“先看到「已放弃」记录再确认”的计划；未显式确认前不执行。
+    var abandonedConfirmationPlan: PiPackageUpdatePlan? {
+        if case .awaitingAbandonedConfirmation(let plan, _) = self { return plan }
+        return nil
+    }
+
+    /// 任何计划（包含被进程保护或「已放弃」记录拒绝的），用于展示与诊断。
     var anyPlan: PiPackageUpdatePlan? {
         switch self {
         case .awaitingConfirmation(let plan): return plan
+        case .awaitingAbandonedConfirmation(let plan, _): return plan
         case .executeBlocked(let plan, _): return plan
         default: return nil
         }
@@ -563,6 +584,8 @@ enum PiPackageUpdateDecision: Equatable {
         switch self {
         case .executeBlocked(_, let reason), .manualOnly(_, let reason), .unavailable(_, let reason):
             return reason
+        case .awaitingAbandonedConfirmation(_, let attempt):
+            return .abandonedAttemptPending(attempt)
         case .awaitingConfirmation:
             return nil
         case .notifyOnly:
@@ -591,6 +614,10 @@ enum PiPackageUpdateDecision: Equatable {
         case .awaitingConfirmation(let plan):
             return "Pi 扩展包更新（\(plan.packageName)）：等待用户确认（允许自动执行：否）\n"
                 + plan.displayLines(redactingWith: redactor).joined(separator: "\n")
+        case .awaitingAbandonedConfirmation(let plan, let attempt):
+            return "Pi 扩展包更新（\(plan.packageName)）：存在未清除的「已放弃」记录，需要用户看完记录后确认（允许自动执行：否）\n"
+                + UpdateAbandonedAttemptPresenter.lines(for: attempt).joined(separator: "\n")
+                + "\n" + plan.displayLines(redactingWith: redactor).joined(separator: "\n")
         case .executeBlocked(let plan, let reason):
             return "Pi 扩展包更新（\(plan.packageName)）：拒绝执行（\(reason.text)）；"
                 + "将执行的命令：\(redactor.redact(plan.commandText))"
@@ -618,6 +645,8 @@ struct PiPackageUpdatePlanSet: Equatable {
     var decisions: [PiPackageUpdateDecision]
     /// 额外拒绝记录：检查结果引用了检测列表之外的包名，或整类策略级拒绝。
     var extraRefusals: [PiPackageUpdateRefusalRecord]
+    /// 本次判定用到的「已放弃」记录（GitHub #62），用于确认框/诊断展示。
+    var abandonedAttempts: [UpdateAbandonedAttempt] = []
 
     static let disabledForPolicyOff = PiPackageUpdatePlanSet(
         policy: .off,
@@ -630,6 +659,17 @@ struct PiPackageUpdatePlanSet: Equatable {
     /// 已就绪、等待用户确认的计划（= 执行入口）。
     var executablePlans: [PiPackageUpdatePlan] {
         decisions.compactMap(\.executablePlan)
+    }
+
+    /// 需要“先看到「已放弃」记录再确认”的计划；与可执行计划一样需要显式确认，
+    /// 但确认框必须先展示记录（GitHub #62）。
+    var abandonedConfirmationPlans: [PiPackageUpdatePlan] {
+        decisions.compactMap(\.abandonedConfirmationPlan)
+    }
+
+    /// 全部需要用户确认的计划（常规确认 + 先看「已放弃」记录的确认）。
+    var confirmationPlans: [PiPackageUpdatePlan] {
+        executablePlans + abandonedConfirmationPlans
     }
 
     /// 全部计划（含被进程保护拒绝的）。
@@ -713,14 +753,16 @@ enum PiPackageUpdatePlanner {
 
     /// 单个包的决策（纯函数）。
     ///
-    /// 顺序：策略 → 包名 → 检查结论 → 目标版本 → 来源 → 命令安全 → 进程保护。
-    /// 进程保护只让“已经就绪的计划”变成 `executeBlocked`，不会掩盖其它拒绝原因。
+    /// 顺序：策略 → 包名 → 检查结论 → 目标版本 → 来源 → 命令安全 →「已放弃」
+    /// 记录 → 进程保护。后两项只让“已经就绪的计划”变成需要确认/拒绝的状态，
+    /// 不会掩盖其它拒绝原因。
     static func decide(
         _ candidate: PiPackageCandidate,
         check: PiPackageCheckOutcome?,
         policy: PiPackageUpdatePolicy,
         processes: PiProcessInspection,
-        piExecutablePath: String?
+        piExecutablePath: String?,
+        abandonedAttempt: UpdateAbandonedAttempt? = nil
     ) -> PiPackageUpdateDecision {
         let name = candidate.packageName
         switch policy {
@@ -805,6 +847,12 @@ enum PiPackageUpdatePlanner {
                 reason: .unsafeCommand
             )
         }
+        // 「已放弃」记录硬前置（GitHub #62 / alpha.3 安全审查 A-6、A-7）：同一包
+        // 存在未清除的记录时不允许自动/常规执行；确认框必须先展示这条记录，
+        // 用户在看过之后显式确认才执行一次。
+        if let abandonedAttempt {
+            return .awaitingAbandonedConfirmation(plan: plan, attempt: abandonedAttempt)
+        }
         // 进程保护：只有“确认没有任何 Pi 进程”才允许进入确认流程；否则拒绝执行。
         switch processes {
         case .noProcesses:
@@ -856,7 +904,11 @@ enum PiPackageUpdatePlanner {
                 check: checks[candidate.packageName],
                 policy: policy,
                 processes: input.processes,
-                piExecutablePath: input.piExecutablePath
+                piExecutablePath: input.piExecutablePath,
+                abandonedAttempt: UpdateAbandonedAttemptGate.blockingAttempt(
+                    for: UpdateTransactionComponent.piPackage(candidate.packageName),
+                    in: input.abandonedAttempts
+                )
             )
         }
         let candidates = Set(input.packages.map(\.packageName))
@@ -868,7 +920,8 @@ enum PiPackageUpdatePlanner {
             didCheck: true,
             packageCount: input.packages.count,
             decisions: decisions,
-            extraRefusals: orphanChecks
+            extraRefusals: orphanChecks,
+            abandonedAttempts: input.abandonedAttempts
         )
     }
 
@@ -879,6 +932,7 @@ enum PiPackageUpdatePlanner {
         packages: [PiPackageCandidate],
         processes: PiProcessInspection = .unknown(.enumerationFailed),
         piExecutablePath: String?,
+        abandonedAttempts: [UpdateAbandonedAttempt] = [],
         check: () -> [PiPackageCheckOutcome]
     ) -> PiPackageUpdatePlanSet {
         guard let mapped = PiPackageUpdatePolicy(policy), mapped != .off else {
@@ -901,7 +955,8 @@ enum PiPackageUpdatePlanner {
             packages: packages,
             checks: checks,
             processes: processes,
-            piExecutablePath: piExecutablePath
+            piExecutablePath: piExecutablePath,
+            abandonedAttempts: abandonedAttempts
         ))
     }
 
@@ -1013,8 +1068,12 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
     private let stateQueue = DispatchQueue(label: "io.github.su-luoya.pi-web-desktop.pi-package-update-command")
     private let clock: () -> Date
     private let baseEnvironment: [String: String]
+    private let redact: (String) -> String
+    private let recordAbandonedAttempt: (UpdateAbandonedAttempt) -> Void
 
     private var process: Process?
+    private var plan: PiPackageUpdatePlan?
+    private var timeout: TimeInterval = 0
     private var timer: DispatchSourceTimer?
     private var drainTimer: DispatchSourceTimer?
     private var completion: ((PiPackageUpdateCommandResult) -> Void)?
@@ -1026,14 +1085,20 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
     private var stderrTail = ""
     private var stdoutDrained = false
     private var stderrDrained = false
+    /// 本次命令是否已经写过「已放弃」记录（至多一条）。
+    private var didRecordAbandonedAttempt = false
     private var pendingFinish: (exitCode: Int32?, launchFailed: Bool)?
 
     init(
         clock: @escaping () -> Date = { Date() },
-        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        redact: @escaping (String) -> String = { LogRedactor().redact($0) },
+        recordAbandonedAttempt: @escaping (UpdateAbandonedAttempt) -> Void = { _ in }
     ) {
         self.clock = clock
         self.baseEnvironment = baseEnvironment
+        self.redact = redact
+        self.recordAbandonedAttempt = recordAbandonedAttempt
     }
 
     func run(
@@ -1050,6 +1115,7 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
         stateQueue.async { [weak self] in
             guard let self, !self.finished else { return }
             self.abandoned = true
+            self.recordAbandonedAttemptLocked(reason: .abandonedWaiting)
             self.finishLocked(exitCode: nil)
         }
     }
@@ -1063,6 +1129,8 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
     ) {
         guard !finished else { return }
         self.completion = completion
+        self.plan = plan
+        self.timeout = timeout
         self.startedAt = clock()
 
         let process = Process()
@@ -1105,12 +1173,38 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
         timer.schedule(deadline: .now() + max(0.05, timeout))
         timer.setEventHandler { [weak self] in
             guard let self, !self.finished else { return }
-            // 超时只放弃等待：不发送信号、不终止子进程。
+            // 超时只放弃等待：不发送信号、不终止子进程；同时写一条「已放弃」记录。
             self.timedOut = true
+            self.recordAbandonedAttemptLocked(reason: .timedOut)
             self.finishLocked(exitCode: nil)
         }
         timer.resume()
         self.timer = timer
+    }
+
+    /// 写一条「已放弃」记录（GitHub #62）：组件是具体包名，实际动作是“没有发送
+    /// 任何信号”，结束时间未知（`finishedAt == nil`）。
+    private func recordAbandonedAttemptLocked(reason: UpdateAbandonedAttempt.Reason) {
+        guard !didRecordAbandonedAttempt, let plan else { return }
+        didRecordAbandonedAttempt = true
+        let recordedAt = clock()
+        recordAbandonedAttempt(UpdateAbandonedAttempt(
+            componentKind: .piPackage,
+            packageName: plan.packageName,
+            reason: reason,
+            commandSummary: UpdateAbandonedAttempt.makeCommandSummary(
+                executablePath: plan.executablePath,
+                arguments: plan.arguments,
+                redactingWith: redact
+            ),
+            startedAt: startedAt ?? recordedAt,
+            timeout: timeout,
+            finishedAt: nil,
+            source: plan.source,
+            recordedAt: recordedAt,
+            childProcessAction: .waitedWithoutSignals,
+            derivedProcessesConfirmedEnded: nil
+        ))
     }
 
     /// 管道回调统一入口：空数据 = 读到 EOF，标记已经读完（可能触发暂存的结束）。
@@ -1345,6 +1439,9 @@ final class PiPackageUpdateCoordinator {
         var timeout: TimeInterval
         /// 共享更新事务（GitHub #23）：文件系统探针、统一历史与降级应用。
         var transaction: UpdateTransactionEnvironment
+        /// 该组件成功完成一次更新后清除它的「已放弃」记录（GitHub #62）。
+        /// 默认什么都不做（旧调用点保持不变）。
+        var clearAbandonedAttempt: (UpdateTransactionComponent) -> Void
 
         init(
             inspectProcesses: @escaping () -> PiProcessInspection,
@@ -1354,7 +1451,8 @@ final class PiPackageUpdateCoordinator {
             log: @escaping (String) -> Void,
             deliver: @escaping (@escaping () -> Void) -> Void,
             timeout: TimeInterval = PiPackageUpdateCoordinator.defaultTimeout,
-            transaction: UpdateTransactionEnvironment = .disabled
+            transaction: UpdateTransactionEnvironment = .disabled,
+            clearAbandonedAttempt: @escaping (UpdateTransactionComponent) -> Void = { _ in }
         ) {
             self.inspectProcesses = inspectProcesses
             self.runner = runner
@@ -1364,6 +1462,7 @@ final class PiPackageUpdateCoordinator {
             self.deliver = deliver
             self.timeout = timeout
             self.transaction = transaction
+            self.clearAbandonedAttempt = clearAbandonedAttempt
         }
     }
 
@@ -1544,6 +1643,8 @@ final class PiPackageUpdateCoordinator {
                 advice: advice,
                 resultingVersion: newVersion
             )
+            // 该组件成功完成了一次更新：清除它的「已放弃」记录（GitHub #62）。
+            self.environment.clearAbandonedAttempt(component)
             self.logOutcome(
                 "Pi 扩展包更新（\(plan.packageName)）完成：\(plan.installedVersion) → \(newVersion)，耗时 \(record.durationText)。"
             )
@@ -1642,14 +1743,21 @@ enum PiPackageUpdateRedetection {
 /// 执行前的确认对话框文案（固定顺序，已脱敏）。
 enum PiPackageUpdateConfirmation {
     /// 整批确认：每个计划一段完整信息，最后给出进程状态与风险说明。
+    /// `abandonedAttempts` 是该批计划涉及的「已放弃」记录（GitHub #62）：
+    /// 确认前必须先展示，确认后才执行一次。
     static func text(
         plans: [PiPackageUpdatePlan],
         inspection: PiProcessInspection,
+        abandonedAttempts: [UpdateAbandonedAttempt] = [],
         redactingWith redactor: LogRedactor
     ) -> String {
         var lines: [String] = []
         lines.append("共 \(plans.count) 个扩展包待更新。执行前会再次检查 Pi 进程；"
             + "检测到运行中的 Pi 进程或状态不确定时不会执行。")
+        for attempt in abandonedAttempts {
+            lines.append("")
+            lines.append(UpdateAbandonedAttemptPresenter.confirmationBlock(for: attempt))
+        }
         for (index, plan) in plans.enumerated() {
             lines.append("")
             lines.append("【\(index + 1)/\(plans.count)】")
@@ -1693,6 +1801,14 @@ enum PiPackageUpdateStatusPresenter {
             }
             for plan in planSet.allPlans where planSet.executablePlans.allSatisfy({ $0.packageName != plan.packageName }) {
                 lines.append("已就绪但被拒绝执行：\(plan.packageName)（原因见下面的拒绝记录）")
+            }
+            // 「已放弃」记录（GitHub #62）：这些包必须先看到记录再确认，未确认前不执行。
+            if !planSet.abandonedConfirmationPlans.isEmpty {
+                let names = planSet.abandonedConfirmationPlans.map(\.packageName).joined(separator: "、")
+                lines.append(
+                    "需先看「已放弃」记录再确认：\(names)"
+                        + "（开始时间与超时上限见下面的记录；结束时间未知；确认后才执行一次）"
+                )
             }
             for notice in planSet.notices {
                 lines.append("只提示：\(notice.packageName) \(notice.installedVersion ?? "未知") → \(notice.targetVersion ?? "未知")")

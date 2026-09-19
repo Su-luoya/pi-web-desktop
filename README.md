@@ -26,7 +26,7 @@ Pi Web Desktop is a macOS AppKit/WebKit shell that starts, monitors, and display
 | 公证 | 未公证。Gatekeeper 默认拒绝（`spctl --assess` 返回 rejected），需要用户在“系统设置 → 隐私与安全性”里手动批准 |
 | 发行状态 | 当前只有早期 alpha 基线 `0.1.0-alpha.1`（build `1`），没有稳定发行版 |
 | 分发现状 | 本仓库当前不提供预编译 [Release](https://github.com/Su-luoya/pi-web-desktop/releases) 下载；alpha.1 从源码构建，ZIP 打包流程见 [发布说明](docs/releasing.md) |
-| 自动更新 | 未实现。当前 alpha 不做应用内更新，也不检查更新（见 [隐私说明](docs/privacy.md) 的“版本检查”） |
+| 应用内更新 | 未实现（后续 issue）。当前 alpha 只做只读版本检查并按设置提示：四类可分别关闭 / 每日 / 每周（扩展包：关闭 / 检查并通知 / 询问后更新），可忽略某个具体版本；不下载、不安装、不降级。见 [隐私说明](docs/privacy.md) 的“版本检查、提示与忽略版本”与 [设置说明](docs/settings-and-workspace.md) |
 | 支持承诺 | 无 SLA，无响应或修复时限。Issue 和 PR 按维护者可用时间处理 |
 | 远程访问 | 默认只监听 loopback；远程访问必须自备加密隧道或 HTTPS 反向代理，密码认证 ≠ 传输加密 |
 | 日志与诊断 | 日志写在 `~/Library/Logs/Pi Web Desktop/`，10 MB 轮转、保留 5 份；日志行、错误消息、环境变量/命令行展示与“复制诊断”导出共用同一个脱敏器。规则与字段见 [日志与诊断导出](docs/logging-and-diagnostics.md) |

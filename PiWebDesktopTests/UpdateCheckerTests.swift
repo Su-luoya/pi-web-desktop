@@ -134,8 +134,10 @@ final class UpdateCheckerTests: XCTestCase {
     // MARK: - 夹具
 
     private func makeWorld(
-        preferences: UpdateCheckPreferences = .allEnabled,
+        preferences: UpdateCheckPreferences = .factoryDefaults,
         cached: UpdateCheckCacheFile = .empty,
+        intervals: UpdateCheckIntervals = .standard,
+        ignoredVersions: UpdateIgnoredVersions = .empty,
         responder: ((UpdateHTTPRequest) -> Result<UpdateHTTPResponse, UpdateHTTPFailure>)? = nil
     ) -> World {
         let clock = FixedClock(referenceDate)
@@ -155,8 +157,9 @@ final class UpdateCheckerTests: XCTestCase {
             cacheStore: store,
             scheduler: scheduler,
             identity: identity,
-            intervals: .standard,
+            intervals: intervals,
             preferences: preferences,
+            ignoredVersions: ignoredVersions,
             log: { logs.append($0) }
         )
         return World(checker: checker, client: client, scheduler: scheduler, clock: clock, store: store, logs: logs, identity: identity)
@@ -246,6 +249,20 @@ final class UpdateCheckerTests: XCTestCase {
     private func requestCount(_ world: World, category: UpdateCheckCategory, packageName: String? = nil) -> Int {
         let target = UpdateCheckTarget(category: category, packageName: packageName)
         return world.client.requests.filter { requestMatches($0, target: target) }.count
+    }
+
+    /// 只按分类判断一次请求（扩展包按夹具包名）；用于“关闭后请求数为 0”类断言。
+    private func requestMatchesCategory(_ request: UpdateHTTPRequest, _ category: UpdateCheckCategory) -> Bool {
+        switch category {
+        case .desktopApp:
+            return request.url.host == UpdateCheckUpstream.githubHost
+        case .piCLI:
+            return request.url.absoluteString.contains("pi-coding-agent")
+        case .piWeb:
+            return request.url.absoluteString.contains("%2Fpi-web") || request.url.absoluteString.contains("%2fpi-web")
+        case .piPackages:
+            return request.url.absoluteString.contains("pi-extension-demo")
+        }
     }
 
     private func makeCachedEntry(
@@ -389,8 +406,8 @@ final class UpdateCheckerTests: XCTestCase {
         let webRequestsBefore = requestCount(world, category: .piWeb)
 
         var preferences = world.checker.preferences
-        preferences.piWebEnabled = false
-        preferences.piPackagesEnabled = false
+        preferences.setPolicy(.off, for: .piWeb)
+        preferences.setPolicy(.off, for: .piPackages)
         world.checker.preferences = preferences
 
         XCTAssertEqual(world.scheduler.activeIntervals, [TimeInterval(24 * 3600)])
@@ -405,9 +422,9 @@ final class UpdateCheckerTests: XCTestCase {
     }
 
     func testDisabledCategoryFromTheStartIsNeverRequested() {
-        var preferences = UpdateCheckPreferences.allEnabled
-        preferences.piWebEnabled = false
-        preferences.piPackagesEnabled = false
+        var preferences = UpdateCheckPreferences.factoryDefaults
+        preferences.setPolicy(.off, for: .piWeb)
+        preferences.setPolicy(.off, for: .piPackages)
         let world = makeWorld(preferences: preferences, responder: automaticResponder())
 
         world.checker.start(inventory: fullInventory())
@@ -421,12 +438,12 @@ final class UpdateCheckerTests: XCTestCase {
     }
 
     func testAllCategoriesDisabledMakesNoRequest() {
-        let preferences = UpdateCheckPreferences(
-            desktopAppEnabled: false,
-            piCLIEnabled: false,
-            piWebEnabled: false,
-            piPackagesEnabled: false
-        )
+        let preferences = UpdateCheckPreferences(policies: [
+            .desktopApp: .off,
+            .piCLI: .off,
+            .piWeb: .off,
+            .piPackages: .off
+        ])
         let world = makeWorld(preferences: preferences, responder: automaticResponder())
 
         world.checker.start(inventory: fullInventory())
@@ -557,10 +574,10 @@ final class UpdateCheckerTests: XCTestCase {
             lastSuccessAt: lastSuccess
         ))
         let world = makeWorld(cached: cached, responder: { _ in .failure(.offline) })
-        var preferences = UpdateCheckPreferences.allEnabled
-        preferences.desktopAppEnabled = false
-        preferences.piCLIEnabled = false
-        preferences.piWebEnabled = false
+        var preferences = UpdateCheckPreferences.factoryDefaults
+        preferences.setPolicy(.off, for: .desktopApp)
+        preferences.setPolicy(.off, for: .piCLI)
+        preferences.setPolicy(.off, for: .piWeb)
         world.checker.preferences = preferences
 
         world.checker.checkNow(
@@ -1090,7 +1107,7 @@ final class UpdateCheckerTests: XCTestCase {
             scheduler: ImmediateUpdateCheckScheduler(),
             identity: UpdateCheckIdentity(appName: "Pi Web Desktop", version: desktopInstalledVersion, bundleIdentifier: nil),
             intervals: .standard,
-            preferences: .allEnabled
+            preferences: .factoryDefaults
         )
 
         checker.checkNow(triggeredBy: .manual, inventory: fullInventory())
@@ -1171,18 +1188,18 @@ final class UpdateCheckerTests: XCTestCase {
         }
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        XCTAssertEqual(UpdateCheckPreferences.load(from: defaults), .allEnabled)
+        XCTAssertEqual(UpdateCheckPreferences.load(from: defaults), .factoryDefaults)
 
-        var preferences = UpdateCheckPreferences.allEnabled
-        preferences.setEnabled(false, for: .piWeb)
-        preferences.setEnabled(false, for: .piPackages)
+        var preferences = UpdateCheckPreferences.factoryDefaults
+        preferences.setPolicy(.weekly, for: .piWeb)
+        preferences.setPolicy(.off, for: .piPackages)
         preferences.save(to: defaults)
 
         let loaded = UpdateCheckPreferences.load(from: defaults)
-        XCTAssertFalse(loaded.piWebEnabled)
-        XCTAssertFalse(loaded.piPackagesEnabled)
-        XCTAssertTrue(loaded.desktopAppEnabled)
-        XCTAssertTrue(loaded.piCLIEnabled)
+        XCTAssertEqual(loaded.policy(for: .piWeb), .weekly)
+        XCTAssertEqual(loaded.policy(for: .piPackages), .off)
+        XCTAssertEqual(loaded.policy(for: .desktopApp), .daily)
+        XCTAssertEqual(loaded.policy(for: .piCLI), .daily)
         XCTAssertTrue(loaded.isEnabled(.desktopApp))
         XCTAssertFalse(loaded.isEnabled(.piPackages))
     }
@@ -1203,5 +1220,227 @@ final class UpdateCheckerTests: XCTestCase {
         world.clock.now = referenceDate.addingTimeInterval(24 * 3600 + 60)
         world.scheduler.fireTimers()
         XCTAssertEqual(summaries.count, 2)
+    }
+
+    // MARK: - 策略与调度（GitHub #18）
+
+    /// 四类组件各自关闭后：该类请求数为 0、无对应计时器，其它分类不受影响。
+    func testEachCategoryOffMakesZeroRequestsAndSchedulesNothing() {
+        for category in UpdateCheckCategory.allCases {
+            var preferences = UpdateCheckPreferences.factoryDefaults
+            preferences.setPolicy(.off, for: category)
+            let world = makeWorld(preferences: preferences, responder: automaticResponder())
+
+            world.checker.start(inventory: fullInventory())
+            // 假时钟推进 8 天并触发全部计时器：每日与每周策略都会到期。
+            world.clock.now = referenceDate.addingTimeInterval(8 * 24 * 3600)
+            world.scheduler.fireTimers()
+            world.checker.checkNow(triggeredBy: .manual, inventory: fullInventory())
+
+            XCTAssertFalse(world.client.requests.isEmpty, "关闭 \(category.rawValue) 后其它分类仍应检查")
+            XCTAssertTrue(
+                world.client.requests.allSatisfy { !requestMatchesCategory($0, category) },
+                "关闭的 \(category.rawValue) 不应产生请求"
+            )
+
+            let enabled = UpdateCheckCategory.allCases.filter { preferences.isEnabled($0) }
+            let expectedIntervals = Set(enabled.map {
+                UpdateCheckIntervals.standard.interval(for: $0, policy: preferences.policy(for: $0)) ?? -1
+            })
+            XCTAssertEqual(Set(world.scheduler.activeIntervals), expectedIntervals, "计时器应与开启分类的策略一致")
+        }
+    }
+
+    /// 每日 / 每周 / 扩展包 7 天的到期判定全部由假时钟推进驱动。
+    func testDailyAndWeeklyCadenceFollowTheFakeClock() {
+        var preferences = UpdateCheckPreferences.factoryDefaults
+        preferences.setPolicy(.weekly, for: .desktopApp)
+        preferences.setPolicy(.weekly, for: .piWeb)
+        preferences.setPolicy(.daily, for: .piCLI)
+        let world = makeWorld(preferences: preferences, responder: automaticResponder())
+
+        world.checker.start(inventory: fullInventory())
+        XCTAssertEqual(requestCount(world, category: .desktopApp), 1)
+        XCTAssertEqual(requestCount(world, category: .piCLI), 1)
+        XCTAssertEqual(requestCount(world, category: .piWeb), 1)
+        XCTAssertEqual(requestCount(world, category: .piPackages, packageName: "pi-extension-demo"), 1)
+
+        // 24 小时后：只有每日的 Pi CLI 到期。
+        world.clock.now = referenceDate.addingTimeInterval(24 * 3600)
+        world.scheduler.fireTimers()
+        XCTAssertEqual(requestCount(world, category: .piCLI), 2)
+        XCTAssertEqual(requestCount(world, category: .desktopApp), 1)
+        XCTAssertEqual(requestCount(world, category: .piWeb), 1)
+        XCTAssertEqual(requestCount(world, category: .piPackages, packageName: "pi-extension-demo"), 1)
+
+        // 7 天后：每周的两类与 7 天节奏的扩展包各再检查一次。
+        world.clock.now = referenceDate.addingTimeInterval(7 * 24 * 3600)
+        world.scheduler.fireTimers()
+        XCTAssertEqual(requestCount(world, category: .desktopApp), 2)
+        XCTAssertEqual(requestCount(world, category: .piWeb), 2)
+        XCTAssertEqual(requestCount(world, category: .piPackages, packageName: "pi-extension-demo"), 2)
+    }
+
+    /// 迁移后的旧版布尔键直接决定调度：`false` 等于关闭（零请求）。
+    func testLegacyEnabledKeysDriveSchedulingAfterMigration() {
+        let suiteName = "pi-web-desktop-update-check-tests-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("无法创建隔离的 UserDefaults suite")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(false, forKey: UpdateSettingKeys.legacyEnabled(for: .piWeb))
+        defaults.set(true, forKey: UpdateSettingKeys.legacyEnabled(for: .desktopApp))
+
+        var diagnostics: [String] = []
+        let preferences = UpdateCheckPreferences.load(from: defaults) { diagnostics.append($0) }
+        XCTAssertTrue(diagnostics.isEmpty)
+        XCTAssertEqual(preferences.policy(for: .piWeb), .off)
+        XCTAssertEqual(preferences.policy(for: .desktopApp), .daily)
+
+        let world = makeWorld(preferences: preferences, responder: automaticResponder())
+        world.checker.start(inventory: fullInventory())
+        world.checker.checkNow(triggeredBy: .manual, inventory: fullInventory())
+        XCTAssertEqual(requestCount(world, category: .piWeb), 0)
+        XCTAssertEqual(requestCount(world, category: .desktopApp), 2)
+    }
+
+    /// 应用关闭（`stop()`）后不再调度：假时钟推进 30 天也没有任何新请求。
+    func testStoppedCheckerNeverSchedulesEvenAfterALongFakeClockAdvance() {
+        let world = makeWorld(responder: automaticResponder())
+        world.checker.start(inventory: fullInventory())
+        let requestsBeforeStop = world.client.requests.count
+
+        world.checker.stop()
+        world.clock.now = referenceDate.addingTimeInterval(30 * 24 * 3600)
+        world.scheduler.fireTimers()
+        world.checker.checkNow(triggeredBy: .manual, inventory: fullInventory())
+
+        XCTAssertEqual(world.client.requests.count, requestsBeforeStop)
+        XCTAssertTrue(world.scheduler.timers.allSatisfy { $0.token.isCancelled })
+    }
+
+    // MARK: - 忽略版本（GitHub #18）
+
+    func testIgnoringCurrentVersionSuppressesRepromptAndNewerUpstreamReprompts() {
+        let world = makeWorld(responder: automaticResponder())
+        let target = UpdateCheckTarget(category: .piWeb)
+        world.checker.start(inventory: fullInventory())
+        XCTAssertEqual(world.checker.summary.result(for: target.id)?.status, .updateAvailable)
+        XCTAssertNil(world.checker.summary.result(for: target.id)?.ignoredVersion)
+
+        var ignored = UpdateIgnoredVersions.empty
+        ignored.ignore("2.0.0", for: .piWeb, at: referenceDate)
+        world.checker.ignoredVersions = ignored
+
+        // 忽略后不再进入通知名单。
+        XCTAssertTrue(UpdateNotificationPlanner.plan(
+            results: world.checker.summary.results,
+            preferences: world.checker.preferences,
+            ignoredVersions: ignored,
+            alreadyNotified: [:]
+        ).allSatisfy { $0.category != .piWeb })
+
+        // 下一次检查把忽略标记带进结果与状态快照。
+        world.checker.checkNow(triggeredBy: .manual, inventory: fullInventory())
+        let afterIgnore = world.checker.summary.result(for: target.id)
+        XCTAssertEqual(afterIgnore?.status, .updateAvailable)
+        XCTAssertEqual(afterIgnore?.ignoredVersion, "2.0.0")
+        XCTAssertEqual(
+            world.checker.summary.categoryStatuses.first { $0.category == .piWeb }?.ignoredVersion,
+            "2.0.0"
+        )
+        XCTAssertTrue(
+            world.checker.summary.categoryStatuses.first { $0.category == .piWeb }?.resultTitle.contains("已忽略") == true
+        )
+
+        // 上游发布更高版本：同一份忽略记录不再匹配，重新提示。
+        let newerWorld = makeWorld(
+            ignoredVersions: ignored,
+            responder: { request in
+                if request.url.host == UpdateCheckUpstream.githubHost {
+                    return Self.githubHTTPResponse(tags: ["v2.4.0"])
+                }
+                return Self.npmHTTPResponse(version: "2.1.0")
+            }
+        )
+        newerWorld.checker.checkNow(triggeredBy: .manual, inventory: fullInventory())
+        let newer = newerWorld.checker.summary.result(for: target.id)
+        XCTAssertEqual(newer?.status, .updateAvailable)
+        XCTAssertEqual(newer?.latestVersion, "2.1.0")
+        XCTAssertNil(newer?.ignoredVersion)
+        XCTAssertEqual(UpdateNotificationPlanner.plan(
+            results: newerWorld.checker.summary.results,
+            preferences: newerWorld.checker.preferences,
+            ignoredVersions: ignored,
+            alreadyNotified: [:]
+        ).count, 1)
+    }
+
+    func testScheduledResultsProduceAtMostOneNotificationPerVersion() {
+        let world = makeWorld(responder: automaticResponder())
+        world.checker.start(inventory: fullInventory())
+
+        var notified: [UpdateCheckCategory: String] = [:]
+        let first = UpdateNotificationPlanner.plan(
+            results: world.checker.summary.results,
+            preferences: world.checker.preferences,
+            ignoredVersions: .empty,
+            alreadyNotified: notified
+        )
+        XCTAssertEqual(first.count, 4)
+        for entry in first { notified[entry.category] = entry.latestVersion }
+
+        world.clock.now = referenceDate.addingTimeInterval(24 * 3600)
+        world.scheduler.fireTimers()
+        let second = UpdateNotificationPlanner.plan(
+            results: world.checker.summary.results,
+            preferences: world.checker.preferences,
+            ignoredVersions: .empty,
+            alreadyNotified: notified
+        )
+        XCTAssertTrue(second.isEmpty, "同一版本在本次运行里不应重复提示")
+    }
+
+    // MARK: - 状态与 alpha.3 预留位
+
+    func testSummaryPublishesPerCategoryStatusWithNextCheckTime() {
+        let world = makeWorld(responder: automaticResponder())
+        world.checker.start(inventory: fullInventory())
+
+        let statuses = world.checker.summary.categoryStatuses
+        XCTAssertEqual(statuses.count, UpdateCheckCategory.allCases.count)
+        for status in statuses {
+            XCTAssertNotNil(status.lastAttemptAt, "\(status.category.rawValue) 应记录最近检查时间")
+            XCTAssertNotNil(status.nextCheckAt, "\(status.category.rawValue) 应给出下次检查时间")
+            XCTAssertEqual(status.status, .updateAvailable)
+        }
+        let desktop = statuses.first { $0.category == .desktopApp }
+        XCTAssertEqual(desktop?.nextCheckAt, referenceDate.addingTimeInterval(24 * 3600))
+        let packages = statuses.first { $0.category == .piPackages }
+        XCTAssertEqual(packages?.nextCheckAt, referenceDate.addingTimeInterval(7 * 24 * 3600))
+    }
+
+    /// alpha.3 预留位打开后：请求、结果与调度与关闭时完全一致，没有任何安装
+    /// 或更新行为（`autoUpdateBeforeLaunchIsEffective` 恒为 false）。
+    func testReservedAlpha3SettingDoesNotChangeAnyRuntimeBehavior() {
+        var reserved = UpdateCheckPreferences.factoryDefaults
+        reserved.autoUpdatePiWebBeforeLaunch = true
+        XCTAssertFalse(UpdateCheckPreferences.autoUpdateBeforeLaunchIsEffective)
+
+        let off = makeWorld(preferences: .factoryDefaults, responder: automaticResponder())
+        let on = makeWorld(preferences: reserved, responder: automaticResponder())
+        off.checker.start(inventory: fullInventory())
+        on.checker.start(inventory: fullInventory())
+
+        XCTAssertEqual(on.client.requests.map(\.url), off.client.requests.map(\.url))
+        XCTAssertEqual(on.checker.summary.results.map(\.status), off.checker.summary.results.map(\.status))
+        XCTAssertEqual(on.checker.summary.categoryStatuses, off.checker.summary.categoryStatuses)
+        XCTAssertEqual(on.scheduler.activeIntervals.sorted(), off.scheduler.activeIntervals.sorted())
+
+        // 检查器只有 GET 请求这一种外部动作；预留位不会增加任何动作。
+        XCTAssertTrue(on.client.requests.allSatisfy { $0.method == "GET" })
+        XCTAssertEqual(on.client.requests.count, off.client.requests.count)
+        XCTAssertTrue(UpdateAutomationBoundary.pendingExplanation.contains("尚未生效"))
     }
 }

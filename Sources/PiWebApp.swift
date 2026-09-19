@@ -30,10 +30,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var updateStatusMenuItem: NSMenuItem?
     private var updateCategoryMenuItems: [UpdateCheckCategory: NSMenuItem] = [:]
     private var updateSettingsMenu: NSMenu?
+    /// “更新检查偏好设置”窗口（GitHub #18）。
+    private var updateSettingsWindowController: UpdateSettingsWindowController?
+    /// 每类组件的“忽略版本”（只存版本字符串与时间戳，见 `UpdateIgnoredVersions`）。
+    private var ignoredVersions: UpdateIgnoredVersions = .empty
+    /// 本次运行已经提示过哪些版本，避免同一个版本反复打扰；退出即丢弃。
+    private var notifiedVersions: [UpdateCheckCategory: String] = [:]
     /// 主线程状态：是否有一次检查正在进行（用于菜单文案与重复点击防护）。
     private var updateCheckInProgress = false
-    /// 手动检查完成后是否弹提示；自动检查只更新菜单文案，不打断用户。
+    /// 手动检查完成后是否弹提示；自动检查是否提示由策略与忽略版本决定。
     private var pendingManualUpdateCheck = false
+
+    /// 诊断页/设置窗口的状态时间格式。
+    private static let updateTimestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM-dd HH:mm"
+        return formatter
+    }()
 
     private let appConfiguration: AppConfiguration
     private let commandRunner: CommandRunning
@@ -80,12 +93,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // ServiceManager 的日志与错误消息共用 AppDelegate 的脱敏器实例。
             logWriter: logWriter
         )
+        // 更新检查设置（GitHub #18）：策略与忽略版本都存在同一个注入的
+        // UserDefaults domain 里；旧版布尔键经迁移函数回退，诊断行进日志。
+        let updateLog: (String) -> Void = { [logWriter] message in _ = logWriter.append(message) }
+        let updatePreferences = appConfiguration.updateCheckPreferences(diagnostics: updateLog)
+        self.ignoredVersions = appConfiguration.updateCheckIgnoredVersions(diagnostics: updateLog)
         let updateChecker = UpdateChecker(
             httpClient: URLSessionUpdateHTTPClient(),
             cacheStore: UpdateCheckCacheFileStore(fileURL: appConfiguration.paths.updateCheckCacheURL),
             scheduler: DispatchUpdateCheckScheduler(),
             identity: .current,
-            preferences: appConfiguration.updateCheckPreferences,
+            preferences: updatePreferences,
+            ignoredVersions: ignoredVersions,
             log: { [logWriter] message in _ = logWriter.append(message) }
         )
         self.updateChecker = updateChecker
@@ -637,6 +656,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             controller.onSelectPiWebPath = { [weak self] path in self?.applySelectedPiWebPath(path) }
             // 与菜单“复制诊断”完全同一条导出路径与同一份文本。
             controller.diagnosticsTextProvider = { [weak self] in self?.diagnosticsExportText() ?? "" }
+            // 更新检查状态（GitHub #18）：诊断页只渲染同一份状态快照。
+            controller.updateStatusTextProvider = { [weak self] in self?.updateCheckStatusBlockText() ?? "" }
             diagnosticsWindowController = controller
             controller.showWindow(nil)
         }
@@ -1187,7 +1208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     /// “服务 → 检查更新…”：忽略 TTL 立即检查，完成后弹出提示。仍然尊重每一类
-    /// 的开关（关闭的分类不会因为手动点击而发起请求）。
+    /// 的策略（关闭的分类不会因为手动点击而发起请求）。
     @objc private func checkForUpdatesNow(_ sender: Any?) {
         guard let updateChecker else { return }
         pendingManualUpdateCheck = true
@@ -1196,15 +1217,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         updateChecker.checkNow(triggeredBy: .manual)
     }
 
+    /// 菜单快捷开关：打开 = 该分类的默认策略，关闭 = 关闭。完整策略（每周 /
+    /// 询问后更新）在“更新检查偏好设置…”里选择。
     @objc private func toggleUpdateCategory(_ sender: NSMenuItem) {
         guard let rawValue = sender.representedObject as? String,
               let category = UpdateCheckCategory(rawValue: rawValue),
               let updateChecker else { return }
         var preferences = updateChecker.preferences
         preferences.setEnabled(sender.state != .on, for: category)
+        applyUpdatePreferences(preferences)
+    }
+
+    /// 策略变更的统一入口：写 UserDefaults、让调度器重建计时器、刷新界面。
+    private func applyUpdatePreferences(_ preferences: UpdateCheckPreferences) {
         appConfiguration.save(preferences)
-        updateChecker.preferences = preferences
+        updateChecker?.preferences = preferences
         refreshUpdateMenuState()
+        syncUpdateSettingsWindow()
+    }
+
+    /// “服务 → 更新检查偏好设置…”：策略、每类状态、忽略版本与 alpha.3 预留位。
+    @objc private func showUpdatePreferences(_ sender: Any?) {
+        let controller = updateSettingsWindowController ?? UpdateSettingsWindowController()
+        controller.onPreferencesChanged = { [weak self] preferences in
+            self?.applyUpdatePreferences(preferences)
+        }
+        controller.onIgnoreCurrentVersion = { [weak self] category in
+            self?.ignoreCurrentVersion(of: category) ?? false
+        }
+        controller.onShowExplanation = { [weak self] in
+            self?.showUpdateCheckExplanation(nil)
+        }
+        updateSettingsWindowController = controller
+        syncUpdateSettingsWindow()
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+        if !NSApp.isActive {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    /// 把当前设置、每类状态与可忽略版本推给设置窗口（窗口未打开时是空操作）。
+    private func syncUpdateSettingsWindow() {
+        guard let controller = updateSettingsWindowController,
+              let updateChecker else { return }
+        controller.update(
+            preferences: updateChecker.preferences,
+            statuses: statusSnapshot(for: updateChecker),
+            ignorableVersions: ignorableVersionCandidates()
+        )
+    }
+
+    /// 每类组件的状态快照。检查器发布过汇总时用它的（在主线程发布，线程安全）；
+    /// 否则用当前设置现算一份“尚未检查”的状态。
+    private func statusSnapshot(for updateChecker: UpdateChecker) -> [UpdateCategoryStatus] {
+        if !updateChecker.summary.categoryStatuses.isEmpty {
+            return updateChecker.summary.categoryStatuses
+        }
+        return UpdateCategoryStatusBuilder.statuses(
+            preferences: updateChecker.preferences,
+            intervals: .standard,
+            cache: .empty,
+            ignoredVersions: ignoredVersions
+        )
+    }
+
+    /// 当前可以被“忽略”的版本：可更新、有上游版本、且尚未被忽略。
+    private func ignorableVersionCandidates() -> [UpdateCheckCategory: String] {
+        guard let updateChecker else { return [:] }
+        var candidates: [UpdateCheckCategory: String] = [:]
+        for status in statusSnapshot(for: updateChecker) where status.status == .updateAvailable {
+            guard let latest = status.latestVersion, status.ignoredVersion != latest else { continue }
+            candidates[status.category] = latest
+        }
+        return candidates
+    }
+
+    /// 记录“忽略某个版本”：只写版本字符串与时间戳，不锁定版本也不降级。
+    @discardableResult
+    private func ignoreCurrentVersion(of category: UpdateCheckCategory) -> Bool {
+        guard let version = ignorableVersionCandidates()[category] else { return false }
+        ignoredVersions.ignore(version, for: category, at: Date())
+        appConfiguration.save(ignoredVersions)
+        updateChecker?.ignoredVersions = ignoredVersions
+        notifiedVersions[category] = version
+        refreshUpdateMenuState()
+        syncUpdateSettingsWindow()
+        diagnosticsWindowController?.refreshUpdateStatus()
+        return true
     }
 
     @objc private func showUpdateCheckExplanation(_ sender: Any?) {
@@ -1217,8 +1317,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         alert.beginSheetModal(for: window)
     }
 
-    /// “更新检查设置”子菜单：状态行 + 四类开关 + 说明。菜单打开时由
-    /// `menuNeedsUpdate` 刷新。
+    /// “更新检查设置”子菜单：状态行 + 四类快捷开关 + 偏好设置与说明。菜单打开
+    /// 时由 `menuNeedsUpdate` 刷新。
     private func makeUpdateSettingsMenuItem() -> NSMenuItem {
         let item = NSMenuItem(title: "更新检查设置", action: nil, keyEquivalent: "")
         let menu = NSMenu(title: "更新检查设置")
@@ -1242,6 +1342,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             menu.addItem(toggle)
         }
         menu.addItem(.separator())
+        let preferencesItem = NSMenuItem(
+            title: "更新检查偏好设置…",
+            action: #selector(showUpdatePreferences(_:)),
+            keyEquivalent: ""
+        )
+        preferencesItem.target = self
+        menu.addItem(preferencesItem)
         menu.addItem(withTitle: "更新检查说明…", action: #selector(showUpdateCheckExplanation(_:)), keyEquivalent: "")
         item.submenu = menu
         updateSettingsMenu = menu
@@ -1255,8 +1362,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func refreshUpdateMenuState() {
         updateStatusMenuItem?.title = updateCheckStatusText()
+        let preferences = updateChecker?.preferences ?? .factoryDefaults
         for (category, item) in updateCategoryMenuItems {
-            item.state = (updateChecker?.preferences.isEnabled(category) ?? true) ? .on : .off
+            item.state = preferences.isEnabled(category) ? .on : .off
+            // 菜单里同时显示当前策略，避免把快捷开关误当成完整设置。
+            item.title = "\(category.displayName)：\(preferences.policy(for: category).title)"
         }
     }
 
@@ -1266,13 +1376,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return updateChecker.summary.statusLine
     }
 
-    /// 检查结果落地（主线程）：刷新菜单文案；只有手动检查才弹提示。
+    /// 诊断页里的更新检查状态块（已脱敏：只有策略、时间、结果与版本）。
+    private func updateCheckStatusBlockText() -> String {
+        guard let updateChecker else { return "" }
+        return UpdateStatusPresenter.lines(
+            statuses: statusSnapshot(for: updateChecker),
+            preferences: updateChecker.preferences,
+            format: { Self.updateTimestampFormatter.string(from: $0) }
+        ).joined(separator: "\n")
+    }
+
+    /// 检查结果落地（主线程）：刷新菜单与窗口；手动检查弹完整结果，自动检查按
+    /// 策略与忽略版本决定是否提示。
     private func handleUpdateCheckResults(_ summary: UpdateCheckSummary) {
         updateCheckInProgress = false
         refreshUpdateMenuState()
-        guard pendingManualUpdateCheck else { return }
+        syncUpdateSettingsWindow()
+        diagnosticsWindowController?.refreshUpdateStatus()
+        guard pendingManualUpdateCheck else {
+            notifyAboutAutomaticUpdates(summary)
+            return
+        }
         pendingManualUpdateCheck = false
         presentUpdateCheckResults(summary)
+    }
+
+    /// 自动检查（启动 / 周期）的通知：尊重策略与忽略版本，同一个版本在一次
+    /// 运行里最多提示一次。提示内容是固定文案 + 组件名 + 版本，不含路径或凭据。
+    private func notifyAboutAutomaticUpdates(_ summary: UpdateCheckSummary) {
+        guard let updateChecker else { return }
+        let entries = UpdateNotificationPlanner.plan(
+            results: summary.results,
+            preferences: updateChecker.preferences,
+            ignoredVersions: ignoredVersions,
+            alreadyNotified: notifiedVersions
+        )
+        guard !entries.isEmpty else { return }
+        for entry in entries {
+            notifiedVersions[entry.category] = entry.latestVersion
+        }
+        presentUpdateNotifications(entries)
+    }
+
+    /// 多个分类共用一个提示框：除了“好”，每个条目一个“忽略 <版本>”按钮。
+    /// 提示框不执行任何安装，按钮只记录忽略版本。
+    private func presentUpdateNotifications(_ entries: [UpdateNotificationEntry]) {
+        let alert = NSAlert()
+        alert.messageText = UpdateNotificationText.title(for: entries)
+        alert.informativeText = UpdateNotificationText.body(for: entries)
+        alert.addButton(withTitle: "好")
+        for entry in entries {
+            alert.addButton(withTitle: "忽略 \(entry.latestVersion)")
+        }
+        alert.beginSheetModal(for: window) { [weak self] response in
+            // 第一个按钮是“好”，其后的每个按钮对应一个条目。
+            let index = response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue - 1
+            guard index >= 0, entries.indices.contains(index) else { return }
+            _ = self?.ignoreCurrentVersion(of: entries[index].category)
+        }
     }
 
     /// 提示全文来自 `UpdateCheckSummary.detailText`；这里只定标题。

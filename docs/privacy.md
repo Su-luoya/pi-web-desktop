@@ -6,13 +6,17 @@
 
 Pi Web Desktop 不收集或上传遥测、使用统计、会话内容、认证信息或诊断报告。除了下面的只读版本检查，应用不会主动向任何上游发送数据；用户主动复制诊断信息或打开日志时，数据才离开本机，且用户负责在公开提交前脱敏。
 
-## 版本检查
+## 版本检查、提示与忽略版本
 
 Pi Web Desktop 在应用运行期间做只读的版本查询，只提示、不下载、不安装任何东西。版本查询**不是项目遥测**：请求只用于比较“本机版本”与“上游最新版”，不携带使用数据、会话内容、认证信息或诊断报告。应用退出后不检查（不安装 LaunchAgent，也不在后台常驻）。
 
 - 访问的域名与请求内容：`api.github.com`（`GET /repos/Su-luoya/pi-web-desktop/releases?per_page=20`，桌面应用发布）与 `registry.npmjs.org`（`GET /<包名>/latest`，Pi CLI、Pi Web 与 `pi list` 得到的扩展包）。只有 GET + JSON 解析；`User-Agent` 固定为应用名 + 版本 + bundle identifier（来自应用自身的 Info.plist，不含用户名或主机名）。不发送 cookies、账号凭据、会话内容或诊断字段；`Cookie`、`Authorization` 这类头即使被误加也会在发出前丢弃；应用侧客户端不跟随重定向，因此请求不会落到这两个域名之外。响应只保留 `etag`、`last-modified` 与 `content-type`，`Set-Cookie` 等响应头不读取也不保存。
-- 频率：应用启动后立即检查一次；运行期间桌面应用 / Pi CLI / Pi Web 每 24 小时、扩展包每 7 天复查一次。
-- 关闭方式：菜单“服务 → 更新检查设置”里四类开关（桌面应用、Pi CLI、Pi Web、Pi 扩展包）各自独立，关闭后应用不再发起对应请求；同一菜单的状态行显示最近一次结论，“更新检查说明…”给出与本节一致的说明。
+- 频率与设置：应用启动后立即检查一次。之后四类组件各自按设置复查，默认值与 [发布说明](releasing.md) 的 alpha.2 更新策略一致：桌面应用 / Pi CLI / Pi Web 默认“每日”（24 小时），可选“每周”或“关闭”；Pi 扩展包默认“检查并通知”（7 天，与 GitHub #17 的节奏相同），可选“询问后更新”或“关闭”。“询问后更新”同样只按 7 天复查，发现可用更新时询问用户是否更新；安装流程属于后续版本，当前不会执行任何安装。
+- 关闭与调度：关闭某一类后应用不再发起该类请求，也不为该类安排复查；四类全部关闭时不发任何请求。设置在“服务 → 更新检查设置 → 更新检查偏好设置…”里修改，键与默认值见下表与 [设置、工作目录与退出行为](settings-and-workspace.md)。
+- 提示方式（取舍）：发现可用更新时使用应用内提示框（`NSAlert`），**不使用 `UNUserNotificationCenter`，也不申请系统通知权限**。取舍：应用内提示不需要额外权限、内容不会进入“通知中心”或被系统持久化、文案完全由应用控制且只含组件名与版本；代价是应用不在运行时不提示——应用本来也不在后台运行，因此这一点不降低现有隐私边界。提示内容不含本机路径、包名、安装来源、凭据或诊断内容。手动“检查更新…”显示完整结果；自动检查（启动 / 周期）对同一版本在一次运行里最多提示一次。
+- 忽略版本：每类组件可以“忽略当前提示的版本”。忽略只抑制那一个具体版本，上游发布更高版本时会重新提示；忽略与安装来源无关，只保存版本字符串与时间戳（`updateChecks.<组件>.ignoredVersion` 与 `.ignoredVersionAt`），不实现任意版本锁定，也不实现降级。提示框与“更新检查偏好设置”窗口里的“忽略此版本”按钮都只记录忽略，不执行安装。
+- 状态显示：诊断窗口与“更新检查偏好设置”窗口显示每类组件的最近检查时间、结果（最新 / 可更新 / 未知 / 失败）、被忽略版本与下次检查时间。
+- alpha.3 预留设置位：“启动前自动更新 Pi Web（alpha.3 起生效）”默认关闭，且在 alpha.2 **不产生任何行为**：应用只保存这个开关的值，不下载、不安装、不修改任何组件，也不改变调度（测试断言请求与调度与关闭时完全一致）。该设置位为 alpha.3 的受限自动安装预留，见 [发布说明](releasing.md) 的版本门槛。
 - 结果缓存：`~/Library/Application Support/Pi Web Desktop/update-check-cache.json`（见下表），只含版本号、时间戳与 etag/条件请求字段；**不含**凭据、cookies、会话、URL、响应体或诊断内容。删除该文件只会让下一次检查重新发起普通 GET。
 - 可信度：只有响应来自预期域名且结构可解析时才将上游版本标为“已验证”；网络失败、超时、限流（HTTP 429）与 5xx 沿用 24 小时/7 天内上一次成功结果并标注为缓存结果；超过有效期、响应无法解析或来自非预期主机时显示“无法确定”。检查失败只影响提示文案，不影响正在运行的服务，也不改变服务状态。
 
@@ -36,10 +40,10 @@ Pi Web Desktop 在应用运行期间做只读的版本查询，只提示、不�
 
 | 数据 | 位置 | 删除方式 |
 | --- | --- | --- |
-| 服务配置、首次设置状态、窗口位置 | UserDefaults（domain 为 bundle identifier `io.github.su-luoya.pi-web-desktop`） | 先 `defaults read io.github.su-luoya.pi-web-desktop` 确认内容，再 `defaults delete io.github.su-luoya.pi-web-desktop` |
+| 服务配置、首次设置状态、窗口位置、更新检查设置 | UserDefaults（domain 为 bundle identifier `io.github.su-luoya.pi-web-desktop`） | 先 `defaults read io.github.su-luoya.pi-web-desktop` 确认内容，再 `defaults delete io.github.su-luoya.pi-web-desktop`。更新检查设置包括策略键 `updateChecks.<组件>.policy`、alpha.3 预留位 `updateChecks.piWeb.autoUpdateBeforeLaunch` 与忽略版本键 `updateChecks.<组件>.ignoredVersion` / `.ignoredVersionAt`（只含版本字符串与时间戳） |
 | 运行状态与所有权记录 | `~/Library/Application Support/Pi Web Desktop/` | 退出应用后删除该目录 |
 | 日志（含轮转文件） | `~/Library/Logs/Pi Web Desktop/`（`Pi Web Desktop.log` 与 `.1.log` … `.5.log`） | 退出应用后删除该目录 |
-| 更新检查缓存 | `~/Library/Application Support/Pi Web Desktop/update-check-cache.json` | 退出应用后删除该文件；菜单“服务 → 更新检查设置”里关闭四类开关可停止后续请求（已存缓存不会自动删除） |
+| 更新检查缓存 | `~/Library/Application Support/Pi Web Desktop/update-check-cache.json` | 退出应用后删除该文件；在“服务 → 更新检查设置”里关闭四类可停止后续请求（已存缓存不会自动删除），忽略版本记录在 UserDefaults 里、不影响缓存 |
 | 远程访问密码 | 登录 Keychain；service 为 bundle identifier，account 为 `remote-access-password` | 在应用里点“删除密码”，或 `security delete-generic-password -s io.github.su-luoya.pi-web-desktop -a remote-access-password` |
 | WebKit 持久化网站数据 | `~/Library/WebKit/io.github.su-luoya.pi-web-desktop/`、`~/Library/Caches/io.github.su-luoya.pi-web-desktop/` | 应用当前没有“清空网站数据”入口，只能退出应用后手动删除：`rm -rf "$HOME/Library/WebKit/io.github.su-luoya.pi-web-desktop" "$HOME/Library/Caches/io.github.su-luoya.pi-web-desktop"` |
 

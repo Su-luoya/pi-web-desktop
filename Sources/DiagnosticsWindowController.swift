@@ -49,12 +49,16 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
     /// 由 `AppDelegate` 注入：与菜单“复制诊断”完全相同的已脱敏导出文本
     /// （GitHub #10）。窗口自己不组装诊断字段。
     var diagnosticsTextProvider: (() -> String)?
+    /// 由 `AppDelegate` 注入：更新检查状态行（GitHub #18：策略、最近检查、
+    /// 结果、忽略版本、下次检查）。窗口只渲染，不读设置、不联网、不安装。
+    var updateStatusTextProvider: (() -> String)?
 
     private let tableView = NSTableView()
     private let detailLabel = NSTextField(labelWithString: "")
     private let hintLabel = NSTextField(labelWithString: "")
     private let componentsTextView = NSTextView()
     private let commandsTextView = NSTextView()
+    private let updateStatusTextView = NSTextView()
     private let copyButton = NSButton(title: "复制安装命令", target: nil, action: nil)
     private let copyDiagnosticsButton = NSButton(title: "复制诊断", target: nil, action: nil)
     private let continueButton = NSButton(title: "开始使用 Pi Web", target: nil, action: nil)
@@ -106,7 +110,14 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         let commands = DependencyReportPresenter.installCommandsText(for: report)
         commandsTextView.string = commands.isEmpty ? "当前没有需要修复的依赖。" : commands
         copyButton.isEnabled = !commands.isEmpty
+        refreshUpdateStatus()
         updateLabels()
+    }
+
+    /// 刷新“更新检查”状态块（策略 / 最近检查 / 结果 / 忽略版本 / 下次检查）。
+    func refreshUpdateStatus() {
+        let text = updateStatusTextProvider?() ?? ""
+        updateStatusTextView.string = text.isEmpty ? "更新检查状态不可用。" : text
     }
 
     private func updateLabels() {
@@ -166,6 +177,23 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         let componentsHeader = NSTextField(labelWithString: "组件安装（路径 / 包名 / 版本 / 来源 / 可信度 / 建议命令；只展示，应用不会执行更新）")
         componentsHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
 
+        let updateHeader = NSTextField(labelWithString: "更新检查（策略 / 最近检查 / 结果 / 忽略版本 / 下次检查；只展示，应用不会自动安装）")
+        updateHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        updateStatusTextView.isEditable = false
+        updateStatusTextView.isSelectable = true
+        updateStatusTextView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        updateStatusTextView.isVerticallyResizable = true
+        updateStatusTextView.isHorizontallyResizable = false
+        updateStatusTextView.autoresizingMask = [.width]
+        updateStatusTextView.textContainerInset = NSSize(width: 4, height: 4)
+        updateStatusTextView.textContainer?.widthTracksTextView = true
+
+        let updateStatusScroll = NSScrollView()
+        updateStatusScroll.documentView = updateStatusTextView
+        updateStatusScroll.hasVerticalScroller = true
+        updateStatusScroll.borderType = .bezelBorder
+        updateStatusScroll.translatesAutoresizingMaskIntoConstraints = false
+
         componentsTextView.isEditable = false
         componentsTextView.isSelectable = true
         componentsTextView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
@@ -216,7 +244,7 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         buttons.spacing = 8
         buttons.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = NSStackView(views: [title, detailLabel, hintLabel, tableScroll, componentsHeader, componentsScroll, commandsHeader, commandsScroll, buttons])
+        let stack = NSStackView(views: [title, detailLabel, hintLabel, tableScroll, componentsHeader, componentsScroll, updateHeader, updateStatusScroll, commandsHeader, commandsScroll, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
@@ -236,6 +264,9 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
             componentsHeader.widthAnchor.constraint(equalTo: stack.widthAnchor),
             componentsScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
             componentsScroll.heightAnchor.constraint(equalToConstant: 150),
+            updateHeader.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            updateStatusScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            updateStatusScroll.heightAnchor.constraint(equalToConstant: 96),
             commandsHeader.widthAnchor.constraint(equalTo: stack.widthAnchor),
             commandsScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
             commandsScroll.heightAnchor.constraint(equalToConstant: 132),
@@ -243,7 +274,7 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         ])
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 860, height: 780),
+            contentRect: NSRect(x: 0, y: 0, width: 860, height: 880),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -251,7 +282,7 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         window.title = "Pi Web Desktop 依赖与环境诊断"
         window.contentView = content
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 760, height: 620)
+        window.minSize = NSSize(width: 760, height: 680)
         window.center()
         self.window = window
     }

@@ -143,14 +143,25 @@ struct AppConfiguration {
     /// loopback-only noProxy list.
     var serviceConfiguration: ServiceConfiguration { ServiceConfiguration.load(from: defaults) }
 
-    /// 更新检查的四类开关（GitHub #17）。默认全部开启；值存在同一个 UserDefaults
-    /// domain 里，键见 `UpdateCheckPreferences`。
-    var updateCheckPreferences: UpdateCheckPreferences {
-        UpdateCheckPreferences.load(from: defaults)
+    /// 更新检查策略（GitHub #18）。默认值与 `docs/privacy.md` 一致；旧版
+    /// （GitHub #17）的布尔键、未知值与非法值都经迁移函数回退到默认，并通过
+    /// `diagnostics` 报告一行日志（不包含原始值）。
+    func updateCheckPreferences(diagnostics: ((String) -> Void)? = nil) -> UpdateCheckPreferences {
+        UpdateCheckPreferences.load(from: defaults, diagnostics: diagnostics)
     }
 
     func save(_ preferences: UpdateCheckPreferences) {
         preferences.save(to: defaults)
+    }
+
+    /// 每类组件的“忽略版本”（GitHub #18 第 2 项）：只含版本字符串与时间戳，
+    /// 不含安装来源或路径。
+    func updateCheckIgnoredVersions(diagnostics: ((String) -> Void)? = nil) -> UpdateIgnoredVersions {
+        UpdateIgnoredVersions.load(from: defaults, diagnostics: diagnostics)
+    }
+
+    func save(_ ignoredVersions: UpdateIgnoredVersions) {
+        ignoredVersions.save(to: defaults)
     }
 
     /// Persists service settings through the same injected UserDefaults.

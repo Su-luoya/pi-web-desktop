@@ -164,6 +164,17 @@ struct AppConfiguration {
         ignoredVersions.save(to: defaults)
     }
 
+    /// 最近一次失败的启动前自动更新的持久警告（GitHub #20）。只含类别、旧/新/
+    /// 目标版本、固定原因文案与时间戳；不含路径、环境变量值、凭据或子进程输出。
+    func piWebUpdateWarning() -> PiWebUpdateWarning? {
+        PiWebUpdateWarningStore.load(from: defaults)
+    }
+
+    /// 保存或清除持久警告（`nil` 表示更新成功，清除旧告警）。
+    func savePiWebUpdateWarning(_ warning: PiWebUpdateWarning?) {
+        PiWebUpdateWarningStore.save(warning, to: defaults)
+    }
+
     /// Persists service settings through the same injected UserDefaults.
     func save(_ configuration: ServiceConfiguration) { configuration.save(to: defaults) }
 

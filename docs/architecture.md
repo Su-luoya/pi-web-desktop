@@ -48,13 +48,14 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 - `AppConfiguration`、`environment` 闭包与 `FileManager`：路径、子进程环境变量和文件操作；`ServiceManager` 另外注入 `remoteAccessPassword` 闭包（默认返回 nil，即“无密码”），因此测试永远不会读到真实 Keychain。
 - `DependencyFileSystemProbing` / `DependencySystemProbe` / `DependencyPortProbing`：依赖诊断的文件系统探针（可执行文件、符号链接、真实路径、文本读取、Home 目录、目录存在与可读性）、系统探针（`uname` 架构、macOS 版本）和端口探针（本机 `bind(2)`，只回“可用/占用/无法判定”）；测试注入假实现，因此不触碰真实 Home、npm 前缀、`~/.pi`、真实端口或网络。
 - `ComponentInstallationDetector`：组件安装识别的命令执行（`CommandRunning`）、磁盘访问（`DependencyFileSystemProbing`）、`environment` 与 `homeDirectory` 都可注入；测试用临时目录夹具 + 假命令回答覆盖多跳/悬空符号链接、nvm 与 npm 全局共存、Homebrew、git checkout 与降级路径，不执行真实 npm/pi/pi-web。
-- 更新检查（GitHub #17 / #18）：`UpdateHTTPClient`（生产 `URLSessionUpdateHTTPClient`；测试用记录请求并返回构造响应的替身）、`UpdateClock`（假时钟推进时间）、`UpdateCheckScheduling`（测试立即执行检查主体与回调，并记录/手动触发周期计时器，不使用真实 sleep）、`UpdateCacheStoring`（内存替身或临时目录文件存储）、`UpdateCheckPreferences`（策略 + alpha.3 预留位）与 `UpdateIgnoredVersions`（忽略版本）都可注入；因此测试不联网、不写真实 Application Support/UserDefaults。
+- 更新检查（GitHub #17 / #18）：`UpdateHTTPClient`（生产 `URLSessionUpdateHTTPClient`；测试用记录请求并返回构造响应的替身）、`UpdateClock`（假时钟推进时间）、`UpdateCheckScheduling`（测试立即执行检查主体与回调，并记录/手动触发周期计时器，不使用真实 sleep）、`UpdateCacheStoring`（内存替身或临时目录文件存储）、`UpdateCheckPreferences`（策略 + 启动前自动更新布尔）与 `UpdateIgnoredVersions`（忽略版本）都可注入；因此测试不联网、不写真实 Application Support/UserDefaults。
+- 启动前自动更新（GitHub #20）：`PiWebUpdateInstalling`（生产 `ProcessPiWebUpdateInstaller`，测试用记录计划与结果的替身）、版本重检测探针、启动服务与健康检查回调、`LogRedactor`、日志闭包、完成投递闭包与超时都是 `PiWebUpdateCoordinator.Environment` 的注入点；测试因此不执行真实 `npm`（只允许执行 `$TMPDIR` 里的假安装器脚本）、不启动真实服务、不写真实 UserDefaults。
 
 `WebViewController` 通过构造参数接收 service URL、端口和 `windowProvider` 闭包（保存面板、打开面板和查找栏需要窗口），所以 `AppDelegate` 不持有 WebKit 状态。
 
 尚未实现（后续 issue 范围）：
 
-- 更新计划与受限安装（GitHub #20–#23）。版本检查与设置（#17、#18）已经实现，见下文“更新检查与缓存”；当前应用只提示版本，不下载、不安装，也没有任何更新执行路径（alpha.3 预留设置位同样不会触发安装）。
+- 更新计划与受限安装的其余部分（GitHub #21–#23）：运行中的服务保护更完整的进程协调、下载缓存与更细的回滚策略、以及非 npm 来源的自动更新。GitHub #20 只实现“已验证的 npm 全局安装”的启动前自动更新与手动入口，见下文“更新检查、设置与缓存”；其它来源仍然只显示命令、绝不自动安装。
 
 `DiagnosticsCollector` 只负责文本组装（调用方仍然只传入可公开的字段，密码等秘密不会进入输入）；脱敏由注入的 `LogRedactor` 在导出时统一完成，见 [日志与诊断导出](logging-and-diagnostics.md)。
 
@@ -148,15 +149,18 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 
 ## 更新检查、设置与缓存
 
-GitHub #17 的版本检查在应用运行期间只做只读查询，不下载、不安装、不修改服务配置；应用退出后不再检查（不安装 LaunchAgent）。GitHub #18 在同一模型上加了逐类策略、忽略版本、状态显示与 alpha.3 预留设置位。
+GitHub #17 的版本检查在应用运行期间只做只读查询，不下载、不安装、不修改服务配置；应用退出后不再检查（不安装 LaunchAgent）。GitHub #18 在同一模型上加了逐类策略、忽略版本、状态显示与启动前自动更新设置位。GitHub #20 让这个设置位在受限条件下生效：只有来源为已验证的 npm 全局安装的 Pi Web 才会在启动前尝试自动更新，其余来源只显示命令。
 
-- 设置模型：`UpdateCheckPolicy` 只有一份允许集合定义（`allowed(for:)`）——桌面应用 / Pi CLI / Pi Web 允许 `off` / `daily` / `weekly`（默认 `daily`），Pi 扩展包允许 `off` / `checkAndNotify`（默认）/ `askBeforeUpdate`。`UpdateCheckPreferences` 是四类策略（始终包含全部分类，非法组合写入时拒绝）加 alpha.3 预留布尔的纯值类型；`UpdateCheckIntervals` 把策略映射到秒数（每日 24 小时、每周 7 天、扩展包 7 天，`off` → nil），测试注入更短的值即可用假时钟断言周期。
+- 设置模型：`UpdateCheckPolicy` 只有一份允许集合定义（`allowed(for:)`）——桌面应用 / Pi CLI / Pi Web 允许 `off` / `daily` / `weekly`（默认 `daily`），Pi 扩展包允许 `off` / `checkAndNotify`（默认）/ `askBeforeUpdate`。`UpdateCheckPreferences` 是四类策略（始终包含全部分类，非法组合写入时拒绝）加启动前自动更新布尔的纯值类型；`UpdateCheckIntervals` 把策略映射到秒数（每日 24 小时、每周 7 天、扩展包 7 天，`off` → nil），测试注入更短的值即可用假时钟断言周期。
 - 调度一致性：`UpdateChecker.restartTimers()` 只为策略非 `off` 的分类创建计时器（相同间隔去重），`appendItem` 在到期判定时再读一次策略，因此关闭 → 不调度、不请求；设置变化时立即重建计时器。`applicationWillTerminate` 调用 `stop()` 取消全部计时器，此后的任何触发（包括 `checkNow`）都被忽略。应用不安装任何随时启动的组件（无 LaunchAgent），关掉应用就没有检查。
 - 启动顺序：应用启动后立即检查一次：`AppDelegate.applicationDidFinishLaunching` 先用当时已知的应用版本启动 `UpdateChecker`，依赖诊断结束后 `startUpdateChecking(with:)` 用 `UpdateCheckInventory(components:)`（#16 的识别结果）补齐 Pi / Pi Web / 扩展包版本，并对还没有检查记录（本机版本未知因而不发请求）的对象立即补检。
 - 迁移与默认值：`UpdateCheckSettingsMigration.resolve(values:report:)` 是纯函数，读键顺序是“新策略键 → 旧布尔键（GitHub #17 的 `updateChecks.*.enabled`）→ 出厂默认”；值无法识别（未知字符串、非法分类组合、非布尔值）时按默认处理并记录一条只含键名与结论的诊断行（不回显原值），由 `AppConfiguration.updateCheckPreferences(diagnostics:)` 把诊断送进应用日志。`save` 写新键时删除旧布尔键，避免两套值并存。
 - 忽略版本：`UpdateIgnoredVersions` 按分类只存版本字符串与时间戳（单独键，不进入缓存文件），不含安装来源或路径；`UpdateChecker` 在判定为可更新时用精确字符串比较标记 `ignoredVersion`，`UpdateNotificationPlanner` 再次用同一份记录过滤，因此忽略只抑制那一个版本，上游发布更高版本时重新进入提示名单，也不存在版本锁定或降级。
 - 状态与提示：`UpdateCategoryStatusBuilder` 从注入的缓存、结果与设置算出四类状态（最近检查、结果、忽略版本、下次检查），并随 `UpdateCheckSummary.categoryStatuses` 在主线程发布；诊断窗口与“更新检查偏好设置”窗口只渲染同一份数据（`UpdateStatusPresenter`）。提示走应用内 `NSAlert`（不用 `UNUserNotificationCenter`、不申请通知权限），同一版本在一次运行里最多提示一次，文案只含组件名与版本。
-- alpha.3 预留设置位：`autoUpdatePiWebBeforeLaunch` 默认 `false`，`UpdateCheckPreferences.autoUpdateBeforeLaunchIsEffective` 在 alpha.2 恒为 `false`，检查器与调度器都不读它；打开只写入布尔值，请求、结果与调度与关闭时完全一致。界面与文档明确标注“尚未生效”，生效版本是 alpha.3。
+- 启动前自动更新设置位：`autoUpdatePiWebBeforeLaunch` 默认 `false`。`UpdateCheckPreferences.autoUpdateBeforeLaunchIsEffective = true`（GitHub #20 起生效），但设置位本身只是前提：是否真的执行由 `PiWebUpdatePlanner` 的前置条件决定（来源必须是 `.npmGlobal` 且可信度为 `.verified`，目标版本必须是 `verified` 且高于本机版本，包名必须等于静态清单里的 Pi Web 包名，npm 可执行文件必须解析到、服务必须没在运行）。检查器与调度器都不读这个设置位：打开它不改变请求、结果与调度，只多出一条启动前的受限安装路径。设置窗口与文档写明生效范围（仅限已验证的 npm 全局安装），不再标注“尚未生效”。
+- 启动前自动更新的执行边界（GitHub #20）：`PiWebUpdateInstallPlan` 只生成参数数组（`["install", "-g", "<静态包名>@<目标版本>"]`），命令通过 `Process` 直接执行，不使用 shell、不调用 `sudo`，参数逐项过 `PiWebUpdateArgumentPolicy`（安全字符集 + 禁止 `sudo` / `sh` / `bash` / `eval` 等 token）；子进程环境只保留白名单键（`PATH` / `HOME` / `TMPDIR` / `LANG` / `LC_ALL` / `LC_CTYPE`），`NODE_OPTIONS`、`npm_config_*`、代理与任何凭据变量都不传递。执行前把可执行文件路径（Home 段显示为 `~`）、参数数组、当前/目标版本与来源/可信度写入日志与诊断，并在安装开始前显示在应用页面上（手动入口还要先在确认框里确认）。安装有可注入超时，超时先 `SIGTERM`、宽限期后 `SIGKILL`，只针对本次启动的子进程。安装后必须重新检测版本并做健康检查，版本没变化或健康检查失败都算失败。
+- 启动顺序与失败语义（GitHub #20）：`applicationDidFinishLaunching` 先处理待办更新（必要时先完成一次版本检查拿到目标版本），再启动服务；任何失败都只写入持久警告、记录日志并进入诊断页，不会阻塞应用启动，也不会阻止用户手动启动服务。失败路径一律保留旧版本语义（“旧版本保持不变”），不声称回滚、不自动卸载或重装；警告只存类别、旧/新/目标版本、原因与时间戳，不含路径或凭据，菜单里有一条常驻入口展示它（可展开完整说明并清除）。同一次运行内失败后不会自动重试，下次启动或手动“立即更新 Pi Web…”才会再试。手动“立即更新 Pi Web…”需要用户在确认框里确认（显示可执行文件路径、参数与版本），确认后先用所有权校验过的路径停止托管服务，再走同一条安装与验证路径。
+- 日志与脱敏（GitHub #20）：决策、参数数组、退出码与前后版本都经 `LogRedactor` 写入应用日志，环境变量只记录键名、绝不记录值；安装器输出只保留截断的尾部，并与日志、警告、诊断文本一起走同一套脱敏规则（Home 路径、`token=` / `password=` 等形状）。
 - 请求边界：只发 GET；URL 只由 `UpdateEndpoint` 的两个工厂方法生成——`https://api.github.com/repos/Su-luoya/pi-web-desktop/releases?per_page=20` 与 `https://registry.npmjs.org/<包名>/latest`（作用域包的 `/` 编码为 `%2F`；包名复用 #16 的 `isPackageName` 校验，不合法就不发请求）。请求头只允许 `Accept: application/json`、固定 `User-Agent`（应用名 + 版本 + bundle identifier，来自 `UpdateCheckIdentity.current`）与 `If-None-Match` / `If-Modified-Since`；`UpdateHTTPRequest.sanitized()` 丢弃白名单外的头，生产客户端再用 `URLSessionConfiguration.ephemeral` + `httpShouldSetCookies = false` + `httpCookieStorage = nil` + `urlCredentialStorage = nil` 保证不发 cookie、不读写凭据，并通过 `willPerformHTTPRedirection` 拒绝所有重定向（跨主机请求因此不可能发生）。响应头只保留 `etag` / `last-modified` / `content-type`。
 - 可信度与比较：`SemanticVersion` 按 SemVer 2.0.0 §11 比较预发布标识符（数字标识符按数值，`alpha.2 < alpha.10 < beta.1 < 1.0.0`）。只有响应来自预期主机且结构可解析时才把上游版本记为 `verified`；网络失败、超时、取消、429 与 5xx 沿用 TTL 内的上次成功结果（`freshness = cached`），超过 TTL 或从未成功则 `unknown`；解析失败、结构异常、重定向或最终主机不在白名单内一律 `unknown`，但保留上一次成功结果（含 etag）供下次条件请求；本机版本未知或包名不合法时不发请求，结果为 `unknown` 并给出原因。
 - 缓存：`UpdateCheckCacheFileStore` 把结果写到 `AppPaths.updateCheckCacheURL`（`~/Library/Application Support/Pi Web Desktop/update-check-cache.json`，独立文件，`schemaVersion = 1`，最多 200 条）。结构只有目标 id、分类、包名、`lastAttemptAt` / `lastSuccessAt`、`etag` / `lastModified`、`latestVersion`、`status` / `confidence` / `failure` / `httpStatusCode`：不含凭据、cookies、会话、URL、响应体或诊断内容；读失败或 schema 不匹配按空缓存处理（重新发起普通 GET），写失败静默，不影响检查结果、服务与退出路径。
@@ -172,7 +176,7 @@ GitHub #17 的版本检查在应用运行期间只做只读查询，不下载、
 - 远程访问密码：macOS Keychain（service = bundle identifier，account = `remote-access-password`，仅本文一处存储）。
 - 运行状态和 PID：`~/Library/Application Support/Pi Web Desktop/`。
 - 日志：`~/Library/Logs/Pi Web Desktop/`（`Pi Web Desktop.log` 与 `.1.log` … `.5.log`），应用执行按大小轮转，详见 [日志与诊断导出](logging-and-diagnostics.md)。
-- 更新检查缓存（GitHub #17）：`~/Library/Application Support/Pi Web Desktop/update-check-cache.json`（只含版本、时间戳与条件请求字段，不含凭据、会话或诊断内容）；更新检查的策略、忽略版本与 alpha.3 预留位在 UserDefaults（`updateChecks.*`，见 [设置、工作目录与退出行为](settings-and-workspace.md)）。
+- 更新检查缓存（GitHub #17）：`~/Library/Application Support/Pi Web Desktop/update-check-cache.json`（只含版本、时间戳与条件请求字段，不含凭据、会话或诊断内容）；更新检查的策略、忽略版本、启动前自动更新开关与最近的更新失败警告在 UserDefaults（`updateChecks.*`，见 [设置、工作目录与退出行为](settings-and-workspace.md)）。
 
 设置分层、默认工作目录、退出行为与不可写目录的处理见 [docs/settings-and-workspace.md](settings-and-workspace.md)。
 

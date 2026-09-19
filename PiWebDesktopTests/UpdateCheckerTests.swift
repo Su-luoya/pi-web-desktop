@@ -1404,7 +1404,7 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertTrue(second.isEmpty, "同一版本在本次运行里不应重复提示")
     }
 
-    // MARK: - 状态与 alpha.3 预留位
+    // MARK: - 状态与启动前自动更新开关
 
     func testSummaryPublishesPerCategoryStatusWithNextCheckTime() {
         let world = makeWorld(responder: automaticResponder())
@@ -1423,12 +1423,13 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertEqual(packages?.nextCheckAt, referenceDate.addingTimeInterval(7 * 24 * 3600))
     }
 
-    /// alpha.3 预留位打开后：请求、结果与调度与关闭时完全一致，没有任何安装
-    /// 或更新行为（`autoUpdateBeforeLaunchIsEffective` 恒为 false）。
-    func testReservedAlpha3SettingDoesNotChangeAnyRuntimeBehavior() {
+    /// 设置位打开后：检查器的请求、结果与调度与关闭时完全一致——安装行为只由
+    /// `PiWebUpdatePlanner` 的前置条件与来源判定决定（GitHub #20），`UpdateChecker`
+    /// 自己依旧没有任何安装/执行路径。
+    func testAutoUpdateSettingDoesNotChangeCheckerRuntimeBehavior() {
         var reserved = UpdateCheckPreferences.factoryDefaults
         reserved.autoUpdatePiWebBeforeLaunch = true
-        XCTAssertFalse(UpdateCheckPreferences.autoUpdateBeforeLaunchIsEffective)
+        XCTAssertTrue(UpdateCheckPreferences.autoUpdateBeforeLaunchIsEffective)
 
         let off = makeWorld(preferences: .factoryDefaults, responder: automaticResponder())
         let on = makeWorld(preferences: reserved, responder: automaticResponder())
@@ -1440,9 +1441,9 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertEqual(on.checker.summary.categoryStatuses, off.checker.summary.categoryStatuses)
         XCTAssertEqual(on.scheduler.activeIntervals.sorted(), off.scheduler.activeIntervals.sorted())
 
-        // 检查器只有 GET 请求这一种外部动作；预留位不会增加任何动作。
+        // 检查器只有 GET 请求这一种外部动作；设置位不会增加检查器的任何动作。
         XCTAssertTrue(on.client.requests.allSatisfy { $0.method == "GET" })
         XCTAssertEqual(on.client.requests.count, off.client.requests.count)
-        XCTAssertTrue(UpdateAutomationBoundary.pendingExplanation.contains("尚未生效"))
+        XCTAssertTrue(UpdateAutomationBoundary.restrictedExplanation.contains("npm 全局"))
     }
 }

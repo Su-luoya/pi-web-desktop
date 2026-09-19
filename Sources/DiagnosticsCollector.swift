@@ -56,6 +56,10 @@ struct DiagnosticsInput: Equatable {
     /// 应用会为子进程执行的命令行（已脱敏由本收集器统一完成）。
     var launchCommand: String
     /// 应用显式设置的子进程环境变量，一行一个 `KEY=value`。
+    ///
+    /// 导出时第一个条目跟在 `启动环境: ` 后面，后续条目各自占一行并使用带序号的
+    /// 唯一标签（`启动环境[2]: `…），所以每一行都能按 `标签: 值` 解析，值本身不裁剪、
+    /// 不转义。目前这是唯一可能多行的字段。
     var launchEnvironment: String
     var logPath: String
     /// `LogWriter.writeStatusDescription` 的结果。
@@ -76,29 +80,45 @@ enum DiagnosticsCollector {
     }
 
     /// 字段顺序即导出顺序；最后统一交给 `LogRedactor` 逐行脱敏，不在各处零散处理。
+    ///
+    /// 每个字段至少占一行，形如 `标签: 值`；值里本来含换行时，后续行用带序号的
+    /// 唯一标签续写（见 `fieldLines`）。因此“每行恰好一个唯一标签、值逐字输出”
+    /// 这一可解析性不变量对所有输入都成立，复制出去的文本可以按行解析。
     static func text(for input: DiagnosticsInput, redactor: LogRedactor = LogRedactor()) -> String {
-        let lines = [
-            "Pi Web Desktop 版本: \(input.appVersion)",
-            "Pi Web Desktop 构建号: \(input.appBuild)",
-            "pi-web 版本: \(input.piWebVersion)（可信度 \(confidenceText(input.piWebVersionConfidence))）",
-            "pi-web 路径: \(input.piWebPath)（可信度 \(confidenceText(input.piWebPathConfidence))）",
-            "Pi CLI 版本: \(input.piCLIVersion)（可信度 \(confidenceText(input.piCLIVersionConfidence))）",
-            "Node.js 版本: \(input.nodeVersion)（可信度 \(confidenceText(input.nodeVersionConfidence))）",
-            "服务地址: \(input.serviceAddress)",
-            "端口: \(input.port)",
-            "状态: \(input.status)",
-            "托管关系: \(input.management.text)",
-            "监听 PID: \(input.listenerPID)",
-            "监听进程: \(input.listenerProcess)",
-            "托管 PID: \(input.managedPID)",
-            "有效工作目录: \(input.workspaceDirectory)",
-            "配置目录: \(input.configurationDirectory)",
-            "启动命令: \(input.launchCommand)",
-            "启动环境: \(input.launchEnvironment)",
-            "日志文件: \(input.logPath)",
-            "日志写入: \(input.logWriteStatus)",
-            "远程访问密码: \(input.remoteAccessPasswordStatus)"
+        let fields: [(label: String, value: String)] = [
+            ("Pi Web Desktop 版本", input.appVersion),
+            ("Pi Web Desktop 构建号", input.appBuild),
+            ("pi-web 版本", "\(input.piWebVersion)（可信度 \(confidenceText(input.piWebVersionConfidence))）"),
+            ("pi-web 路径", "\(input.piWebPath)（可信度 \(confidenceText(input.piWebPathConfidence))）"),
+            ("Pi CLI 版本", "\(input.piCLIVersion)（可信度 \(confidenceText(input.piCLIVersionConfidence))）"),
+            ("Node.js 版本", "\(input.nodeVersion)（可信度 \(confidenceText(input.nodeVersionConfidence))）"),
+            ("服务地址", input.serviceAddress),
+            ("端口", input.port),
+            ("状态", input.status),
+            ("托管关系", input.management.text),
+            ("监听 PID", input.listenerPID),
+            ("监听进程", input.listenerProcess),
+            ("托管 PID", input.managedPID),
+            ("有效工作目录", input.workspaceDirectory),
+            ("配置目录", input.configurationDirectory),
+            ("启动命令", input.launchCommand),
+            ("启动环境", input.launchEnvironment),
+            ("日志文件", input.logPath),
+            ("日志写入", input.logWriteStatus),
+            ("远程访问密码", input.remoteAccessPasswordStatus)
         ]
+        let lines = fields.flatMap { fieldLines(label: $0.label, value: $0.value) }
         return redactor.redact(lines.joined(separator: "\n"))
+    }
+
+    /// 把一个字段渲染成一行或多行 `标签: 值`。值含换行时，第一个条目用原标签，
+    /// 后续条目用 `标签[序号]: 值`（序号从 2 开始），保证标签逐行唯一、值不裁剪、
+    /// 不转义；空行也保留成一条带标签的空值字段。
+    private static func fieldLines(label: String, value: String) -> [String] {
+        let parts = value.components(separatedBy: "\n")
+        guard parts.count > 1 else { return ["\(label): \(value)"] }
+        return parts.enumerated().map { index, part in
+            index == 0 ? "\(label): \(part)" : "\(label)[\(index + 1)]: \(part)"
+        }
     }
 }

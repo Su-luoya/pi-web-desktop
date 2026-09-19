@@ -16,6 +16,7 @@ private final class IntegrationHTTPServer {
         case bindFailed(Int32)
         case listenFailed(Int32)
         case nameUnavailable(Int32)
+        case readinessTimeout
     }
 
     private let listener: Int32
@@ -23,6 +24,7 @@ private final class IntegrationHTTPServer {
     private let lock = NSLock()
     private let stoppedSemaphore = DispatchSemaphore(value: 0)
     private var running = true
+    private var ready = false
     private var stopRequested = false
     private var requests = 0
 
@@ -80,6 +82,25 @@ private final class IntegrationHTTPServer {
         return requests
     }
 
+    /// accept 循环是否已经开始。
+    var isReady: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return ready
+    }
+
+    /// 有界等待 accept 循环就绪。`listen(2)` 在 `init` 里就已完成，即使循环还没
+    /// 拿到 CPU，内核也会把连接放进 backlog；显式等待是把“服务器可用”变成测试的
+    /// 前置条件，而不是依赖调度顺序（CI 上出现过 connection refused 抖动）。
+    func waitUntilReady(timeout: TimeInterval = 5) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if isReady { return true }
+            usleep(20_000)
+        }
+        return isReady
+    }
+
     /// 关闭监听并等待 accept 循环退出，保证测试之间不留下占用端口的线程。
     func stop() {
         lock.lock()
@@ -119,6 +140,9 @@ private final class IntegrationHTTPServer {
     }
 
     private func acceptLoop() {
+        lock.lock()
+        ready = true
+        lock.unlock()
         defer {
             close(listener)
             stoppedSemaphore.signal()
@@ -179,6 +203,17 @@ private final class IntegrationHTTPServer {
 }
 
 // MARK: - fixtures
+
+/// 建好本地 HTTP 服务器并确认 accept 循环已经启动。监听描述符在 `init` 里就已就绪，
+/// 但显式等待能把“服务器可用”变成测试的前置条件，而不是依赖线程调度顺序。
+private func makeReadyIntegrationServer() throws -> IntegrationHTTPServer {
+    let server = try IntegrationHTTPServer()
+    guard server.waitUntilReady() else {
+        server.stop()
+        throw IntegrationHTTPServer.ServerError.readinessTimeout
+    }
+    return server
+}
 
 /// 一次集成测试用到的全部临时状态。
 ///
@@ -300,7 +335,7 @@ private final class IntegrationFixture {
         #"""
         #!/bin/bash
         # 假 pi-web：`--version` 只回答版本；被应用托管启动时记录 argv 与环境
-        # 变量，然后保持运行，直到退出哨兵文件出现或生命周期结束。
+        # 变量，然后保持运行，直到退出哨兵文件出现。
         if [ "${1:-}" = "--version" ]; then
           printf '%s\n' "$*" >> "\#(piWebVersionRecordURL.path)"
           printf '%s\n' "1.2.3"
@@ -321,10 +356,6 @@ private final class IntegrationFixture {
           printf 'PATH=%s\n' "${PATH:-unset}"
         } > "$PI_WEB_FAKE_RECORD"
 
-        if [ -n "${PI_WEB_FAKE_LIFETIME:-}" ]; then
-          sleep "$PI_WEB_FAKE_LIFETIME"
-          exit "${PI_WEB_FAKE_EXIT_CODE:-0}"
-        fi
         while [ ! -f "$PI_WEB_FAKE_EXIT_FILE" ]; do
           sleep 0.1
         done
@@ -755,7 +786,7 @@ final class ServiceLifecycleIntegrationTests: XCTestCase {
     func testManagedServiceGetsTheServiceArgumentsAndEnvironmentAndBecomesReady() throws {
         let fixture = try IntegrationFixture()
         defer { fixture.cleanUp() }
-        let server = try IntegrationHTTPServer()
+        let server = try makeReadyIntegrationServer()
         defer { server.stop() }
         let harness = IntegrationServiceHarness(
             fixture: fixture,
@@ -796,7 +827,7 @@ final class ServiceLifecycleIntegrationTests: XCTestCase {
     func testStoppingTheManagedServiceSignalsOnlyItsOwnProcessGroup() throws {
         let fixture = try IntegrationFixture()
         defer { fixture.cleanUp() }
-        let server = try IntegrationHTTPServer()
+        let server = try makeReadyIntegrationServer()
         defer { server.stop() }
         let harness = IntegrationServiceHarness(
             fixture: fixture,
@@ -834,7 +865,6 @@ final class ServiceLifecycleIntegrationTests: XCTestCase {
         defer { decoy.stop() }
 
         var environment = fixture.baseEnvironment
-        environment["PI_WEB_FAKE_LIFETIME"] = "0.3"
         environment["PI_WEB_FAKE_EXIT_CODE"] = "1"
         let harness = IntegrationServiceHarness(
             fixture: fixture,
@@ -845,19 +875,40 @@ final class ServiceLifecycleIntegrationTests: XCTestCase {
 
         harness.manager.startManagedService()
 
-        // 服务在启动轮询期间退出：应用不得停留在“正在启动”或伪装成运行中，也
-        // 不得留下可认领的所有权记录。当前实现里 `pollUntilReady` 的“进程已退出”
-        // 分支会被先到达的终止回调清空 `serviceProcess` 而跳过，因此立即提示的
-        // 缺口（要等 30 秒启动超时）作为测试缺口登记在 #11 报告里，不在这里制造
-        // 一个与实现不一致的断言。
+        // 退出时机由哨兵文件控制，不再用固定 sleep：先确认启动轮询已开始并且所有权
+        // 已登记，再让服务退出。否则在慢 runner 上子进程可能先于登记退出，测试就
+        // 变成了竞态（CI run 35413056039 就是这样失败的）。
         XCTAssertTrue(
-            waitForIntegrationCondition { harness.recorder.isStopped || harness.recorder.failureMessage != nil },
+            waitForIntegrationCondition(timeout: 5) {
+                harness.recorder.latestState == .starting && harness.manager.verifiedOwnershipRecord() != nil
+            },
+            "服务应先进入“正在启动”并登记所有权: \(harness.recorder.states)"
+        )
+        let record = try XCTUnwrap(harness.manager.verifiedOwnershipRecord())
+        XCTAssertTrue(harness.recorder.pageMessages.contains("正在启动 Pi Web…"))
+
+        XCTAssertTrue(
+            FileManager.default.createFile(atPath: fixture.exitSentinelURL.path, contents: Data()),
+            "退出哨兵文件必须能创建"
+        )
+        XCTAssertTrue(
+            waitForIntegrationCondition(timeout: 5) { !IntegrationProcess.isAlive(record.pid) },
+            "哨兵出现后假服务必须退出"
+        )
+
+        // 服务在启动轮询期间退出：应用不得停留在“正在启动”或伪装成运行中，也
+        // 不得留下可认领的所有权记录。终止回调与轮询自己的“进程已退出”分支谁先
+        // 到达都允许，所以两者都接；轮询立即提示的缺口登记在 #11 报告里，
+        // 不在这里制造一个与实现不一致的断言。
+        XCTAssertTrue(
+            waitForIntegrationCondition(timeout: 5) {
+                harness.recorder.isStopped || harness.recorder.failureMessage != nil
+            },
             "退出的服务必须离开“正在启动”状态: \(harness.recorder.states)"
         )
         XCTAssertFalse(harness.recorder.isRunning, "进程已退出时不能显示为运行中")
-        XCTAssertTrue(harness.recorder.pageMessages.contains("正在启动 Pi Web…"))
         XCTAssertTrue(
-            waitForIntegrationCondition { harness.manager.verifiedOwnershipRecord() == nil },
+            waitForIntegrationCondition(timeout: 5) { harness.manager.verifiedOwnershipRecord() == nil },
             "退出后的服务不能留下可认领的所有权记录"
         )
         XCTAssertTrue(decoy.isRunning)
@@ -867,7 +918,7 @@ final class ServiceLifecycleIntegrationTests: XCTestCase {
     func testRunningServiceDisconnectIsReportedAndRecoveryIsAttempted() throws {
         let fixture = try IntegrationFixture()
         defer { fixture.cleanUp() }
-        let server = try IntegrationHTTPServer()
+        let server = try makeReadyIntegrationServer()
         defer { server.stop() }
         let harness = IntegrationServiceHarness(
             fixture: fixture,
@@ -907,7 +958,7 @@ final class ServiceLifecycleIntegrationTests: XCTestCase {
     func testServiceWithoutAVerifiedRecordIsReadOnlyAndNeverSignalled() throws {
         let fixture = try IntegrationFixture()
         defer { fixture.cleanUp() }
-        let server = try IntegrationHTTPServer()
+        let server = try makeReadyIntegrationServer()
         defer { server.stop() }
         let harness = IntegrationServiceHarness(
             fixture: fixture,

@@ -162,5 +162,5 @@ Release 说明由 `docs/release-notes-template.md` 渲染。`Scripts/package-rel
 - GitHub Actions 全部按提交 SHA 固定，不使用浮动 tag；例如 `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`。
 - `.github/dependabot.yml` 每周检查固定版本的更新，通过带 `dependencies`、`github_actions` 标签的 PR 提出升级；升级必须走 CI 和评审，不允许为了发布临时改用浮动版本。
 - 发布工作流不得使用 secrets，也不得引入第三方签名、公证或上传服务；当前 `build` 工作流的权限只有 `contents: read`。
-- 通用 secret scan 尚未实现，不要在发布说明或检查清单里把它写成已完成的门槛。已有的只是上面两处固定模式检查（personal-data `git grep` + `check-identity.sh`），能力边界见 [贡献指南](../CONTRIBUTING.md#personal-data-与-secret-扫描能力)。
+- 通用 secret scan（`./Scripts/scan-secrets.sh`，#11）已实现并由 CI 门禁；发布门槛里要把它的退出码与结尾的 `scan-secrets: suppressed N lines` 一起记入证据，并按 [开发说明](development.md#personal-data-与-secret-扫描能力)核对 N。它只覆盖固定凭据形状、只扫已跟踪文件、不扫 Git 历史，所以不能写成“没有秘密”；三层文本检查的能力边界与未覆盖类型见 [贡献指南](../CONTRIBUTING.md#personal-data-与-secret-扫描能力)与 [alpha.1 安全与发布审查](security-review-alpha.1.md)。
 - 发布流程不依赖新的运行时依赖。应用自身没有第三方 Swift 包或 npm 依赖；新增依赖必须先按 [贡献指南](../CONTRIBUTING.md)记录许可证、维护状态和供应链理由。

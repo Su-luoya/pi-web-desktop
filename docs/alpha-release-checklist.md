@@ -20,7 +20,9 @@
 ## 门槛
 
 - [ ] main CI（build workflow）在 main 上为绿：<run 链接>
-- [ ] #14 安全审查完成，无阻断项：<结论链接 / 日期>
+- [ ] #14 安全审查完成，无阻断项（结论：[alpha.1 安全与发布审查](security-review-alpha.1.md)，含日期与被执行命令的提交）：<日期 / 链接>
+- [ ] 安全门槛逐项核对（见下文“安全门槛”一节的 8 项）：结果写入本 Issue
+- [ ] `./Scripts/scan-secrets.sh` 与 `./Scripts/scan-secrets.sh --self-test` 均退出 0（记录结尾的 `scan-secrets: suppressed N lines` 并与本次 diff 新增的内联标记数对照）
 - [ ] tag 与 bundle 版本一致：`./Scripts/check-identity.sh` 与 `./Scripts/check-release-version.sh <tag>` 退出 0
 - [ ] 真机 smoke 记录（见下表）
 - [ ] checksum 记录（见下表，与 Release 资产一致）
@@ -81,6 +83,37 @@
 7. **未公证事实已写明。** Release 说明必须包含签名与公证证据段落，并写明 ad-hoc 与未公证；
    不允许出现“已签名”“已公证”或任何关闭 Gatekeeper 的指导。
 
+## 安全门槛（#14 审查结论映射）
+
+本节的 8 项与 [#14](https://github.com/Su-luoya/pi-web-desktop/issues/14) 的审查范围一一对应；
+详细证据、威胁模型、风险清单与阻断条件见 [alpha.1 安全与发布审查](security-review-alpha.1.md)。
+每一行都必须在本版本的 Release Issue 里留下可核对的结论（通过 / 不通过）与证据链接。
+
+| # | 安全门槛 | alpha.1 验收标准（可观察） | 证据形式 |
+| --- | --- | --- | --- |
+| S1 | 服务所有权与外部服务只读 | 只有通过所有权验证的进程组会收到信号；验证失败零信号；无命令行子串匹配的停止路径 | 审查报告的 §1 结论 + `git grep -n "kill(" -- Sources` 与 `sendGroupSignal` 调用点输出 |
+| S2 | 凭据边界 | 密码只在 Keychain 与子进程环境；UserDefaults / 命令行 / 日志 / 诊断 / 错误消息中无密码值或长度 | 审查报告的 §2 结论 + `git grep` 反证输出 |
+| S3 | 日志与诊断脱敏 | 统一 `LogRedactor` 实例覆盖四处路径；已记录已知不覆盖形态与幂等例外 | 审查报告的 §3 结论与实测矩阵 |
+| S4 | 网络边界 | 默认 loopback；非 loopback 强制非空密码；`0.0.0.0`/`::` 在界面不可保存；文档明写“密码认证不等于传输加密” | 审查报告 §4 表 + `./Scripts/check-identity.sh` 的服务默认值检查 |
+| S5 | 构建与发布 | CI 权限最小、Actions 固定完整 SHA、ZIP 只含应用包与 AppleDouble 元数据、checksum 可复验 | 审查报告 §5 + `unzip -l` 清单 |
+| S6 | 签名与 Gatekeeper 表述 | `codesign` 报告 `Signature=adhoc` / `TeamIdentifier=not set`，`spctl` 预期拒绝；文档只写 ad-hoc/未公证 | 审查报告 §6 + 本机 `codesign` / `spctl` 输出 |
+| S7 | 依赖与供应链 | 无第三方 Swift / npm 运行时依赖，无 `Package.swift`；Actions 依赖清单固定 | 审查报告 §7 输出 |
+| S8 | 个人数据与 secret | `scan-secrets.sh` 与 CI personal-data `git grep` 均通过；仓库无真实主机名、私网地址、凭据、真实用户路径 | 审查报告 §8 与 §8.1 + 两条扫描的退出码（**先 `git add` 再扫**，否则未跟踪文件会给出假绿，见 R-11） |
+
+安全门槛的判定规则：
+
+- **阻断项必须为 0 才可发布。** 阻断项定义见审查报告 §11.2；任一项触发就不要 push tag，
+  已创建的草稿 Release 保留并在 Release Issue 里记录阻塞点。
+- **非阻断风险要显式接受。** 审查报告 §10 的风险清单（含严重度与建议）必须在本 Issue 里
+  逐条给出“接受 / 本版本修 / 转后续 Issue”的处置，不允许默认忽略。
+- **后续 Issue 建议要在本 Issue 里链接。** follow-up Issue 由 coordinator/维护者创建，
+  审查 worker 不创建 Issue；未创建时在本 Issue 记录待创建条目。
+- **能力描述不得夸大。** 特别不要把“scan-secrets 通过”或“脱敏通过”写成“没有秘密”，
+  也不要把本地 `codesign --verify` 通过写成“已签名”。
+- **S1–S8 的复核命令必须在候选提交上重跑**，而不是引用更早的审查运行；脚本链见
+  [开发说明](development.md#验证)与 `## 演练（不发布）` 小节。基于 `git grep` 的两条文本检查
+  只扫已跟踪文件，复核前先暂存，否则新建文件会被跳过（见审查报告 R-11）。
+
 ## 演练（不发布）
 
 任何一个提交都可以先演练打包，不 push tag、不创建 Release：
@@ -99,6 +132,8 @@
 ```sh
 sh -n Scripts/*.sh
 git diff --check
+./Scripts/scan-secrets.sh --self-test
+./Scripts/scan-secrets.sh
 ./Scripts/build.sh
 ./Scripts/check-identity.sh
 ./Scripts/check-release-version.sh v<MARKETING_VERSION>

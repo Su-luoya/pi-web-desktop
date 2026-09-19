@@ -52,7 +52,7 @@ Issue 进入 `status: ready` 前必须满足：
 2. 在对应版本的 Orca Run 中创建 task。
 3. 创建 `issue-N-slug` worktree，并用 `orca worktree set --issue N` 关联。
 4. 启动一个实现 worker。worker 默认只提交本地 commit，不 push、不创建 PR、不合并。
-5. coordinator 检查 diff、测试、personal-data 文本扫描和 worktree 状态；通用 secret scan 尚未实现（[#11](https://github.com/Su-luoya/pi-web-desktop/issues/11)），不要把它写成已通过的门槛。
+5. coordinator 检查 diff、测试、personal-data 文本扫描、`./Scripts/scan-secrets.sh`（退出 0，并核对结尾的 `scan-secrets: suppressed N lines`）和 worktree 状态；secret scan 只覆盖固定凭据形状与已跟踪文件，不要把它写成“没有秘密”（[#11](https://github.com/Su-luoya/pi-web-desktop/issues/11) 已实现，能力边界见[开发说明](development.md#personal-data-与-secret-扫描能力)）。
 6. 重要 Issue 可在同一分支上启动独立只读 review task；review worker 不直接改实现分支。
 7. coordinator 创建 PR，等待 CI，并按 [PR 模板](../.github/pull_request_template.md)把证据和遗留不确定项写入 PR。
 8. squash merge 后关闭 Issue，标记 Orca workspace completed，清理 worktree 和终端。

@@ -59,7 +59,12 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 
 尚未实现（后续 issue 范围）：
 
-- 更新计划与受限安装的其余部分（GitHub #22–#23）：下载缓存与更细的回滚/验证策略，以及非 npm 来源的自动更新。GitHub #21 已实现运行进程保护（有 Pi 进程运行时自动更新一律推迟）与 Pi CLI 的受限启动前自动更新/手动入口，GitHub #20 只实现 Pi Web“已验证的 npm 全局安装”的启动前自动更新，均见下文“更新检查、设置与缓存”；其它来源仍然只显示命令、绝不自动安装。
+- 更新流水线中仍未实现的部分：桌面应用自身的应用内更新（下载、安装 `Pi Web Desktop.app` 属于后续 issue），
+  更新包的下载缓存与内容哈希/签名校验，比 GitHub #23 的“有限降级”更完整的回滚策略，以及非 npm/pnpm
+  全局来源（Homebrew、nvm/mise、git checkout、本地路径）的自动更新。GitHub #20 / #21 / #22
+  已实现三条受限更新路径（Pi Web 启动前自动安装、Pi CLI 启动前自动更新与运行进程保护、Pi 扩展包“询问后更新”），
+  GitHub #23 给三条路径加了阶段化事务、验证能力边界与有限降级，均见下文“更新检查、设置与缓存”；
+  上述未实现的能力不在本版可用范围内，其它来源仍然只显示命令、绝不自动安装。
 
 `DiagnosticsCollector` 只负责文本组装（调用方仍然只传入可公开的字段，密码等秘密不会进入输入）；脱敏由注入的 `LogRedactor` 在导出时统一完成，见 [日志与诊断导出](logging-and-diagnostics.md)。
 
@@ -174,10 +179,6 @@ GitHub #17 的版本检查在应用运行期间只做只读查询，不下载、
 - 更新前指纹（GitHub #23）：preflight 只记录可执行文件路径、解析后真实路径、版本、`package.json` 名称，以及可选（不保证存在）的文件大小与 mtime；不读取凭据、不做签名验证。扩展包没有独立的可执行文件路径，指纹只含包名与版本，因此回滚证据不足时降级判定会如实给出“无法自动回滚”。
 - 失败语义与有限回滚（GitHub #23）：install 失败 → 系统状态未改变，保留旧版本、不报告成功、不尝试回滚；verify 失败 → `UpdateDegradationPlanner` 产出四类之一：`installFailedKeepingPreviousVersion`（安装失败，仍在使用旧版本）、`stillUsingPreviousArtifact`（版本未变，文件仍是旧的）、`degradedToPreviousArtifact`（已把服务/重检测指回更新前仍然可用的可执行文件）、`cannotAutomaticallyRollback`（无法自动回滚：进入诊断并写持久警告，给出来自静态清单的手动命令或指引）。自动降级的真实边界只有一条：来源必须是已验证的 npm 全局安装、应用自己保留了更新前的可执行文件路径与版本证据，并且该证据在新版本安装后仍然存在、仍带可执行位、大小与 mtime 与指纹一致。pnpm / Homebrew / nvm / mise / git checkout / 本地路径 / 未知来源一律不回滚，只报告并给出手动提示。commit 成功后不做自动卸载；整个框架不移动、不复制、不删除任何文件，也不向任何进程发送信号。
 - 统一更新历史与展示（GitHub #23）：历史存在 UserDefaults 单键 `updateChecks.updateHistory`（JSON，最多 20 条，最新在前），每条含时间、组件、来源、从/到版本、各阶段结果、失败原因与降级结论。写入前逐条校验并截断（非法版本号、非法包名与未知枚举丢弃），不含绝对路径、环境变量值、凭据或子进程输出。诊断页展示最近一次更新的完成阶段、阶段结果与建议动作（手动命令文本只显示、应用绝不执行）；持久警告文案区分“更新失败，仍在使用旧版本”与“更新后验证失败，已降级 / 无法自动回滚”。
-- 请求边界：只发 GET；URL 只由 `UpdateEndpoint` 的两个工厂方法生成——`https://api.github.com/repos/Su-luoya/pi-web-desktop/releases?per_page=20` 与 `https://registry.npmjs.org/<包名>/latest`（作用域包的 `/` 编码为 `%2F`；包名复用 #16 的 `isPackageName` 校验，不合法就不发请求）。请求头只允许 `Accept: application/json`、固定 `User-Agent`（应用名 + 版本 + bundle identifier，来自 `UpdateCheckIdentity.current`）与 `If-None-Match` / `If-Modified-Since`；`UpdateHTTPRequest.sanitized()` 丢弃白名单外的头，生产客户端再用 `URLSessionConfiguration.ephemeral` + `httpShouldSetCookies = false` + `httpCookieStorage = nil` + `urlCredentialStorage = nil` 保证不发 cookie、不读写凭据，并通过 `willPerformHTTPRedirection` 拒绝所有重定向（跨主机请求因此不可能发生）。响应头只保留 `etag` / `last-modified` / `content-type`。
-- 可信度与比较：`SemanticVersion` 按 SemVer 2.0.0 §11 比较预发布标识符（数字标识符按数值，`alpha.2 < alpha.10 < beta.1 < 1.0.0`）。只有响应来自预期主机且结构可解析时才把上游版本记为 `verified`；网络失败、超时、取消、429 与 5xx 沿用 TTL 内的上次成功结果（`freshness = cached`），超过 TTL 或从未成功则 `unknown`；解析失败、结构异常、重定向或最终主机不在白名单内一律 `unknown`，但保留上一次成功结果（含 etag）供下次条件请求；本机版本未知或包名不合法时不发请求，结果为 `unknown` 并给出原因。
-- 缓存：`UpdateCheckCacheFileStore` 把结果写到 `AppPaths.updateCheckCacheURL`（`~/Library/Application Support/Pi Web Desktop/update-check-cache.json`，独立文件，`schemaVersion = 1`，最多 200 条）。结构只有目标 id、分类、包名、`lastAttemptAt` / `lastSuccessAt`、`etag` / `lastModified`、`latestVersion`、`status` / `confidence` / `failure` / `httpStatusCode`：不含凭据、cookies、会话、URL、响应体或诊断内容；读失败或 schema 不匹配按空缓存处理（重新发起普通 GET），写失败静默，不影响检查结果、服务与退出路径。
-- 失败隔离：`UpdateChecker` 不持有 `ServiceManager` 或任何服务状态引用，也没有安装、下载或执行路径；失败只更新 `UpdateCheckSummary`、状态行与（手动检查时）提示框。日志只写一条计数行（可用更新 / 无法确定 / 检查总数），不含 URL、包名列表或响应内容。
 - 请求边界：只发 GET；URL 只由 `UpdateEndpoint` 的两个工厂方法生成——`https://api.github.com/repos/Su-luoya/pi-web-desktop/releases?per_page=20` 与 `https://registry.npmjs.org/<包名>/latest`（作用域包的 `/` 编码为 `%2F`；包名复用 #16 的 `isPackageName` 校验，不合法就不发请求）。请求头只允许 `Accept: application/json`、固定 `User-Agent`（应用名 + 版本 + bundle identifier，来自 `UpdateCheckIdentity.current`）与 `If-None-Match` / `If-Modified-Since`；`UpdateHTTPRequest.sanitized()` 丢弃白名单外的头，生产客户端再用 `URLSessionConfiguration.ephemeral` + `httpShouldSetCookies = false` + `httpCookieStorage = nil` + `urlCredentialStorage = nil` 保证不发 cookie、不读写凭据，并通过 `willPerformHTTPRedirection` 拒绝所有重定向（跨主机请求因此不可能发生）。响应头只保留 `etag` / `last-modified` / `content-type`。
 - 可信度与比较：`SemanticVersion` 按 SemVer 2.0.0 §11 比较预发布标识符（数字标识符按数值，`alpha.2 < alpha.10 < beta.1 < 1.0.0`）。只有响应来自预期主机且结构可解析时才把上游版本记为 `verified`；网络失败、超时、取消、429 与 5xx 沿用 TTL 内的上次成功结果（`freshness = cached`），超过 TTL 或从未成功则 `unknown`；解析失败、结构异常、重定向或最终主机不在白名单内一律 `unknown`，但保留上一次成功结果（含 etag）供下次条件请求；本机版本未知或包名不合法时不发请求，结果为 `unknown` 并给出原因。
 - 缓存：`UpdateCheckCacheFileStore` 把结果写到 `AppPaths.updateCheckCacheURL`（`~/Library/Application Support/Pi Web Desktop/update-check-cache.json`，独立文件，`schemaVersion = 1`，最多 200 条）。结构只有目标 id、分类、包名、`lastAttemptAt` / `lastSuccessAt`、`etag` / `lastModified`、`latestVersion`、`status` / `confidence` / `failure` / `httpStatusCode`：不含凭据、cookies、会话、URL、响应体或诊断内容；读失败或 schema 不匹配按空缓存处理（重新发起普通 GET），写失败静默，不影响检查结果、服务与退出路径。

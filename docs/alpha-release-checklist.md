@@ -262,3 +262,21 @@ Provider 的重挂载时机；注入的 32 字节 FinderInfo 值取自同步目�
 （ZIP、checksum、证据、Release 正文）由 workflow 生成，本机 `dist/` 下的同名文件只是演练产物。
 本节新增后按同一命令链重跑过一次以上本地命令，退出码与标记均与表中一致（只有本地打包的
 SHA-256 每次都不同，原因见上）。
+
+## 发布执行结果（v0.1.0-alpha.1）
+
+- **发布状态**：已发布为 prerelease，非草稿：<https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.1>
+- **Tag 与提交**：`v0.1.0-alpha.1` → `ea9df60`（main）；`MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` / bundle id 与 tag、bundle、Release 标题一致（`sh Scripts/check-release-version.sh v0.1.0-alpha.1` 退出 0）。
+- **Release workflow**：run `35417813221`（macos-14，arm64）全绿，含 `xcodebuild build/test`、脚本构建、身份检查、smoke launch、ZIP/checksum/签名证据打包与 draft 生成。
+- **下载产物复核（Apple M4 / macOS 27.0 / arm64）**：`shasum -a 256 -c` 通过；`codesign --verify --deep --strict` 通过（`adhoc`，`TeamIdentifier=not set`）；`unzip -l` 9 项且无源码/测试/日志/个人路径；对下载产物运行 `PI_WEB_DESKTOP_SMOKE=1` 输出 `smoke: ready` 且退出 0。
+- **SHA-256**：`aa6c51851adb3cc457191fb96f7f08b6b34810ec335b07666cc91af4ebedd915`
+- **macOS 14 边界**：macOS 14 层面的验证由 CI 的 `macos-14` runner 承担；本机证据的系统版本为 macOS 27.0，两者在 Release 说明与 Issue #15 中分别标注，不混同。
+
+### 发布过程中修复的两个真实缺陷
+
+1. `release.yml` 的 publish 任务没有 checkout，`gh` 无法定位仓库（`failed to run git: fatal: not a git repository`）→ 显式使用 `GH_REPO` 与 `--repo`（PR #43）。
+2. Finder/iCloud 写入的 `com.apple.FinderInfo` 等扩展属性会让 `codesign --verify --deep --strict` 失败并使 `package-release.sh` 中断（CI 干净 checkout 不触发）→ `build.sh` / `package-release.sh` 在签名与打包前清理扩展属性（PR #42）。
+
+### 发布后遗留（不阻断 alpha.1）
+
+安全审查 R 清单中的低风险项已建 Issue：#38（R-1/R-2 脱敏缺口与幂等）、#39（R-3 启动路径地址校验）、#40（R-9 `APP_STEM` 白名单）、#41（R-7/R-11 门禁处理未跟踪文件与 README 表述）。

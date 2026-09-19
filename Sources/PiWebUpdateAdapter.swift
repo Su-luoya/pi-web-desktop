@@ -165,6 +165,35 @@ enum PiWebUpdateEnvironment {
     }
 }
 
+// MARK: - npm 生命周期脚本策略（GitHub #60，对应 alpha.3 安全审查 A-2）
+
+/// 自动安装是否传 `--ignore-scripts` 的结论与理由。
+///
+/// **结论：刻意不传。** 这是一次**静态评估**——只读地检查了本机已安装包的文件，
+/// 没有真的执行过安装，所以下面是脚本声明与作用的证据，不是实跑结果。
+///
+/// 只读证据（来自本机 npm 全局安装目录，路径由 `npm prefix -g` 推出的
+/// `<前缀>/lib/node_modules/<静态包名>` 决定，不是硬编码的个人路径）：
+/// - 上游 `package.json` 声明了 `postinstall`（命令是 `node bin/prepare-terminal.js`），
+///   且 `files` 白名单含 `bin` 与 `.next`，即构建产物随包发布、安装期不依赖构建；
+/// - `bin/prepare-terminal.js` 在 macOS 上只做一件事：给依赖 `node-pty` 的
+///   `spawn-helper` 二进制补上可执行位（该脚本自己的注释写明上游包可能不保留该位）；
+/// - 同一安装树里的依赖 `node-pty` 自己声明了 `install` 与 `postinstall`
+///   （选择预编译原生模块，必要时 `node-gyp rebuild`）。
+///
+/// npm 的 `--ignore-scripts` 会跳过**所有**生命周期脚本，包括依赖的 `install`，
+/// 因此跳过脚本可能留下缺少可执行位的终端辅助二进制或未就绪的原生模块——也就是
+/// 破坏上游包自己的安装。是否允许脚本执行由用户的 npm 配置与上游包的声明决定，
+/// 应用不替用户决定：argv 保持不带该开关，环境白名单也不注入
+/// `npm_config_ignore_scripts`（`npm_config_*` 一律不传递）。
+enum PiWebUpdateLifecycleScriptPolicy {
+    /// 自动安装是否传 `--ignore-scripts`。恒为 `false`，见类型文档里的证据与取舍。
+    static let passesIgnoreScripts = false
+
+    /// 展示/日志用的固定说明（不含路径，也不含包名之外的动态内容）。
+    static let rationale = "不传 --ignore-scripts（按上游包声明的安装期脚本执行；用你本机的 npm 与 npm 配置）"
+}
+
 // MARK: - 安装计划
 
 /// 一次受限自动安装的完整计划：可执行文件、参数数组、白名单环境与展示字段。
@@ -195,6 +224,9 @@ struct PiWebUpdateInstallPlan: Equatable {
               packageName == InstallCommandManifest.piWebPackageName else { return nil }
         guard let target = SemanticVersion(targetVersion), target.description == targetVersion else { return nil }
         guard !npmExecutablePath.isEmpty else { return nil }
+        // 刻意不传 `--ignore-scripts`：上游包声明了安装期脚本，而 npm 的该开关会连依赖的
+        // `install` 脚本一起跳过，可能留下不可用的原生模块。静态评估与只读证据见
+        // `PiWebUpdateLifecycleScriptPolicy`。
         let arguments = ["install", "-g", "\(packageName)@\(targetVersion)"]
         guard PiWebUpdateArgumentPolicy.isSafe(arguments) else { return nil }
         return PiWebUpdateInstallPlan(
@@ -215,6 +247,7 @@ struct PiWebUpdateInstallPlan: Equatable {
         [
             "可执行文件：\(redactor.redact(npmExecutablePath))",
             "参数数组：\(PiWebUpdateArgumentPolicy.displayText(for: arguments))",
+            "生命周期脚本：\(PiWebUpdateLifecycleScriptPolicy.rationale)",
             "当前版本：\(installedVersion)",
             "目标版本：\(targetVersion)",
             "来源：\(source.displayName)；可信度：\(confidence.displayName)",

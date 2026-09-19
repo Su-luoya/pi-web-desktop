@@ -450,6 +450,46 @@ final class PiWebUpdateAdapterTests: XCTestCase {
         XCTAssertFalse(lines.contains("--require"))
     }
 
+    // MARK: - 3b. npm 生命周期脚本策略（GitHub #60，对应 alpha.3 安全审查 A-2）
+
+    /// argv 精确等于普通 `npm install -g`：刻意不传 `--ignore-scripts`，因此上游包声明的
+    /// 安装期脚本按 npm 默认语义执行。结论与证据在 `PiWebUpdateLifecycleScriptPolicy` 里，
+    /// 那是一次**静态评估**（只读检查上游 `package.json`、`bin/prepare-terminal.js` 与依赖
+    /// `node-pty` 自己的安装脚本），没有真的执行过安装。
+    func testAutomaticInstallArgumentsNeverPassIgnoreScripts() throws {
+        let plan = try makePlan()
+        XCTAssertEqual(plan.arguments, ["install", "-g", "@agegr/pi-web@0.9.2"])
+        XCTAssertEqual(plan.arguments.count, 3)
+        XCTAssertFalse(plan.arguments.contains("--ignore-scripts"))
+        XCTAssertFalse(plan.arguments.contains { $0.hasPrefix("--ignore-scripts") })
+        // 决策本身是可断言的事实：应用不替用户决定 npm 脚本策略。
+        XCTAssertFalse(PiWebUpdateLifecycleScriptPolicy.passesIgnoreScripts)
+        XCTAssertTrue(PiWebUpdateLifecycleScriptPolicy.rationale.contains("--ignore-scripts"))
+        XCTAssertTrue(PiWebUpdateLifecycleScriptPolicy.rationale.contains("npm"))
+        // 日志/诊断/确认框必须给出可复现的 argv，并带上这条生命周期脚本说明。
+        let text = plan.displayLines(redactingWith: LogRedactor(homeDirectory: fixtureHome)).joined(separator: "\n")
+        XCTAssertTrue(text.contains("参数数组：\"install\", \"-g\", \"@agegr/pi-web@0.9.2\""))
+        XCTAssertTrue(text.contains(PiWebUpdateLifecycleScriptPolicy.rationale))
+    }
+
+    /// 子进程环境白名单不注入 `npm_config_ignore_scripts`：脚本策略由用户的 npm 配置与上游包
+    /// 决定，应用既不传开关也不改写 npm 配置（既有行为：所有 `npm_config_*` 一律不传递）。
+    func testChildEnvironmentNeverCarriesIgnoreScriptsOverride() throws {
+        let plan = try makePlan(baseEnvironment: [
+            "PATH": "/usr/bin:/bin",
+            "HOME": fixtureHome,
+            "npm_config_ignore_scripts": "true",
+            "NPM_CONFIG_IGNORE_SCRIPTS": "true",
+            "npm_config_registry": "https://example.invalid"
+        ])
+        XCTAssertEqual(Set(plan.environment.keys), ["PATH", "HOME"])
+        XCTAssertNil(plan.environment["npm_config_ignore_scripts"])
+        XCTAssertNil(plan.environment["NPM_CONFIG_IGNORE_SCRIPTS"])
+        XCTAssertNil(plan.environment["npm_config_registry"])
+        XCTAssertFalse(PiWebUpdateEnvironment.allowedKeys.contains { $0.lowercased().hasPrefix("npm_config_") })
+        XCTAssertFalse(plan.environment.keys.contains { $0.lowercased().hasPrefix("npm_config_") })
+    }
+
     // MARK: - 4. 安装成功但版本未变化 → 版本验证失败
 
     func testInstallerSuccessWithUnchangedVersionFailsVerification() throws {

@@ -95,6 +95,7 @@ swiftc "$ROOT/Sources/PiWebApp.swift" \
   "$ROOT/Sources/PiWebUpdateAdapter.swift" \
   "$ROOT/Sources/PiProcessInspector.swift" \
   "$ROOT/Sources/PiCLIUpdateAdapter.swift" \
+  "$ROOT/Sources/PiPackageUpdateAdapter.swift" \
   "$ROOT/Sources/DependencyChecker.swift" \
   "$ROOT/Sources/FirstLaunchDiagnostics.swift" \
   "$ROOT/Sources/InstallCommandManifest.swift" \

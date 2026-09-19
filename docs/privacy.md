@@ -8,10 +8,10 @@ Pi Web Desktop 不收集或上传遥测、使用统计、会话内容、认证�
 
 ## 版本检查、提示与忽略版本
 
-Pi Web Desktop 在应用运行期间做只读的版本查询，只提示、不下载、不安装任何东西。版本查询**不是项目遥测**：请求只用于比较“本机版本”与“上游最新版”，不携带使用数据、会话内容、认证信息或诊断报告。应用退出后不检查（不安装 LaunchAgent，也不在后台常驻）。唯一的例外是下面两个启动前自动更新（**默认关闭**）：它们只对来源为已验证的 npm 全局（Pi CLI 还允许 pnpm 全局）安装的组件执行一次受限更新，不改动桌面应用自身。
+Pi Web Desktop 在应用运行期间做只读的版本查询，只提示、不下载、不安装任何东西。版本查询**不是项目遥测**：请求只用于比较“本机版本”与“上游最新版”，不携带使用数据、会话内容、认证信息或诊断报告。应用退出后不检查（不安装 LaunchAgent，也不在后台常驻）。唯一的例外是下面两个启动前自动更新（**默认关闭**）：它们只对来源为已验证的 npm 全局（Pi CLI 还允许 pnpm 全局）安装的组件执行一次受限更新，不改动桌面应用自身，也不涉及 Pi 扩展包——**Pi 扩展包永远不会在无人值守时更新**（见下面“扩展包更新需要用户确认”）。
 
 - 访问的域名与请求内容：`api.github.com`（`GET /repos/Su-luoya/pi-web-desktop/releases?per_page=20`，桌面应用发布）与 `registry.npmjs.org`（`GET /<包名>/latest`，Pi CLI、Pi Web 与 `pi list` 得到的扩展包）。只有 GET + JSON 解析；`User-Agent` 固定为应用名 + 版本 + bundle identifier（来自应用自身的 Info.plist，不含用户名或主机名）。不发送 cookies、账号凭据、会话内容或诊断字段；`Cookie`、`Authorization` 这类头即使被误加也会在发出前丢弃；应用侧客户端不跟随重定向，因此请求不会落到这两个域名之外。响应只保留 `etag`、`last-modified` 与 `content-type`，`Set-Cookie` 等响应头不读取也不保存。
-- 频率与设置：应用启动后立即检查一次。之后四类组件各自按设置复查，默认值与 [发布说明](releasing.md) 的 alpha.2 更新策略一致：桌面应用 / Pi CLI / Pi Web 默认“每日”（24 小时），可选“每周”或“关闭”；Pi 扩展包默认“检查并通知”（7 天，与 GitHub #17 的节奏相同），可选“询问后更新”或“关闭”。“询问后更新”同样只按 7 天复查，发现可用更新时询问用户是否更新；询问后更新本身仍不执行安装，只有下面两个启动前自动更新会（默认关闭，Pi Web 仅限已验证的 npm 全局安装，Pi CLI 仅限已验证的 npm/pnpm 全局安装且当次确认没有运行中的 Pi 进程）。
+- 频率与设置：应用启动后立即检查一次。之后四类组件各自按设置复查，默认值与 [发布说明](releasing.md) 的 alpha.2 更新策略一致：桌面应用 / Pi CLI / Pi Web 默认“每日”（24 小时），可选“每周”或“关闭”；Pi 扩展包默认“检查并通知”（7 天，与 GitHub #17 的节奏相同），可选“询问后更新”或“关闭”。“询问后更新”同样只按 7 天复查，发现可用更新时询问用户是否更新（GitHub #22 起，用户在确认框里确认后才会执行一次 `pi update npm:<包名>`；未确认、取消或进程状态不确定时都不执行）；询问与确认本身不下载、不安装，只有下面两个启动前自动更新会（默认关闭，Pi Web 仅限已验证的 npm 全局安装，Pi CLI 仅限已验证的 npm/pnpm 全局安装且当次确认没有运行中的 Pi 进程）。
 - 关闭与调度：关闭某一类后应用不再发起该类请求，也不为该类安排复查；四类全部关闭时不发任何请求。设置在“服务 → 更新检查设置 → 更新检查偏好设置…”里修改，键与默认值见下表与 [设置、工作目录与退出行为](settings-and-workspace.md)。
 - 提示方式（取舍）：发现可用更新时使用应用内提示框（`NSAlert`），**不使用 `UNUserNotificationCenter`，也不申请系统通知权限**。取舍：应用内提示不需要额外权限、内容不会进入“通知中心”或被系统持久化、文案完全由应用控制且只含组件名与版本；代价是应用不在运行时不提示——应用本来也不在后台运行，因此这一点不降低现有隐私边界。提示内容不含本机路径、包名、安装来源、凭据或诊断内容。手动“检查更新…”显示完整结果；自动检查（启动 / 周期）对同一版本在一次运行里最多提示一次。
 - 忽略版本：每类组件可以“忽略当前提示的版本”。忽略只抑制那一个具体版本，上游发布更高版本时会重新提示；忽略与安装来源无关，只保存版本字符串与时间戳（`updateChecks.<组件>.ignoredVersion` 与 `.ignoredVersionAt`），不实现任意版本锁定，也不实现降级。提示框与“更新检查偏好设置”窗口里的“忽略此版本”按钮都只记录忽略，不执行安装。
@@ -23,6 +23,10 @@ Pi Web Desktop 在应用运行期间做只读的版本查询，只提示、不�
   - **命令与子进程环境**：只执行官方自更新参数数组 `update --self`（参数数组直接执行，**不使用 shell、不调用 `sudo`**，不拼接 npm/pnpm 命令）；子进程环境只保留白名单键（`PATH` / `HOME` / `TMPDIR` / `LANG` / `LC_ALL` / `LC_CTYPE`），因此凭据类变量（例如 `PI_WEB_PASSWORD`）、`NODE_OPTIONS`、`npm_config_*` 与代理变量都不会传递。这一步的网络请求与凭据由用户自己的 `pi` 按它自己的配置发出，应用不代发（也不读取 `~/.pi` 的认证内容）。
   - **只读磁盘的部分**：判断“名为 `pi` 的脚本路径是否真的可执行”只查一个可执行位（读文件元数据），不读文件内容、不写任何文件。
   - **记录的内容**：进程记录（诊断页与手动更新的确认框）只包含 PID、父进程 PID、启动时间、判定依据、**已脱敏**的镜像路径与**已脱敏且有长度上限**的命令摘要；凭据（`token=` / `password=` / `api_key=` 等形状、URL 查询串、`Bearer`）在进入记录前就换成占位符，Home 路径换成 `~`，`KEY=VALUE` 环境片段直接丢弃。执行结果只记录退出码、耗时与**脱敏后**的输出尾部（截断），失败只写持久警告（类别、旧/新/目标版本、原因、时间戳），**不含路径、环境变量值、凭据或完整命令输出**。手动入口需先在确认框里看到这些信息并显式确认；自动路径失败或版本未变时同样只写日志与告警，**不会自动回滚**、不降级，也不做无上限重试（一次运行最多一次）。
+- 扩展包更新需要用户确认（GitHub #22）：Pi 扩展包策略只有“关闭 / 检查并通知 / 询问后更新”，**没有“自动更新”选项**。“询问后更新”也只是按 7 天复查、发现更新时弹确认框，用户在确认框里显式确认后才执行一次 `pi update npm:<包名>`；未确认、点“取消”或直接关闭对话框都不执行，也不改任何状态。执行入口只在来源为**已验证的 npm 全局安装**、目标版本已验证且更高、且当次进程检查确认没有运行中的 Pi 进程时出现；其它来源（pnpm、Homebrew、nvm/mise、git checkout、本地路径、未知）只显示官方命令文本 `pi update --extensions`，不提供可点的执行入口。
+  - **命令与子进程环境**：只执行官方参数数组 `["update", "npm:<包名>"]`（参数数组直接执行，**不使用 shell、不调用 `sudo`**，不拼接 npm/pnpm 命令）；子进程环境只保留白名单键（`PATH` / `HOME` / `TMPDIR` / `LANG` / `LC_ALL` / `LC_CTYPE`），因此凭据类变量（例如 `PI_WEB_PASSWORD`）、`NODE_OPTIONS`、`npm_config_*` 与代理变量都不会传递。这一步的网络请求与凭据由用户自己的 `pi` 按它自己的配置发出，应用不代发，也不读取 `~/.pi` 的认证内容或 npm 配置。
+  - **不发信号、不接管会话**：执行前用同一套只读进程检查再确认一次，有运行中的 Pi 进程或状态不确定就**拒绝执行**；应用从不发送 `SIGTERM`/`SIGKILL`，也不结束、暂停或接管任何 Pi 进程，超时与应用退出只是不再等待子进程。
+  - **记录的内容**：确认框与诊断只包含包名、当前/目标版本、来源与可信度、脱敏后的可执行文件路径（Home → `~`）、参数数组与每个进程的**已脱敏且长度受限**的命令摘要；执行结果只记录退出码、耗时与截断后的输出尾部（经 `LogRedactor`），失败只写持久告警（类别、包名、旧/新/目标版本、固定原因文案与时间戳），**不含环境变量值、凭据或完整命令输出**；拒绝原因同样只写入日志与诊断且不含凭据。不自动重试、不声称回滚，也不修改 Pi 自己的配置文件。
 - 结果缓存：`~/Library/Application Support/Pi Web Desktop/update-check-cache.json`（见下表），只含版本号、时间戳与 etag/条件请求字段；**不含**凭据、cookies、会话、URL、响应体或诊断内容。删除该文件只会让下一次检查重新发起普通 GET。
 - 可信度：只有响应来自预期域名且结构可解析时才将上游版本标为“已验证”；网络失败、超时、限流（HTTP 429）与 5xx 沿用 24 小时/7 天内上一次成功结果并标注为缓存结果；超过有效期、响应无法解析或来自非预期主机时显示“无法确定”。检查失败只影响提示文案，不影响正在运行的服务，也不改变服务状态。
 
@@ -46,7 +50,7 @@ Pi Web Desktop 在应用运行期间做只读的版本查询，只提示、不�
 
 | 数据 | 位置 | 删除方式 |
 | --- | --- | --- |
-| 服务配置、首次设置状态、窗口位置、更新检查设置 | UserDefaults（domain 为 bundle identifier `io.github.su-luoya.pi-web-desktop`） | 先 `defaults read io.github.su-luoya.pi-web-desktop` 确认内容，再 `defaults delete io.github.su-luoya.pi-web-desktop`。更新检查设置包括策略键 `updateChecks.<组件>.policy`、启动前自动更新开关 `updateChecks.piWeb.autoUpdateBeforeLaunch` 与 `updateChecks.pi.autoUpdateBeforeLaunch`、忽略版本键 `updateChecks.<组件>.ignoredVersion` / `.ignoredVersionAt`（只含版本字符串与时间戳）与最近一次更新失败警告 `updateChecks.piWeb.lastUpdateWarning.*` 和 `updateChecks.pi.lastUpdateWarning.*`（只含类别、旧/新/目标版本、固定原因文案与时间戳，不含路径、环境变量值、凭据或子进程输出；进程检查结果不落盘，只在内存与界面/日志里存在） |
+| 服务配置、首次设置状态、窗口位置、更新检查设置 | UserDefaults（domain 为 bundle identifier `io.github.su-luoya.pi-web-desktop`） | 先 `defaults read io.github.su-luoya.pi-web-desktop` 确认内容，再 `defaults delete io.github.su-luoya.pi-web-desktop`。更新检查设置包括策略键 `updateChecks.<组件>.policy`、启动前自动更新开关 `updateChecks.piWeb.autoUpdateBeforeLaunch` 与 `updateChecks.pi.autoUpdateBeforeLaunch`、忽略版本键 `updateChecks.<组件>.ignoredVersion` / `.ignoredVersionAt`（只含版本字符串与时间戳）与最近一次更新失败警告 `updateChecks.piWeb.lastUpdateWarning.*`、`updateChecks.pi.lastUpdateWarning.*` 和 `updateChecks.piPackages.lastUpdateWarning.*`（只含类别、包名、旧/新/目标版本、固定原因文案与时间戳，不含路径、环境变量值、凭据或子进程输出；进程检查结果不落盘，只在内存与界面/日志里存在） |
 | 运行状态与所有权记录 | `~/Library/Application Support/Pi Web Desktop/` | 退出应用后删除该目录 |
 | 日志（含轮转文件） | `~/Library/Logs/Pi Web Desktop/`（`Pi Web Desktop.log` 与 `.1.log` … `.5.log`） | 退出应用后删除该目录 |
 | 更新检查缓存 | `~/Library/Application Support/Pi Web Desktop/update-check-cache.json` | 退出应用后删除该文件；在“服务 → 更新检查设置”里关闭四类可停止后续请求（已存缓存不会自动删除），忽略版本记录在 UserDefaults 里、不影响缓存 |

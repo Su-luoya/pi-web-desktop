@@ -520,7 +520,8 @@ final class UpdateSettingsTests: XCTestCase {
         XCTAssertEqual(entries.first?.policy, .askBeforeUpdate)
 
         let text = UpdateNotificationText.title(for: entries) + "\n" + UpdateNotificationText.body(for: entries)
-        XCTAssertTrue(text.contains("尚未实现"))
+        XCTAssertTrue(text.contains("无人值守"))
+        XCTAssertTrue(text.contains("确认"))
         for forbidden in ["/", "~", "password", "token", "secret", "Bearer", "http", "Keychain"] {
             XCTAssertFalse(text.contains(forbidden), "提示内容不应包含 \(forbidden)")
         }

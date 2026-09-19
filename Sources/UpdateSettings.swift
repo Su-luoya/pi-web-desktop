@@ -113,6 +113,29 @@ enum UpdateSettingKeys {
         ]
     }
 
+    /// 最近一次失败的 Pi 扩展包更新的持久记录（GitHub #22）。字段与 #20/#21 的
+    /// 警告同构，另外带一个已通过 npm 包名校验的包名；不含路径、环境变量值、
+    /// 凭据或子进程输出。
+    static let piPackageUpdateWarningKind = "updateChecks.piPackages.lastUpdateWarning.kind"
+    static let piPackageUpdateWarningPackage = "updateChecks.piPackages.lastUpdateWarning.package"
+    static let piPackageUpdateWarningOldVersion = "updateChecks.piPackages.lastUpdateWarning.oldVersion"
+    static let piPackageUpdateWarningNewVersion = "updateChecks.piPackages.lastUpdateWarning.newVersion"
+    static let piPackageUpdateWarningTargetVersion = "updateChecks.piPackages.lastUpdateWarning.targetVersion"
+    static let piPackageUpdateWarningReason = "updateChecks.piPackages.lastUpdateWarning.reason"
+    static let piPackageUpdateWarningRecordedAt = "updateChecks.piPackages.lastUpdateWarning.recordedAt"
+
+    static var allPiPackageUpdateWarningKeys: [String] {
+        [
+            piPackageUpdateWarningKind,
+            piPackageUpdateWarningPackage,
+            piPackageUpdateWarningOldVersion,
+            piPackageUpdateWarningNewVersion,
+            piPackageUpdateWarningTargetVersion,
+            piPackageUpdateWarningReason,
+            piPackageUpdateWarningRecordedAt
+        ]
+    }
+
     static func stem(for category: UpdateCheckCategory) -> String {
         switch category {
         case .desktopApp: return "updateChecks.desktopApp"
@@ -152,6 +175,7 @@ enum UpdateSettingKeys {
     /// 保存策略不会清掉警告。
     static var allKeys: [String] {
         allPreferencesKeys + allIgnoredVersionKeys + allPiWebUpdateWarningKeys + allPiCLIUpdateWarningKeys
+            + allPiPackageUpdateWarningKeys
     }
 }
 
@@ -725,15 +749,17 @@ enum UpdateNotificationText {
             }
             if entry.policy == .askBeforeUpdate {
                 return "\(entry.target.displayName)：本机 \(installed)，上游 \(entry.latestVersion)。"
-                    + "是否更新由你决定；扩展包的自动安装尚未实现，当前只提示、不下载、不安装。"
+                    + "是否更新由你决定：应用不做无人值守扩展包更新，只在你确认后才用参数数组"
+                    + "执行一次 Pi 官方更新命令（菜单“服务 → 更新检查设置 → 查看 Pi 扩展包更新…”）。"
             }
             return "\(entry.target.displayName)：本机 \(installed)，上游 \(entry.latestVersion)。"
         }
         if autoInstallDeferredToNextLaunch.isEmpty {
-            lines.append("应用只提示版本，不会自动下载或安装。忽略某个版本后不会再提示它，"
-                + "只有上游发布更高版本时才会再次提示。")
+            lines.append("应用只提示版本，不会自动下载或安装（扩展包也必须在菜单里确认后才执行一次官方更新命令）。"
+                + "忽略某个版本后不会再提示它，只有上游发布更高版本时才会再次提示。")
         } else {
-            lines.append("应用不会在本次运行中自动下载或安装；启动前自动更新只对已验证的 npm 全局安装生效。"
+            lines.append("应用不会在本次运行中自动下载或安装；启动前自动更新只对已验证的 npm 全局安装生效，"
+                + "扩展包必须在菜单里确认后才执行一次官方更新命令。"
                 + "忽略某个版本后不会再提示它，只有上游发布更高版本时才会再次提示。")
         }
         return lines.joined(separator: "\n")

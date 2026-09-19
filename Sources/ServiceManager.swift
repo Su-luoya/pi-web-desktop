@@ -169,6 +169,12 @@ struct ServiceLaunchSpecification: Equatable {
     static func arguments(configuration: ServiceConfiguration) -> [String] {
         ["--hostname", configuration.hostname, "--port", String(configuration.port), "--no-open"]
     }
+
+    /// 诊断展示用：把子进程环境整理成按键排序的 `KEY=value` 行。值原样给出，
+    /// 调用方必须用共用的 `LogRedactor` 脱敏后再展示或复制（GitHub #10）。
+    static func environmentDescription(_ environment: [String: String]) -> String {
+        environment.keys.sorted().map { "\($0)=\(environment[$0] ?? "")" }.joined(separator: "\n")
+    }
 }
 
 /// Handle for a launched service process.
@@ -451,7 +457,7 @@ final class ServiceManager {
     static let probeTimeout: TimeInterval = 1
     static let stopPollAttempts = 40
     static let stopPollInterval: TimeInterval = 0.1
-    static let maxLogBytes = 10 * 1024 * 1024
+    // 日志上限/保留份数的唯一来源是 `LogRotationPolicy`（GitHub #10），这里不保留第二套常量。
 
     private(set) var configuration: ServiceConfiguration
     private(set) var currentState: ServiceState = .checking
@@ -485,6 +491,14 @@ final class ServiceManager {
     /// Identifier of this app instance. It is part of every ownership record,
     /// so a record written by an earlier launch can never be adopted again.
     let instanceID: String
+
+    /// 统一日志写入器（GitHub #10）：按大小轮转，应用写入的每一行都经过它的
+    /// `redactor`。错误消息与诊断导出共用同一个实例，"同一实例脱敏"不是约定
+    /// 而是类型上的同一对象。
+    let logWriter: LogWriter
+
+    /// 与 `logWriter` 同一个实例：错误消息在进入状态机之前先脱敏。
+    private var redactor: LogRedactor { logWriter.redactor }
 
     private let appConfiguration: AppConfiguration
     private let processInspector: ProcessInspector
@@ -527,7 +541,8 @@ final class ServiceManager {
         signaler: ServiceSignaling = POSIXServiceSignaler(),
         remoteAccessPassword: @escaping () -> String? = { nil },
         workspaceProbe: WorkspaceDirectoryProbe? = nil,
-        instanceID: String = UUID().uuidString
+        instanceID: String = UUID().uuidString,
+        logWriter: LogWriter? = nil
     ) {
         self.configuration = configuration
         self.appConfiguration = appConfiguration
@@ -543,6 +558,7 @@ final class ServiceManager {
         self.remoteAccessPassword = remoteAccessPassword
         self.workspaceProbe = workspaceProbe ?? .live(fileManager: fileManager)
         self.instanceID = instanceID
+        self.logWriter = logWriter ?? LogWriter(logFileURL: appConfiguration.logURL, fileManager: fileManager)
     }
 
     // MARK: - Configuration
@@ -886,11 +902,14 @@ final class ServiceManager {
                         guard self.launchGeneration == generation else { return }
                         self.serviceProcess = nil
                         self.closeLog()
+                        self.logWriter.record("服务进程已退出")
                         if !self.isStoppingService && !self.isQuitting {
                             self.setState(.stopped)
                         }
                     }
                 }
+                // 应用侧事件行也走同一个 LogWriter/LogRedactor。
+                logWriter.record("服务已启动：PID \(process.processIdentifier)")
                 serviceProcess = process
                 startupAttempts = 0
                 // A process without a verifiable ownership record can never be
@@ -926,7 +945,7 @@ final class ServiceManager {
         workspaceDirectoryPath = validation.path
         workspaceUsesDefaultLocation = WorkspaceDirectory.usesDefaultLocation(configured: configuration.workspacePath)
         guard let problem = validation.problem else { return true }
-        onWorkspaceProblem?(problem, validation.path)
+        onWorkspaceProblem?(problem, redactor.redact(validation.path))
         return false
     }
 
@@ -1192,9 +1211,10 @@ final class ServiceManager {
 
     // MARK: - Logs
 
-    /// Opens the log file for the child process, rotating it first when needed.
+    /// Opens the log file for the child process via the unified `LogWriter`:
+    /// directory creation, in-place redaction of the existing log, size-based
+    /// rotation and opening all live there (GitHub #10).
     private func openLogForWriting() throws -> FileHandle {
-        let logURL = appConfiguration.logURL
         // 工作目录可用性由启动前的 `prepareWorkspaceBeforeLaunch()` 保证（GitHub #9
         // 复审）。只有应用默认工作目录才允许在这里创建：用户自选目录缺失时不应该
         // 被静默重建，而是已经作为不可用被门控拒绝。
@@ -1204,13 +1224,7 @@ final class ServiceManager {
                 withIntermediateDirectories: true
             )
         }
-        try fileManager.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if !fileManager.fileExists(atPath: logURL.path) {
-            fileManager.createFile(atPath: logURL.path, contents: nil)
-        }
-        rotateLogsIfNeeded()
-        let handle = try FileHandle(forWritingTo: logURL)
-        try handle.seekToEnd()
+        let handle = try logWriter.openChildOutput()
         logHandle = handle
         return handle
     }
@@ -1220,28 +1234,16 @@ final class ServiceManager {
         logHandle = nil
     }
 
-    private func rotateLogsIfNeeded() {
-        let logURL = appConfiguration.logURL
-        guard let attributes = try? fileManager.attributesOfItem(atPath: logURL.path),
-              let size = attributes[.size] as? NSNumber,
-              size.intValue >= Self.maxLogBytes else { return }
-
-        let directory = logURL.deletingLastPathComponent()
-        let base = logURL.deletingPathExtension().lastPathComponent
-        let rotated = directory.appendingPathComponent("\(base).1.log")
-        let previous = directory.appendingPathComponent("\(base).2.log")
-        try? fileManager.removeItem(at: previous)
-        try? fileManager.moveItem(at: rotated, to: previous)
-        try? fileManager.moveItem(at: logURL, to: rotated)
-        fileManager.createFile(atPath: logURL.path, contents: nil)
-    }
-
     // MARK: - Presentation helpers
 
     private func reportStartupFailure(_ message: String) {
-        setState(.failed(message))
+        // 错误消息可能内嵌路径或命令行（例如“无法创建日志目录：/Use…/…”），
+        // 展示给用户、写进日志之前先经过共用的脱敏器。
+        let redacted = redactor.redact(message)
+        logWriter.record("启动失败：\(redacted)")
+        setState(.failed(redacted))
         onPageMessage?("启动失败")
-        onStartupFailure?(message)
+        onStartupFailure?(redacted)
     }
 
     private func requestLoad() {

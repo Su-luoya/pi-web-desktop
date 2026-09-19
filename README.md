@@ -29,6 +29,7 @@ Pi Web Desktop is a macOS AppKit/WebKit shell that starts, monitors, and display
 | 自动更新 | 未实现。当前 alpha 不做应用内更新，也不检查更新（见 [隐私说明](docs/privacy.md) 的“版本检查”） |
 | 支持承诺 | 无 SLA，无响应或修复时限。Issue 和 PR 按维护者可用时间处理 |
 | 远程访问 | 默认只监听 loopback；远程访问必须自备加密隧道或 HTTPS 反向代理，密码认证 ≠ 传输加密 |
+| 日志与诊断 | 日志写在 `~/Library/Logs/Pi Web Desktop/`，10 MB 轮转、保留 5 份；日志行、错误消息、环境变量/命令行展示与“复制诊断”导出共用同一个脱敏器。规则与字段见 [日志与诊断导出](docs/logging-and-diagnostics.md) |
 
 未在表中列出的组合（Intel、更旧的系统版本、稳定发行版、应用内更新）都视为未支持：文档、Issue 和 Release 说明里都不能暗示它们已经可用。
 
@@ -127,6 +128,7 @@ open "$HOME/Applications/Pi-Web-Desktop.app"
 
 - [架构](docs/architecture.md)
 - [设置、工作目录与退出行为](docs/settings-and-workspace.md)
+- [日志与诊断导出](docs/logging-and-diagnostics.md)
 - [开发](docs/development.md)
 - [安全设计](docs/security-ownership.md)
 - [发布](docs/releasing.md)

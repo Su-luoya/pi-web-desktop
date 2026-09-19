@@ -15,7 +15,7 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 已实现：
 
 - `AppDelegate`（`Sources/PiWebApp.swift`）：应用生命周期、菜单、窗口布局、状态栏菜单项、屏幕变化、退出确认、设置窗口协调和 smoke 启动分支。服务动作转发给 `ServiceManager`，WebKit 动作转发给 `WebViewController`；`AppDelegate` 里不再有 `Process()` 启动点，也不再有 WebKit 代理方法实现。
-- `ServiceManager`（`Sources/ServiceManager.swift`）：服务生命周期状态机——启动、停止、重启、启动轮询与重试、4 秒健康检查、日志文件句柄与轮转、可验证的服务所有权记录写入与校验、退出行为（保持运行 / 退出并停止）。对外只暴露 `onStateChange`、`onLoadPage`、`onPageMessage`、`onStartupFailure` 回调和动作方法，不接触 AppKit。停止只对已验证的托管进程组发送信号；外部服务只读。
+- `ServiceManager`（`Sources/ServiceManager.swift`）：服务生命周期状态机——启动、停止、重启、启动轮询与重试、4 秒健康检查、可验证的服务所有权记录写入与校验、退出行为（保持运行 / 退出并停止）。日志句柄、目录创建、历史日志脱敏、按大小轮转与写入都委托给 `LogWriter`（GitHub #10，见 [日志与诊断导出](logging-and-diagnostics.md)）；错误消息在进入状态机与回调前先经 `LogWriter` 的同一个 `LogRedactor`。对外只暴露 `onStateChange`、`onLoadPage`、`onPageMessage`、`onStartupFailure` 回调和动作方法，不接触 AppKit。停止只对已验证的托管进程组发送信号；外部服务只读。
 - `ServiceOwnership`（`Sources/ServiceOwnership.swift`）：所有权记录（JSON 字段、规范化命令文本的 SHA-256 摘要、可执行标识来源）、记录文件存取（`ServiceOwnershipStoring`）、逐项校验的纯逻辑（`ServiceOwnershipVerifier`）和只按进程组发送信号的接口（`ServiceSignaling` / `POSIXServiceSignaler`）。
 - `WebViewController`（`Sources/WebViewController.swift`）：`WKWebView` 创建与配置、导航策略、下载、外部链接、查找栏、缩放和加载/错误状态页；加载状态页、错误页和带标题的诊断状态页（`showDependencyPage(title:message:)`）都由它拥有；通过 `onNavigationFailure`（以及 `onDownloadStarted`）回调把结果交给 `AppDelegate`，窗口由 `windowProvider` 闭包注入。
 - `WebViewNavigationPolicy`（`Sources/WebViewNavigationPolicy.swift`）：本地/外链 URL 判定（`127.0.0.1`/`localhost`/`::1` 加配置端口；`about`/`blob`/`data` 视为内联），不依赖 Cocoa/WebKit，可在 unhosted 测试目标里直接测试。
@@ -23,7 +23,8 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 - `WorkspaceDirectory`（`Sources/WorkspaceDirectory.swift`）：工作目录的解析与校验（存在、是目录、可写）与可读修复提示；默认目录首次使用时创建，自选目录必须已存在且可写，不可用时阻止启动（见 [docs/settings-and-workspace.md](settings-and-workspace.md)）。
 - `QuitPlan`（`Sources/QuitPolicy.swift`）：退出行为的纯决策（询问 / 保持运行 / 停止服务），可 unhosted 测试；外部服务在任何退出行为下都不会被停止。
 - `ProcessInspector`：`ps`/`lsof` 命令、监听端口 PID、进程存活判断、`pgid`/`lstart`/`comm`/`args` 事实读取和进程描述；命令执行通过 `CommandRunning` 注入，可执行标识读取（`proc_pidpath`）也可注入，解析规则是不访问进程的纯函数。它只报告事实，不做所有权判定。
-- `DiagnosticsCollector`：把调用方已收集的版本、地址、状态、PID、进程描述和路径组装为诊断文本，自身不执行命令、不读磁盘。
+- `LogWriter`（`Sources/LogWriter.swift`）与 `LogRedactor`（`Sources/LogRedactor.swift`）：统一日志写入与统一脱敏（GitHub #10）。`LogWriter` 按大小轮转（`LogRotationPolicy`，默认 10 MB / 保留 5 份；阈值、份数、`FileManager`、时间源都可注入），打开子进程日志句柄前先就地脱敏历史日志，任何写入/轮转失败只记录在 `failureDescription`（诊断导出的“日志写入”一行）而不抛出也不崩溃。`LogRedactor` 的同一个实例用于日志行、诊断导出、错误消息、环境变量与命令行展示；规则覆盖 URL 查询串、`Authorization`/`Bearer`、敏感键值（含 `PI_WEB_PASSWORD`）、JWT、代理凭据、Home 路径、私钥块，多行输入逐行处理且幂等。
+- `DiagnosticsCollector`（`Sources/DiagnosticsCollector.swift`）与 `DiagnosticsClipboard`（`Sources/DiagnosticsClipboard.swift`）：把调用方已收集的版本/构建号、Node/pi/pi-web 版本与路径可信度、服务地址与端口、状态、托管关系、监听/托管 PID、有效工作目录、配置目录、启动命令与启动环境、日志位置与写入状态、密码状态组装为诊断文本，自身不执行命令、不读磁盘；整段文本在导出前交给注入的 `LogRedactor`。菜单“复制诊断”与诊断窗口的复制按钮共用同一导出文本与同一条提醒/写剪贴板路径。字段与规则见 [日志与诊断导出](logging-and-diagnostics.md)。
 - `DependencyChecker`（`Sources/DependencyChecker.swift`）：启动前的只读依赖诊断。检查系统（`uname` 架构与 macOS 版本）、Node.js（必须 `>= 22.19.0`，自实现语义化版本比较）、Pi CLI、Pi Web（可执行文件、版本、真实路径、符号链接目标，以及 pi-web 的 package.json `name`/`version`）、默认服务端口（本机 `bind(2)` 判定可用/被占用）和 Pi 配置目录（`~/.pi/agent`，只问“存在吗/可读吗”）。命令经 `CommandRunning` 注入，磁盘经 `DependencyFileSystemProbing` 注入，架构与系统版本经 `DependencySystemProbe` 注入，端口经 `DependencyPortProbing` 注入。它不安装、不升级、不联网、不调用 `sudo`，也不读取认证内容；路径在离开 checker 前已经完成 Home 脱敏（`~`）。
 - `InstallCommandManifest`（`Sources/InstallCommandManifest.swift`）：修复建议的静态清单（Node.js 最低版本、Pi CLI 与 Pi Web 的 npm 安装命令、官方文档 URL）。纯编译期常量，不联网、不动态生成；应用只展示和复制，绝不执行。
 - `FirstLaunchDiagnostics`（`Sources/FirstLaunchDiagnostics.swift`）：首次启动路由、门控控件映射、pi-web 路径选择和诊断 smoke 夹具的纯逻辑——`DiagnosticsGate`（`checking`/`ready`/`blocked`）、`ServiceControlState`（门控 → start/stop/restart 可用性）、`DiagnosticsRouting`（报告 + 首次设置状态 → `mainWindow`/`diagnostics(reasons)`）、`ServiceLaunchIntent`（首次设置刚完成 → 显式启动，否则尊重 `autoStart`）、`PiWebPathSelection` 与 `PiWebIdentityEvidence`（选中的路径 + 只读身份证据 → 新配置或可读错误）和 `DiagnosticsSmokeFixture`。不依赖 AppKit，可在 unhosted 测试目标里直接断言。
@@ -51,7 +52,7 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 
 - `UpdateCoordinator`：版本检查、更新计划、用户确认和受限安装。
 
-`DiagnosticsCollector` 只负责文本组装；脱敏由调用方保证——只传入上面列出的字段，不传入密码等秘密。
+`DiagnosticsCollector` 只负责文本组装（调用方仍然只传入可公开的字段，密码等秘密不会进入输入）；脱敏由注入的 `LogRedactor` 在导出时统一完成，见 [日志与诊断导出](logging-and-diagnostics.md)。
 
 ## 依赖诊断与启动门控
 
@@ -86,7 +87,7 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 
 门控不只在菜单层生效：`ServiceManager.isDependencyGateOpen`（默认关闭，`AppDelegate` 在诊断期间保持关闭、结果通过后打开）是所有服务启动入口的硬前置。`startAtLaunch()`、`ensureServerIsRunning()`、`startService()`、`startManagedService()`、`reloadAfterConfigurationChange()`、启动轮询（`pollUntilReady()`）和健康检查在入口以及每个异步主队列回调执行前都重新确认门控，因此配置变更重载、启动失败重试、外部服务恢复和健康恢复都不能绕过诊断结果；门控关闭时既不启动子进程、不加载服务页，也不改变状态或报启动失败。诊断判定阻塞时 `AppDelegate` 还会调用 `stopHealthMonitor()`（健康轮询本身也在入口拒绝启动），避免健康检查把状态改回 `running`、把诊断页覆盖回服务页。
 
-诊断文本只包含已脱敏的字段：Home 前缀替换为 `~`，URL 去掉 userinfo、query 和 fragment；不写入用户名、绝对 Home 路径、凭据、token 或查询参数。Pi 配置目录只报告路径（`~/.pi/agent`）与“存在/可读”状态：既不做目录列表，也不读取目录内任何文件，认证内容永远不会进入报告。
+诊断文本只包含已脱敏的字段：Home 前缀替换为 `~`，URL 去掉 userinfo、query 和 fragment；不写入用户名、绝对 Home 路径、凭据、token 或查询参数。导出前整段文本经过与日志、错误消息、环境变量/命令行展示共用的 `LogRedactor`（规则见 [日志与诊断导出](logging-and-diagnostics.md)）。Pi 配置目录只报告路径（`~/.pi/agent`）与“存在/可读”状态：既不做目录列表，也不读取目录内任何文件，认证内容永远不会进入报告。
 
 ## 服务所有权
 
@@ -142,7 +143,7 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 - 普通设置：UserDefaults（读写都经 `AppConfiguration`）。
 - 远程访问密码：macOS Keychain（service = bundle identifier，account = `remote-access-password`，仅本文一处存储）。
 - 运行状态和 PID：`~/Library/Application Support/Pi Web Desktop/`。
-- 日志：`~/Library/Logs/Pi Web Desktop/`（`Pi Web Desktop.log`），应用执行轮转。
+- 日志：`~/Library/Logs/Pi Web Desktop/`（`Pi Web Desktop.log` 与 `.1.log` … `.5.log`），应用执行按大小轮转，详见 [日志与诊断导出](logging-and-diagnostics.md)。
 
 设置分层、默认工作目录、退出行为与不可写目录的处理见 [docs/settings-and-workspace.md](settings-and-workspace.md)。
 

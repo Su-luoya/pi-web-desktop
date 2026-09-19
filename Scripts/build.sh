@@ -88,10 +88,13 @@ swiftc "$ROOT/Sources/PiWebApp.swift" \
   "$ROOT/Sources/AppConfiguration.swift" \
   "$ROOT/Sources/AppPaths.swift" \
   "$ROOT/Sources/DiagnosticsCollector.swift" \
+  "$ROOT/Sources/DiagnosticsClipboard.swift" \
   "$ROOT/Sources/DependencyChecker.swift" \
   "$ROOT/Sources/FirstLaunchDiagnostics.swift" \
   "$ROOT/Sources/InstallCommandManifest.swift" \
   "$ROOT/Sources/KeychainStore.swift" \
+  "$ROOT/Sources/LogRedactor.swift" \
+  "$ROOT/Sources/LogWriter.swift" \
   "$ROOT/Sources/ProcessInspector.swift" \
   "$ROOT/Sources/QuitPolicy.swift" \
   "$ROOT/Sources/ServiceConfiguration.swift" \

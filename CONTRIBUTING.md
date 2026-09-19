@@ -37,7 +37,7 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 ```
 
 - `Scripts/build.sh` 生成 arm64、macOS 14 目标、ad-hoc 签名的 `build/Pi-Web-Desktop.app`。
-- `Scripts/check-identity.sh` 退出 0 才表示身份与版本一致；它同时扫描仓库文本里的私人默认值。用法见 [开发说明](docs/development.md#一致性检查)。
+- `Scripts/check-identity.sh` 退出 0 才表示身份与版本一致；它同时用固定模式集扫描仓库文本里的私人默认值，不是通用 secret scanner。用法见 [开发说明](docs/development.md#personal-data-与-secret-扫描能力)。
 - `Scripts/smoke.sh` 在临时 support 目录里验证主窗口与诊断页启动路径，不写真实 UserDefaults、Application Support 与 Logs，也不启动真实 pi-web。
 
 如果改动了 Swift 代码，还要运行工程构建和 XCTest（需要完整 Xcode，只有 Command Line Tools 时会失败）：
@@ -62,16 +62,21 @@ xcodebuild "${XCODEBUILD_ARGS[@]}" test
 
 无法自动测试的 UI、Keychain、WebKit 或 Gatekeeper 行为必须在 PR 里提供人工验证步骤和观察结果。
 
-## personal-data 扫描
+## personal-data 与 secret 扫描能力
 
-CI 与 `Scripts/check-identity.sh` 都会扫描仓库文本，确认没有私人默认值。要复现 CI 的那条命令，直接从工作流里取出并执行，避免在文档或注释里复制模式字面值：
+仓库现有的自动文本检查只有两组固定模式，**都不是通用 secret scanner**：
+
+- `Scripts/check-identity.sh`（仓库文本扫描在 `Scripts/check-identity.sh:428-447`）：小写的私有 VPN 主机名、tailnet DNS 后缀、CGNAT 私网地址段、以 `/Users` 开头的主目录路径、固定本地代理端点，以及 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/` 里出现 `MARKETING_VERSION` 字面值。
+- CI 的 `Check for accidental personal data` 步骤（`.github/workflows/build.yml:54-56`）：一条 `git grep` 字面量检查，排除 `*.icns`、该 workflow 自身和 `Scripts/check-identity.sh`。
+
+本地复现 CI 的那条命令（从工作流里取出，避免在文档或注释里复制模式字面值）：
 
 ```bash
 SCAN=$(awk '/^ *! git grep/{sub(/^ */, ""); print; exit}' .github/workflows/build.yml)
 sh -c "$SCAN" && echo "personal-data scan: PASS"
 ```
 
-扫描在匹配到内容时以非零退出。`./Scripts/check-identity.sh` 覆盖同一组检查并额外覆盖 tailnet DNS 后缀、CGNAT 私网地址和固定本地代理端点。
+命令匹配到内容时以非零退出。两个检查都只覆盖上面列出的模式：任何未被列入的凭据、token、私钥或其他私网地址都不会被发现。通用 secret scan 尚未实现，属 [#11](https://github.com/Su-luoya/pi-web-desktop/issues/11) 的范围；在它落地前，凭据泄漏防线是评审和作者自查，不要在 PR 或发布说明里声称已经通过 secret scan。
 
 ## 代码和隐私要求
 

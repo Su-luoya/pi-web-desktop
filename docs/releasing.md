@@ -38,7 +38,7 @@ shasum -a 256 -c Pi-Web-Desktop-alpha.zip.sha256
 
 发布前必须满足：
 
-- `main` 上的提交通过构建、测试、静态检查和 secret scan；CI 的 `build` 工作流在 GitHub 托管的 `macos-14` runner 上全绿。
+- `main` 上的提交通过构建、测试、shell 语法检查、身份一致性检查和 personal-data 文本扫描；CI 的 `build` 工作流在 GitHub 托管的 `macos-14` runner 上全绿。CI 目前**没有**通用 secret scan 步骤：唯一的文本检查是 `.github/workflows/build.yml:54-56` 的 `git grep` 字面量检查和 `./Scripts/check-identity.sh:433-446` 的固定模式集，补齐真正的 secret scan 是 [#11](https://github.com/Su-luoya/pi-web-desktop/issues/11) 的范围，不是当前门槛。
 - Apple Silicon + macOS 14 或以上真机完成 smoke test。
 - Release Issue 记录实际测试的 macOS、CPU、Node.js、Pi 和 Pi Web 版本。
 - `./Scripts/check-identity.sh` 退出 0，且 ZIP 与 tag 都对应同一个 `MARKETING_VERSION`。
@@ -78,4 +78,5 @@ shasum -a 256 -c Pi-Web-Desktop-alpha.zip.sha256
 - GitHub Actions 全部按提交 SHA 固定，不使用浮动 tag；例如 `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`。
 - `.github/dependabot.yml` 每周检查固定版本的更新，通过带 `dependencies`、`github_actions` 标签的 PR 提出升级；升级必须走 CI 和评审，不允许为了发布临时改用浮动版本。
 - 发布工作流不得使用 secrets，也不得引入第三方签名、公证或上传服务；当前 `build` 工作流的权限只有 `contents: read`。
+- 通用 secret scan 尚未实现，不要在发布说明或检查清单里把它写成已完成的门槛。已有的只是上面两处固定模式检查（personal-data `git grep` + `check-identity.sh`），能力边界见 [贡献指南](../CONTRIBUTING.md#personal-data-与-secret-扫描能力)。
 - 发布流程不依赖新的运行时依赖。应用自身没有第三方 Swift 包或 npm 依赖；新增依赖必须先按 [贡献指南](../CONTRIBUTING.md)记录许可证、维护状态和供应链理由。

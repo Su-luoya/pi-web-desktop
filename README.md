@@ -99,7 +99,7 @@ open "$HOME/Applications/Pi-Web-Desktop.app"
 - 默认只监听 `127.0.0.1`。远程访问需要用户先在 Keychain 保存非空密码，并且需要用户自备加密传输；**密码认证只验证访问者，不等于传输加密**。
 - 不要把 agent 服务暴露给不可信网络。
 - 不要在公开 Issue、PR 或讨论里粘贴密码、API key、token、代理凭据、私有主机名、包含主目录绝对路径（以 `/Users` 开头）的环境信息或未脱敏日志。
-- 本地数据位置与清理方式见 [隐私说明](docs/privacy.md)。
+- 本地数据位置与清理方式见 [隐私说明](docs/privacy.md)。WebView 使用系统默认的持久化网站数据存储，cookies、缓存与 local storage 写在 `~/Library/WebKit/<bundle id>/` 与 `~/Library/Caches/<bundle id>/` 下；应用当前没有内置的“清空网站数据”入口，只能退出应用后手动删除。
 
 ## 参与贡献
 
@@ -107,7 +107,7 @@ open "$HOME/Applications/Pi-Web-Desktop.app"
 2. 大功能、架构调整和安全相关改动先开 Issue 并满足 Definition of Ready（见 [Orca 工作流](docs/orca-workflow.md)）。
 3. 用 `issue-<number>-<slug>` 建分支，一个 Issue 对应一个分支、一个 PR。
 4. PR 必须关联 Issue，并按 [PR 模板](.github/pull_request_template.md)填写变更说明、验收证据、安全与兼容性影响。维护者验证后用 squash merge 合入 `main`。
-5. 提交前按 [贡献指南](CONTRIBUTING.md)运行构建、身份检查、smoke 和 personal-data 扫描。
+5. 提交前按 [贡献指南](CONTRIBUTING.md)运行构建、身份检查、smoke 和仓库文本（personal-data）扫描。
 
 标签体系统一使用 `type:`（bug/feature/maintenance/documentation/security）、`area:`（app/service/diagnostics/security/updates/build-release/documentation）、`status:`（needs-decision/ready/blocked/needs-reproduction）和 `priority:`（P0–P3）。当前没有任何公开 Release，安装或升级前请先看[发布页](https://github.com/Su-luoya/pi-web-desktop/releases)是否为空白。
 
@@ -121,6 +121,7 @@ open "$HOME/Applications/Pi-Web-Desktop.app"
 - CI 只使用 GitHub 托管的 `macos-14` runner，工作流权限是只读的 `contents: read`，不使用 secrets。
 - 所有 GitHub Actions 按**提交 SHA 固定**（例如 `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`），不使用浮动 tag。
 - `.github/dependabot.yml` 每周检查 GitHub Actions 固定版本的更新，并通过带 `dependencies`、`github_actions` 标签的 PR 提出升级，必须走正常评审和 CI。
+- CI 目前**没有**通用 secret scanning：`.github/workflows/build.yml:54-56` 只有一条 personal-data `git grep`（几个固定字面量），`./Scripts/check-identity.sh:433-446` 用的是另一组固定模式；两者都不是凭据/密钥扫描，能力边界见 [贡献指南](CONTRIBUTING.md#personal-data-与-secret-扫描能力)。通用 secret scan 属 [#11](https://github.com/Su-luoya/pi-web-desktop/issues/11) 的范围，当前发布门槛里不含它。
 
 ## 项目文档
 

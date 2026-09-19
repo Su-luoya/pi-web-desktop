@@ -142,6 +142,7 @@ smoke 变量只影响那一次启动：
 - 启动 smoke 跳过依赖门控：`applicationDidFinishLaunching` 在 smoke 分支直接返回，不运行 `DependencyChecker`、不等待后台结果、不显示诊断窗口；因此即使本机缺少 Node.js/Pi/Pi Web，仍然验证主窗口建立与退出路径。
 - 诊断 smoke 不运行真实探针：`DiagnosticsSmokeFixture` 用假命令 runner、空文件系统和固定端口探针生成确定性报告（系统项用 `DependencyChecker.minimumMacOSVersion` 而不是另一份版本字面值），但路由、诊断行、状态页和窗口都由真实代码生成；前置固定判定为缺失，所以它同时验证了门控路径。
 - 建立窗口/诊断页后向 stdout 打印标记并以 0 退出；临时目录创建失败、主窗口未建立或诊断夹具不再进入诊断页时向 stderr 报错并以 1 退出，不打印标记。
+- 不隔离 WebKit 数据：启动模式仍会创建默认数据存储的 `WKWebView`（`Sources/WebViewController.swift:37` 的 `.default()`，`Sources/` 里没有任何 `WKWebsiteDataStore` 删除调用）。实测跑一次 `./Scripts/smoke.sh` 会更新 `~/Library/WebKit/<bundle id>/WebsiteData/` 下已有文件的 mtime/size，所以临时目录只隔离应用自己的 support 目录、日志与 UserDefaults，**不**隔离 WebKit 的持久化网站数据；位置与删除方式见 [隐私说明](privacy.md#本地数据一览与删除)。
 
 变量未设置时行为完全不变。smoke 只验证窗口、诊断页与退出路径，不验证服务功能，也不替代 `xcodebuild` 的构建和 `xcodebuild test` 的单元测试：本机只有 Command Line Tools 时无法运行 XCTest，smoke 不声称覆盖测试用例。
 
@@ -156,11 +157,18 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 ./Scripts/smoke.sh
 ```
 
-`./Scripts/check-identity.sh` 退出 0 表示身份、版本与服务默认值一致，并且仓库文本扫描通过（它同时覆盖 tailnet DNS 后缀、CGNAT 私网地址和固定本地代理端点）。`xcodebuild build` / `xcodebuild test` 需要完整 Xcode：`xcode-select -p` 指向 Command Line Tools 时这两条命令会失败，此时以上面的脚本链替代，并在 PR 中说明 XCTest 由 CI 的 `macos-14` job 覆盖。
+`./Scripts/check-identity.sh` 退出 0 表示身份、版本与服务默认值一致，并且仓库文本扫描通过。`xcodebuild build` / `xcodebuild test` 需要完整 Xcode：`xcode-select -p` 指向 Command Line Tools 时这两条命令会失败，此时以上面的脚本链替代，并在 PR 中说明 XCTest 由 CI 的 `macos-14` job 覆盖。
 
-### personal-data 扫描
+### personal-data 与 secret 扫描能力
 
-CI（`.github/workflows/build.yml` 的 `Check for accidental personal data` 步骤）用 `git grep` 检查仓库文本里没有私人默认值。本地复现时从工作流里取出同一条命令再执行，避免在文档、注释或脚本里复制模式字面值：
+CI（`.github/workflows/build.yml` 的 `Check for accidental personal data` 步骤，第 54-56 行）和 `Scripts/check-identity.sh` 的仓库文本扫描（`Scripts/check-identity.sh:428-447`）都只是**模式有限的字面量检查**，不是通用 secret scanner：
+
+- CI 只跑一条 `git grep -nE`，匹配几个固定字面量（一个私有 VPN 厂商名的小写形式、一个固定本地代理端点、以 `/Users` 开头的主目录路径），并排除 `*.icns`、该 workflow 自身和 `Scripts/check-identity.sh`。
+- `Scripts/check-identity.sh` 用另一组模式：小写的私有 VPN 主机名、tailnet DNS 后缀、CGNAT 私网地址段、以 `/Users` 开头的路径、固定本地代理端点，再加 `MARKETING_VERSION` 字面值（限 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/`）。
+
+两组检查都不覆盖凭据、token、私钥或其他未列入的私网地址。通用 secret scan 尚未实现，属 [#11](https://github.com/Su-luoya/pi-web-desktop/issues/11) 的范围；在它落地前不要声称已通过 secret scan。
+
+本地复现 CI 的那条命令时，从工作流里取出再执行，避免在文档、注释或脚本里复制模式字面值：
 
 ```bash
 SCAN=$(awk '/^ *! git grep/{sub(/^ */, ""); print; exit}' .github/workflows/build.yml)

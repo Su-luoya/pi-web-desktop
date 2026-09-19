@@ -22,7 +22,7 @@ Closes #
 - [ ] `./Scripts/check-identity.sh` 退出 0
 - [ ] `./Scripts/smoke.sh`（不适用时说明原因）
 - [ ] `codesign --verify --deep --strict build/Pi-Web-Desktop.app`
-- [ ] personal-data 扫描通过（`Scripts/check-identity.sh` 或工作流里的 `git grep`）
+- [ ] personal-data 文本扫描通过（`./Scripts/check-identity.sh` 与 CI 的 `git grep`）；两者都只是固定模式检查，不是通用 secret scan（[#11](https://github.com/Su-luoya/pi-web-desktop/issues/11)）
 - [ ] Swift 代码变更已跑 `xcodebuild build` / `xcodebuild test`；无法执行时说明由哪一步 CI 覆盖
 - [ ] 已检查 diff，没有凭据、私人路径、主机名、代理信息或 token
 - [ ] 已同步更新用户可见文档

@@ -1,61 +1,135 @@
-# 发布说明
+# 发布流程
 
-上游归属、支持矩阵与“未承诺”事项见 [README](../README.md#支持矩阵)。发布任何二进制前都必须重新确认那份矩阵，不得在 Release 说明里扩大承诺。
+本文描述当前 alpha 通道的真实流程；结论以仓库里的脚本与 workflow 为准：
+`Scripts/build.sh`、`Scripts/check-release-version.sh`、`Scripts/package-release.sh`、
+`Scripts/check-identity.sh`、`.github/workflows/release.yml`。
+发布前的逐项门槛见 [alpha 发布门槛清单](alpha-release-checklist.md)。
 
-## 当前状态
+## 现状（先读这一段）
 
-- 本仓库当前没有公开的预编译 Release；`0.1.0-alpha.1` 可以从源码构建，ZIP 打包流程见下。
-- alpha 二进制是 **ad-hoc 签名**，没有 Developer ID 证书，**未公证**。Gatekeeper 默认拒绝打开，用户必须在“系统设置 → 隐私与安全性”里手动批准。
-- 没有 x86_64 产物，也不承诺 Intel Mac 支持。
-- 项目无 SLA：不承诺响应、修复或发布时限。
+- 本项目**没有 Apple Developer 账号**：不执行 Developer ID 签名，也不执行 Apple 公证。
+- 唯一的签名是 ad-hoc（`codesign --force --deep --sign -`）。它只能证明 bundle 打包后没有被改动，
+  不包含开发者身份；`codesign -dv --verbose=4` 会显示 `Signature=adhoc` 与 `TeamIdentifier=not set`。
+- `spctl -a -vv` 会拒绝该应用（退出码非 0），这是未公证 ad-hoc 产物的预期结果。
+- 因此任何文档、Release 说明或回复都不允许声称产物“已签名”或“已公证”，也不允许指导用户关闭
+  Gatekeeper。准确说法是“ad-hoc 签名、未公证”。
+- 安装限制由应用层面承担：首次打开需要在“系统设置 → 隐私与安全性”中针对该应用放行，
+  或在 Finder 中右键打开。这是用户对自己机器的选择，不是关闭 Gatekeeper。
 
 ## 版本来源与 Git tag
 
-应用身份与版本的唯一来源是 `Configuration/AppIdentity.xcconfig` 中的 `MARKETING_VERSION` 与 `CURRENT_PROJECT_VERSION`；`PiWebDesktop.xcodeproj` 通过 `baseConfigurationReference` 继承该文件，`Scripts/build.sh` 也从同一文件生成 `Info.plist`。因此：
+应用身份与版本的唯一来源是 `Configuration/AppIdentity.xcconfig` 中的 `MARKETING_VERSION`
+与 `CURRENT_PROJECT_VERSION`；`PiWebDesktop.xcodeproj` 通过 `baseConfigurationReference`
+继承该文件，`Scripts/build.sh` 也从同一文件生成 `Info.plist`。因此：
 
-- tag 名称固定为 `v<MARKETING_VERSION>`，例如 `MARKETING_VERSION = 0.1.0-alpha.1` 对应 tag `v0.1.0-alpha.1`；tag 与该值不一致时不得发布。
-- 打 tag 前先提交版本改动，再运行 `./Scripts/build.sh && ./Scripts/check-identity.sh`，确认 xcconfig、Xcode 工程、已构建 bundle 的 `Info.plist` 与本地服务默认值一致。
-- `Scripts/check-identity.sh` 会拒绝 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/` 里出现 `MARKETING_VERSION` 的字面值；不要在代码、脚本或模板中复制版本号。
-- 发布说明里同时写明 `CFBundleShortVersionString`（即 `MARKETING_VERSION`）、`CFBundleVersion`（即 `CURRENT_PROJECT_VERSION`）和 bundle identifier，便于用户核对下载的 ZIP。
+- tag 名称固定为 `v<MARKETING_VERSION>`（例如 `MARKETING_VERSION = 0.1.0-alpha.1` 对应
+  tag `v0.1.0-alpha.1`）；tag 与该值不一致时不得发布。
+- 打 tag 前先提交版本改动，再运行 `./Scripts/build.sh && ./Scripts/check-identity.sh`，
+  确认 xcconfig、Xcode 工程、已构建 bundle 的 `Info.plist` 与本地服务默认值一致。
+- `Scripts/check-identity.sh` 会拒绝 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、
+  `PiWebDesktopTests/` 里出现 `MARKETING_VERSION` 的字面值；不要在代码、脚本或模板中复制版本号。
+- Release 说明里同时写明 `CFBundleShortVersionString`（即 `MARKETING_VERSION`）与
+  `CFBundleVersion`（即 `CURRENT_PROJECT_VERSION`），便于用户核对下载的 ZIP。
 
-## 打包与校验
+### `Scripts/check-release-version.sh`
 
-```bash
+- `./Scripts/check-release-version.sh v<MARKETING_VERSION>`：完整比较。tag 必须等于
+  `v<MARKETING_VERSION>`；当 tag 带数字预发布计数（`v0.1.0-alpha.1` 里的 `1`）时，
+  该计数还必须等于 `CURRENT_PROJECT_VERSION`。不一致时退出 1 并给出修正提示。
+- 不带参数且环境里没有 `GITHUB_REF_NAME`：打印期望的 tag，跳过比较，退出 0。
+  这是本地 checkout 的默认情况，演练不需要先打 tag。
+- `--print-tag`：只输出 `v<MARKETING_VERSION>`；workflow 在非 tag ref 的演练里用它。
+- 版本值只从 xcconfig 读取，脚本里不写版本字面值。
+
+## 发布前门槛
+
+见 [alpha 发布门槛清单](alpha-release-checklist.md)。简述：`main` CI 为绿；安全审查无阻断项；
+tag 与 bundle 版本一致；真机 smoke 记录写入 Release Issue；checksum 与 Release 说明一致；
+Release 标记 prerelease；说明中写明未公证与安装限制；上一版资产仍可下载。
+
+## 本地演练（不需要完整 Xcode，不 push tag）
+
+```sh
+sh -n Scripts/*.sh
+git diff --check
 ./Scripts/build.sh
 ./Scripts/check-identity.sh
+./Scripts/check-release-version.sh "$(./Scripts/check-release-version.sh --print-tag)"
+./Scripts/package-release.sh --tag v<MARKETING_VERSION>
 ./Scripts/smoke.sh
-ditto -c -k --sequesterRsrc --keepParent build/Pi-Web-Desktop.app Pi-Web-Desktop-alpha.zip
-shasum -a 256 Pi-Web-Desktop-alpha.zip > Pi-Web-Desktop-alpha.zip.sha256
-shasum -a 256 -c Pi-Web-Desktop-alpha.zip.sha256
 ```
 
-- `Scripts/build.sh` 已经对 app 做 ad-hoc 签名并在结束时执行 `codesign --verify --deep --strict`；打包前可以再手动确认一次签名产物完整。
-- `ditto -c -k --sequesterRsrc --keepParent` 是 CI 使用的同一条打包命令（见 `.github/workflows/build.yml` 的 `Package smoke artifact` 步骤）；`--sequesterRsrc` 会把 Finder 元数据放进 `__MACOSX/`，这是预期结果。
-- 发布说明中给出 ZIP 的 SHA-256 与校验方法。用户侧只需比较 `shasum -a 256 Pi-Web-Desktop-alpha.zip` 的输出。
-- 解压后可以用 `plutil -extract CFBundleShortVersionString raw -o - Pi-Web-Desktop.app/Contents/Info.plist` 核对版本，用 `codesign --verify --deep --strict Pi-Web-Desktop.app` 核对签名完整性。
+- 只有 `xcodebuild` 需要完整 Xcode；CI 之外不要求本机安装完整 Xcode。
+- `Scripts/package-release.sh` 只打包已经构建好的 bundle（默认 `build/Pi-Web-Desktop.app`）；
+  bundle 不存在时加 `--build`，它会先运行 `./Scripts/build.sh`。
+- 产物写入 `dist/`（已被 `.gitignore` 忽略）：`Pi-Web-Desktop-<版本>.zip`、
+  `<...>.zip.sha256`、`<...>.evidence.md` 与 `release-metadata.env`。
+- 证据文件包含运行机器的路径与 macOS 版本，不要把它提交到仓库，也不要把 `dist/` 加进版本控制。
 
-## Release 前置检查
+## Tag 驱动 workflow（`.github/workflows/release.yml`）
 
-发布前必须满足：
+触发方式：
 
-- `main` 上的提交通过构建、测试、shell 语法检查、身份一致性检查和 personal-data 文本扫描；CI 的 `build` 工作流在 GitHub 托管的 `macos-14` runner 上全绿。CI 目前**没有**通用 secret scan 步骤：唯一的文本检查是 `.github/workflows/build.yml:54-56` 的 `git grep` 字面量检查和 `./Scripts/check-identity.sh:433-446` 的固定模式集，补齐真正的 secret scan 是 [#11](https://github.com/Su-luoya/pi-web-desktop/issues/11) 的范围，不是当前门槛。
-- Apple Silicon + macOS 14 或以上真机完成 smoke test。
-- Release Issue 记录实际测试的 macOS、CPU、Node.js、Pi 和 Pi Web 版本。
-- `./Scripts/check-identity.sh` 退出 0，且 ZIP 与 tag 都对应同一个 `MARKETING_VERSION`。
-- ZIP 使用 ad-hoc 签名，并在 Release 说明里明确写出 `not notarized`，同时给出 SHA-256、已知问题、安装限制和回退说明。
+- push 受保护 tag `v*`：完整发布路径；
+- `workflow_dispatch`：演练。同样的构建、校验、打包与 Release 说明渲染，但只上传
+  Actions artifact `pi-web-desktop-alpha`，**不创建 Release**，即使 ref 本身是 tag。
+  `tag` 输入为空且 ref 不是 tag 时，workflow 用
+  `./Scripts/check-release-version.sh --print-tag` 从 xcconfig 推导 tag 再执行同一套比较。
 
-未公证的 ZIP 不是稳定安装包。不要建议用户全局关闭 Gatekeeper；如果用户明确下载并理解风险，说明如何针对单个应用处理 macOS 的阻止提示。
+`build` job（`macos-14`，`permissions: contents: read`）：
 
-## 发布说明必须包含
+1. checkout（`actions/checkout` 固定到完整 commit SHA）；
+2. 解析 tag 并运行 `./Scripts/check-release-version.sh <tag>`；
+3. `sh -n` 检查发布相关脚本语法；
+4. `xcodebuild build`（`-sdk macosx -arch arm64`、`CODE_SIGN_STYLE=Manual`、`CODE_SIGN_IDENTITY=-`）：
+   这是工程构建与身份交叉检查，发布产物不来自这里；
+5. `./Scripts/build.sh` 构建 arm64 发布产物；
+6. `./Scripts/check-identity.sh` 同时核对 Xcode 产物与脚本产物；
+7. `./Scripts/smoke.sh`（两种模式）；
+8. `./Scripts/package-release.sh`：`codesign --verify --deep --strict`、
+   `codesign -dv --verbose=4`、`spctl -a -vv`、ZIP、SHA-256、证据与元数据；
+9. 用 `docs/release-notes-template.md` 渲染 Release 说明：替换 `{{VERSION}}`、`{{BUILD}}`、
+   `{{ZIP_NAME}}`、`{{SHA256}}`，并在固定位置插入证据段落；渲染后若仍有 `{{...}}` 占位符
+   或缺少 checksum 则直接失败；
+10. 把 `dist/` 上传为 artifact。
 
-- 版本号、构建号、bundle identifier 与 tag。
-- ZIP 的 SHA-256。
-- 支持矩阵现状：Apple Silicon、macOS 14 或以上、ad-hoc 签名、未公证、无 Intel 承诺、无 SLA。
-- 已知问题与不包含的功能（例如尚未实现的自动更新）。
-- 安装限制与回退方式。
-- 一句明确的远程访问提示：默认只监听 loopback，密码认证不等于传输加密。
+`publish` job（`ubuntu-latest`，只有这里授予 `contents: write`）：
 
-**不得**出现下列表述（这些词在本文件里只作为禁止清单出现，不作为项目现状的描述）：稳定版、已签名（指 Developer ID）、已公证、保证兼容、支持 Intel、自动更新已就绪。ad-hoc 签名只能写成“ad-hoc 签名”，并且必须与“未公证”同时出现。
+- 下载 artifact，用 `sha256sum -c` 复核 checksum（与用户校验命令一致）；
+- 仅在 tag push 时运行：如果同名草稿已存在，只删除草稿再重建，从不改动已发布版本；
+- 创建**草稿** prerelease（`gh release create --prerelease --draft`），上传 ZIP、`.sha256`
+  与证据 Markdown。资产在这之前不会公开可见。
+
+第三方 Actions 全部固定到完整 commit SHA；workflow 顶层权限为 `contents: read`，
+写权限只出现在 `publish` job。
+
+## Release 说明与证据段落
+
+Release 说明由 `docs/release-notes-template.md` 渲染。`Scripts/package-release.sh` 生成的
+“签名与公证证据”段落会写入固定位置，内容包括：
+
+- `codesign --verify --deep --strict` 的退出码（必须为 0）；
+- `codesign -dv --verbose=4` 原始输出，其中必须出现 `Signature=adhoc` 与 `TeamIdentifier=not set`；
+- `spctl -a -vv` 原始输出与退出码（未公证 ad-hoc 应用被拒绝是预期结果）；
+- ZIP 名称、SHA-256、构建提交、打包环境（明确标注它不等同于真机实测环境）。
+
+如果 bundle 的签名不是 `adhoc`，`package-release.sh` 会拒绝打包，因为现有的说明与安装步骤
+只描述未公证的 alpha。真机实测版本（机器、macOS、Node.js、Pi、Pi Web）来自 Release Issue，
+由维护者在发布草稿前填入；workflow 不会用 CI runner 的版本冒充真机记录，未填写的字段会以
+`<待填写>` 保留在说明里。
+
+发布流程：workflow 结束 → 打开草稿 Release → 从 Release Issue 填入真机记录与已知问题 →
+确认没有 `<待填写>`、checksum 与 Issue 记录一致 → 发布（保持 prerelease）。
+
+## 可复现性与诚实的边界
+
+- 流程是脚本化的：本地演练与 CI 运行同一批脚本，tag、版本与 checksum 都能核对。
+- 但本项目**不承诺 bit-for-bit 可复现**：ad-hoc 签名、CDHash 与编译器版本都会影响二进制字节，
+  同一提交在不同机器上构建出的 ZIP 不一定相同。可复现的是步骤与校验值；ZIP 的 SHA-256
+  记录的是“这一个具体产物”。
+- 不要为了对齐 checksum 而替换已发布的资产；版本内容有变化就发布新的 alpha。
+- 发布记录（Release Issue、Release 说明、证据文件）必须与实际产物一致；宁可延迟发布，
+  也不要补写没有实际运行过的验证结果。
 
 ## 版本门槛
 
@@ -67,7 +141,17 @@ shasum -a 256 -c Pi-Web-Desktop-alpha.zip.sha256
 
 ## 回退
 
-更新前记录当前版本。只有安装来源和工具提供可靠恢复路径时才执行回滚；不能承诺所有 npm、Git package、本地路径或非标准安装都能自动恢复。更新失败时优先保留可运行的旧版本，并把完整但已脱敏的日志留给用户查看。
+- 草稿阶段：在 Actions 里重跑 workflow，或在草稿上补正说明；确需删除时
+  `gh release delete <tag> --yes` 只删除草稿，tag 不受影响。
+- 已发布版本：不要静默替换 ZIP 或 checksum。在 Release 说明与 Release Issue 中标注问题，
+  必要时发布新的 alpha（例如 `v0.1.0-alpha.2`）并说明回退路径。
+- 用户侧回退：保留上一版 ZIP 与 checksum，重新解压替换 `Pi-Web-Desktop.app` 即可；
+  应用没有系统级常驻组件，删除应用包即卸载。服务配置保留在用户目录，不会被回退自动清理。
+- 更新前记录当前版本。只有安装来源和工具提供可靠恢复路径时才执行回滚；不能承诺所有 npm、
+  Git package、本地路径或非标准安装都能自动恢复。更新失败时优先保留可运行的旧版本，
+  并把完整但已脱敏的日志留给用户查看。
+- 如果 tag 推送后需要撤回：先删除草稿 Release，再删除 tag
+  （`git push origin :refs/tags/<tag>`），并在 Release Issue 记录原因；不要重复使用已公开的版本号。
 
 ## 应用自身更新
 

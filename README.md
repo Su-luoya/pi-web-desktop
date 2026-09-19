@@ -130,6 +130,8 @@ open "$HOME/Applications/Pi-Web-Desktop.app"
 - [开发](docs/development.md)
 - [安全设计](docs/security-ownership.md)
 - [发布](docs/releasing.md)
+- [Alpha 发布门槛清单](docs/alpha-release-checklist.md)
+- [Release notes 模板](docs/release-notes-template.md)
 - [隐私](docs/privacy.md)
 - [Orca 工作流](docs/orca-workflow.md)
 - [贡献指南](CONTRIBUTING.md)

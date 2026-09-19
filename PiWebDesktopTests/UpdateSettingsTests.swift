@@ -35,7 +35,9 @@ final class UpdateSettingsTests: XCTestCase {
         latest: String? = nil,
         failure: UpdateCheckFailure? = nil,
         ignoredVersion: String? = nil,
-        checkedAt: Date? = nil
+        checkedAt: Date? = nil,
+        origin: UpdateCheckOrigin = .unavailable,
+        cacheWrittenAt: Date? = nil
     ) -> UpdateCheckResult {
         UpdateCheckResult(
             target: UpdateCheckTarget(category: category, packageName: packageName),
@@ -48,7 +50,9 @@ final class UpdateSettingsTests: XCTestCase {
             httpStatusCode: nil,
             checkedAt: checkedAt ?? referenceDate,
             lastSuccessAt: checkedAt ?? referenceDate,
-            ignoredVersion: ignoredVersion
+            ignoredVersion: ignoredVersion,
+            origin: origin,
+            cacheWrittenAt: cacheWrittenAt
         )
     }
 
@@ -393,6 +397,67 @@ final class UpdateSettingsTests: XCTestCase {
         XCTAssertTrue(line.contains("策略：关闭"))
         XCTAssertTrue(line.contains("结果：失败（网络不可用）"))
         XCTAssertTrue(line.contains("下次检查：已关闭"))
+    }
+
+    /// 缓存回退的状态必须标注来源与缓存写入时间：界面与诊断不能把“上次检查
+    /// 结果显示有更新”读成本次已验证（GitHub #59）。
+    func testCategoryStatusAnnotatesCacheOriginWithWriteTime() {
+        let cachedAt = referenceDate.addingTimeInterval(-3600)
+        let cached = result(
+            category: .piWeb,
+            status: .updateAvailable,
+            installed: "0.9.0",
+            latest: "0.9.2",
+            origin: .cachedFallback,
+            cacheWrittenAt: cachedAt
+        )
+
+        let statuses = UpdateCategoryStatusBuilder.statuses(
+            preferences: .factoryDefaults,
+            intervals: .standard,
+            cache: .empty,
+            ignoredVersions: .empty,
+            results: [cached]
+        )
+        let piWeb = statuses.first { $0.category == .piWeb }
+        XCTAssertEqual(piWeb?.status, .updateAvailable)
+        XCTAssertEqual(piWeb?.latestVersion, "0.9.2")
+        XCTAssertEqual(piWeb?.origin, .cachedFallback)
+        XCTAssertEqual(piWeb?.cacheWrittenAt, cachedAt)
+
+        let line = UpdateStatusPresenter.line(
+            for: piWeb ?? UpdateCategoryStatus(category: .piWeb),
+            policy: .daily,
+            format: fixedFormat
+        )
+        XCTAssertTrue(line.contains("结果：可更新 0.9.2"))
+        XCTAssertTrue(line.contains("来源：本机缓存"))
+        XCTAssertTrue(line.contains(fixedFormat(cachedAt)))
+        XCTAssertFalse(line.contains("已验证"))
+    }
+
+    /// 本次网络结果不产生缓存来源标注。
+    func testCategoryStatusOmitsCacheAnnotationForNetworkOrigin() {
+        let fresh = result(
+            category: .piWeb,
+            status: .updateAvailable,
+            installed: "0.9.0",
+            latest: "0.9.2",
+            origin: .network
+        )
+        let statuses = UpdateCategoryStatusBuilder.statuses(
+            preferences: .factoryDefaults,
+            intervals: .standard,
+            cache: .empty,
+            ignoredVersions: .empty,
+            results: [fresh]
+        )
+        let line = UpdateStatusPresenter.line(
+            for: statuses.first { $0.category == .piWeb } ?? UpdateCategoryStatus(category: .piWeb),
+            policy: .daily,
+            format: fixedFormat
+        )
+        XCTAssertFalse(line.contains("本机缓存"))
     }
 
     func testCategoryStatusBuilderPrefersAvailableUpdateAcrossPackages() {

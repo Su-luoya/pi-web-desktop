@@ -291,6 +291,30 @@ final class UpdateCheckerTests: XCTestCase {
         )
     }
 
+    /// 一条缓存条目的 JSON 片段；`overrides` 用原始 JSON 片段覆盖字段，便于构造
+    /// “字段类型错误 / 非法版本 / 未来时间戳 / 目标 id 不一致”等被改写的缓存。
+    private func cacheEntryJSON(_ overrides: [String: String] = [:]) -> String {
+        var fields: [String: String] = [
+            "targetID": "\"desktop-app\"",
+            "category": "\"desktop-app\"",
+            "latestVersion": "\"0.2.0\"",
+            "status": "\"update-available\"",
+            "confidence": "\"verified\"",
+            "lastAttemptAt": "\"2023-11-14T22:13:20Z\"",
+            "lastSuccessAt": "\"2023-11-14T22:13:20Z\""
+        ]
+        for (key, value) in overrides { fields[key] = value }
+        let body = fields.keys.sorted().map { "\"\($0)\":\(fields[$0] ?? "null")" }.joined(separator: ",")
+        return "{\(body)}"
+    }
+
+    private func cacheFileJSON(
+        schemaVersion: Int = UpdateCheckCacheFile.currentSchemaVersion,
+        entries: [String]
+    ) -> Data {
+        Data("{\"schemaVersion\":\(schemaVersion),\"entries\":[\(entries.joined(separator: ","))]}".utf8)
+    }
+
     private func makeTemporaryDirectory() -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("pi-web-desktop-update-check-tests-\(UUID().uuidString)", isDirectory: true)
@@ -711,7 +735,9 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertEqual(result?.displayText.contains("301"), true)
     }
 
-    func testNotModifiedRefreshesSuccessFromCache() {
+    /// 304 是成功的网络往返（freshness 仍为 .fresh），但版本值来自缓存文件，
+    /// 因此 origin 是缓存回退，只用于提示（GitHub #59）。
+    func testNotModifiedKeepsFreshnessButMarksCacheOrigin() {
         var cached = UpdateCheckCacheFile()
         let lastSuccess = referenceDate.addingTimeInterval(-30 * 3600)
         cached.upsert(makeCachedEntry(
@@ -737,6 +763,9 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertEqual(result?.confidence, .verified)
         XCTAssertNil(result?.failure)
         XCTAssertEqual(result?.latestVersion, desktopInstalledVersion)
+        XCTAssertEqual(result?.origin, .cachedFallback)
+        XCTAssertEqual(result?.cacheWrittenAt, lastSuccess)
+        XCTAssertFalse(result?.origin.isEligibleForAutomaticInstall ?? true)
         let entry = world.store.file.entry(for: UpdateCheckTarget(category: .desktopApp).id)
         XCTAssertEqual(entry?.lastSuccessAt, referenceDate)
         XCTAssertEqual(entry?.etag, "\"v1\"")
@@ -818,6 +847,109 @@ final class UpdateCheckerTests: XCTestCase {
         let request = world.client.requests.first { $0.url.absoluteString.contains("scoped-pkg") }
         XCTAssertNotNil(request)
         XCTAssertEqual(request?.url.absoluteString, "https://registry.npmjs.org/@demo%2Fscoped-pkg/latest")
+    }
+
+    // MARK: - 结果来源（GitHub #59 / alpha.3 安全审查 A-1）
+
+    /// 本次网络结果：origin = network，没有缓存写入时间与缓存标注。
+    func testFreshNetworkResultsAreMarkedAsNetworkOrigin() {
+        let world = makeWorld(responder: automaticResponder())
+
+        world.checker.start(inventory: fullInventory())
+
+        XCTAssertEqual(world.checker.summary.results.count, 4)
+        for result in world.checker.summary.results {
+            XCTAssertEqual(result.origin, .network)
+            XCTAssertEqual(result.freshness, .fresh)
+            XCTAssertNil(result.cacheWrittenAt)
+            XCTAssertNil(result.cacheOriginAnnotation)
+            XCTAssertTrue(result.origin.isEligibleForAutomaticInstall)
+        }
+    }
+
+    /// 网络失败沿用缓存结论：origin = cachedFallback，带缓存写入时间；提示文本
+    /// 标注“缓存”与时间，且不含“已验证/官方”之类误导措辞。
+    func testOfflineFallbackIsMarkedAsCacheOriginWithWriteTime() {
+        var cached = UpdateCheckCacheFile()
+        let lastSuccess = referenceDate.addingTimeInterval(-3600)
+        cached.upsert(makeCachedEntry(
+            category: .desktopApp,
+            latestVersion: "0.2.0",
+            status: .updateAvailable,
+            lastAttemptAt: lastSuccess,
+            lastSuccessAt: lastSuccess
+        ))
+        let world = makeWorld(cached: cached, responder: { _ in .failure(.offline) })
+
+        world.checker.checkNow(
+            triggeredBy: .manual,
+            inventory: UpdateCheckInventory(desktopAppVersion: desktopInstalledVersion)
+        )
+
+        let result = world.checker.summary.result(for: UpdateCheckTarget(category: .desktopApp).id)
+        XCTAssertEqual(result?.status, .updateAvailable)
+        XCTAssertEqual(result?.freshness, .cached)
+        XCTAssertEqual(result?.origin, .cachedFallback)
+        XCTAssertEqual(result?.cacheWrittenAt, lastSuccess)
+        XCTAssertFalse(result?.origin.isEligibleForAutomaticInstall ?? true)
+        let text = result?.displayText ?? ""
+        XCTAssertTrue(text.contains("缓存"))
+        XCTAssertTrue(text.contains(UpdateCheckTimestamp.text(lastSuccess)))
+        XCTAssertFalse(text.contains("已验证"))
+        XCTAssertFalse(text.contains("官方"))
+        XCTAssertEqual(result?.cacheOriginAnnotation?.contains("只用于提示"), true)
+    }
+
+    /// 没有缓存可用时（失败、缓存被丢弃）结论是 unavailable：连提示版本都没有。
+    func testFailureWithoutCacheIsMarkedAsUnavailableOrigin() {
+        let world = makeWorld(responder: { _ in .failure(.offline) })
+
+        world.checker.checkNow(
+            triggeredBy: .manual,
+            inventory: UpdateCheckInventory(desktopAppVersion: desktopInstalledVersion)
+        )
+
+        let result = world.checker.summary.result(for: UpdateCheckTarget(category: .desktopApp).id)
+        XCTAssertEqual(result?.status, .unknown)
+        XCTAssertEqual(result?.freshness, UpdateResultFreshness.none)
+        XCTAssertEqual(result?.origin, .unavailable)
+        XCTAssertNil(result?.latestVersion)
+        XCTAssertNil(result?.cacheWrittenAt)
+        XCTAssertNil(result?.cacheOriginAnnotation)
+        XCTAssertFalse(result?.origin.isEligibleForAutomaticInstall ?? true)
+    }
+
+    /// 本机版本未知而不发请求（skip）：有缓存版本时标为缓存回退，无缓存时不可用。
+    func testSkippedChecksCarryCacheOriginOnlyWhenACachedVersionExists() {
+        var cached = UpdateCheckCacheFile()
+        let lastSuccess = referenceDate.addingTimeInterval(-3600)
+        cached.upsert(makeCachedEntry(
+            category: .piCLI,
+            latestVersion: "1.9.0",
+            status: .updateAvailable,
+            lastAttemptAt: lastSuccess,
+            lastSuccessAt: lastSuccess
+        ))
+        let withCache = makeWorld(cached: cached, responder: automaticResponder())
+        withCache.checker.checkNow(
+            triggeredBy: .manual,
+            inventory: UpdateCheckInventory(desktopAppVersion: desktopInstalledVersion, piWebVersion: piWebInstalledVersion)
+        )
+        let piCLI = withCache.checker.summary.result(for: UpdateCheckTarget(category: .piCLI).id)
+        XCTAssertEqual(piCLI?.failure, .installedVersionUnknown)
+        XCTAssertEqual(piCLI?.origin, .cachedFallback)
+        XCTAssertEqual(piCLI?.cacheWrittenAt, lastSuccess)
+        XCTAssertEqual(piCLI?.latestVersion, "1.9.0")
+
+        let withoutCache = makeWorld(responder: automaticResponder())
+        withoutCache.checker.checkNow(
+            triggeredBy: .manual,
+            inventory: UpdateCheckInventory(desktopAppVersion: desktopInstalledVersion, piWebVersion: piWebInstalledVersion)
+        )
+        let skipped = withoutCache.checker.summary.result(for: UpdateCheckTarget(category: .piCLI).id)
+        XCTAssertEqual(skipped?.failure, .installedVersionUnknown)
+        XCTAssertEqual(skipped?.origin, .unavailable)
+        XCTAssertEqual(requestCount(withoutCache, category: .piCLI), 0)
     }
 
     // MARK: - 版本比较
@@ -1073,6 +1205,182 @@ final class UpdateCheckerTests: XCTestCase {
 
         try Data("{\"schemaVersion\":99,\"entries\":[]}".utf8).write(to: fileURL)
         XCTAssertEqual(store.load(), .empty)
+    }
+
+    // MARK: - 缓存结构校验（GitHub #59）
+
+    /// 损坏结构、字段类型错误、非法版本与未来时间戳：整份缓存丢弃，不部分采用。
+    func testCacheValidationRejectsMalformedTypesVersionsAndFutureTimestamps() {
+        let now = referenceDate
+
+        var outcome = UpdateCheckCacheFile.validated(Data("{not json".utf8), now: now)
+        XCTAssertEqual(outcome.rejection, .malformedStructure)
+        XCTAssertEqual(outcome.file, .empty)
+
+        // 字段类型错误：latestVersion 是数字而不是字符串。
+        outcome = UpdateCheckCacheFile.validated(
+            cacheFileJSON(entries: [cacheEntryJSON(["latestVersion": "5"])]),
+            now: now
+        )
+        XCTAssertEqual(outcome.rejection, .malformedStructure)
+        XCTAssertEqual(outcome.file, .empty)
+
+        // 非法版本字符串（不是规范化的语义化版本）。
+        outcome = UpdateCheckCacheFile.validated(
+            cacheFileJSON(entries: [cacheEntryJSON(["latestVersion": "\"not-a-version\""])]),
+            now: now
+        )
+        XCTAssertEqual(outcome.rejection, .invalidVersionShape)
+        XCTAssertEqual(outcome.file, .empty)
+
+        // 未来时间戳（超过允许的时钟偏移）。
+        outcome = UpdateCheckCacheFile.validated(
+            cacheFileJSON(entries: [cacheEntryJSON(["lastSuccessAt": "\"2999-01-01T00:00:00Z\""])]),
+            now: now
+        )
+        XCTAssertEqual(outcome.rejection, .timestampInTheFuture)
+        XCTAssertEqual(outcome.file, .empty)
+
+        // 目标 id 与分类不一致。
+        outcome = UpdateCheckCacheFile.validated(
+            cacheFileJSON(entries: [cacheEntryJSON(["targetID": "\"pi-web\""])]),
+            now: now
+        )
+        XCTAssertEqual(outcome.rejection, .invalidEntry)
+        XCTAssertEqual(outcome.file, .empty)
+
+        // 未知枚举值与非法分类。
+        outcome = UpdateCheckCacheFile.validated(
+            cacheFileJSON(entries: [cacheEntryJSON(["category": "\"not-a-category\""])]),
+            now: now
+        )
+        XCTAssertEqual(outcome.rejection, .invalidEntry)
+
+        // schema 版本不是当前版本。
+        outcome = UpdateCheckCacheFile.validated(cacheFileJSON(schemaVersion: 99, entries: []), now: now)
+        XCTAssertEqual(outcome.rejection, .unsupportedSchemaVersion(99))
+        XCTAssertEqual(outcome.file, .empty)
+    }
+
+    /// 条目数超限与文件超大：在解析前就拒绝。
+    func testCacheValidationRejectsTooManyEntriesAndOversizedData() {
+        let entries = (0..<(UpdateCheckCacheFile.maximumEntries + 1)).map { index in
+            cacheEntryJSON([
+                "targetID": "\"pi-packages:pkg-\(index)\"",
+                "category": "\"pi-packages\"",
+                "packageName": "\"pkg-\(index)\""
+            ])
+        }
+        var outcome = UpdateCheckCacheFile.validated(cacheFileJSON(entries: entries), now: referenceDate)
+        XCTAssertEqual(outcome.rejection, .tooManyEntries(entries.count))
+        XCTAssertEqual(outcome.file, .empty)
+
+        let oversized = Data(repeating: 0x7B, count: UpdateCheckCacheFile.maximumFileBytes + 1)
+        outcome = UpdateCheckCacheFile.validated(oversized, now: referenceDate)
+        XCTAssertEqual(outcome.rejection, .tooLarge(bytes: oversized.count))
+        XCTAssertEqual(outcome.file, .empty)
+    }
+
+    /// 一条合法 + 一条被改写：整份缓存丢弃，合法条目也不被采用。
+    func testCacheValidationDropsTheWholeFileWhenOneEntryIsRewritten() {
+        let outcome = UpdateCheckCacheFile.validated(
+            cacheFileJSON(entries: [
+                cacheEntryJSON(),
+                cacheEntryJSON(["targetID": "\"pi-web\"", "category": "\"pi-web\"", "latestVersion": "\"v0.2\""])
+            ]),
+            now: referenceDate
+        )
+
+        XCTAssertEqual(outcome.rejection, .invalidVersionShape)
+        XCTAssertEqual(outcome.file, .empty)
+        XCTAssertNil(outcome.file.entry(for: "desktop-app"))
+    }
+
+    /// 文件存储：未来时间戳与被改写的版本一律丢弃，并给出原因；合法缓存仍然可读。
+    func testCacheFileStoreRejectsRewrittenCacheAndKeepsValidOne() throws {
+        let directory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("update-check-cache.json")
+        let store = UpdateCheckCacheFileStore(fileURL: fileURL, clock: UpdateClock { self.referenceDate })
+
+        try Data("{\"schemaVersion\":1,\"entries\":[]}".utf8).write(to: fileURL)
+        XCTAssertEqual(store.load(), .empty)
+        XCTAssertNil(store.lastLoadRejection)
+
+        try cacheFileJSON(entries: [cacheEntryJSON(["latestVersion": "\"9.9\""])]).write(to: fileURL)
+        XCTAssertEqual(store.load(), .empty)
+        XCTAssertEqual(store.lastLoadRejection, .invalidVersionShape)
+
+        try cacheFileJSON(entries: [cacheEntryJSON(["lastAttemptAt": "\"2999-01-01T00:00:00Z\""])]).write(to: fileURL)
+        XCTAssertEqual(store.load(), .empty)
+        XCTAssertEqual(store.lastLoadRejection, .timestampInTheFuture)
+
+        // 合法缓存（包括从未来偏移到允许范围内的时钟）仍然正常读回。
+        var valid = UpdateCheckCacheFile()
+        valid.upsert(makeCachedEntry(
+            category: .desktopApp,
+            latestVersion: "0.2.0",
+            status: .updateAvailable,
+            lastAttemptAt: referenceDate,
+            lastSuccessAt: referenceDate
+        ))
+        store.save(valid)
+        let reloaded = store.load()
+        XCTAssertNil(store.lastLoadRejection)
+        XCTAssertEqual(reloaded, valid)
+    }
+
+    /// 超大缓存文件在读取前就拒绝（不进入 JSON 解析、不进入内存）。
+    func testCacheFileStoreRejectsOversizedFileBeforeParsing() throws {
+        let directory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("update-check-cache.json")
+        let size = UpdateCheckCacheFile.maximumFileBytes + 1
+        try Data(repeating: 0x20, count: size).write(to: fileURL)
+
+        let store = UpdateCheckCacheFileStore(fileURL: fileURL, clock: UpdateClock { self.referenceDate })
+
+        XCTAssertEqual(store.load(), .empty)
+        XCTAssertEqual(store.lastLoadRejection, .tooLarge(bytes: size))
+    }
+
+    /// 被改写/损坏的缓存进入检查器：丢弃、记录固定原因、当作不可用，不崩溃。
+    func testDiscardedCacheIsLoggedAndTreatedAsUnavailableByTheChecker() throws {
+        let directory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("update-check-cache.json")
+        try Data("{not json".utf8).write(to: fileURL)
+
+        let clock = FixedClock(referenceDate)
+        let client = RecordingUpdateHTTPClient()
+        client.responder = { _ in .failure(.offline) }
+        let store = UpdateCheckCacheFileStore(fileURL: fileURL, clock: clock.clock)
+        let logs = LogSink()
+        let checker = UpdateChecker(
+            httpClient: client,
+            clock: clock.clock,
+            cacheStore: store,
+            scheduler: ImmediateUpdateCheckScheduler(),
+            identity: UpdateCheckIdentity(appName: "Pi Web Desktop", version: desktopInstalledVersion, bundleIdentifier: nil),
+            intervals: .standard,
+            preferences: .factoryDefaults,
+            log: { logs.append($0) }
+        )
+
+        checker.checkNow(triggeredBy: .manual, inventory: fullInventory())
+
+        XCTAssertEqual(store.lastLoadRejection, .malformedStructure)
+        XCTAssertTrue(logs.messages.contains { $0.contains("缓存已丢弃") && $0.contains("无法解析") })
+        XCTAssertEqual(checker.summary.results.count, 4)
+        for result in checker.summary.results {
+            XCTAssertEqual(result.origin, .unavailable)
+            XCTAssertNil(result.latestVersion)
+        }
+        // 日志只写固定结论：不回显缓存内容、临时目录或凭据。
+        let joined = logs.messages.joined(separator: "\n")
+        XCTAssertFalse(joined.contains(directory.path))
+        XCTAssertFalse(joined.contains("not json"))
+        XCTAssertFalse(joined.contains("{"))
     }
 
     func testCachePrunesToMaximumEntries() {

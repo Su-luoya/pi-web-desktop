@@ -529,6 +529,11 @@ struct UpdateCategoryStatus: Equatable {
     var ignoredVersion: String?
     /// 下一次检查时间；关闭或尚未检查时为 nil。
     var nextCheckAt: Date?
+    /// 结论来源（GitHub #59）：`.cachedFallback` 时界面与诊断必须标注“本机缓存”
+    /// 与缓存写入时间，避免把缓存回退读成本次已验证的上游确认。
+    var origin: UpdateCheckOrigin = .unavailable
+    /// 结论来源为缓存回退时的缓存写入时间；其余情况为 nil。
+    var cacheWrittenAt: Date?
 
     /// 结果文案：最新 / 可更新 / 未知 / 失败 / 尚未检查。
     var resultTitle: String {
@@ -613,6 +618,21 @@ enum UpdateCategoryStatusBuilder {
             nextCheckAt = lastAttemptAt.addingTimeInterval(interval)
         }
 
+        // 来源只反映本次运行的结果；没有结果但缓存里还有可展示版本时，结论本身
+        // 就来自缓存（只用于提示）。
+        let origin: UpdateCheckOrigin
+        let cacheWrittenAt: Date?
+        if let chosenResult {
+            origin = chosenResult.origin
+            cacheWrittenAt = chosenResult.cacheWrittenAt
+        } else if let entryWithVersion {
+            origin = .cachedFallback
+            cacheWrittenAt = entryWithVersion.lastSuccessAt ?? entryWithVersion.lastAttemptAt
+        } else {
+            origin = .unavailable
+            cacheWrittenAt = nil
+        }
+
         return UpdateCategoryStatus(
             category: category,
             lastAttemptAt: lastAttemptAt,
@@ -622,7 +642,9 @@ enum UpdateCategoryStatusBuilder {
             installedVersion: chosenResult?.installedVersion,
             latestVersion: chosenResult?.latestVersion ?? entryWithVersion?.latestVersion,
             ignoredVersion: ignoredVersions.ignored(for: category)?.version,
-            nextCheckAt: nextCheckAt
+            nextCheckAt: nextCheckAt,
+            origin: origin,
+            cacheWrittenAt: cacheWrittenAt
         )
     }
 
@@ -665,6 +687,11 @@ enum UpdateStatusPresenter {
             parts.append("下次检查：\(format(nextCheckAt))")
         } else {
             parts.append("下次检查：\(policy.isEnabled ? "—" : "已关闭")")
+        }
+        // 缓存回退必须标注来源与缓存写入时间：它只用于提示，不参与自动安装判定。
+        if status.origin == .cachedFallback {
+            let stamp = status.cacheWrittenAt.map(format) ?? "未知"
+            parts.append("来源：本机缓存（写入于 \(stamp)；缓存不是可信输入，只用于提示，不用于自动安装）")
         }
         return parts.joined(separator: "；")
     }

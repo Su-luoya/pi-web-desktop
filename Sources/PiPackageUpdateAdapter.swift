@@ -18,6 +18,8 @@ import Foundation
 //   pnpm 全局、Homebrew、nvm/mise、git checkout、本地路径与未知来源一律只给
 //   官方命令文本（`pi update --extensions`，只更新扩展包、不更新 pi 自身），
 //   不提供执行按钮；
+// - 执行入口还要求目标版本来自**本次运行**的网络结果（GitHub #59 / 安全审查
+//   A-1）：缓存回退只用于提示，不提供一键执行；“检查并通知”仍只提示；
 // - 进程保护：**执行前**必须确认没有任何运行中的 Pi 进程（`noProcesses`）；
 //   有运行中的进程或状态不确定时拒绝执行并给出可读原因。本文件没有任何
 //   `kill` / `killpg` / 终止调用：超时只放弃等待，不向任何进程发送信号；
@@ -124,23 +126,32 @@ struct PiPackageCheckOutcome: Equatable {
     var status: UpdateCheckStatus
     var confidence: DetectionConfidence
     var failureText: String?
+    /// 检查结果的来源；只有 `.network`（本次运行刚从白名单主机取得）才提供
+    /// 可点的执行入口。默认值是最安全的一档，漏传时不会退化成“可执行”。
+    var origin: UpdateCheckOrigin = .unavailable
+    /// 来源为缓存回退时的缓存写入时间（仅用于展示与拒绝原因）。
+    var cacheWrittenAt: Date? = nil
 
     init(
         packageName: String,
         latestVersion: String?,
         status: UpdateCheckStatus,
         confidence: DetectionConfidence,
-        failureText: String? = nil
+        failureText: String? = nil,
+        origin: UpdateCheckOrigin = .unavailable,
+        cacheWrittenAt: Date? = nil
     ) {
         self.packageName = packageName
         self.latestVersion = latestVersion
         self.status = status
         self.confidence = confidence
         self.failureText = failureText
+        self.origin = origin
+        self.cacheWrittenAt = cacheWrittenAt
     }
 
     /// 只接受扩展包分类且带包名的检查结果；其它分类（桌面应用 / Pi CLI / Pi Web）
-    /// 不进入包更新流程。
+    /// 不进入包更新流程。来源信息一并带过来，供执行入口的硬前置判定。
     init?(result: UpdateCheckResult) {
         guard result.target.category == .piPackages,
               let name = result.target.packageName,
@@ -150,6 +161,8 @@ struct PiPackageCheckOutcome: Equatable {
         self.status = result.status
         self.confidence = result.confidence
         self.failureText = result.failure?.text
+        self.origin = result.origin
+        self.cacheWrittenAt = result.cacheWrittenAt
     }
 
     static func list(from results: [UpdateCheckResult]) -> [PiPackageCheckOutcome] {
@@ -198,6 +211,9 @@ enum PiPackageUpdateRefusal: Equatable {
     case noTargetVersion
     /// 目标版本未经上游响应验证。
     case targetNotVerified
+    /// 判定所用的检查结果不是本次运行从白名单主机取得的网络结果（缓存回退或
+    /// 没有结果）。缓存文件不是可信输入，因此不提供执行入口（GitHub #59）。
+    case targetNotFromNetwork(origin: UpdateCheckOrigin, cacheWrittenAt: Date?)
     /// 目标版本不是可比较的语义化版本。
     case invalidTargetVersion
     /// 目标版本不高于本机版本。
@@ -235,6 +251,8 @@ enum PiPackageUpdateRefusal: Equatable {
             return "没有可用的目标版本（检查结果不是“可更新”或缺少版本号）"
         case .targetNotVerified:
             return "目标版本未经上游响应验证"
+        case .targetNotFromNetwork(let origin, let cacheWrittenAt):
+            return origin.autoInstallRefusalText(cacheWrittenAt: cacheWrittenAt)
         case .invalidTargetVersion:
             return "目标版本无法解析为语义化版本"
         case .notNewerTargetVersion:
@@ -752,6 +770,15 @@ enum PiPackageUpdatePlanner {
         }
         guard policy == .askBeforeUpdate else {
             return .notifyOnly(notice(for: candidate, check: check, piExecutablePath: piExecutablePath))
+        }
+        // 硬前置（GitHub #59 / alpha.3 安全审查 A-1）：可点的执行入口只对本次
+        // 运行刚从白名单主机取得的结果开放。“检查并通知”不受影响，仍然只提示；
+        // 缓存回退与没有结果连执行入口都不提供，只保留手动命令文本。
+        guard check.origin.isEligibleForAutomaticInstall else {
+            return .manualOnly(
+                notice(for: candidate, check: check, piExecutablePath: piExecutablePath),
+                reason: .targetNotFromNetwork(origin: check.origin, cacheWrittenAt: check.cacheWrittenAt)
+            )
         }
         guard isExecutableSource(candidate.source, confidence: candidate.confidence) else {
             return .manualOnly(

@@ -178,6 +178,7 @@ final class UpdateTransactionTests: XCTestCase {
             targetVersion: "0.9.2",
             targetStatus: .updateAvailable,
             targetConfidence: .verified,
+            targetOrigin: .network,
             serviceIsRunning: false,
             npmExecutablePath: "/opt/homebrew/bin/npm",
             baseEnvironment: ["PATH": "/usr/bin:/bin"]
@@ -314,6 +315,37 @@ final class UpdateTransactionTests: XCTestCase {
         XCTAssertEqual(entry.completedPhase, .commit)
         XCTAssertNil(entry.degradationKind)
         XCTAssertFalse(log.text.contains(fixtureHome))
+    }
+
+    /// GitHub #59：缓存回退（`cached-fallback`）不得驱动自动安装，协调器一级就要拒绝，且不写历史。
+    func testCachedFallbackOriginBlocksCoordinatorBeforeAnyCommand() throws {
+        let probe = FakeProbe()
+        probe.executables.insert(newExecutable)
+        probe.readable.insert(newExecutable)
+        let world = RecordingInstaller()
+        let history = HistoryRecorder()
+        let log = LogSink()
+        let coordinator = PiWebUpdateCoordinator(environment: PiWebUpdateCoordinator.Environment(
+            installer: world,
+            detectInstallation: { self.installation() },
+            startServiceAndCheckHealth: { completion in completion(true) },
+            redactor: LogRedactor(homeDirectory: self.fixtureHome),
+            log: { log.append($0) },
+            deliver: { work in work() },
+            timeout: 60,
+            transaction: transactionEnvironment(probe: probe.make(), history: history)
+        ))
+        var input = piWebInput(installation: installation())
+        input.targetOrigin = .cachedFallback
+        input.targetCacheWrittenAt = referenceDate.addingTimeInterval(-3600)
+        var outcome: PiWebUpdateRunOutcome?
+        coordinator.run(input) { outcome = $0 }
+
+        XCTAssertEqual(outcome?.isSucceeded, false)
+        XCTAssertEqual(world.plans.count, 0, "缓存回退不允许执行任何安装命令")
+        XCTAssertTrue(history.entries.isEmpty, "被拒绝的判定不写更新历史")
+        XCTAssertTrue(log.text.contains("缓存"), "拒绝原因里要写明来源是缓存")
+        XCTAssertFalse(log.text.contains(self.fixtureHome))
     }
 
     // MARK: - 2. 验证能力边界
@@ -788,6 +820,7 @@ final class UpdateTransactionTests: XCTestCase {
             targetVersion: "0.9.2",
             targetStatus: .updateAvailable,
             targetConfidence: .verified,
+            targetOrigin: .network,
             serviceIsRunning: false,
             npmExecutablePath: "/opt/homebrew/bin/npm",
             baseEnvironment: [
@@ -951,6 +984,7 @@ final class UpdateTransactionTests: XCTestCase {
             targetVersion: "0.4.2",
             targetStatus: .updateAvailable,
             targetConfidence: .verified,
+            targetOrigin: .network,
             processes: .noProcesses
         )) { outcome = $0 }
 

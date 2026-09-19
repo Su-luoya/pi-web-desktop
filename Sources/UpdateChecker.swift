@@ -139,8 +139,8 @@ enum UpdateCheckDisclosure {
         · 频率：应用启动后立即检查一次；之后桌面应用 / Pi CLI / Pi Web 默认每 \(desktopHours) 小时（每日）、Pi 扩展包默认每 \(packageDays) 天（检查并通知）复查。四类可分别设为关闭 / 每日 / 每周（扩展包为关闭 / 检查并通知 / 询问后更新）；关闭后不发起对应请求，也不安排复查。应用关闭后不检查（不安装 LaunchAgent）。
         · 提示方式：应用内提示框（不使用系统通知中心、不申请通知权限）；提示只含组件名与版本。发现可用更新时最多在本次运行里提示一次，忽略某个版本后不再提示它。
         · 忽略版本：可以逐类忽略当前提示的版本；忽略与安装来源无关，只抑制这一个版本，上游发布更高版本时会再次提示。不实现版本锁定或降级。
-        · 启动前自动更新 Pi Web：默认关闭。打开后只对“来源为已验证的 npm 全局安装”的 Pi Web 生效：应用启动时若有已验证的可用版本，会以参数数组执行 npm install -g <包名>@<版本>（不使用 shell、不调用 sudo、安装有超时），安装后重新检测版本并做健康检查。其它来源（pnpm、Homebrew、nvm/mise、git checkout、本地路径、未知）仍只显示更新命令，绝不自动安装；应用不承诺所有来源都能回滚。
-        · 结果缓存：\(cachePath)（只含版本、时间戳与条件请求字段），删除该文件即可清空。
+        · 启动前自动更新 Pi Web：默认关闭。打开后只对“来源为已验证的 npm 全局安装”的 Pi Web 生效：应用启动时若有**本次运行刚从白名单主机取得**的已验证可用版本，会以参数数组执行 npm install -g <包名>@<版本>（不使用 shell、不调用 sudo、安装有超时），安装后重新检测版本并做健康检查。其它来源（pnpm、Homebrew、nvm/mise、git checkout、本地路径、未知）仍只显示更新命令，绝不自动安装；应用不承诺所有来源都能回滚。
+        · 结果缓存：\(cachePath)（只含版本、时间戳与条件请求字段），删除该文件即可清空。缓存不是可信输入（可被同一用户改写），只用于提示；读取时校验结构与上限、不合法就整份丢弃，且不参与自动安装判定。
 
         版本查询不是遥测：请求只用于比较版本，不会上传使用数据、会话或诊断内容。
         """
@@ -527,11 +527,67 @@ enum UpdateCheckFailure: String, Equatable {
     }
 }
 
-/// 结果来源：本次真实响应、沿用的缓存、或没有可用结果。
+/// 结果新鲜度：本次真实响应、沿用的缓存、或没有可用结果。
 enum UpdateResultFreshness: String, Equatable {
     case fresh
     case cached
     case none
+}
+
+/// 检查结果的来源（GitHub #59 / alpha.3 安全审查 A-1）。
+///
+/// **只有 `.network` 允许作为自动安装（受限自动更新）的判定依据**：它表示本次
+/// 运行刚从白名单主机取得的响应。`.cachedFallback` 的版本值来自本机缓存文件
+/// （同一用户可改写，不是可信输入），只允许用于提示；`.unavailable` 表示没有
+/// 可用结果（没有缓存或整份缓存被丢弃）。
+///
+/// 与 `freshness` 的分工：`freshness` 描述本次网络往返是否成功，`origin` 描述
+/// 判定所用的**数据**从哪里来。条件请求命中 304 时网络往返是成功的
+/// （`freshness` 仍为 `.fresh`），但版本值来自缓存文件，因此 `origin` 是
+/// `.cachedFallback`：304 只确认“缓存里的那个版本仍然是上游最新”，不能让
+/// 本地可改写的版本字符串变成自动安装的目标。
+enum UpdateCheckOrigin: String, Equatable {
+    case network
+    case cachedFallback = "cached-fallback"
+    case unavailable
+
+    var displayName: String {
+        switch self {
+        case .network: return "本次网络检查"
+        case .cachedFallback: return "本机缓存"
+        case .unavailable: return "无可用结果"
+        }
+    }
+
+    /// 是否允许作为自动安装的判定依据。只有本次网络结果可以。
+    var isEligibleForAutomaticInstall: Bool { self == .network }
+
+    /// 自动安装前的来源拒绝文案（Pi Web / Pi CLI / Pi 扩展包共用同一组固定
+    /// 事实）。缓存回退分支包含“缓存”与缓存写入时间，且不出现“已验证”“官方”
+    /// 之类会被读成“本次已由上游确认”的措辞。
+    func autoInstallRefusalText(cacheWrittenAt: Date?) -> String {
+        switch self {
+        case .cachedFallback:
+            let stamp = cacheWrittenAt.map { "（缓存写入时间 \(UpdateCheckTimestamp.text($0))）" } ?? ""
+            return "判定所用的检查结果来自本机缓存\(stamp)，不是本次运行从白名单主机取得的网络结果；缓存不是可信输入，自动更新不做"
+        case .network:
+            return "判定所用的检查结果不是本次运行从白名单主机取得的网络结果"
+        case .unavailable:
+            return "本次运行没有可用的网络检查结果；缓存回退与缓存缺失都不触发自动更新"
+        }
+    }
+}
+
+/// 缓存时间戳的固定展示格式：UTC、秒级，不依赖机器时区与语言，日志、诊断与
+/// 测试断言因此是确定性的。
+enum UpdateCheckTimestamp {
+    static func text(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss'Z'"
+        return formatter.string(from: date)
+    }
 }
 
 /// 一个对象的用户可见结论。只包含版本、状态与固定文案，不含路径、请求细节或
@@ -550,6 +606,10 @@ struct UpdateCheckResult: Equatable {
     var lastSuccessAt: Date?
     /// 本次结论对应的版本被用户忽略时，这里是那个版本（等于 `latestVersion`）。
     var ignoredVersion: String? = nil
+    /// 结论来源。默认值是最安全的一档（不可用）：漏传时绝不会退化成“允许自动安装”。
+    var origin: UpdateCheckOrigin = .unavailable
+    /// `origin == .cachedFallback` 时缓存条目的写入时间；其余情况为 nil。
+    var cacheWrittenAt: Date? = nil
 
     var failureText: String {
         guard let failure else { return "未知原因" }
@@ -582,7 +642,18 @@ struct UpdateCheckResult: Equatable {
                 text += " 原因：\(failureText)。"
             }
         }
+        if let annotation = cacheOriginAnnotation {
+            text += annotation
+        }
         return text
+    }
+
+    /// 缓存回退的固定来源标注：包含“缓存”与缓存写入时间，并说明它只用于提示。
+    /// 不写“已验证”“官方”之类会让用户以为本次已由上游确认的措辞。
+    var cacheOriginAnnotation: String? {
+        guard origin == .cachedFallback else { return nil }
+        let stamp = cacheWrittenAt.map { "，写入于 \(UpdateCheckTimestamp.text($0))" } ?? "，写入时间未知"
+        return "（来源：本机缓存\(stamp)；缓存不是可信输入，只用于提示，不用于自动安装。）"
     }
 }
 
@@ -738,6 +809,17 @@ struct UpdateCheckCacheFile: Codable, Equatable {
     static let currentSchemaVersion = 1
     /// 条目上限：包名列表长期变化时避免文件无限增长。
     static let maximumEntries = 200
+    /// 文件大小上限：超过它的缓存文件不解析、不部分采用，直接丢弃。
+    /// 上限比满额缓存（200 条 × 各字段上限）更大，因此合法缓存不会被它拒绝。
+    static let maximumFileBytes = 1024 * 1024
+    /// 单个版本字符串的长度上限（版本值还必须是规范化的语义化版本）。
+    static let maximumVersionLength = 64
+    /// 条件请求字段（`etag` / `lastModified`）的长度上限。
+    static let maximumConditionalHeaderLength = 512
+    /// 目标 id 的长度上限。
+    static let maximumTargetIDLength = 256
+    /// 允许的时钟偏移（秒）：比“未来”宽松一点点，但不改变“未来时间戳不可信”。
+    static let futureTimestampTolerance: TimeInterval = 300
 
     var schemaVersion: Int
     var entries: [UpdateCacheEntry]
@@ -771,10 +853,135 @@ struct UpdateCheckCacheFile: Codable, Equatable {
     }
 }
 
+/// 缓存被丢弃的原因。全部是固定文案：不回显缓存文件里的任何内容，因此损坏或
+/// 被改写的文件不能把任意文本带进日志与诊断。
+enum UpdateCheckCacheRejection: Equatable {
+    /// 文件存在但读不出来。
+    case unreadable
+    /// 文件超过大小上限（在解析前就拒绝）。
+    case tooLarge(bytes: Int)
+    /// 结构无法解析（JSON 损坏、字段类型不对）。
+    case malformedStructure
+    /// `schemaVersion` 不是当前版本。
+    case unsupportedSchemaVersion(Int)
+    /// 条目数超过上限。
+    case tooManyEntries(Int)
+    /// 条目字段不合法（分类、包名、状态、目标 id 或条件请求字段）。
+    case invalidEntry
+    /// 版本字符串不是规范化的语义化版本。
+    case invalidVersionShape
+    /// 时间戳落在未来（超过允许的时钟偏移）。
+    case timestampInTheFuture
+
+    var text: String {
+        switch self {
+        case .unreadable:
+            return "缓存文件无法读取"
+        case .tooLarge(let bytes):
+            return "缓存文件超过大小上限（\(bytes) 字节 > \(UpdateCheckCacheFile.maximumFileBytes) 字节）"
+        case .malformedStructure:
+            return "缓存结构无法解析（字段类型或形状不合法）"
+        case .unsupportedSchemaVersion(let version):
+            return "缓存 schema 版本不受支持（\(version) ≠ \(UpdateCheckCacheFile.currentSchemaVersion)）"
+        case .tooManyEntries(let count):
+            return "缓存条目数超过上限（\(count) > \(UpdateCheckCacheFile.maximumEntries)）"
+        case .invalidEntry:
+            return "缓存条目字段不合法（分类、包名、目标 id、状态或条件请求字段）"
+        case .invalidVersionShape:
+            return "缓存里的版本字符串不是规范化的语义化版本"
+        case .timestampInTheFuture:
+            return "缓存时间戳落在未来"
+        }
+    }
+
+    /// 完整日志行：固定文案 + 结论（只影响提示，不参与自动安装判定）。
+    var logLine: String {
+        "更新检查缓存已丢弃（\(text)）；本次按“没有可用缓存”处理：只影响提示，不参与自动安装判定。"
+    }
+}
+
+// MARK: - 缓存校验
+
+/// 单条缓存条目的结构校验。返回 nil 表示合法。
+///
+/// 校验只看形状与一致性：分类/包名/目标 id 互相对得上、枚举值是已知取值、版本
+/// 字符串是规范化的语义化版本、时间戳不落在未来。任何一项不满足都丢弃整份缓存
+/// （不部分采用），因为一个被改写的条目与其余条目的可信度无法区分。
+extension UpdateCacheEntry {
+    func validationRejection(at now: Date) -> UpdateCheckCacheRejection? {
+        guard !targetID.isEmpty,
+              targetID.count <= UpdateCheckCacheFile.maximumTargetIDLength else { return .invalidEntry }
+        guard let category = UpdateCheckCategory(rawValue: category) else { return .invalidEntry }
+        if let packageName {
+            guard ComponentInstallationDetector.isPackageName(packageName) else { return .invalidEntry }
+        }
+        if category != .piPackages, packageName != nil { return .invalidEntry }
+        guard targetID == UpdateCheckTarget(category: category, packageName: packageName).id else {
+            return .invalidEntry
+        }
+        if let status, UpdateCheckStatus(rawValue: status) == nil { return .invalidEntry }
+        if let confidence, DetectionConfidence(rawValue: confidence) == nil { return .invalidEntry }
+        if let failure, UpdateCheckFailure(rawValue: failure) == nil { return .invalidEntry }
+        if let httpStatusCode, !(100...599).contains(httpStatusCode) { return .invalidEntry }
+        if let etag, etag.count > UpdateCheckCacheFile.maximumConditionalHeaderLength { return .invalidEntry }
+        if let lastModified, lastModified.count > UpdateCheckCacheFile.maximumConditionalHeaderLength {
+            return .invalidEntry
+        }
+        if let latestVersion {
+            guard latestVersion.count <= UpdateCheckCacheFile.maximumVersionLength,
+                  let parsed = SemanticVersion(latestVersion),
+                  parsed.description == latestVersion else { return .invalidVersionShape }
+        }
+        // 时间戳不能落在未来；允许小幅时钟偏移，但偏移必须小于容差。
+        for timestamp in [lastAttemptAt, lastSuccessAt].compactMap({ $0 }) where
+            timestamp.timeIntervalSince(now) > UpdateCheckCacheFile.futureTimestampTolerance {
+            return .timestampInTheFuture
+        }
+        return nil
+    }
+}
+
+extension UpdateCheckCacheFile {
+    /// 读取时的整体校验。任何不合法都返回整份 `.empty` 与拒绝原因：不崩溃、
+    /// 不部分采用，调用方按 `unavailable` 处理。
+    static func validated(
+        _ data: Data,
+        now: Date
+    ) -> (file: UpdateCheckCacheFile, rejection: UpdateCheckCacheRejection?) {
+        guard data.count <= maximumFileBytes else {
+            return (.empty, .tooLarge(bytes: data.count))
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let file = try? decoder.decode(UpdateCheckCacheFile.self, from: data) else {
+            return (.empty, .malformedStructure)
+        }
+        guard file.schemaVersion == currentSchemaVersion else {
+            return (.empty, .unsupportedSchemaVersion(file.schemaVersion))
+        }
+        guard file.entries.count <= maximumEntries else {
+            return (.empty, .tooManyEntries(file.entries.count))
+        }
+        for entry in file.entries {
+            if let rejection = entry.validationRejection(at: now) {
+                return (.empty, rejection)
+            }
+        }
+        return (file, nil)
+    }
+}
+
 /// 缓存读写接口（可注入）。测试用内存替身，不写真实 Application Support。
 protocol UpdateCacheStoring: AnyObject {
     func load() -> UpdateCheckCacheFile
     func save(_ file: UpdateCheckCacheFile)
+    /// 最近一次 `load()` 丢弃整份缓存的原因；nil 表示读到合法缓存或本来就没有文件。
+    var lastLoadRejection: UpdateCheckCacheRejection? { get }
+}
+
+extension UpdateCacheStoring {
+    /// 默认没有拒绝原因：内存替身不必实现它。
+    var lastLoadRejection: UpdateCheckCacheRejection? { nil }
 }
 
 /// 生产实现：Application Support 下的独立 JSON 文件。
@@ -784,21 +991,39 @@ protocol UpdateCacheStoring: AnyObject {
 final class UpdateCheckCacheFileStore: UpdateCacheStoring {
     let fileURL: URL
     private let fileManager: FileManager
+    private let clock: UpdateClock
 
-    init(fileURL: URL, fileManager: FileManager = .default) {
+    /// 最近一次读取丢弃整份缓存的原因（供调用方记录固定文案）。
+    private(set) var lastLoadRejection: UpdateCheckCacheRejection?
+
+    init(fileURL: URL, fileManager: FileManager = .default, clock: UpdateClock = .system) {
         self.fileURL = fileURL
         self.fileManager = fileManager
+        self.clock = clock
     }
 
     func load() -> UpdateCheckCacheFile {
-        guard let data = try? Data(contentsOf: fileURL) else { return .empty }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard let file = try? decoder.decode(UpdateCheckCacheFile.self, from: data),
-              file.schemaVersion == UpdateCheckCacheFile.currentSchemaVersion else {
+        guard fileManager.fileExists(atPath: fileURL.path) else {
+            lastLoadRejection = nil
             return .empty
         }
-        return file
+        guard let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
+              let size = (attributes[.size] as? NSNumber)?.intValue else {
+            lastLoadRejection = .unreadable
+            return .empty
+        }
+        // 先看大小再读内容：超大文件不进入内存，也不进入 JSON 解析。
+        guard size <= UpdateCheckCacheFile.maximumFileBytes else {
+            lastLoadRejection = .tooLarge(bytes: size)
+            return .empty
+        }
+        guard let data = try? Data(contentsOf: fileURL) else {
+            lastLoadRejection = .unreadable
+            return .empty
+        }
+        let outcome = UpdateCheckCacheFile.validated(data, now: clock.now())
+        lastLoadRejection = outcome.rejection
+        return outcome.file
     }
 
     func save(_ file: UpdateCheckCacheFile) {
@@ -812,7 +1037,10 @@ final class UpdateCheckCacheFileStore: UpdateCacheStoring {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-            try encoder.encode(file).write(to: fileURL, options: [.atomic])
+            let data = try encoder.encode(file)
+            // 不写自己会拒绝读取的文件（正常情况下远小于上限）。
+            guard data.count <= UpdateCheckCacheFile.maximumFileBytes else { return }
+            try data.write(to: fileURL, options: [.atomic])
         } catch {
             // 静默：缓存写入失败不影响检查结果、服务或退出路径。
         }
@@ -1228,7 +1456,8 @@ final class UpdateChecker {
     /// 不变；因为不计入 `lastAttemptAt`，依赖检测补齐版本后下一次到期判断
     /// 会立即重试。
     private func skip(item: PlanItem, failure: UpdateCheckFailure, at now: Date) -> UpdateCheckResult {
-        UpdateCheckResult(
+        let cacheOrigin = Self.cacheOrigin(for: item.cached)
+        return UpdateCheckResult(
             target: item.target,
             status: .unknown,
             installedVersion: item.installedVersion,
@@ -1238,8 +1467,27 @@ final class UpdateChecker {
             failure: failure,
             httpStatusCode: nil,
             checkedAt: now,
-            lastSuccessAt: item.cached?.lastSuccessAt
+            lastSuccessAt: item.cached?.lastSuccessAt,
+            origin: cacheOrigin.origin,
+            cacheWrittenAt: cacheOrigin.cacheWrittenAt
         )
+    }
+
+    /// 缓存回退的来源信息：有可展示的版本才叫“缓存回退”，否则是“不可用”。
+    /// 缓存写入时间取该条目的上次成功时间（没有成功时间的旧条目退到上次尝试时间）。
+    private static func cacheOrigin(for entry: UpdateCacheEntry?) -> (origin: UpdateCheckOrigin, cacheWrittenAt: Date?) {
+        guard let entry, entry.latestVersion != nil else { return (.unavailable, nil) }
+        return (.cachedFallback, entry.lastSuccessAt ?? entry.lastAttemptAt)
+    }
+
+    /// 一次缓存回退的结论（含来源标注）。
+    private struct CachedFallbackOutcome {
+        var status: UpdateCheckStatus
+        var latestVersion: String?
+        var confidence: DetectionConfidence
+        var freshness: UpdateResultFreshness
+        var origin: UpdateCheckOrigin
+        var cacheWrittenAt: Date?
     }
 
     private func evaluate(
@@ -1258,6 +1506,8 @@ final class UpdateChecker {
             freshness: UpdateResultFreshness,
             failure: UpdateCheckFailure?,
             httpStatusCode: Int?,
+            origin: UpdateCheckOrigin,
+            cacheWrittenAt: Date?,
             keepSuccessFields: Bool
         ) -> (UpdateCacheEntry, UpdateCheckResult) {
             entry.latestVersion = latestVersion
@@ -1284,7 +1534,9 @@ final class UpdateChecker {
                 httpStatusCode: httpStatusCode,
                 checkedAt: now,
                 lastSuccessAt: entry.lastSuccessAt,
-                ignoredVersion: ignoredVersion
+                ignoredVersion: ignoredVersion,
+                origin: origin,
+                cacheWrittenAt: cacheWrittenAt
             )
             return (entry, result)
         }
@@ -1292,28 +1544,32 @@ final class UpdateChecker {
         switch response {
         case .failure(let transportFailure):
             let failure = Self.checkFailure(from: transportFailure)
-            let (status, latest, confidence, freshness) = cachedFallback(entry: item.cached, at: now, allowStatus: true)
+            let fallback = cachedFallback(entry: item.cached, at: now, allowStatus: true)
             return resolve(
-                status: status,
-                latestVersion: latest,
-                confidence: confidence,
-                freshness: freshness,
+                status: fallback.status,
+                latestVersion: fallback.latestVersion,
+                confidence: fallback.confidence,
+                freshness: fallback.freshness,
                 failure: failure,
                 httpStatusCode: nil,
+                origin: fallback.origin,
+                cacheWrittenAt: fallback.cacheWrittenAt,
                 keepSuccessFields: false
             )
 
         case .success(let http):
             // 最终主机不在白名单内：不采信内容，未经验证 → unknown，保留上一次成功结果。
             if let finalURL = http.finalURL, !endpoint.allows(host: finalURL.host) {
-                let (status, latest, confidence, freshness) = cachedFallback(entry: item.cached, at: now, allowStatus: false)
+                let fallback = cachedFallback(entry: item.cached, at: now, allowStatus: false)
                 return resolve(
-                    status: status,
-                    latestVersion: latest,
-                    confidence: confidence,
-                    freshness: freshness,
+                    status: fallback.status,
+                    latestVersion: fallback.latestVersion,
+                    confidence: fallback.confidence,
+                    freshness: fallback.freshness,
                     failure: .unexpectedHost,
                     httpStatusCode: http.statusCode,
+                    origin: fallback.origin,
+                    cacheWrittenAt: fallback.cacheWrittenAt,
                     keepSuccessFields: false
                 )
             }
@@ -1327,17 +1583,20 @@ final class UpdateChecker {
                     entry.lastModified = http.lastModified ?? item.cached?.lastModified
                     guard let verdict = compare(installed: item.installedVersion, upstream: upstream.version) else {
                         // 上游版本无法与本机版本比较：未经验证 → unknown。
-                        let (status, latest, confidence, freshness) = cachedFallback(entry: item.cached, at: now, allowStatus: false)
+                        let fallback = cachedFallback(entry: item.cached, at: now, allowStatus: false)
                         return resolve(
-                            status: status,
-                            latestVersion: latest,
-                            confidence: confidence,
-                            freshness: freshness,
+                            status: fallback.status,
+                            latestVersion: fallback.latestVersion,
+                            confidence: fallback.confidence,
+                            freshness: fallback.freshness,
                             failure: .unparsableVersion,
                             httpStatusCode: http.statusCode,
+                            origin: fallback.origin,
+                            cacheWrittenAt: fallback.cacheWrittenAt,
                             keepSuccessFields: false
                         )
                     }
+                    // 本次网络响应：来源是网络，可以作为自动安装的判定依据。
                     return resolve(
                         status: verdict,
                         latestVersion: upstream.version,
@@ -1345,39 +1604,49 @@ final class UpdateChecker {
                         freshness: .fresh,
                         failure: nil,
                         httpStatusCode: http.statusCode,
+                        origin: .network,
+                        cacheWrittenAt: nil,
                         keepSuccessFields: true
                     )
                 case .failure:
                     // 解析失败：未经验证 → unknown，并保留上一次成功结果与条件请求字段。
-                    let (status, latest, confidence, freshness) = cachedFallback(entry: item.cached, at: now, allowStatus: false)
+                    let fallback = cachedFallback(entry: item.cached, at: now, allowStatus: false)
                     return resolve(
-                        status: status,
-                        latestVersion: latest,
-                        confidence: confidence,
-                        freshness: freshness,
+                        status: fallback.status,
+                        latestVersion: fallback.latestVersion,
+                        confidence: fallback.confidence,
+                        freshness: fallback.freshness,
                         failure: .invalidResponse,
                         httpStatusCode: http.statusCode,
+                        origin: fallback.origin,
+                        cacheWrittenAt: fallback.cacheWrittenAt,
                         keepSuccessFields: false
                     )
                 }
             case 304:
-                // 条件请求命中：沿用缓存里的成功结果，时间戳与前缀字段都视为已验证。
+                // 条件请求命中：沿用缓存里的成功结果。
                 guard let cachedVersion = item.cached?.latestVersion,
                       let cachedEntry = item.cached,
                       let verdict = compare(installed: item.installedVersion, upstream: cachedVersion) else {
-                    let (status, latest, confidence, freshness) = cachedFallback(entry: item.cached, at: now, allowStatus: false)
+                    let fallback = cachedFallback(entry: item.cached, at: now, allowStatus: false)
                     return resolve(
-                        status: status,
-                        latestVersion: latest,
-                        confidence: confidence,
-                        freshness: freshness,
+                        status: fallback.status,
+                        latestVersion: fallback.latestVersion,
+                        confidence: fallback.confidence,
+                        freshness: fallback.freshness,
                         failure: .invalidResponse,
                         httpStatusCode: http.statusCode,
+                        origin: fallback.origin,
+                        cacheWrittenAt: fallback.cacheWrittenAt,
                         keepSuccessFields: false
                     )
                 }
                 entry.etag = http.etag ?? cachedEntry.etag
                 entry.lastModified = http.lastModified ?? cachedEntry.lastModified
+                // 304 只证明“缓存里的那个版本仍是上游最新”：网络往返成功
+                // （freshness 仍为 .fresh），但版本值来自本机缓存文件。缓存不是
+                // 可信输入，因此 origin 记为缓存回退，只用于提示。
+                let cacheOrigin = Self.cacheOrigin(for: item.cached)
                 return resolve(
                     status: verdict,
                     latestVersion: cachedVersion,
@@ -1385,20 +1654,24 @@ final class UpdateChecker {
                     freshness: .fresh,
                     failure: nil,
                     httpStatusCode: http.statusCode,
+                    origin: cacheOrigin.origin,
+                    cacheWrittenAt: cacheOrigin.cacheWrittenAt,
                     keepSuccessFields: true
                 )
             default:
                 let failure = Self.failure(forStatusCode: http.statusCode)
                 // 重定向属于未经验证的响应；限流 / 5xx 等明确的上游回答可以沿用旧缓存。
                 let allowCachedStatus = failure != .unexpectedRedirect
-                let (status, latest, confidence, freshness) = cachedFallback(entry: item.cached, at: now, allowStatus: allowCachedStatus)
+                let fallback = cachedFallback(entry: item.cached, at: now, allowStatus: allowCachedStatus)
                 return resolve(
-                    status: status,
-                    latestVersion: latest,
-                    confidence: confidence,
-                    freshness: freshness,
+                    status: fallback.status,
+                    latestVersion: fallback.latestVersion,
+                    confidence: fallback.confidence,
+                    freshness: fallback.freshness,
                     failure: failure,
                     httpStatusCode: http.statusCode,
+                    origin: fallback.origin,
+                    cacheWrittenAt: fallback.cacheWrittenAt,
                     keepSuccessFields: false
                 )
             }
@@ -1430,25 +1703,57 @@ final class UpdateChecker {
     ///   连结论一起沿用，标记为 `.cached`；超过 TTL 或从未成功过则 unknown。
     /// - `allowStatus == false`（解析失败、非预期主机/重定向、版本无法比较）：
     ///   响应未经验证，本次结论一律 unknown，但仍展示上次成功版本。
+    ///
+    /// 无论哪种情况，结论来源都是 `.cachedFallback`（没有可展示版本时为
+    /// `.unavailable`）：缓存文件不是可信输入，因此这些结论只供提示。
     private func cachedFallback(
         entry: UpdateCacheEntry?,
         at now: Date,
         allowStatus: Bool
-    ) -> (UpdateCheckStatus, String?, DetectionConfidence, UpdateResultFreshness) {
+    ) -> CachedFallbackOutcome {
+        let cacheOrigin = Self.cacheOrigin(for: entry)
         guard let entry, let latestVersion = entry.latestVersion else {
-            return (.unknown, nil, .unknown, .none)
+            return CachedFallbackOutcome(
+                status: .unknown,
+                latestVersion: nil,
+                confidence: .unknown,
+                freshness: .none,
+                origin: cacheOrigin.origin,
+                cacheWrittenAt: cacheOrigin.cacheWrittenAt
+            )
         }
-        guard allowStatus else {
-            return (.unknown, latestVersion, .unknown, .cached)
+        if !allowStatus {
+            return CachedFallbackOutcome(
+                status: .unknown,
+                latestVersion: latestVersion,
+                confidence: .unknown,
+                freshness: .cached,
+                origin: cacheOrigin.origin,
+                cacheWrittenAt: cacheOrigin.cacheWrittenAt
+            )
         }
         let ttl = UpdateCheckCategory(rawValue: entry.category).map { intervals.ttl(for: $0) }
             ?? intervals.ttl(for: .desktopApp)
         if entry.isReusable(at: now, ttl: ttl),
            let status = entry.decodedStatus,
            status != .unknown {
-            return (status, latestVersion, entry.decodedConfidence ?? .unknown, .cached)
+            return CachedFallbackOutcome(
+                status: status,
+                latestVersion: latestVersion,
+                confidence: entry.decodedConfidence ?? .unknown,
+                freshness: .cached,
+                origin: cacheOrigin.origin,
+                cacheWrittenAt: cacheOrigin.cacheWrittenAt
+            )
         }
-        return (.unknown, latestVersion, .unknown, .cached)
+        return CachedFallbackOutcome(
+            status: .unknown,
+            latestVersion: latestVersion,
+            confidence: .unknown,
+            freshness: .cached,
+            origin: cacheOrigin.origin,
+            cacheWrittenAt: cacheOrigin.cacheWrittenAt
+        )
     }
 
     private func baseEntry(for item: PlanItem) -> UpdateCacheEntry {
@@ -1492,6 +1797,11 @@ final class UpdateChecker {
         guard !cacheLoaded else { return }
         cacheLoaded = true
         let loaded = cacheStore.load()
+        // 结构校验失败（损坏、被改写、超大、未来时间戳）：整份缓存按不可用处理，
+        // 并记录固定原因。日志只写结论，不回显缓存内容。
+        if let rejection = cacheStore.lastLoadRejection {
+            log?(rejection.logLine)
+        }
         cache = loaded.schemaVersion == UpdateCheckCacheFile.currentSchemaVersion ? loaded : .empty
     }
 

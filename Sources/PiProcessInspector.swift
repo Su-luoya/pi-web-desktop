@@ -7,6 +7,11 @@ import Foundation
 // 边界：
 // - 只读：枚举 PID 用 `proc_listpids`，单个进程的事实用 `proc_pidinfo` /
 //   `proc_pidpath` 与 `sysctl KERN_PROCARGS2`（Apple 系统框架以内）；
+// - 读取面收窄（GitHub #61）：先用 `proc_pidinfo` / `proc_pidpath` 取便宜的身份
+//   事实，只有候选进程（镜像路径或内核进程名的可执行基名是 `pi`，或是已知的 JS
+//   运行时）才用 `sysctl KERN_PROCARGS2` 读 argv；系统守护进程、编译器、编辑器
+//   等非候选进程不读命令行。候选判定只是读取优化，不是安全判断：镜像路径解析
+//   失败、权限不足、枚举失败仍然按“不确定”处理（不自动更新）；
 // - 绝不向任何进程发送信号：本文件不调用 `kill`/`killpg`，也不使用
 //   `Process`；它连 `Process` 都不 import（只有 `Darwin`/`Foundation`）；
 // - 只按“可执行名”判定，不做 argv 子串匹配：真实镜像路径（`proc_pidpath`）的
@@ -17,9 +22,11 @@ import Foundation
 //   镜像路径与进程名都不可读、解释器进程的 argv 不可读、名为 `pi` 的脚本路径
 //   无法确认）都返回 `unknown`，由更新决策按“不安全”处理；
 // - 命令摘要只保留脱敏后的文本：原始 argv 不离开本文件，摘要先按 token 边界
-//   处理 `--token=…` / `--password …` 这类凭据，再经 `LogRedactor` 整体处理
-//   （Home 路径 → `~`、查询串/其它键值 → 占位符），并丢掉 `KEY=VALUE` 形状的
-//   环境变量片段；长度有上限。
+//   处理 `--token=…` / `--password …` / `-p<值>` 这类凭据、已知凭据前缀（`sk-` /
+//   `ghp_` / `xoxb-` 等）与长不透明串（疑似 base64/十六进制），再经 `LogRedactor`
+//   整体处理（Home 路径 → `~`、查询串/其它键值 → 占位符），并丢掉 `KEY=VALUE`
+//   形状的环境变量片段；长度有上限。遮罩是模式化的：不符合已知形状的自由文本
+//   可能保留（已知边界，见 `docs/privacy.md`），因此不要把秘密放进命令行。
 
 // MARK: - 原始事实（探针输出）
 
@@ -55,6 +62,10 @@ struct PiProcessSnapshot: Equatable {
     /// 内核进程名（`pbi_comm`，最多 16 字节；为空时回退 `pbi_name`）。
     var executableName: String?
     /// 完整 argv（只含真实参数，不含环境变量）。空数组表示没有读到。
+    ///
+    /// 生产快照只携带便宜的身份事实（`LibprocPiProcessProbe.snapshot` 不读 argv）；
+    /// argv 由 `PiProcessProbing.arguments` 单独读取，并且只有候选进程会被读，
+    /// 读到的值再由 `PiProcessInspector.inspect` 补进快照。
     var arguments: [String]
     /// 读取失败的原因；nil 表示这一组事实读取成功。
     var readFailure: PiProcessReadFailure?
@@ -79,24 +90,39 @@ enum PiProcessSnapshotOutcome: Equatable {
 /// 生产实现是 `LibprocPiProcessProbe`；unhosted 测试注入假进程表，因此测试
 /// **绝不枚举、也绝不操作真实用户进程**。接口里没有任何发送信号、终止或修改
 /// 进程的方法：这条路径在类型层面就不具备向 Pi 进程发信号的能力。
+///
+/// 读取分成两步，这样“哪个 PID 被读过 argv”本身就是可注入、可断言的事实：
+/// 1. `snapshot(_:)` 只取便宜的身份事实（父 PID、启动时间、镜像路径、内核进程名）；
+/// 2. `arguments(_:)` 才读 argv（`KERN_PROCARGS2`），并且**只对候选进程调用**
+///    （见 `PiProcessInspector.isCandidate`）。测试注入一个记录调用的闭包，就能
+///    断言非候选进程没有触发 argv 读取，而不需要任何真实进程。
 struct PiProcessProbing {
     var listProcessIdentifiers: () -> PiProcessPidListing
     var snapshot: (pid_t) -> PiProcessSnapshotOutcome
+    /// 读取 argv；读不到（权限、已退出、解析失败）时返回空数组。
+    var arguments: (pid_t) -> [String]
 
     static let libproc = PiProcessProbing(
         listProcessIdentifiers: LibprocPiProcessProbe.listProcessIdentifiers,
-        snapshot: LibprocPiProcessProbe.snapshot(of:)
+        snapshot: LibprocPiProcessProbe.snapshot(of:),
+        arguments: LibprocPiProcessProbe.arguments(of:)
     )
 
     /// 固定进程表（测试与诊断 fixture 用）。`snapshots` 里没有的 PID 视为已退出。
+    ///
+    /// `snapshot` 返回的进程事实**不含 argv**：argv 只通过 `arguments` 提供，因此
+    /// “非候选进程不读 argv”的断言不会被 fixture 自己绕过（fixture 只有在被调用时
+    /// 才交出 argv）。
     static func fixture(_ snapshots: [PiProcessSnapshot]) -> PiProcessProbing {
         let table = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.pid, $0) })
         return PiProcessProbing(
             listProcessIdentifiers: { .pids(snapshots.map(\.pid)) },
             snapshot: { pid in
-                guard let snapshot = table[pid] else { return .processGone }
+                guard var snapshot = table[pid] else { return .processGone }
+                snapshot.arguments = []
                 return .snapshot(snapshot)
-            }
+            },
+            arguments: { pid in table[pid]?.arguments ?? [] }
         )
     }
 }
@@ -149,7 +175,7 @@ enum LibprocPiProcessProbe {
                 startedAt: nil,
                 imagePath: imagePath(of: pid),
                 executableName: nil,
-                arguments: arguments(of: pid),
+                arguments: [],
                 readFailure: failure
             ))
         }
@@ -172,7 +198,7 @@ enum LibprocPiProcessProbe {
             startedAt: startedAt,
             imagePath: path,
             executableName: fixedString(bytes: info.pbi_comm) ?? fixedString(bytes: info.pbi_name),
-            arguments: arguments(of: pid),
+            arguments: [],
             readFailure: pathFailure
         ))
     }
@@ -190,7 +216,10 @@ enum LibprocPiProcessProbe {
     /// `sysctl KERN_PROCARGS2`：读取真实 argv。只读取 argv 的前 `argc` 项，
     /// 停在 argv 边界，因此不会把 envp 当成参数；读取失败（其它用户的进程、
     /// 权限不足）返回空数组。
-    private static func arguments(of pid: pid_t) -> [String] {
+    ///
+    /// 这是唯一会读命令行的路径，调用方（`PiProcessInspector.inspect`）只对候选
+    /// 进程调用它；`snapshot(of:)` 自己不再读 argv。
+    static func arguments(of pid: pid_t) -> [String] {
         var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
         var size = 0
         guard sysctl(&mib, 3, nil, &size, nil, 0) == 0,
@@ -449,7 +478,18 @@ struct PiProcessInspector {
                 switch probe.snapshot(pid) {
                 case .processGone:
                     continue
-                case .snapshot(let snapshot):
+                case .snapshot(let identity):
+                    // 便宜筛选：非候选进程不读 argv，分类也不会看 argv；候选进程
+                    // 读到的 argv 只是补全快照，不确定语义不变（读不到仍按空处理，
+                    // 由 classify 归入 unknown）。
+                    let snapshot: PiProcessSnapshot
+                    if Self.isCandidate(identity) {
+                        var candidate = identity
+                        candidate.arguments = probe.arguments(identity.pid)
+                        snapshot = candidate
+                    } else {
+                        snapshot = identity
+                    }
                     switch classify(snapshot) {
                     case .pi(let record):
                         records.append(record)
@@ -573,6 +613,47 @@ struct PiProcessInspector {
         name == piExecutableName
     }
 
+    /// JS 运行时的候选名字前缀（GitHub #61）。
+    ///
+    /// 候选判定故意比分类宽松：`node24`、`npm-cli` 这类带版本或包装后缀的名字也
+    /// 按运行时处理。放宽只可能多读一个进程的 argv，不可能漏读，也不可能改变
+    /// 分类结论（`classify` 仍然只认 `interpreterExecutableNames` 的精确名字）。
+    static let runtimeNamePrefixes: Set<String> = [
+        "node", "npm", "npx", "bun", "deno", "tsx", "ts-node"
+    ]
+
+    /// 名字是否像已知的 JS 运行时（精确名或已知前缀）。
+    static func isRuntimeLikeName(_ name: String?) -> Bool {
+        guard let name, !name.isEmpty else { return false }
+        let lowered = name.lowercased()
+        if interpreterExecutableNames.contains(lowered) { return true }
+        return runtimeNamePrefixes.contains { lowered.hasPrefix($0) }
+    }
+
+    /// 便宜的候选判定：只用镜像路径与内核进程名，**不读 argv**。
+    ///
+    /// 只有候选进程的 argv 可能改变判定结果：`pi` 的可执行名（镜像或内核进程名）
+    /// 需要 argv 生成命令摘要；JS 运行时（Pi CLI 的 `#!/usr/bin/env node` 形态、
+    /// npm/pnpm 全局前缀下的入口脚本都由 `node` 承载）需要 argv 才能看到脚本路径
+    /// 与进程标题。系统守护进程、编译器、编辑器的 argv 与判定无关，因此不读。
+    ///
+    /// 候选判定是读取优化，不是安全判断：它不把任何“不确定”变成“确定”，
+    /// 两个可执行身份都读不到的进程仍然走 `unknown`。
+    static func isCandidate(imagePath: String?, executableName: String?) -> Bool {
+        let imageName = baseName(imagePath)
+        let kernelName = baseName(executableName)
+        if let imageName, isPiExecutableName(imageName) { return true }
+        if let kernelName, isPiExecutableName(kernelName) { return true }
+        if isRuntimeLikeName(imageName) { return true }
+        if isRuntimeLikeName(kernelName) { return true }
+        return false
+    }
+
+    /// `PiProcessSnapshot` 版本的候选判定。
+    static func isCandidate(_ snapshot: PiProcessSnapshot) -> Bool {
+        isCandidate(imagePath: snapshot.imagePath, executableName: snapshot.executableName)
+    }
+
     /// 路径（或裸名）的最后一段；空值返回 nil。
     static func baseName(_ path: String?) -> String? {
         guard let path, !path.isEmpty else { return nil }
@@ -633,13 +714,61 @@ struct PiProcessInspector {
         return token.firstIndex(of: ":")
     }
 
+    /// 敏感短开关字母：`-p<值>` / `-t<值>` / `-s<值>` 这类单字母短开关紧贴值
+    /// （或后面跟一个 token）时按凭据处理。只覆盖凭证习惯用法，不做任意字母猜测。
+    static let sensitiveShortSwitchLetters: Set<Character> = ["p", "t", "s"]
+
+    /// 已知凭据前缀：命中即把整个 token 换成占位符（不保留任何可见片段）。
+    /// 与仓库 secret 扫描的高信号形状对齐，但不依赖它。
+    static let secretValuePrefixes = [
+        "sk-", "sk_live_", "sk_test_", "rk_live_", "rk_test_",
+        "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_",
+        "xoxa-", "xoxb-", "xoxp-", "xoxr-", "xoxs-",
+        "glpat-", "npm_", "AKIA"
+    ]
+
+    /// 长位置参数的遮罩阈值：长度达到它并且只由 base64/十六进制/不透明标识符
+    /// 字符组成时，按“疑似秘密”处理（短于阈值的不遮罩，见 `docs/privacy.md` 的
+    /// 已知边界）。
+    static let opaqueSecretMinimumLength = 32
+
+    /// token 是否以已知凭据前缀开头。
+    static func hasKnownSecretPrefix(_ token: String) -> Bool {
+        secretValuePrefixes.contains { token.hasPrefix($0) }
+    }
+
+    /// 位置参数形态的疑似秘密：长 base64/十六进制/不透明串。
+    ///
+    /// 路径与 URL 不算（`/` 开头、`~` 开头或含 `://`）：它们交给 `LogRedactor`
+    /// 的 Home 路径与查询串规则，也避免把普通路径整体换成占位符。普通单词、
+    /// 版本号与短标识符都不到阈值，因此不会被误遮罩。
+    static func isOpaqueSecretToken(_ token: String) -> Bool {
+        guard token.count >= opaqueSecretMinimumLength else { return false }
+        guard !token.hasPrefix("/"), !token.hasPrefix("~"), !token.contains("://") else {
+            return false
+        }
+        return token.allSatisfy { character in
+            guard character.isASCII else { return false }
+            return character.isLetter || character.isNumber
+                || character == "+" || character == "/" || character == "="
+                || character == "-" || character == "_"
+        }
+    }
+
     /// Token 级预处理：把 `--token=值`、`token:值` 形态的值换成占位符，
-    /// 把 `--password 值` 的下一个 token 换成占位符。
+    /// 把 `--password 值` 的下一个 token 换成占位符，把 `-p值` 这类短开关紧跟
+    /// 值的形态换成 `-p<占位符>`，并把已知凭据前缀与长不透明串（疑似 base64/
+    /// 十六进制）整段换成占位符。
     ///
     /// 这一步不能省：`LogRedactor` 的键值规则在同一行里匹配时，未加引号的值会
     /// 贪婪吐掉后面的所有内容（`[^\n,;&]+` 允许空格）。一旦后面的内容里已经出现
     /// 占位符（例如同一行的 URL 查询串先被替换），幂等保护会让整条规则跳过，
     /// 凭据就会原样留在摘要里。按 token 边界先处理，就不依赖匹配顺序。
+    ///
+    /// 已知边界（如实说明，不夸大）：这是模式化遮罩，不是“凡秘密必被遮”。不符合
+    /// 任何已知形状的自由文本（例如短于 `opaqueSecretMinimumLength`、又没有已知
+    /// 前缀的位置参数，或与已知键名无关的普通句子）会原样保留；因此不要把秘密
+    /// 直接放进命令行。`docs/privacy.md` 与对应测试都把这个保留行为写成断言。
     static func maskSensitiveTokens(_ tokens: [String], marker: String = LogRedactor.marker) -> [String] {
         var masked: [String] = []
         masked.reserveCapacity(tokens.count)
@@ -655,11 +784,11 @@ struct PiProcessInspector {
                 index += 1
                 continue
             }
-            // 2. 裸开关 `--token` / `--password`：值在下一个 token，但无法可靠
-            //    区分“值”与“下一个开关”，而把开关当成值又会漏掉真正的值；
-            //    因此这里连尾巴一起不展示（宁可少展示，不少脱敏）。
             if token.hasPrefix("-"), !token.contains("=") {
                 let name = strippingLeadingDashes(token)
+                // 2. 裸开关 `--token` / `--password`：值在下一个 token，但无法可靠
+                //    区分“值”与“下一个开关”，而把开关当成值又会漏掉真正的值；
+                //    因此这里连尾巴一起不展示（宁可少展示，不少脱敏）。
                 if endsWithSensitiveKeyFragment(name) {
                     masked.append(token)
                     masked.append(marker)
@@ -671,6 +800,33 @@ struct PiProcessInspector {
                     index += 1
                     continue
                 }
+                // 4. 短开关紧跟值（`-p<值>`）：保留开关本身，值换成占位符。
+                //    单横线长开关（`-password`）已在第 2 步处理，不会走到这里。
+                if !token.hasPrefix("--"),
+                   let first = name.first,
+                   sensitiveShortSwitchLetters.contains(first) {
+                    if name.count == 1 {
+                        // 裸短开关：值在下一个 token，按第 2 步同样的策略连尾巴隐藏。
+                        masked.append(token)
+                        masked.append(marker)
+                        break
+                    }
+                    masked.append(String(token.prefix(2)) + marker)
+                    index += 1
+                    continue
+                }
+            }
+            // 5. 位置参数形式的已知凭据前缀（`sk-` / `ghp_` / `xoxb-` …）。
+            if hasKnownSecretPrefix(token) {
+                masked.append(marker)
+                index += 1
+                continue
+            }
+            // 6. 位置参数形式的长不透明串（疑似 base64/十六进制秘密）。
+            if isOpaqueSecretToken(token) {
+                masked.append(marker)
+                index += 1
+                continue
             }
             masked.append(token)
             index += 1

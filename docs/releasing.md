@@ -66,6 +66,35 @@ git diff --check
   `<...>.zip.sha256`、`<...>.evidence.md` 与 `release-metadata.env`。
 - 证据文件包含运行机器的路径与 macOS 版本，不要把它提交到仓库，也不要把 `dist/` 加进版本控制。
 
+### 本地演练与 Finder / iCloud 扩展属性
+
+如果工作区放在 iCloud Drive / File Provider 同步的目录（例如被“桌面与文稿”同步的 `~/Documents`），
+Finder 或 File Provider 会在构建过程中给 app bundle 或它的可执行文件写 `com.apple.FinderInfo`、
+`com.apple.fileprovider.fpfs#P` 这类扩展属性；`codesign --verify --deep --strict` 会因此拒绝产物，
+本地演练可能停在：
+
+```text
+package-release: FAILED - codesign --verify --deep --strict failed with status 1 for /…/build/Pi-Web-Desktop.app
+build/Pi-Web-Desktop.app: resource fork, Finder information, or similar detritus not allowed
+file with invalid attached data: Disallowed xattr com.apple.FinderInfo found on /…/build/Pi-Web-Desktop.app
+```
+
+`Scripts/build.sh` 在签名前后各清一次扩展属性并复验（失败时重试最多 3 次），
+`Scripts/package-release.sh` 在签名校验与打包前也做一次防御性清理（校验失败时清一次再重试），因此
+正常路径不会再失败；只有 `xattr` 不可用、或清理后立即被重新写入时才以可读错误停下，并提示下面的命令。
+手工排查与恢复：
+
+```bash
+xattr -l build/Pi-Web-Desktop.app
+xattr -l build/Pi-Web-Desktop.app/Contents/MacOS/PiWebDesktop
+xattr -cr build/Pi-Web-Desktop.app
+./Scripts/package-release.sh --tag v<MARKETING_VERSION>
+```
+
+清除扩展属性不会破坏封条，不需要重新签名；ZIP 流程不变（`ditto -c -k --sequesterRsrc` 只把剩余元数据
+写进 `__MACOSX/` AppleDouble 条目，打包前已经清理过一次）。CI 在干净目录 checkout，不受影响。
+更详细的机制与实测见[开发说明的“Finder / iCloud 扩展属性与签名校验”](development.md#finder--icloud-扩展属性与签名校验)。
+
 ## Tag 驱动 workflow（`.github/workflows/release.yml`）
 
 触发方式：

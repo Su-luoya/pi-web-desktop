@@ -122,7 +122,8 @@ open "$HOME/Applications/Pi-Web-Desktop.app"
 - CI 只使用 GitHub 托管的 `macos-14` runner，工作流权限是只读的 `contents: read`，不使用 secrets。
 - 所有 GitHub Actions 按**提交 SHA 固定**（例如 `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`），不使用浮动 tag。
 - `.github/dependabot.yml` 每周检查 GitHub Actions 固定版本的更新，并通过带 `dependencies`、`github_actions` 标签的 PR 提出升级，必须走正常评审和 CI。
-- CI 目前**没有**通用 secret scanning：`.github/workflows/build.yml:54-56` 只有一条 personal-data `git grep`（几个固定字面量），`./Scripts/check-identity.sh:433-446` 用的是另一组固定模式；两者都不是凭据/密钥扫描，能力边界见 [贡献指南](CONTRIBUTING.md#personal-data-与-secret-扫描能力)。通用 secret scan 属 [#11](https://github.com/Su-luoya/pi-web-desktop/issues/11) 的范围，当前发布门槛里不含它。
+- 仓库与 CI 共有三层固定模式文本检查，覆盖的是固定模式和已跟踪内容，不是通用泄露检测：`Scripts/check-identity.sh` 的仓库文本扫描、`.github/workflows/build.yml` 的 `Check for accidental personal data` 步骤（一条 `git grep` 字面量检查），以及 `Scripts/scan-secrets.sh`（[#11](https://github.com/Su-luoya/pi-web-desktop/issues/11) 已实现，CI 上由 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 两步门禁）——后者按形状扫描已跟踪文件里的高信号凭据（AWS access key ID、GitHub token、PEM 私钥头、JWT 和 `password=` 这类赋值），命中行只有**同一行**带 `scan-secrets: allow` 时才被跳过，每次运行结尾输出 `scan-secrets: suppressed N lines`，退出码 0 表示没有命中。
+- 三者的能力边界相同：只匹配固定规则、只扫已跟踪内容（对未跟踪的新文件会给出假绿，先暂存再扫），不做熵分析、不扫 Git 历史、不检查二进制或加密载荷，也不识别未列出的凭据类型。**“扫描通过”不等于“仓库里没有秘密”**；发布门槛要求 `./Scripts/scan-secrets.sh` 与 `./Scripts/scan-secrets.sh --self-test` 都退出 0，并把结尾的 N 与本次新增的抑制标记数对照。规则、退出码与本地用法见 [贡献指南](CONTRIBUTING.md#personal-data-与-secret-扫描能力) 与 [开发说明](docs/development.md#personal-data-与-secret-扫描能力)。
 
 ## 项目文档
 
@@ -134,6 +135,7 @@ open "$HOME/Applications/Pi-Web-Desktop.app"
 - [发布](docs/releasing.md)
 - [Alpha 发布门槛清单](docs/alpha-release-checklist.md)
 - [Release notes 模板](docs/release-notes-template.md)
+- [v0.1.0-alpha.1 Release 说明](docs/release-notes-v0.1.0-alpha.1.md)
 - [隐私](docs/privacy.md)
 - [Orca 工作流](docs/orca-workflow.md)
 - [贡献指南](CONTRIBUTING.md)

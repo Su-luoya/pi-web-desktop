@@ -159,8 +159,9 @@ struct ComponentInstallation: Equatable {
         copy.resolvedPath = resolvedPath.map { redactor.redact($0) }
         copy.symlinkChain = symlinkChain.map { redactor.redact($0) }
         copy.packageJSONPath = packageJSONPath.map { redactor.redact($0) }
-        // 证据行里的路径不一定在行首（例如 `npm root -g → /Users/…`），
-        // 所以这里替换所有出现的 Home 前缀，而不只是行首。
+        // 证据行里的路径不一定在行首（例如 `npm root -g → ` 后面紧跟用户主目录前缀），
+        // 所以这里替换所有出现的 Home 前缀，而不只是行首；写注释时不要写出该前缀的字面量，
+        // 否则仓库自己的 personal-data 门禁会把这条注释当成命中的样例。
         copy.evidence = evidence.map { redactor.redactingAllOccurrences(in: $0) }
         return copy
     }

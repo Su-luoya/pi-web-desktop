@@ -59,7 +59,7 @@ final class LogWriterTests: XCTestCase {
         let writer = makeWriter()
         XCTAssertTrue(writer.append("""
         plain line
-        token=test-secret-value
+        token=test-secret-value  // scan-secrets: allow
         Authorization: Bearer header-secret
         cwd \(fakeHome)/work
         """))
@@ -141,7 +141,7 @@ final class LogWriterTests: XCTestCase {
     func testOpenChildOutputScrubsHistoricallyWrittenSecrets() throws {
         let writer = makeWriter(policy: LogRotationPolicy(maximumBytes: 1024, retainedFileCount: 2))
         try FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try "token=old-history-secret\nplain history\n".write(to: logURL, atomically: true, encoding: .utf8)
+        try "token=old-history-secret\nplain history\n".write(to: logURL, atomically: true, encoding: .utf8)  // scan-secrets: allow
 
         let handle = try writer.openChildOutput()
         try handle.write(contentsOf: Data("child output\n".utf8))
@@ -156,7 +156,7 @@ final class LogWriterTests: XCTestCase {
     func testOpenChildOutputRotatesAnOversizedLogAfterScrubbingIt() throws {
         let writer = makeWriter(policy: LogRotationPolicy(maximumBytes: 64, retainedFileCount: 2))
         try FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try ("token=rotated-secret\n" + String(repeating: "z", count: 100) + "\n")
+        try ("token=rotated-secret\n" + String(repeating: "z", count: 100) + "\n")  // scan-secrets: allow
             .write(to: logURL, atomically: true, encoding: .utf8)
 
         let handle = try writer.openChildOutput()

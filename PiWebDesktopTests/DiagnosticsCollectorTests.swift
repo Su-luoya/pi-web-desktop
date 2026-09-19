@@ -33,6 +33,70 @@ final class DiagnosticsCollectorTests: XCTestCase {
         remoteAccessPasswordStatus: "已设置（仅存于 Keychain）"
     )
 
+    /// 导出文本的标签集合（字段顺序由 `testTextMatchesTheExpectedLayout` 单独固定）。
+    /// #10 新增的版本可信度与托管关系都在内。
+    private let expectedLabels: [String] = [
+        "Pi Web Desktop 版本",
+        "Pi Web Desktop 构建号",
+        "pi-web 版本",
+        "pi-web 路径",
+        "Pi CLI 版本",
+        "Node.js 版本",
+        "服务地址",
+        "端口",
+        "状态",
+        "托管关系",
+        "监听 PID",
+        "监听进程",
+        "托管 PID",
+        "有效工作目录",
+        "配置目录",
+        "启动命令",
+        "启动环境",
+        "日志文件",
+        "日志写入",
+        "远程访问密码"
+    ]
+
+    /// 按 `标签: 值` 解析导出文本。每一行都必须可解析（多行值由实现拆成带序号的
+    /// 唯一标签行），否则显式失败，避免解析器静默吞掉不合规的输出。
+    private func parseExport(
+        _ text: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) -> [(label: String, value: String)] {
+        var fields: [(label: String, value: String)] = []
+        for rawLine in text.components(separatedBy: "\n") {
+            guard let separator = rawLine.firstIndex(of: ":"),
+                  separator > rawLine.startIndex else {
+                XCTFail("导出文本每一行都必须是 `标签: 值`: \(rawLine)", file: file, line: line)
+                continue
+            }
+            let remainder = rawLine[rawLine.index(after: separator)...]
+            guard remainder.hasPrefix(" ") else {
+                XCTFail("`标签:` 后必须有一个空格再接值: \(rawLine)", file: file, line: line)
+                continue
+            }
+            fields.append((String(rawLine[rawLine.startIndex..<separator]), String(remainder.dropFirst())))
+        }
+        return fields
+    }
+
+    private func value(_ label: String, in fields: [(label: String, value: String)]) -> String? {
+        fields.first { $0.label == label }?.value
+    }
+
+    private func assertLabelsAreUniqueAndComplete(
+        _ fields: [(label: String, value: String)],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let labels = fields.map(\.label)
+        XCTAssertEqual(Set(labels).count, labels.count, "标签必须唯一: \(labels)", file: file, line: line)
+        XCTAssertEqual(Set(labels), Set(expectedLabels), file: file, line: line)
+        XCTAssertEqual(labels.count, expectedLabels.count, file: file, line: line)
+    }
+
     func testTextMatchesTheExpectedLayout() {
         let expected = """
         Pi Web Desktop 版本: 9.9.9
@@ -85,7 +149,7 @@ final class DiagnosticsCollectorTests: XCTestCase {
         ] {
             XCTAssertTrue(text.contains(value), "diagnostics is missing \(value)")
         }
-        XCTAssertEqual(text.components(separatedBy: "\n").count, 20)
+        assertLabelsAreUniqueAndComplete(parseExport(text))
     }
 
     /// 脱敏不牺牲故障上下文：秘密与用户名全部消失，但版本、状态、端口、可信度
@@ -243,6 +307,54 @@ final class DiagnosticsCollectorTests: XCTestCase {
         XCTAssertTrue(text.contains("托管 PID: 无（外部服务或未运行）"))
         XCTAssertTrue(text.contains("pi-web 路径: 未找到（可信度 unknown（未知））"))
         XCTAssertTrue(text.contains("监听进程: 无"))
-        XCTAssertEqual(text.components(separatedBy: "\n").count, 20)
+
+        let fields = parseExport(text)
+        assertLabelsAreUniqueAndComplete(fields)
+        for label in ["Pi Web Desktop 版本", "服务地址", "启动环境", "日志文件"] {
+            XCTAssertEqual(value(label, in: fields), "", "空值必须保留成空字段: \(label)")
+        }
+    }
+
+    /// 值原样输出（不裁剪、不转义），每一行恰好一个唯一的 `标签: 值`，否则复制
+    /// 出去的文本无法可靠解析；多行值同样由实现拆成带序号的唯一标签行。
+    func testEveryLineCarriesOneUniqueLabelAndTheValueVerbatim() {
+        var padded = input
+        padded.status = "  正在运行  "
+        padded.configurationDirectory = "~/.pi/agent/"
+
+        let fields = parseExport(DiagnosticsCollector.text(for: padded))
+
+        assertLabelsAreUniqueAndComplete(fields)
+        // 值逐字：前导/尾随空格与结尾斜杠都不被裁剪。
+        XCTAssertEqual(value("状态", in: fields), "  正在运行  ")
+        XCTAssertEqual(value("配置目录", in: fields), "~/.pi/agent/")
+        // #10 新增的版本可信度与托管关系也按同一规则输出。
+        XCTAssertEqual(value("pi-web 版本", in: fields), "1.2.3（可信度 verified（已验证））")
+        XCTAssertEqual(value("pi-web 路径", in: fields), "/opt/homebrew/bin/pi-web（可信度 verified（已验证））")
+        XCTAssertEqual(value("Pi CLI 版本", in: fields), "0.5.0（可信度 inferred（推断））")
+        XCTAssertEqual(value("Node.js 版本", in: fields), "v22.19.0（可信度 verified（已验证））")
+        XCTAssertEqual(value("托管关系", in: fields), DiagnosticsManagement.managed(pid: "4321").text)
+        XCTAssertEqual(value("远程访问密码", in: fields), "已设置（仅存于 Keychain）")
+    }
+
+    /// 多行值不产生无标签的续行：每个环境变量条目独占一行，标签唯一，值逐字保留。
+    func testMultiLineValuesKeepOneUniqueLabelPerLine() {
+        var multiLine = input
+        multiLine.launchEnvironment = "PI_WEB_NO_OPEN=1\nINTEGRATION_BASE=1"
+
+        let text = DiagnosticsCollector.text(for: multiLine)
+        let fields = parseExport(text)
+
+        let labels = fields.map(\.label)
+        XCTAssertEqual(Set(labels).count, labels.count, "标签必须唯一: \(labels)")
+        XCTAssertEqual(labels.count, expectedLabels.count + 1, "多行值只增加一个带序号的标签行")
+        XCTAssertEqual(value("启动环境", in: fields), "PI_WEB_NO_OPEN=1")
+        XCTAssertEqual(value("启动环境[2]", in: fields), "INTEGRATION_BASE=1")
+        for label in labels {
+            XCTAssertTrue(
+                expectedLabels.contains(label) || label.hasPrefix("启动环境["),
+                "多行值续行的标签必须可识别: \(label)"
+            )
+        }
     }
 }

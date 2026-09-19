@@ -427,4 +427,83 @@ final class KeychainStoreTests: XCTestCase {
         XCTAssertTrue(RemoteAccessPolicy.isLoopbackHostname(ServiceConfiguration.default.hostname))
         XCTAssertEqual(ServiceConfiguration.defaultHostname, "127.0.0.1")
     }
+
+    // MARK: Keychain 替身的更多失败路径
+
+    /// 读取失败按“未设置”处理：同时又提供了新密码才能保存；不提供新密码时
+    /// 仍按缺密码拒绝，且两次都不会写入 UserDefaults 或真实 Keychain。
+    func testReadFailureNeedsANewPasswordToSaveRemoteAccess() throws {
+        let keychain = InMemoryKeychainStore()
+        keychain.loadError = KeychainStoreError.status(errSecAuthFailed)
+
+        let rejected = RemoteAccessSetup.apply(
+            requested: remoteConfiguration(),
+            newPassword: nil,
+            keychain: keychain
+        )
+        XCTAssertNil(rejected.configuration)
+        XCTAssertEqual(rejected.error, RemoteAccessPolicy.missingPasswordMessage)
+        XCTAssertTrue(keychain.items.isEmpty)
+
+        let accepted = RemoteAccessSetup.apply(
+            requested: remoteConfiguration(),
+            newPassword: secret,
+            keychain: keychain
+        )
+        XCTAssertEqual(accepted.configuration, remoteConfiguration())
+        XCTAssertNil(accepted.error)
+        keychain.loadError = nil
+        XCTAssertEqual(try keychain.load(for: RemoteAccessPassword.account), secret)
+    }
+
+    /// 非 LocalizedError 的失败也要有可读文本（固定兜底），且不包含密码。
+    func testNonLocalizedKeychainFailureStaysReadableAndRedacted() throws {
+        struct PlainFailure: Error {}
+        let keychain = InMemoryKeychainStore()
+        keychain.saveError = PlainFailure()
+
+        let outcome = RemoteAccessSetup.apply(
+            requested: remoteConfiguration(),
+            newPassword: secret,
+            keychain: keychain
+        )
+        let error = try XCTUnwrap(outcome.error)
+
+        XCTAssertNil(outcome.configuration)
+        XCTAssertEqual(outcome.error?.contains("未知错误"), true)
+        XCTAssertEqual(outcome.error?.contains("PlainFailure"), false)
+        XCTAssertFalse(error.contains(secret))
+        XCTAssertEqual(RemoteAccessSetup.readableMessage(for: PlainFailure()), "未知错误")
+        XCTAssertEqual(RemoteAccessSetup.readableMessage(for: KeychainStoreError.notFound), "Keychain 中没有找到该条目。")
+        XCTAssertEqual(RemoteAccessSetup.readableMessage(for: KeychainStoreError.undecodableData), "Keychain 中的条目内容无法读取。")
+    }
+
+    /// 一条文本里出现多个秘密时全部替换；空秘密不参与替换（否则会把整段
+    /// 文本拆掉）。
+    func testSecretScrubbingReplacesEveryOccurrenceAndIgnoresEmptySecrets() {
+        let other = "unit-test-secret-Bb2!"
+        let text = "a=\(secret) b=\(other) c=\(secret)"
+
+        let scrubbed = SecretScrubbing.scrub(text, secrets: [secret, other, ""])
+
+        XCTAssertEqual(
+            scrubbed,
+            "a=\(SecretScrubbing.placeholder) b=\(SecretScrubbing.placeholder) c=\(SecretScrubbing.placeholder)"
+        )
+        XCTAssertFalse(scrubbed.contains(secret))
+        XCTAssertFalse(scrubbed.contains(other))
+        XCTAssertEqual(SecretScrubbing.scrub(text, secrets: [""]), text)
+    }
+
+    /// 关闭远程模式对 loopback 配置是幂等的，且不会顺手改动端口、代理或行为。
+    func testDisablingRemoteAccessIsIdempotentForLoopback() {
+        var configuration = ServiceConfiguration.default
+        configuration.port = 41234
+        configuration.allowedHosts = "pi.example.invalid"
+        configuration.httpProxy = "http://proxy.example.invalid:8080"
+        configuration.workspacePath = "/tmp/PiWebDesktopTests/workspace"
+        configuration.quitBehavior = .stopService
+
+        XCTAssertEqual(RemoteAccessPolicy.disablingRemoteAccess(in: configuration), configuration)
+    }
 }

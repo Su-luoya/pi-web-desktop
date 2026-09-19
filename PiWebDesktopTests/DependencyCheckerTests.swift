@@ -777,4 +777,91 @@ final class DependencyCheckerTests: XCTestCase {
             XCTAssertFalse(line.contains("curl"))
         }
     }
+
+    // MARK: - 版本解析边界
+
+    func testVersionParsingTrimsWhitespaceAndDropsBuildMetadata() {
+        XCTAssertEqual(SemanticVersion("  v1.2.3  ")?.description, "1.2.3")
+        XCTAssertEqual(SemanticVersion("V2.0")?.description, "2.0.0")
+        XCTAssertEqual(SemanticVersion("1.2.3+build.7")?.description, "1.2.3")
+        XCTAssertEqual(SemanticVersion("1.2.3-")?.description, "1.2.3", "空 prerelease 要当正式版")
+        XCTAssertEqual(SemanticVersion("1.2.03")?.description, "1.2.3", "前导零不是新版本")
+        XCTAssertNil(SemanticVersion("."))
+        XCTAssertNil(SemanticVersion("١٢.٣"), "非 ASCII 数字不是版本段")
+        XCTAssertNil(SemanticVersion("99999999999999999999.1"), "溢出段必须拒绝而不是崩溃")
+    }
+
+    func testFirstVersionSkipsUnparseableTokensInOrder() {
+        XCTAssertEqual(SemanticVersion.firstVersion(in: "pi-web unknown 1.2.3")?.description, "1.2.3")
+        XCTAssertEqual(SemanticVersion.firstVersion(in: "1.2.3 2.0.0")?.description, "1.2.3")
+        XCTAssertEqual(SemanticVersion.firstVersion(in: "v22.19.0,")?.description, "22.19.0")
+        XCTAssertNil(SemanticVersion.firstVersion(in: "1.2.3.4.5"))
+    }
+
+    // MARK: - 安装来源推断与脱敏
+
+    /// Homebrew 前缀但不在 Cellar 下：来源可推断，置信度只能是 inferred。
+    func testHomebrewPrefixWithoutCellarIsInferredNotVerified() {
+        let harness = DependencyHarness()
+        harness.fileSystem.executables = [
+            "/usr/local/bin/node",
+            "/usr/local/bin/pi",
+            "/usr/local/bin/pi-web"
+        ]
+        harness.runner.handler = { arguments in
+            switch arguments.joined(separator: " ") {
+            case "/usr/local/bin/node --version": return "v22.19.0\n"
+            case "/usr/local/bin/pi --version": return "9.9.9\n"
+            case "/usr/local/bin/pi-web --version": return "1.2.3\n"
+            default: return nil
+            }
+        }
+
+        let report = harness.checker().run()
+        let piWeb = report.finding(for: .piWeb)
+        XCTAssertEqual(piWeb?.status, .ok)
+        XCTAssertEqual(piWeb?.installSource, .homebrew)
+        XCTAssertEqual(piWeb?.confidence, .inferred)
+    }
+
+    /// `~/.npm-global/bin` 命中 npm 全局，但没有 package.json 佐证时置信度只能是
+    /// inferred，不能标成 verified。
+    func testNPMGlobalHomeBinDirectoryIsInferredNotVerified() {
+        let harness = DependencyHarness()
+        let home = harness.fileSystem.home
+        harness.fileSystem.executables = [
+            "\(home)/.npm-global/bin/node",
+            "\(home)/.npm-global/bin/pi",
+            "\(home)/.npm-global/bin/pi-web"
+        ]
+        harness.runner.handler = { arguments in
+            switch arguments.joined(separator: " ") {
+            case "\(home)/.npm-global/bin/node --version": return "v22.19.0\n"
+            case "\(home)/.npm-global/bin/pi --version": return "9.9.9\n"
+            case "\(home)/.npm-global/bin/pi-web --version": return "1.2.3\n"
+            default: return nil
+            }
+        }
+
+        let report = harness.checker().run()
+        let piWeb = report.finding(for: .piWeb)
+        XCTAssertEqual(piWeb?.status, .ok)
+        XCTAssertEqual(piWeb?.installSource, .npmGlobal)
+        XCTAssertEqual(piWeb?.confidence, .inferred)
+        XCTAssertTrue(report.canStartService)
+    }
+
+    /// 脱敏只替换 Home 边界：Home 本身与 Home 下的路径换成 `~`，同前缀目录
+    /// （例如 Home 后面还多一个 `-other` 段）不能被误伤。
+    func testPathRedactorOnlyReplacesTheHomeBoundary() {
+        let home = "/tmp/pi-web-desktop-tests-home"
+        let redactor = DependencyPathRedactor(homeDirectory: home + "/")
+        XCTAssertEqual(redactor.redact(home), "~")
+        XCTAssertEqual(redactor.redact(home + "/tools/bin/pi"), "~/tools/bin/pi")
+        XCTAssertEqual(redactor.redact(home + "-other/bin/pi"), home + "-other/bin/pi")
+        XCTAssertEqual(redactor.redact("/opt/homebrew/bin/pi"), "/opt/homebrew/bin/pi")
+
+        XCTAssertEqual(DependencyPathRedactor(homeDirectory: "/").redact("/opt/homebrew/bin/pi"), "/opt/homebrew/bin/pi")
+        XCTAssertEqual(DependencyPathRedactor(homeDirectory: "").redact("/opt/homebrew/bin/pi"), "/opt/homebrew/bin/pi")
+    }
 }

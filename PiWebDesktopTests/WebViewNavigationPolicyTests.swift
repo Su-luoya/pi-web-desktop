@@ -55,4 +55,14 @@ final class WebViewNavigationPolicyTests: XCTestCase {
         XCTAssertFalse(WebViewNavigationPolicy.isInlineScheme("http"))
         XCTAssertFalse(WebViewNavigationPolicy.isInlineScheme(nil))
     }
+
+    /// scheme 与 host 大小写不影响判定，端口必须精确匹配；`localhost.localdomain`
+    /// 这类同前缀主机不能因为看起来像 localhost 而被放行。
+    func testSchemeAndHostComparisonIsNormalized() throws {
+        XCTAssertEqual(WebViewNavigationPolicy.decision(for: try url("HTTP://127.0.0.1:\(port)/app"), port: port), .allow)
+        XCTAssertEqual(WebViewNavigationPolicy.decision(for: try url("HTTPS://LOCALHOST/"), port: port), .allow)
+        XCTAssertEqual(WebViewNavigationPolicy.decision(for: try url("http://[::1]/"), port: port), .allow)
+        XCTAssertEqual(WebViewNavigationPolicy.decision(for: try url("http://127.0.0.1:80/"), port: port), .openExternally)
+        XCTAssertEqual(WebViewNavigationPolicy.decision(for: try url("http://localhost.localdomain/"), port: port), .openExternally)
+    }
 }

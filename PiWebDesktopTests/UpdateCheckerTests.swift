@@ -340,7 +340,7 @@ final class UpdateCheckerTests: XCTestCase {
     func testScheduledRechecksFollowCategoryIntervals() {
         let world = makeWorld(responder: automaticResponder())
         world.checker.start(inventory: fullInventory())
-        XCTAssertEqual(world.scheduler.activeIntervals.sorted(), [24 * 3600, 7 * 24 * 3600])
+        XCTAssertEqual(world.scheduler.activeIntervals.sorted(), [TimeInterval(24 * 3600), TimeInterval(7 * 24 * 3600)])
 
         // 24 小时：桌面 / Pi / Pi Web 复查，扩展包（7 天）不复查。
         world.clock.now = referenceDate.addingTimeInterval(24 * 3600)
@@ -385,7 +385,7 @@ final class UpdateCheckerTests: XCTestCase {
     func testDisablingCategoryStopsItsRequestsAndRemovesItsTimer() {
         let world = makeWorld(responder: automaticResponder())
         world.checker.start(inventory: fullInventory())
-        XCTAssertEqual(world.scheduler.activeIntervals.sorted(), [24 * 3600, 7 * 24 * 3600])
+        XCTAssertEqual(world.scheduler.activeIntervals.sorted(), [TimeInterval(24 * 3600), TimeInterval(7 * 24 * 3600)])
         let webRequestsBefore = requestCount(world, category: .piWeb)
 
         var preferences = world.checker.preferences
@@ -393,7 +393,7 @@ final class UpdateCheckerTests: XCTestCase {
         preferences.piPackagesEnabled = false
         world.checker.preferences = preferences
 
-        XCTAssertEqual(world.scheduler.activeIntervals, [24 * 3600])
+        XCTAssertEqual(world.scheduler.activeIntervals, [TimeInterval(24 * 3600)])
         XCTAssertTrue(world.scheduler.timers.filter { $0.token.isCancelled }.count >= 2)
 
         world.clock.now = referenceDate.addingTimeInterval(3 * 24 * 3600)

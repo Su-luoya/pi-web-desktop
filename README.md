@@ -24,8 +24,8 @@ Pi Web Desktop is a macOS AppKit/WebKit shell that starts, monitors, and display
 | 构建工具 | 系统 Swift 编译器（`swiftc`）+ Xcode Command Line Tools；`xcodebuild build/test` 需要完整 Xcode |
 | 签名 | ad-hoc 签名（`codesign --sign -`），没有 Developer ID 证书，`TeamIdentifier` 为空 |
 | 公证 | 未公证。Gatekeeper 默认拒绝（`spctl --assess` 返回 rejected），需要用户在“系统设置 → 隐私与安全性”里手动批准 |
-| 发行状态 | 当前只有早期 alpha 基线 `0.1.0-alpha.1`（build `1`），没有稳定发行版 |
-| 分发现状 | 本仓库当前不提供预编译 [Release](https://github.com/Su-luoya/pi-web-desktop/releases) 下载；alpha.1 从源码构建，ZIP 打包流程见 [发布说明](docs/releasing.md) |
+| 发行状态 | 当前最新是早期 alpha `0.1.0-alpha.2`（build `2`），没有稳定发行版；`0.1.0-alpha.1` 仍然可以下载 |
+| 分发现状 | alpha 以 prerelease 形式发布在 [GitHub Releases](https://github.com/Su-luoya/pi-web-desktop/releases)：自 `v0.1.0-alpha.1` 起提供预编译 ZIP、`.sha256` 与签名/公证证据 Markdown；也可以按 [发布说明](docs/releasing.md) 从源码构建。所有资产都是 **ad-hoc 签名、未公证** |
 | 应用内更新 | 未实现（后续 issue）。当前 alpha 只做只读版本检查并按设置提示：四类可分别关闭 / 每日 / 每周（扩展包：关闭 / 检查并通知 / 询问后更新），可忽略某个具体版本；不下载、不安装、不降级。见 [隐私说明](docs/privacy.md) 的“版本检查、提示与忽略版本”与 [设置说明](docs/settings-and-workspace.md) |
 | 支持承诺 | 无 SLA，无响应或修复时限。Issue 和 PR 按维护者可用时间处理 |
 | 远程访问 | 默认只监听 loopback；远程访问必须自备加密隧道或 HTTPS 反向代理，密码认证 ≠ 传输加密 |
@@ -69,7 +69,7 @@ open build/Pi-Web-Desktop.app
 
 `Scripts/smoke.sh` 在临时 support 目录里跑“主窗口”和“诊断页”两种 smoke 模式，都必须在超时内以 0 退出并打印各自标记；它不会写真实 UserDefaults、`~/Library/Application Support` 或 `~/Library/Logs`，也不会启动真实 pi-web。完整说明见 [开发说明](docs/development.md)。
 
-应用身份、版本与最低系统版本只有一个来源：`Configuration/AppIdentity.xcconfig`。当前 alpha 为 `0.1.0-alpha.1`（build `1`），bundle identifier `io.github.su-luoya.pi-web-desktop`，显示名 `Pi Web Desktop`，最低系统版本 `14.0`。`PiWebDesktop.xcodeproj` 通过 `baseConfigurationReference` 继承该文件，`Scripts/build.sh` 也从同一文件生成 `Info.plist`，所以 Xcode 工程、测试 target、脚本产物与 CI 不会各自漂移。任何身份或版本改动后都要重跑：
+应用身份、版本与最低系统版本只有一个来源：`Configuration/AppIdentity.xcconfig`。当前 alpha 为 `0.1.0-alpha.2`（build `2`），bundle identifier `io.github.su-luoya.pi-web-desktop`，显示名 `Pi Web Desktop`，最低系统版本 `14.0`。`PiWebDesktop.xcodeproj` 通过 `baseConfigurationReference` 继承该文件，`Scripts/build.sh` 也从同一文件生成 `Info.plist`，所以 Xcode 工程、测试 target、脚本产物与 CI 不会各自漂移。任何身份或版本改动后都要重跑：
 
 ```bash
 ./Scripts/build.sh
@@ -110,7 +110,7 @@ open "$HOME/Applications/Pi-Web-Desktop.app"
 4. PR 必须关联 Issue，并按 [PR 模板](.github/pull_request_template.md)填写变更说明、验收证据、安全与兼容性影响。维护者验证后用 squash merge 合入 `main`。
 5. 提交前按 [贡献指南](CONTRIBUTING.md)运行构建、身份检查、smoke 和仓库文本（personal-data）扫描。
 
-标签体系统一使用 `type:`（bug/feature/maintenance/documentation/security）、`area:`（app/service/diagnostics/security/updates/build-release/documentation）、`status:`（needs-decision/ready/blocked/needs-reproduction）和 `priority:`（P0–P3）。当前没有任何公开 Release，安装或升级前请先看[发布页](https://github.com/Su-luoya/pi-web-desktop/releases)是否为空白。
+标签体系统一使用 `type:`（bug/feature/maintenance/documentation/security）、`area:`（app/service/diagnostics/security/updates/build-release/documentation）、`status:`（needs-decision/ready/blocked/needs-reproduction）和 `priority:`（P0–P3）。公开版本目前只有 alpha prerelease（最新 `0.1.0-alpha.2`，ad-hoc 签名、未公证），安装或升级前请先看[发布页](https://github.com/Su-luoya/pi-web-desktop/releases)的说明与 checksum。
 
 ## 报告安全问题
 
@@ -135,6 +135,7 @@ open "$HOME/Applications/Pi-Web-Desktop.app"
 - [发布](docs/releasing.md)
 - [Alpha 发布门槛清单](docs/alpha-release-checklist.md)
 - [Release notes 模板](docs/release-notes-template.md)
+- [v0.1.0-alpha.2 Release 说明](docs/release-notes-v0.1.0-alpha.2.md)
 - [v0.1.0-alpha.1 Release 说明](docs/release-notes-v0.1.0-alpha.1.md)
 - [隐私](docs/privacy.md)
 - [Orca 工作流](docs/orca-workflow.md)

@@ -783,6 +783,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         serviceManager.onRemoteAccessClosed = { [weak self] closed in
             self?.persistClosedRemoteAccessConfiguration(closed)
         }
+        // 启动入口在启动前发现工作目录不可用（GitHub #9 复审：健康监控运行期间
+        // 自选目录被删除）：进入诊断状态并给出可读修复提示，而不是重建目录。
+        serviceManager.onWorkspaceProblem = { [weak self] _, _ in
+            // 从启动入口里回来，延到下一个主线程周期再重路由，避开重入。
+            DispatchQueue.main.async { self?.presentWorkspaceDiagnostics() }
+        }
+    }
+
+    /// 工作目录在某个启动入口被判定为不可用时重新路由到诊断状态。
+    ///
+    /// 目录已经被恢复（例如用户在提示后重新创建）时不进入诊断，回到正常路由：
+    /// `applyDependencyReport` 会拿最新的工作目录状态重新决定主窗口/诊断页。
+    private func presentWorkspaceDiagnostics() {
+        guard !serviceManager.isQuitting else { return }
+        // 用 AppDelegate 自己的探针重新校验，保证页面、诊断窗口与门控三处同源。
+        refreshWorkspaceState()
+        guard let report = dependencyReport else { return }
+        applyDependencyReport(report, triggeredByUser: false)
     }
 
     /// 远程访问被 `ServiceManager` 收敛（密码被删除或读取失败、已停止托管进程）
@@ -957,9 +975,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func openInBrowser(_ sender: Any?) { NSWorkspace.shared.open(startURL) }
     @objc private func copyLocalAddress(_ sender: Any?) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(startURL.absoluteString, forType: .string) }
     @objc private func openLog(_ sender: Any?) {
-        let logURL = appConfiguration.logURL
-        if !FileManager.default.fileExists(atPath: logURL.path) { FileManager.default.createFile(atPath: logURL.path, contents: nil) }
-        NSWorkspace.shared.open(logURL)
+        // 日志父目录可能还不存在（从未启动过服务，或关闭了自动启动）：先补齐目录，
+        // 失败时给出可读提示，不静默失败也不崩溃（GitHub #9 复审）。
+        if let error = appConfiguration.prepareLogFileForOpening() {
+            presentLogOpenFailure(error)
+            return
+        }
+        NSWorkspace.shared.open(appConfiguration.logURL)
+    }
+
+    /// “打开日志”失败时的可读提示（只用于用户主动点开日志的场景）。
+    private func presentLogOpenFailure(_ message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "无法打开日志"
+        alert.informativeText = message
+        alert.addButton(withTitle: "好")
+        alert.beginSheetModal(for: window) { _ in }
     }
 
     // 版本信息只有一个来源：bundle 的 Info.plist（由 Configuration/AppIdentity.xcconfig 生成）。

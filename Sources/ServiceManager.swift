@@ -474,6 +474,10 @@ final class ServiceManager {
     /// 该路径是否为应用默认工作目录；可读提示据此区分“默认工作目录”与用户自选目录。
     private(set) var workspaceUsesDefaultLocation = true
 
+    /// 启动入口在真正启动前发现工作目录不可用时的回调（GitHub #9 复审）。
+    /// 调用方据此进入诊断状态；`ServiceManager` 不自己重建自选目录。
+    var onWorkspaceProblem: ((WorkspaceDirectoryProblem, String) -> Void)?
+
     /// True once a quit sequence started. AppDelegate drives this through
     /// `beginQuitting()` / `keepRunningOnQuit()` / `stopManagedServiceOnQuit(completion:)`.
     private(set) var isQuitting = false
@@ -492,6 +496,10 @@ final class ServiceManager {
     private let fileManager: FileManager
     private let ownershipStore: ServiceOwnershipStoring
     private let signaler: ServiceSignaling
+    /// 工作目录探针（GitHub #9 复审）。启动入口在启动前重新校验一次工作目录，
+    /// 使健康监控运行期间被删除的自选目录不会被静默重建；默认复用注入的
+    /// `fileManager`，测试可以注入假探针。
+    private let workspaceProbe: WorkspaceDirectoryProbe
     /// 读取远程访问密码（Keychain）。默认返回 nil，即“无密码”：远程模式因此默认
     /// 被拒绝，测试也绝不会碰到真实 Keychain；生产环境由 AppDelegate 注入。
     private let remoteAccessPassword: () -> String?
@@ -518,6 +526,7 @@ final class ServiceManager {
         ownershipStore: ServiceOwnershipStoring = FileServiceOwnershipStore(),
         signaler: ServiceSignaling = POSIXServiceSignaler(),
         remoteAccessPassword: @escaping () -> String? = { nil },
+        workspaceProbe: WorkspaceDirectoryProbe? = nil,
         instanceID: String = UUID().uuidString
     ) {
         self.configuration = configuration
@@ -532,6 +541,7 @@ final class ServiceManager {
         self.ownershipStore = ownershipStore
         self.signaler = signaler
         self.remoteAccessPassword = remoteAccessPassword
+        self.workspaceProbe = workspaceProbe ?? .live(fileManager: fileManager)
         self.instanceID = instanceID
     }
 
@@ -835,6 +845,11 @@ final class ServiceManager {
     /// 依赖门控关闭时直接返回，不产生任何进程或页面副作用。
     func startManagedService() {
         guard isBaseStartPermitted else { return }
+        // 启动前的最后一次工作目录校验（GitHub #9 复审）：门控是上一次探测的
+        // 结果，健康监控运行期间用户自选目录可能已被删除。只有默认工作目录允许
+        // 被自动创建；自选目录缺失/不可写时一律不可用：阻止启动、回调调用方进入
+        // 诊断状态，不静默重建目录。
+        guard prepareWorkspaceBeforeLaunch() else { return }
         // 本次启动只读一次凭证，校验与启动规格共用它：校验通过后不再触碰 Keychain
         // （GitHub #8 复审：二次读取失败不能退化成无认证的远程启动）。
         let credentials = remoteAccessPassword()
@@ -894,6 +909,25 @@ final class ServiceManager {
                 reportStartupFailure("无法启动 pi-web：\(error.localizedDescription)")
             }
         }
+    }
+
+    /// 启动前重新校验工作目录，并同步门控状态（GitHub #9 复审）。
+    ///
+    /// `WorkspaceDirectory.prepare` 只会创建默认工作目录；自选目录缺失时返回
+    /// `problem`，因此这里不会把用户删掉的目录静默重建。返回 false 表示本次启动
+    /// 必须被拒绝，调用方（`AppDelegate`）已经通过 `onWorkspaceProblem` 得到通知。
+    private func prepareWorkspaceBeforeLaunch() -> Bool {
+        let validation = WorkspaceDirectory.prepare(
+            configuredPath: configuration.workspacePath,
+            defaultPath: appConfiguration.defaultWorkspaceDirectory.path,
+            probe: workspaceProbe
+        )
+        workspaceProblem = validation.problem
+        workspaceDirectoryPath = validation.path
+        workspaceUsesDefaultLocation = WorkspaceDirectory.usesDefaultLocation(configured: configuration.workspacePath)
+        guard let problem = validation.problem else { return true }
+        onWorkspaceProblem?(problem, validation.path)
+        return false
     }
 
     /// Records the process this launch created.
@@ -1161,12 +1195,15 @@ final class ServiceManager {
     /// Opens the log file for the child process, rotating it first when needed.
     private func openLogForWriting() throws -> FileHandle {
         let logURL = appConfiguration.logURL
-        // 工作目录可用性由 `setWorkspaceAvailability` 门控；这里只负责在启动
-        // 前确保它存在（默认目录首次使用时创建）。
-        try fileManager.createDirectory(
-            at: appConfiguration.workspaceDirectory(for: configuration),
-            withIntermediateDirectories: true
-        )
+        // 工作目录可用性由启动前的 `prepareWorkspaceBeforeLaunch()` 保证（GitHub #9
+        // 复审）。只有应用默认工作目录才允许在这里创建：用户自选目录缺失时不应该
+        // 被静默重建，而是已经作为不可用被门控拒绝。
+        if WorkspaceDirectory.usesDefaultLocation(configured: configuration.workspacePath) {
+            try fileManager.createDirectory(
+                at: appConfiguration.workspaceDirectory(for: configuration),
+                withIntermediateDirectories: true
+            )
+        }
         try fileManager.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         if !fileManager.fileExists(atPath: logURL.path) {
             fileManager.createFile(atPath: logURL.path, contents: nil)

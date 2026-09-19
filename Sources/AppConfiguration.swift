@@ -73,6 +73,29 @@ struct AppConfiguration {
 
     var logURL: URL { paths.logFileURL }
 
+    /// 打开日志前的准备：确保日志目录与日志文件存在。
+    ///
+    /// 日志位于 `~/Library/Logs/Pi Web Desktop/` 子目录（GitHub #9 的存储分层）。
+    /// 从未启动过服务、或关闭了自动启动时这个目录还不存在，直接
+    /// `createFile(atPath:)` 会因为父目录缺失而失败，所以这里先建目录再建文件。
+    /// 重复调用是幂等的。返回可读错误信息；`nil` 表示日志文件已经可以打开。
+    func prepareLogFileForOpening(fileManager: FileManager = .default) -> String? {
+        let logURL = self.logURL
+        let directory = logURL.deletingLastPathComponent()
+        do {
+            // 目录已存在时 `withIntermediateDirectories` 不会报错，所以这里不需要
+            // 先探测；目录位置被同名文件占据时会抛出可读错误。
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            return "无法创建日志目录：\(directory.path)（\(error.localizedDescription)）"
+        }
+        if !fileManager.fileExists(atPath: logURL.path),
+           !fileManager.createFile(atPath: logURL.path, contents: nil) {
+            return "无法创建日志文件：\(logURL.path)"
+        }
+        return nil
+    }
+
     /// 默认工作目录 `~/Library/Application Support/Pi Web Desktop/Workspace`。
     /// 首次使用时创建；用户在偏好窗口选择其他目录后，`service.workspacePath`
     /// 覆盖它（见 `workspaceDirectory(for:)`）。

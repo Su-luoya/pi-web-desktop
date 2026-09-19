@@ -195,6 +195,61 @@ final class AppConfigurationTests: XCTestCase {
         XCTAssertFalse(fresh.hasCompletedFirstLaunchSetup)
     }
 
+    // MARK: 打开日志（GitHub #9 复审）
+
+    /// 日志现在位于 `~/Library/Logs/Pi Web Desktop/` 子目录，从未启动过服务
+    /// （或关闭了自动启动）时这个目录还不存在：打开日志前必须先建目录，
+    /// 否则 `createFile` 会因为父目录缺失而失败。
+    func testPrepareLogFileForOpeningCreatesTheLogDirectoryAndFile() throws {
+        let root = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let logs = root.appendingPathComponent("Library/Logs/Pi Web Desktop", isDirectory: true)
+        let configuration = makeTemporaryConfiguration(root: root, logs: logs)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: logs.path))
+
+        XCTAssertNil(configuration.prepareLogFileForOpening())
+
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: logs.path, isDirectory: &isDirectory))
+        XCTAssertTrue(isDirectory.boolValue)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: configuration.logURL.path))
+
+        // 幂等：再次打开不会失败，也不会截断已经写下的日志。
+        try "existing log line\n".write(to: configuration.logURL, atomically: true, encoding: .utf8)
+        XCTAssertNil(configuration.prepareLogFileForOpening())
+        XCTAssertEqual(try String(contentsOf: configuration.logURL, encoding: .utf8), "existing log line\n")
+    }
+
+    /// 日志目录无法创建（位置被同名文件占据）时返回可读错误，不崩溃也不静默失败。
+    func testPrepareLogFileForOpeningReportsAnUncreatableLogDirectory() throws {
+        let root = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let logs = root.appendingPathComponent("Pi Web Desktop", isDirectory: true)
+        try "blocker".write(to: logs, atomically: true, encoding: .utf8)
+        let configuration = makeTemporaryConfiguration(root: root, logs: logs)
+
+        let error = try XCTUnwrap(configuration.prepareLogFileForOpening())
+
+        XCTAssertTrue(error.contains("无法创建日志目录"))
+        XCTAssertTrue(error.contains(logs.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: configuration.logURL.path))
+    }
+
+    /// 真实临时目录（不是假路径）：创建与失败两种行为都要真的落到文件系统。
+    private func makeTemporaryRoot() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("AppConfigurationTests-\(UUID().uuidString)", isDirectory: true)
+    }
+
+    private func makeTemporaryConfiguration(root: URL, logs: URL) -> AppConfiguration {
+        AppConfiguration(
+            supportURL: root.appendingPathComponent("support", isDirectory: true),
+            logsRootURL: logs,
+            defaults: makeEmptyDefaults().defaults
+        )
+    }
+
     func testNormalLaunchKeepsTheRealSupportLocations() {
         let normal = AppConfiguration.forCurrentProcess(
             environment: [:],

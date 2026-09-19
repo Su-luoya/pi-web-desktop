@@ -888,12 +888,7 @@ enum PiPackageUpdatePlanner {
     /// 有目标版本时要求“达到或超过目标版本”；没有目标版本时只要版本发生变化
     /// 就算成功；版本不可解析一律算失败。
     static func updateVerified(detected: String?, old: String, target: String?) -> Bool {
-        guard let detected, let detectedVersion = SemanticVersion(detected) else { return false }
-        if let target, let targetVersion = SemanticVersion(target) {
-            return detectedVersion >= targetVersion
-        }
-        guard let oldVersion = SemanticVersion(old) else { return false }
-        return detectedVersion != oldVersion
+        UpdateVerifier.versionReached(detected: detected, old: old, target: target)
     }
 }
 
@@ -1245,7 +1240,7 @@ enum PiPackageUpdateRunOutcome: Equatable {
                 oldVersion: plan.installedVersion,
                 newVersion: plan.installedVersion,
                 targetVersion: plan.targetVersion,
-                reason: failure.text
+                reason: "更新失败，仍在使用旧版本：\(failure.text)"
             )
         case .versionUnchanged(let plan, let detectedVersion, _):
             return PiPackageUpdateWarning(
@@ -1254,7 +1249,7 @@ enum PiPackageUpdateRunOutcome: Equatable {
                 oldVersion: plan.installedVersion,
                 newVersion: detectedVersion,
                 targetVersion: plan.targetVersion,
-                reason: "更新命令已结束，但重新检测到的版本是 \(detectedVersion ?? "未知")，未达到目标版本"
+                reason: "更新后验证失败，仍在使用更新前的版本：更新命令已结束，但重新检测到的版本是 \(detectedVersion ?? "未知")，未达到目标版本"
             )
         }
     }
@@ -1321,6 +1316,8 @@ final class PiPackageUpdateCoordinator {
         var deliver: (@escaping () -> Void) -> Void
         /// 命令超时（秒）。超时按失败处理，但不发送任何信号。
         var timeout: TimeInterval
+        /// 共享更新事务（GitHub #23）：文件系统探针、统一历史与降级应用。
+        var transaction: UpdateTransactionEnvironment
 
         init(
             inspectProcesses: @escaping () -> PiProcessInspection,
@@ -1329,7 +1326,8 @@ final class PiPackageUpdateCoordinator {
             redactor: LogRedactor,
             log: @escaping (String) -> Void,
             deliver: @escaping (@escaping () -> Void) -> Void,
-            timeout: TimeInterval = PiPackageUpdateCoordinator.defaultTimeout
+            timeout: TimeInterval = PiPackageUpdateCoordinator.defaultTimeout,
+            transaction: UpdateTransactionEnvironment = .disabled
         ) {
             self.inspectProcesses = inspectProcesses
             self.runner = runner
@@ -1338,6 +1336,7 @@ final class PiPackageUpdateCoordinator {
             self.log = log
             self.deliver = deliver
             self.timeout = timeout
+            self.transaction = transaction
         }
     }
 
@@ -1409,6 +1408,25 @@ final class PiPackageUpdateCoordinator {
             "Pi 扩展包更新：用户已确认执行\n"
                 + plan.displayLines(redactingWith: environment.redactor).joined(separator: "\n")
         ))
+        // 共享事务（GitHub #23）：准备阶段记录指纹。扩展包没有独立可执行文件，
+        // 只记录包名与版本（能验证到哪一层就写到哪一层），因此回滚证据不足时
+        // 降级判定会如实给出“无法自动回滚”。
+        let component = UpdateTransactionComponent.piPackage(plan.packageName)
+        let advice = UpdateManualAdviceBuilder.advice(component: component, source: plan.source)
+        var journal = UpdateTransactionJournal(
+            configuration: UpdateTransactionJournal.Configuration(
+                component: component,
+                source: plan.source,
+                previousVersion: plan.installedVersion,
+                targetVersion: plan.targetVersion,
+                fingerprint: UpdateArtifactFingerprint.versionOnly(
+                    version: plan.installedVersion,
+                    packageName: plan.packageName
+                )
+            ),
+            now: environment.transaction.now
+        )
+        journal.recordPreflight()
         environment.runner.run(plan, timeout: environment.timeout) { [weak self] result in
             guard let self else { return }
             let record = PiPackageUpdateCommandRecord(
@@ -1417,7 +1435,23 @@ final class PiPackageUpdateCoordinator {
                 failure: result.failure
             )
             if let failure = result.failure {
+                let degradation = UpdateDegradationPlanner.installFailure(
+                    component: component,
+                    source: plan.source,
+                    fingerprint: journal.configuration.fingerprint,
+                    targetVersion: plan.targetVersion,
+                    failureReason: failure.text
+                )
+                journal.recordInstallFailed(failure.text)
+                journal.recordCommitNotAttempted(reason: "执行阶段失败，未启用新版本")
+                journal.recordDegradation(degradation)
                 let tail = Self.outputTailText(result, redactingWith: self.environment.redactor)
+                self.recordTransaction(
+                    journal,
+                    degradation: degradation,
+                    advice: advice,
+                    resultingVersion: nil
+                )
                 self.logOutcome(
                     "Pi 扩展包更新（\(plan.packageName)）失败：\(failure.text)；退出码 "
                         + "\(result.exitCode.map(String.init) ?? "无")，耗时 \(record.durationText)，"
@@ -1429,12 +1463,43 @@ final class PiPackageUpdateCoordinator {
                 completion(.commandFailed(plan: plan, failure: failure, record: record, outputTail: tail))
                 return
             }
+            journal.recordInstallSucceeded()
             let detected = self.environment.detectPackageVersion(plan.packageName)
-            guard PiPackageUpdatePlanner.updateVerified(
-                detected: detected,
-                old: plan.installedVersion,
-                target: plan.targetVersion
-            ) else {
+            let verificationInput = UpdateVerificationInput(
+                component: .piPackage,
+                packageName: plan.packageName,
+                previousVersion: plan.installedVersion,
+                targetVersion: plan.targetVersion,
+                detectedVersion: detected,
+                detectedPackageName: plan.packageName,
+                detectedExecutablePath: nil,
+                detectedResolvedPath: nil,
+                detectedPackageJSONPath: nil,
+                fingerprint: journal.configuration.fingerprint
+            )
+            let report = UpdateVerifier.verify(
+                verificationInput,
+                probe: self.environment.transaction.probe
+            )
+            guard journal.recordVerification(report, detectedVersion: detected) else {
+                let degradation = UpdateDegradationPlanner.verificationFailure(
+                    component: component,
+                    source: plan.source,
+                    fingerprint: journal.configuration.fingerprint,
+                    newVersion: detected,
+                    newResolvedPath: nil,
+                    failureReason: report.failureReason ?? "验证未通过",
+                    probe: self.environment.transaction.probe
+                )
+                journal.recordCommitNotAttempted(reason: "验证阶段失败，未启用新版本")
+                journal.recordDegradation(degradation)
+                self.environment.transaction.applyDegradation(degradation)
+                self.recordTransaction(
+                    journal,
+                    degradation: degradation,
+                    advice: advice,
+                    resultingVersion: detected
+                )
                 self.logOutcome(
                     "Pi 扩展包更新（\(plan.packageName)）未通过版本验证：命令退出码 0，但重新检测到的版本是 "
                         + "\(detected ?? "未知")，目标版本 \(plan.targetVersion ?? "未知")。"
@@ -1444,11 +1509,35 @@ final class PiPackageUpdateCoordinator {
                 return
             }
             let newVersion = detected ?? plan.targetVersion ?? plan.installedVersion
+            journal.recordDegradationNotNeeded()
+            journal.recordCommit(version: newVersion)
+            self.recordTransaction(
+                journal,
+                degradation: nil,
+                advice: advice,
+                resultingVersion: newVersion
+            )
             self.logOutcome(
                 "Pi 扩展包更新（\(plan.packageName)）完成：\(plan.installedVersion) → \(newVersion)，耗时 \(record.durationText)。"
             )
             completion(.succeeded(plan: plan, newVersion: newVersion, record: record))
         }
+    }
+
+    /// 记录统一更新历史（GitHub #23）并写一条脱敏日志。
+    private func recordTransaction(
+        _ journal: UpdateTransactionJournal,
+        degradation: UpdateDegradationPlan?,
+        advice: UpdateManualAdvice,
+        resultingVersion: String?
+    ) {
+        let entry = journal.historyEntry(
+            degradation: degradation,
+            advice: advice,
+            resultingVersion: resultingVersion
+        )
+        environment.transaction.recordHistory(entry)
+        logOutcome("更新历史：\(UpdateHistoryPresenter.lines(for: entry).joined(separator: " "))")
     }
 
     private func logOutcome(_ message: String) {

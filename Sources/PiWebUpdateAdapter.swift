@@ -698,7 +698,7 @@ enum PiWebUpdateRunOutcome: Equatable {
                 oldVersion: oldVersion,
                 newVersion: plan.installedVersion,
                 targetVersion: targetVersion,
-                reason: failure.text
+                reason: "更新失败，仍在使用旧版本：\(failure.text)"
             )
         case .versionUnchanged(_, let detectedVersion, let oldVersion, let targetVersion):
             return PiWebUpdateWarning(
@@ -706,7 +706,7 @@ enum PiWebUpdateRunOutcome: Equatable {
                 oldVersion: oldVersion,
                 newVersion: detectedVersion,
                 targetVersion: targetVersion,
-                reason: "安装命令已结束，但重新检测到的版本是 \(detectedVersion ?? "未知")，未达到目标版本"
+                reason: "更新后验证失败，仍在使用更新前的版本：安装命令已结束，但重新检测到的版本是 \(detectedVersion ?? "未知")，未达到目标版本"
             )
         case .healthCheckFailed(let plan, let oldVersion, let newVersion):
             return PiWebUpdateWarning(
@@ -714,7 +714,7 @@ enum PiWebUpdateRunOutcome: Equatable {
                 oldVersion: oldVersion,
                 newVersion: newVersion,
                 targetVersion: plan.targetVersion,
-                reason: "版本已更新，但服务启动或健康检查失败"
+                reason: "更新后验证失败：版本已更新，但服务启动或健康检查失败"
             )
         }
     }
@@ -742,6 +742,9 @@ final class PiWebUpdateCoordinator {
         var deliver: (@escaping () -> Void) -> Void
         /// 安装超时（秒）。超时按失败处理。
         var timeout: TimeInterval
+        /// 共享更新事务（GitHub #23）：文件系统探针、统一历史与降级应用。
+        /// 默认不注入探针、不记历史、不应用降级，也不改变已有行为。
+        var transaction: UpdateTransactionEnvironment
 
         init(
             installer: PiWebUpdateInstalling,
@@ -750,7 +753,8 @@ final class PiWebUpdateCoordinator {
             redactor: LogRedactor,
             log: @escaping (String) -> Void,
             deliver: @escaping (@escaping () -> Void) -> Void,
-            timeout: TimeInterval = PiWebUpdateCoordinator.defaultTimeout
+            timeout: TimeInterval = PiWebUpdateCoordinator.defaultTimeout,
+            transaction: UpdateTransactionEnvironment = .disabled
         ) {
             self.installer = installer
             self.detectInstallation = detectInstallation
@@ -759,6 +763,7 @@ final class PiWebUpdateCoordinator {
             self.log = log
             self.deliver = deliver
             self.timeout = timeout
+            self.transaction = transaction
         }
     }
 
@@ -782,14 +787,52 @@ final class PiWebUpdateCoordinator {
         case .unavailable(let reason):
             environment.deliver { completion(.skipped(reason: reason, commandText: nil)) }
         case .automatic(let plan):
-            runInstall(plan: plan, completion: completion)
+            runInstall(plan: plan, installation: input.installation, completion: completion)
         }
     }
 
-    private func runInstall(plan: PiWebUpdateInstallPlan, completion: @escaping (PiWebUpdateRunOutcome) -> Void) {
+    private func runInstall(
+        plan: PiWebUpdateInstallPlan,
+        installation: ComponentInstallation?,
+        completion: @escaping (PiWebUpdateRunOutcome) -> Void
+    ) {
+        // 共享事务（GitHub #23）：准备阶段记录更新前指纹，安装/验证/提交/降级
+        // 四个阶段的结果都进入同一份更新历史。
+        let component = UpdateTransactionComponent.piWeb
+        let advice = UpdateManualAdviceBuilder.advice(component: component, source: plan.source)
+        var journal = UpdateTransactionJournal(
+            configuration: UpdateTransactionJournal.Configuration(
+                component: component,
+                source: plan.source,
+                previousVersion: plan.installedVersion,
+                targetVersion: plan.targetVersion,
+                fingerprint: UpdateArtifactFingerprint.capture(
+                    installation: installation,
+                    probe: environment.transaction.probe
+                )
+            ),
+            now: environment.transaction.now
+        )
+        journal.recordPreflight()
         environment.installer.install(plan, timeout: environment.timeout) { [weak self] result in
             guard let self else { return }
             if let failure = result.failure {
+                let degradation = UpdateDegradationPlanner.installFailure(
+                    component: component,
+                    source: plan.source,
+                    fingerprint: journal.configuration.fingerprint,
+                    targetVersion: plan.targetVersion,
+                    failureReason: failure.text
+                )
+                journal.recordInstallFailed(failure.text)
+                journal.recordCommitNotAttempted(reason: "安装阶段失败，未启用新版本")
+                journal.recordDegradation(degradation)
+                self.recordTransaction(
+                    journal,
+                    degradation: degradation,
+                    advice: advice,
+                    resultingVersion: nil
+                )
                 self.logOutcome(
                     "Pi Web 更新失败（\(failure.text)）：退出码 \(result.exitCode.map(String.init) ?? "无")，"
                     + "当前版本 \(plan.installedVersion)，目标版本 \(plan.targetVersion)。旧版本保持不变。"
@@ -808,9 +851,44 @@ final class PiWebUpdateCoordinator {
                 return
             }
 
+            journal.recordInstallSucceeded()
             let detected = self.environment.detectInstallation()
             let detectedVersion = detected?.version
-            guard Self.versionReached(detected: detectedVersion, target: plan.targetVersion) else {
+            let verificationInput = UpdateVerificationInput(
+                component: .piWeb,
+                packageName: component.expectedPackageName,
+                previousVersion: plan.installedVersion,
+                targetVersion: plan.targetVersion,
+                detectedVersion: detectedVersion,
+                detectedPackageName: detected?.packageName,
+                detectedExecutablePath: detected?.executablePath,
+                detectedResolvedPath: detected?.resolvedPath,
+                detectedPackageJSONPath: detected?.packageJSONPath,
+                fingerprint: journal.configuration.fingerprint
+            )
+            let report = UpdateVerifier.verify(
+                verificationInput,
+                probe: self.environment.transaction.probe
+            )
+            guard journal.recordVerification(report, detectedVersion: detectedVersion) else {
+                let degradation = UpdateDegradationPlanner.verificationFailure(
+                    component: component,
+                    source: plan.source,
+                    fingerprint: journal.configuration.fingerprint,
+                    newVersion: detectedVersion,
+                    newResolvedPath: detected?.resolvedPath ?? detected?.executablePath,
+                    failureReason: report.failureReason ?? "验证未通过",
+                    probe: self.environment.transaction.probe
+                )
+                journal.recordCommitNotAttempted(reason: "验证阶段失败，未启用新版本")
+                journal.recordDegradation(degradation)
+                self.environment.transaction.applyDegradation(degradation)
+                self.recordTransaction(
+                    journal,
+                    degradation: degradation,
+                    advice: advice,
+                    resultingVersion: detectedVersion
+                )
                 self.logOutcome(
                     "Pi Web 更新未通过版本验证：安装命令退出码 0，但重新检测到的版本是 "
                     + "\(detectedVersion ?? "未知")，目标版本 \(plan.targetVersion)。"
@@ -829,7 +907,21 @@ final class PiWebUpdateCoordinator {
             let newVersion = detectedVersion ?? plan.targetVersion
             self.environment.startServiceAndCheckHealth { [weak self] ready in
                 guard let self else { return }
+                let finalReport = UpdateVerifier.report(
+                    report,
+                    healthCheck: ready
+                        ? .passed
+                        : .failed(reason: "既有健康检查路径报告服务不可用")
+                )
                 if ready {
+                    journal.recordDegradationNotNeeded()
+                    journal.recordCommit(version: newVersion)
+                    self.recordTransaction(
+                        journal,
+                        degradation: nil,
+                        advice: advice,
+                        resultingVersion: newVersion
+                    )
                     self.logOutcome(
                         "Pi Web 更新完成：\(plan.installedVersion) → \(newVersion)，服务健康检查通过。"
                     )
@@ -840,6 +932,25 @@ final class PiWebUpdateCoordinator {
                     )
                     self.environment.deliver { completion(outcome) }
                 } else {
+                    // 健康检查失败也属于验证失败：用最终报告原地更新 verify 阶段。
+                    journal.recordVerification(finalReport, detectedVersion: newVersion)
+                    let degradation = UpdateDegradationPlanner.verificationFailure(
+                        component: component,
+                        source: plan.source,
+                        fingerprint: journal.configuration.fingerprint,
+                        newVersion: newVersion,
+                        newResolvedPath: detected?.resolvedPath ?? detected?.executablePath,
+                        failureReason: finalReport.failureReason ?? "服务健康检查失败",
+                        probe: self.environment.transaction.probe
+                    )
+                    journal.recordDegradation(degradation)
+                    self.environment.transaction.applyDegradation(degradation)
+                    self.recordTransaction(
+                        journal,
+                        degradation: degradation,
+                        advice: advice,
+                        resultingVersion: newVersion
+                    )
                     self.logOutcome(
                         "Pi Web 更新后健康检查失败：\(plan.installedVersion) → \(newVersion)。"
                         + "应用停在诊断状态，不会自动回滚，也不声称更新成功。"
@@ -855,11 +966,26 @@ final class PiWebUpdateCoordinator {
         }
     }
 
+    /// 记录统一更新历史（GitHub #23）：阶段结果、从/到版本、降级结果与手动建议。
+    /// 历史字段全部是固定枚举、已校验版本与静态清单文本，不含路径。
+    private func recordTransaction(
+        _ journal: UpdateTransactionJournal,
+        degradation: UpdateDegradationPlan?,
+        advice: UpdateManualAdvice,
+        resultingVersion: String?
+    ) {
+        let entry = journal.historyEntry(
+            degradation: degradation,
+            advice: advice,
+            resultingVersion: resultingVersion
+        )
+        environment.transaction.recordHistory(entry)
+        logOutcome("更新历史：\(UpdateHistoryPresenter.lines(for: entry).joined(separator: " "))")
+    }
+
     /// 重新检测的版本是否达到目标版本（相等或更高都算达到）。
     static func versionReached(detected: String?, target: String) -> Bool {
-        guard let detected, let detectedVersion = SemanticVersion(detected),
-              let targetVersion = SemanticVersion(target) else { return false }
-        return detectedVersion >= targetVersion
+        UpdateVerifier.versionReached(detected: detected, old: target, target: target)
     }
 
     private func logOutcome(_ message: String) {

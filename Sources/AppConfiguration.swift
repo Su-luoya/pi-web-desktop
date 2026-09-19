@@ -197,6 +197,21 @@ struct AppConfiguration {
         PiPackageUpdateWarningStore.save(warning, to: defaults)
     }
 
+    /// 统一更新历史（GitHub #23）：最近在前，单键 JSON；只含脱敏字段。
+    func updateHistory() -> [UpdateHistoryEntry] {
+        UpdateHistoryStore.load(from: defaults)
+    }
+
+    /// 追加一条更新历史（自动截断到上限）。
+    func recordUpdateHistory(_ entry: UpdateHistoryEntry) {
+        UpdateHistoryStore.record(entry, to: defaults)
+    }
+
+    /// 清除全部更新历史（只清除历史记录，不改动任何安装）。
+    func clearUpdateHistory() {
+        UpdateHistoryStore.clear(from: defaults)
+    }
+
     /// Persists service settings through the same injected UserDefaults.
     func save(_ configuration: ServiceConfiguration) { configuration.save(to: defaults) }
 

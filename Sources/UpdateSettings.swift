@@ -136,6 +136,10 @@ enum UpdateSettingKeys {
         ]
     }
 
+    /// 统一更新历史（GitHub #23）。单键 JSON：时间、组件、来源、从/到版本、
+    /// 阶段结果与失败原因（脱敏）。不含路径、环境变量值、凭据或子进程输出。
+    static let updateHistory = "updateChecks.updateHistory"
+
     static func stem(for category: UpdateCheckCategory) -> String {
         switch category {
         case .desktopApp: return "updateChecks.desktopApp"
@@ -175,7 +179,7 @@ enum UpdateSettingKeys {
     /// 保存策略不会清掉警告。
     static var allKeys: [String] {
         allPreferencesKeys + allIgnoredVersionKeys + allPiWebUpdateWarningKeys + allPiCLIUpdateWarningKeys
-            + allPiPackageUpdateWarningKeys
+            + allPiPackageUpdateWarningKeys + [updateHistory]
     }
 }
 

@@ -92,6 +92,8 @@ swiftc "$ROOT/Sources/PiWebApp.swift" \
   "$ROOT/Sources/ComponentInstallation.swift" \
   "$ROOT/Sources/UpdateChecker.swift" \
   "$ROOT/Sources/UpdateSettings.swift" \
+  "$ROOT/Sources/UpdateTransaction.swift" \
+  "$ROOT/Sources/UpdateVerifier.swift" \
   "$ROOT/Sources/PiWebUpdateAdapter.swift" \
   "$ROOT/Sources/PiProcessInspector.swift" \
   "$ROOT/Sources/PiCLIUpdateAdapter.swift" \

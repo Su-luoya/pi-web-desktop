@@ -190,6 +190,9 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
   下面所有命令都在该提交上重跑，输出摘要为本次实际输出
 - 同一批事实也写在 [v0.1.0-alpha.1 Release 说明](release-notes-v0.1.0-alpha.1.md) 的
   “本机实测环境与版本”与“构建与签名验证记录”两节
+- **追加修复（本节下方的“追加修复实测”小节）**：上表的签名校验行记录的是干净目录下的结果；把仓库放在
+  iCloud/File Provider 同步目录时，Finder 写入的 `com.apple.FinderInfo` 会让 `codesign --verify` 失败。
+  修复在提交 `03e0b86`（`Scripts/build.sh`、`Scripts/package-release.sh`），实测证据见下方小节
 
 ### 已在候选提交上实测
 
@@ -200,7 +203,7 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
 | 3 | 构建 | `./Scripts/build.sh` | `Built: build/Pi-Web-Desktop.app`；`Mach-O 64-bit executable arm64` | 退出 0，通过 |
 | 4 | 身份与版本一致性 | `./Scripts/check-identity.sh` | `check-identity: PASSED (45 checks)`；bundle `CFBundleShortVersionString=0.1.0-alpha.1`、`CFBundleVersion=1`、`LSMinimumSystemVersion=14.0`、`CFBundleIdentifier=io.github.su-luoya.pi-web-desktop` | 退出 0，通过 |
 | 5 | tag 与 bundle 版本一致 | `sh Scripts/check-release-version.sh v0.1.0-alpha.1` | `PASSED (tag v0.1.0-alpha.1, MARKETING_VERSION 0.1.0-alpha.1, CURRENT_PROJECT_VERSION 1)` | 退出 0，通过 |
-| 6 | 签名校验 | `codesign --verify --deep --strict build/Pi-Web-Desktop.app` | `valid on disk`、`satisfies its Designated Requirement` | 退出 0，通过 |
+| 6 | 签名校验 | `codesign --verify --deep --strict build/Pi-Web-Desktop.app` | `valid on disk`、`satisfies its Designated Requirement`（干净目录；同步目录下的 xattr 变体见下方追加小节） | 退出 0，通过 |
 | 7 | 签名身份与公证状态 | `codesign -dv --verbose=4 build/Pi-Web-Desktop.app` | `Signature=adhoc`、`TeamIdentifier=not set`、`Format=app bundle with Mach-O thin (arm64)` | 预期结果：ad-hoc、未公证 |
 | 8 | Gatekeeper 行为 | `spctl -a -vv build/Pi-Web-Desktop.app` | `rejected`；本机不打印拒绝原因（已记入审查报告 R-10） | 退出 3；未公证 ad-hoc 产物的预期结果 |
 | 9 | smoke 启动模式 | `./Scripts/smoke.sh` | app exit 0（0s）；标记 `smoke: ready` | 通过 |
@@ -217,6 +220,30 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
 bit-for-bit 可复现，见 [发布流程](releasing.md#可复现性与诚实的边界)）。因此**发布说明里的
 SHA-256 必须从 workflow 产出的资产复制**，不要使用上表任何本地值；本地证据文件的 `COMMIT`
 也只能证明“哪个提交被本机打包”。
+
+### 追加修复实测：Finder/iCloud 扩展属性导致 ad-hoc 签名校验失败（#15）
+
+被测提交：`03e0b86`（`fix(release): 清理 Finder/iCloud 扩展属性，修复 ad-hoc 签名校验失败 (#15)`）。
+环境同上（Apple M4 / macOS 27.0 / arm64）。本机工作区不在同步目录，因此用测试用的 `codesign` 包装
+脚本（放在 `$TMPDIR` 下、不进入仓库）在签名后或校验前注入 `com.apple.FinderInfo`，模拟 File
+Provider 的重挂载时机；注入的 32 字节 FinderInfo 值取自同步目录里 `com.apple.FinderInfo` 的实际形状。
+
+| # | 场景 | 命令（摘要） | 实测输出 | 判定 |
+| --- | --- | --- | --- | --- |
+| X1 | 复现：修复前的 `build.sh`（`bf90611` 版本）+ 签名后注入 | `git show bf90611:Scripts/build.sh` 到临时目录（符号链接 `Sources/`、`Resources/`、`Configuration/`）后带注入 shim 运行 | 退出 1；`resource fork, Finder information, or similar detritus not allowed` | 复现了报告的现象 |
+| X2 | 验前手工注入（症状确认） | `xattr -wx com.apple.FinderInfo … <app 与 Contents/MacOS/PiWebDesktop>` 后 `codesign --verify --deep --strict --verbose=2` | 退出 1；`file with invalid attached data: Disallowed xattr com.apple.FinderInfo found on …/build/Pi-Web-Desktop.app` | 与报告输出一致 |
+| X3 | 修复后 + 签名后注入 | `PATH=<shim> ./Scripts/build.sh` | 退出 0；无 warning；产物 `Mach-O 64-bit executable arm64` | 通过（签名后清理生效） |
+| X4 | 修复后 + 首次验前注入（触发重试） | `PATH=<shim-once> ./Scripts/build.sh` | 退出 0；`warning: codesign --verify --deep --strict failed (attempt 1/3 …); clearing extended attributes and retrying`、`info: … passed on attempt 2` | 通过（清属性重试生效，不重新签名） |
+| X5 | 修复后 + 持续注入（对抗性） | `PATH=<always-inject-shim> ./Scripts/build.sh` | 退出 1；打印每次尝试的真实 `codesign` 输出 + `xattr -l` / `xattr -cr` 提示 | 预期失败：清理后立即被重写时不静默忽略签名错误 |
+| X6 | 打包前的防御性清理 | 先 `xattr -wx com.apple.FinderInfo …`（bundle 根与可执行文件），`codesign --verify` 退出 1，再 `./Scripts/package-release.sh --tag v0.1.0-alpha.1` | 退出 0；`ok   codesign --verify --deep --strict passed`、`package-release: OK`；打包后 `xattr -l` 只剩 `com.apple.provenance` | 通过 |
+| X7 | ZIP 内容 | `unzip -l dist/Pi-Web-Desktop-0.1.0-alpha.1.zip` | 23 项；`grep -Ei '\.swift|\.git|\.log|/Users/|Tests|\.DS_Store'` 无命中 | 通过（与上表第 14 项一致） |
+| X8 | 解压后复验（用户视角） | `ditto -x -k <zip> $TMPDIR && codesign --verify --deep --strict <解压的 app>` | 退出 0；`valid on disk`、`satisfies its Designated Requirement` | 通过 |
+| X9 | 幂等性 | 连续两次 `./Scripts/build.sh` 后 `codesign --verify --deep --strict` | 两次退出 0，复验退出 0 | 通过 |
+
+定位细节（实测）：把 `com.apple.FinderInfo` 挂在 bundle 根目录或 `Contents/MacOS/PiWebDesktop` 上会
+导致校验失败；挂在 `Contents/Info.plist` 上仍然通过。`xattr -cr` 清除后同一 bundle 立即复验通过，
+不需要重新签名。修复后的普通路径（无注入）不打印任何 warning，退出码与标记与上表一致（X6–X9）。
+上述测试 shim 只存在于 `$TMPDIR`，没有进入仓库；`Scripts/check-identity.sh` 未被修改。
 
 ### 仍需 CI / 发布 workflow 完成
 

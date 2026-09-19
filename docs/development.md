@@ -22,7 +22,7 @@
 
 ## Xcode 工程构建与测试
 
-标准 Xcode 工程使用 Apple Silicon、macOS 14 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让测试在没有 host app 的情况下仍可编译，target 会把被测源码直接加入测试源：`Sources/ServiceConfiguration.swift`、`Sources/AppConfiguration.swift`、`Sources/ProcessInspector.swift`、`Sources/DiagnosticsCollector.swift`、`Sources/DependencyChecker.swift`、`Sources/FirstLaunchDiagnostics.swift`、`Sources/InstallCommandManifest.swift`、`Sources/ServiceManager.swift`、`Sources/ServiceOwnership.swift`、`Sources/WebViewNavigationPolicy.swift`、`Sources/KeychainStore.swift`；因此测试文件直接使用该 target 内编译的这些类型，不通过 `@testable import PiWebDesktop` 引入 app target。`Sources/WebViewController.swift` 与 `Sources/DiagnosticsWindowController.swift` 依赖 AppKit/WebKit 且需要真实窗口，只进 app target；依赖诊断的纯文本呈现（`DependencyReportPresenter`）与首次启动路由、控件映射、路径选择因此分别放在 `DependencyChecker.swift` 和 `FirstLaunchDiagnostics.swift` 里，可以在 unhosted 目标里测试。这些测试使用假的 `ps`/`lsof` 输出、注入的存活判定、假的进程启动器、即时执行的调度器、假依赖探针和临时目录，不访问真实进程、网络、Keychain、真实端口或 `~/.pi`。
+标准 Xcode 工程使用 Apple Silicon、macOS 14 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让测试在没有 host app 的情况下仍可编译，target 会把被测源码直接加入测试源：`Sources/ServiceConfiguration.swift`、`Sources/AppConfiguration.swift`、`Sources/AppPaths.swift`、`Sources/ProcessInspector.swift`、`Sources/DiagnosticsCollector.swift`、`Sources/DependencyChecker.swift`、`Sources/FirstLaunchDiagnostics.swift`、`Sources/InstallCommandManifest.swift`、`Sources/ServiceManager.swift`、`Sources/ServiceOwnership.swift`、`Sources/WebViewNavigationPolicy.swift`、`Sources/KeychainStore.swift`、`Sources/WorkspaceDirectory.swift`、`Sources/QuitPolicy.swift`；因此测试文件直接使用该 target 内编译的这些类型，不通过 `@testable import PiWebDesktop` 引入 app target。`Sources/WebViewController.swift` 与 `Sources/DiagnosticsWindowController.swift` 依赖 AppKit/WebKit 且需要真实窗口，只进 app target；依赖诊断的纯文本呈现（`DependencyReportPresenter`）与首次启动路由、控件映射、路径选择因此分别放在 `DependencyChecker.swift` 和 `FirstLaunchDiagnostics.swift` 里，可以在 unhosted 目标里测试。这些测试使用假的 `ps`/`lsof` 输出、注入的存活判定、假的进程启动器、即时执行的调度器、假依赖探针和临时目录，不访问真实进程、网络、Keychain、真实端口或 `~/.pi`。
 
 ```bash
 DERIVED_DATA_PATH="$(mktemp -d /tmp/PiWebDesktopDerivedData.XXXXXX)"
@@ -40,6 +40,14 @@ xcodebuild "${XCODEBUILD_ARGS[@]}" test
 ```
 
 CI 在 `macos-14` 上使用同样的临时 `derivedDataPath` 和 ad-hoc `CODE_SIGN_IDENTITY=-`，不需要开发者账号或 provisioning profile。`xcodebuild` 的工程构建和测试验证需要完整 Xcode（命令行工具目录本身不提供完整的 Xcode 工程构建/测试环境）。当前环境若只有 Command Line Tools，则 `xcodebuild` 不可验证，会因 active developer directory 不是完整 Xcode 而失败；此时请使用下方 alpha 脚本验证构建路径。该临时目录不再在 `xcodebuild` 步骤结束时删除：步骤会把 `Build/Products/Debug/PiWebDesktop.app` 作为 `XCODE_APP_PATH` 导出，下一步在脚本产物和 Xcode 产物上同时运行 `./Scripts/check-identity.sh`，再清理临时目录，因此 DerivedData 不会被提交。
+
+### 测试分层
+
+- **单元测试**：`PiWebDesktopTests/*Tests.swift`（`ServiceIntegrationTests.swift` 除外）。所有副作用都走注入的替身：假的 `ps`/`lsof` 输出、注入的存活判定、假的进程启动器、即时执行的调度器、假依赖探针、内存 Keychain 替身与临时目录，不访问真实进程、网络、Keychain、真实端口或 `~/.pi`。
+- **集成测试**：`PiWebDesktopTests/ServiceIntegrationTests.swift` 用真实代码路径和受控的真实子进程覆盖“启动 → 健康检查 → 失败恢复 → 停止”。它在 `$TMPDIR` 下的临时 fixture 目录里生成 `pi`/`pi-web`/`node` 假可执行脚本、假 `~/.npm-global/bin`、假 `~/.pi/agent` 和假 `pi-web` `package.json`，用一个只绑定 `127.0.0.1`、端口交给系统分配的本地 HTTP 测试服务器作为健康检查对象，用真实 `posix_spawn` 启动假 `pi-web`（`#!/bin/bash`，避免 `/bin/sh` 在部分 macOS 版本上转发到 bash 造成 `proc_pidpath` 抖动）：断言启动参数与环境变量、真实所有权记录、健康检查确实到达服务器（请求计数）、假服务进程在启动阶段退出后的状态收敛、HTTP 端点消失后的断开提示与恢复尝试，以及停止只对经过验证的进程组发信号。涉及信号路径的测试还会启动一个不在受管进程组里的诱饵进程，断言它既没有被终止、也没有收到 TERM/INT。fixture 只向子进程传入测试自己的环境变量（不含真实 `HOME`）、`npm prefix -g` 被显式短路为“未安装”、命令 runner 记录每次调用并断言只执行了 fixture 里的脚本，因此不执行真实 npm/pi/pi-web、不访问网络、GitHub、Keychain、`~/.pi` 或真实用户 Home，也不调用 `sudo`；所有 fixture 都在 `$TMPDIR` 下并在测试结束或失败时清理。
+- **smoke**：见下文。smoke 只验证窗口/诊断页与退出路径，不执行 XCTest，也不替代单元测试与集成测试。
+
+新增集成测试时必须遵守同样的边界：fixture 写进临时目录并在失败路径上也清理、不继承真实环境、把外部命令换成 fixture 脚本或显式短路、只对恒定的 loopback 地址发起连接、用轮询加超时（不用固定 `sleep`）等待异步状态。
 
 ## 身份与版本单一来源
 
@@ -150,6 +158,8 @@ smoke 变量只影响那一次启动：
 
 ```bash
 sh -n Scripts/*.sh
+./Scripts/scan-secrets.sh --self-test
+./Scripts/scan-secrets.sh
 git diff --check
 ./Scripts/build.sh
 codesign --verify --deep --strict build/Pi-Web-Desktop.app
@@ -157,18 +167,27 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 ./Scripts/smoke.sh
 ```
 
-`./Scripts/check-identity.sh` 退出 0 表示身份、版本与服务默认值一致，并且仓库文本扫描通过。`xcodebuild build` / `xcodebuild test` 需要完整 Xcode：`xcode-select -p` 指向 Command Line Tools 时这两条命令会失败，此时以上面的脚本链替代，并在 PR 中说明 XCTest 由 CI 的 `macos-14` job 覆盖。
+`./Scripts/check-identity.sh` 退出 0 表示身份、版本与服务默认值一致，并且仓库文本扫描通过。`./Scripts/scan-secrets.sh --self-test` 必须证明每条规则都会命中，`./Scripts/scan-secrets.sh` 必须退出 0（没有已跟踪文件命中）。`xcodebuild build` / `xcodebuild test` 需要完整 Xcode：`xcode-select -p` 指向 Command Line Tools 时这两条命令会失败，此时以上面的脚本链替代（脚本链不运行 XCTest），并在 PR 中说明 XCTest 由 CI 的 `macos-14` job 覆盖。
 
 ### personal-data 与 secret 扫描能力
 
-CI（`.github/workflows/build.yml` 的 `Check for accidental personal data` 步骤，第 54-56 行）和 `Scripts/check-identity.sh` 的仓库文本扫描（`Scripts/check-identity.sh:428-447`）都只是**模式有限的字面量检查**，不是通用 secret scanner：
+仓库与 CI 共有三层自动文本检查，覆盖的是固定模式和已跟踪内容，不是通用泄露检测：
 
-- CI 只跑一条 `git grep -nE`，匹配几个固定字面量（一个私有 VPN 厂商名的小写形式、一个固定本地代理端点、以 `/Users` 开头的主目录路径），并排除 `*.icns`、该 workflow 自身和 `Scripts/check-identity.sh`。
-- `Scripts/check-identity.sh` 用另一组模式：小写的私有 VPN 主机名、tailnet DNS 后缀、CGNAT 私网地址段、以 `/Users` 开头的路径、固定本地代理端点，再加 `MARKETING_VERSION` 字面值（限 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/`）。
+- **CI 的 personal-data 步骤**（`.github/workflows/build.yml` 的 `Check for accidental personal data` 步骤）：一条 `git grep -nE`，匹配几个固定字面量（一个私有 VPN 厂商名的小写形式、一个固定本地代理端点、以 `/Users` 开头的主目录路径），并排除 `*.icns`、该 workflow 自身和 `Scripts/check-identity.sh`。
+- **`Scripts/check-identity.sh` 的仓库文本扫描**（脚本里 `# --- 6. repository text scan ---` 一节）：用另一组模式：小写的私有 VPN 主机名、tailnet DNS 后缀、CGNAT 私网地址段、以 `/Users` 开头的路径、固定本地代理端点，再加 `MARKETING_VERSION` 字面值（限 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/`）。
+- **`Scripts/scan-secrets.sh`**（#11 新增；CI 的 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 两步）：按形状扫描**已跟踪文件**里的高信号凭据：AWS access key ID（`AKIA` + 16 位大写字母/数字）、GitHub token（`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_` + 长后缀）、PEM 私钥头、JWT（三段 base64url，`eyJ` 开头）、以及 `password=`/`passwd=`/`secret=`/`api_key=`/`access_token=`/`auth_token=`/`token=` 这类**紧贴等号且值至少 12 个字符**的赋值。规则、样本和匹配器本身也受同一条扫描约束。
 
-两组检查都不覆盖凭据、token、私钥或其他未列入的私网地址。通用 secret scan 尚未实现，属 [#11](https://github.com/Su-luoya/pi-web-desktop/issues/11) 的范围；在它落地前不要声称已通过 secret scan。
+```bash
+./Scripts/scan-secrets.sh --self-test    # 在临时目录里证明每条规则都会命中、代码类误报不会被报告
+./Scripts/scan-secrets.sh                # 扫描所有已跟踪文件
+./Scripts/scan-secrets.sh path/to/file   # 提交前扫描待提交文件
+```
 
-本地复现 CI 的那条命令时，从工作流里取出再执行，避免在文档、注释或脚本里复制模式字面值：
+退出码 0 表示没有命中，1 表示至少命中一处，2 表示用法/环境错误（例如不在 Git work tree 里）。自检和仓库扫描在 CI 上是两个独立步骤，所以“规则失效”与“仓库里真有凭据”不会互相掩盖。
+
+三层检查都只看文本模式、只看已跟踪内容（CI 上是已 checkout 的提交），不做熵分析、扫描 Git 历史、检查二进制/加密载荷或未列出的凭据类型；命中不等于一定泄漏（例如文档里的示例形状），漏报也不等于安全。凭据泄漏防线仍然是评审和作者自查，不要把“scan-secrets 通过”写成“没有秘密”。
+
+本地复现 CI 的 personal-data 那条命令时，从工作流里取出再执行，避免在文档、注释或脚本里复制模式字面值：
 
 ```bash
 SCAN=$(awk '/^ *! git grep/{sub(/^ */, ""); print; exit}' .github/workflows/build.yml)
@@ -180,6 +199,10 @@ sh -c "$SCAN" && echo "personal-data scan: PASS"
 服务生命周期、依赖诊断、版本解析、安装来源、脱敏和所有权判定应使用单元测试和本地假服务测试。测试不得访问真实 npm、GitHub、用户 Keychain 或 `~/.pi`。
 
 `PiWebDesktopTests/ServiceOwnershipTests.swift` 覆盖所有权记录与判定表（匹配/不匹配、PID 复用、启动时间、端口、实时命令文本摘要与空白归一化、可执行标识与来源、进程组、过期记录、`ps` 事实不可读、损坏记录清理、JSON 存取）；`PiWebDesktopTests/KeychainStoreTests.swift` 覆盖远程访问密码，全部使用内存 Keychain 替身（`InMemoryKeychainStore`，不访问真实 Keychain）：密码写入后 UserDefaults 中无该字符串（也没有以密码命名的键）、远程配置缺密码时保存被拒绝、删除密码后远程模式关闭且 hostname 回到 `127.0.0.1`、Keychain 写入失败返回可读错误（即使替身的错误描述故意带上密码，`SecretScrubbing` 也会清掉）、读取失败/空密码按“未设置”处理、loopback/hostname 校验拒绝 `0.0.0.0` 与协议路径、启动环境只在“远程 + 非空密码”时包含 `PI_WEB_PASSWORD`（loopback 还会清除继承值）、`ServiceLaunchSpecification.arguments` 与诊断文本里都没有密码、密码生成长度与字符集（可注入随机源或失败源）、IPv6 字面量的保存校验与 URL 方括号（`::1` 与 `[::1]` 都能保存并生成 `http://[::1]:端口/`，`host:port` 这类输入被拒绝）；`PiWebDesktopTests/DiagnosticsCollectorTests.swift` 断言导出的字段与布局（版本与构建号、Node/Pi CLI/pi-web 的版本与路径可信度、状态、端口、托管关系、有效工作目录、日志位置、日志写入状态）与 `verified（已验证）/inferred（推断）/unknown（未知）` 映射，断言已知敏感字段（URL 查询串、`Authorization`/`Bearer`、`token`/`password`/`secret`/`api_key`、代理凭据、Home 路径、`PI_WEB_PASSWORD`）已替换为 `<redacted>` 而不丢失版本/状态/端口/可信度等故障上下文，并断言诊断文本只出现“已设置（仅存于 Keychain）/未设置”、不出现密码值或长度；`PiWebDesktopTests/LogRedactorTests.swift` 覆盖每条脱敏规则（URL 查询串整体替换、`Authorization`/`Bearer`、敏感键值含 JSON 与 `PI_WEB_PASSWORD`、命令行 `--password`、JWT、代理凭据、非当前用户的 Home 路径、私钥头与私钥体）、多行逐行处理、幂等与不误伤 `tokenizer=`/`passwordless=` 这类普通词；`PiWebDesktopTests/LogWriterTests.swift` 用 40–80 字节小阈值重复演练真实轮转（`Pi Web Desktop.1.log` 命名、保留份数硬上限、越新越靠前的顺序）、假时钟时间戳、打开子进程句柄前就地脱敏历史日志、目录不可用时抛可读错误且写入失败只记录不崩溃（全部指向临时目录，不写真实 `~/Library/Logs`）；`PiWebDesktopTests/DependencyCheckerTests.swift` 覆盖依赖诊断（语义化版本解析与比较、缺少命令、Node 版本边界与 prerelease、候选路径不可运行时不借用其他 node 的版本、进程 PATH 回退记录真正的可执行路径、`uname` 失败时系统项置信度为 unknown、符号链接路径/真实路径/链接目标、安装来源 npm-global/homebrew/local-path/unknown、package.json 与 CLI 版本的优先级、版本无法解析为 unknown、`canStartService`/`blockingFindings` 门控矩阵、脱敏与 URL 清洗、命令白名单与只读断言）；`PiWebDesktopTests/ServiceManagerTests.swift` 覆盖磁盘记录的生命周期（启动写入并即时校验、旧 `service.pid` 清理、旧实例记录清理、写入/即时校验失败时终止刚启动的进程组且不重复启动、过期记录只删文件）和启动决策（完整命令行与环境变量、找不到可执行文件、停止中忽略启动、复用已验证的进程或在飞子进程）、停止与退出行为（只对验证通过的进程组发送有限次信号、外部服务零信号且状态不变）、描述符保护（fd ≤ stderr 时先复制到 stderr 之上）、健康检查重试，远程访问的凭证单次读取（`startDecision(credentials:)` 与启动规格共用同一个值，凭证只返回一次也能带上它启动）、运行中密码被删除的收敛（只对已验证的托管进程组发信号、配置回落 `127.0.0.1`、通过回调触发持久化、不可验证的进程零信号且不改配置、收敛幂等且不静默重启），以及依赖门控（默认关闭、所有启动入口与异步回调在 blocked 时不启动/不加载/不改状态、启动轮询期间关闭门控、blocked 时健康 ready 回调不覆盖诊断页、重新打开门控后恢复启动）与启动失败消息脱敏（注入假 Home 的脱敏器后，错误描述里的 Home 路径与 `token=` 值不会出现在状态、`onStartupFailure` 回调或日志里）；所有副作用都走注入的 `CommandRunning`/`ServiceLaunching`/`ServiceOwnershipStoring`/`ServiceSignaling`/`ServiceProbing`/`ServiceScheduling`，可执行标识读取也可注入，`ServiceManager` 的 `remoteAccessPassword` 闭包默认返回 nil，断言不依赖真实的进程、网络、真实 Keychain 或墙钟时间。`PiWebDesktopTests/WebViewNavigationPolicyTests.swift` 覆盖本地/外链 URL 判定。
+
+### #11 追加的针对性用例
+
+在不动已有断言的前提下，上述文件追加了以前没覆盖到的分支：端口存档越界/非数字类型回落与合法边界保留、全字段 `UserDefaults` 往返、运行时签名覆盖每个进入启动参数的字段且不被 `autoStart`/`quitBehavior` 扰动（`ServiceConfigurationTests`）；版本解析的空白/`V` 前缀/构建元数据/空 prerelease/前导零/非 ASCII 数字/溢出边界与 `firstVersion` 跳过错 token、安装来源推断（Homebrew 前缀但无 Cellar、`~/.npm-global/bin`）保持 `inferred`、路径脱敏只替换 Home 边界（`DependencyCheckerTests`）；读取失败时只有提供新密码才能保存、非 `LocalizedError` 的兜底文案、多处秘密全部替换且空秘密不参与替换、loopback 下关闭远程的幂等性（`KeychainStoreTests`）；诊断导出逐行唯一标签且值原样输出（`DiagnosticsCollectorTests`）；启动轮询期间子进程立即退出时的可读失败提示与日志路径（`ServiceManagerTests`）；HTTP(S) scheme/host 大小写与端口归一化、`localhost.localdomain` 这类伪装不被当作本机（`WebViewNavigationPolicyTests`）；以及 `ServiceIntegrationTests.swift` 的真实子进程集成层（见上文“测试分层”）。
 
 ## 开发约束
 

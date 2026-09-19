@@ -29,6 +29,8 @@ Issue 标签统一使用仓库现有体系：
 
 ```bash
 sh -n Scripts/*.sh
+./Scripts/scan-secrets.sh --self-test
+./Scripts/scan-secrets.sh
 git diff --check
 ./Scripts/build.sh
 ./Scripts/check-identity.sh
@@ -37,7 +39,8 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 ```
 
 - `Scripts/build.sh` 生成 arm64、macOS 14 目标、ad-hoc 签名的 `build/Pi-Web-Desktop.app`。
-- `Scripts/check-identity.sh` 退出 0 才表示身份与版本一致；它同时用固定模式集扫描仓库文本里的私人默认值，不是通用 secret scanner。用法见 [开发说明](docs/development.md#personal-data-与-secret-扫描能力)。
+- `Scripts/check-identity.sh` 退出 0 才表示身份与版本一致；它同时用固定模式集扫描仓库文本里的私人默认值。用法见 [开发说明](docs/development.md#personal-data-与-secret-扫描能力)。
+- `Scripts/scan-secrets.sh --self-test` 先用临时目录里的样本证明每条凭据规则都会命中，`Scripts/scan-secrets.sh` 再扫描所有已跟踪文件；两个命令都必须退出 0。提交前可以用 `./Scripts/scan-secrets.sh <file>` 只扫待提交文件。
 - `Scripts/smoke.sh` 在临时 support 目录里验证主窗口与诊断页启动路径，不写真实 UserDefaults、Application Support 与 Logs，也不启动真实 pi-web。
 
 如果改动了 Swift 代码，还要运行工程构建和 XCTest（需要完整 Xcode，只有 Command Line Tools 时会失败）：
@@ -62,12 +65,17 @@ xcodebuild "${XCODEBUILD_ARGS[@]}" test
 
 无法自动测试的 UI、Keychain、WebKit 或 Gatekeeper 行为必须在 PR 里提供人工验证步骤和观察结果。
 
+测试分两层（见 [开发说明的“测试分层”](docs/development.md#测试分层)）：单元测试全部用注入替身，不碰真实进程/网络/Keychain/`~/.pi`；集成测试 `PiWebDesktopTests/ServiceIntegrationTests.swift` 用真实代码路径加真实子进程，但只执行 `$TMPDIR` 里临时生成的假 `pi`/`pi-web`/`node` 脚本、只连接 `127.0.0.1` 上系统分配端口的本地 HTTP 测试服务器，并且涉及信号路径的测试会断言不在受管进程组里的诱饵进程没有被终止或收到信号。新增这类测试时必须保持同样的边界：不访问真实 npm、GitHub、用户 Keychain、`~/.pi` 或真实 Home，不调用 `sudo`，fixture 写进临时目录并在失败路径上也清理，用轮询加超时（不用固定 `sleep`）等待异步状态。
+
 ## personal-data 与 secret 扫描能力
 
-仓库现有的自动文本检查只有两组固定模式，**都不是通用 secret scanner**：
+仓库与 CI 共有三层自动文本检查，覆盖的是固定模式和已跟踪内容，不是通用泄露检测：
 
-- `Scripts/check-identity.sh`（仓库文本扫描在 `Scripts/check-identity.sh:428-447`）：小写的私有 VPN 主机名、tailnet DNS 后缀、CGNAT 私网地址段、以 `/Users` 开头的主目录路径、固定本地代理端点，以及 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/` 里出现 `MARKETING_VERSION` 字面值。
-- CI 的 `Check for accidental personal data` 步骤（`.github/workflows/build.yml:54-56`）：一条 `git grep` 字面量检查，排除 `*.icns`、该 workflow 自身和 `Scripts/check-identity.sh`。
+- `Scripts/check-identity.sh`（仓库文本扫描在 `# --- 6. repository text scan ---` 一节）：小写的私有 VPN 主机名、tailnet DNS 后缀、CGNAT 私网地址段、以 `/Users` 开头的主目录路径、固定本地代理端点，以及 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/` 里出现 `MARKETING_VERSION` 字面值。
+- CI 的 `Check for accidental personal data` 步骤（`.github/workflows/build.yml`）：一条 `git grep` 字面量检查，排除 `*.icns`、该 workflow 自身和 `Scripts/check-identity.sh`。
+- `Scripts/scan-secrets.sh`（#11 新增，CI 上由 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 两步执行）：按固定形状扫描已跟踪文件里的 AWS access key ID、GitHub token、PEM 私钥头、JWT 和 `password=`/`secret=`/`api_key=`/`token=` 这类赋值；`--self-test` 在临时目录里证明每条规则都会命中，且形似文本（只有前缀、空赋值、带空格的赋值、散文描述）不会被误报。
+
+退出码：0 表示没有命中，1 表示至少命中一处，2 表示用法/环境错误。
 
 本地复现 CI 的那条命令（从工作流里取出，避免在文档或注释里复制模式字面值）：
 
@@ -76,7 +84,7 @@ SCAN=$(awk '/^ *! git grep/{sub(/^ */, ""); print; exit}' .github/workflows/buil
 sh -c "$SCAN" && echo "personal-data scan: PASS"
 ```
 
-命令匹配到内容时以非零退出。两个检查都只覆盖上面列出的模式：任何未被列入的凭据、token、私钥或其他私网地址都不会被发现。通用 secret scan 尚未实现，属 [#11](https://github.com/Su-luoya/pi-web-desktop/issues/11) 的范围；在它落地前，凭据泄漏防线是评审和作者自查，不要在 PR 或发布说明里声称已经通过 secret scan。
+命令匹配到内容时以非零退出。三层检查都只覆盖上面列出的模式，只看已跟踪内容，不做熵分析、扫描 Git 历史、检查二进制/加密载荷或未列出的凭据类型；命中不等于一定泄漏（例如文档里的示例形状），漏报也不等于安全。凭据泄漏防线仍然是评审和作者自查，不要在 PR 或发布说明里把“scan-secrets 通过”写成“没有秘密”。能力边界与本地用法见 [开发说明](docs/development.md#personal-data-与-secret-扫描能力)。
 
 ## 代码和隐私要求
 

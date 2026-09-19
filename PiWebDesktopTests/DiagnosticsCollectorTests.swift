@@ -245,4 +245,23 @@ final class DiagnosticsCollectorTests: XCTestCase {
         XCTAssertTrue(text.contains("监听进程: 无"))
         XCTAssertEqual(text.components(separatedBy: "\n").count, 20)
     }
+
+    /// 值原样输出（不裁剪、不转义），每行恰好一个唯一的 `标签: 值`，否则复制
+    /// 出去的文本无法可靠解析。
+    func testEveryLineCarriesOneUniqueLabelAndTheValueVerbatim() {
+        var padded = input
+        padded.status = "  正在运行  "
+        padded.configurationDirectory = "~/.pi/agent/"
+
+        let lines = DiagnosticsCollector.text(for: padded).components(separatedBy: "\n")
+        XCTAssertEqual(lines.count, 12)
+        XCTAssertEqual(lines[4], "状态:   正在运行  ")
+        XCTAssertEqual(lines[9], "配置目录: ~/.pi/agent/")
+
+        let labels = lines.map { line in
+            String(line.prefix(while: { $0 != ":" }))
+        }
+        XCTAssertEqual(Set(labels).count, lines.count, "标签必须唯一: \(labels)")
+        XCTAssertTrue(labels.allSatisfy { !$0.isEmpty })
+    }
 }

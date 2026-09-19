@@ -907,6 +907,27 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(harness.probe.timeouts.last, 1)
     }
 
+    /// 启动轮询期间子进程退出（仍填在句柄里）时必须立即给出可读失败提示，而
+    /// 不是继续轮询到超时。真实 launcher 的终止回调会先清空 `serviceProcess`，
+    /// 因此这里用假句柄直接覆盖轮询自己的判断分支。
+    func testPollUntilReadyReportsAProcessThatExitedDuringPolling() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        let process = ManagerFakeProcess(processIdentifier: 5150)
+        harness.launcher.result = .success(process)
+        harness.probe.ready = false
+        harness.manager.startManagedService()
+
+        process.isRunning = false
+        XCTAssertTrue(harness.scheduler.runNextDelayedWork())
+
+        let expected = "pi-web 进程已退出。请查看日志：\(harness.logURL.path)"
+        XCTAssertEqual(harness.startupFailures, [expected])
+        XCTAssertEqual(harness.pageMessages, ["正在启动 Pi Web…", "启动失败"])
+        XCTAssertEqual(harness.manager.currentState, .failed(expected))
+    }
+
     func testMissingExecutableReportsTheInstallHint() throws {
         let harness = try makeHarness(fileManager: ManagerFakeFileManager())
         defer { harness.cleanUp() }

@@ -54,8 +54,12 @@ jobs:
       - name: Check for accidental personal data
         run: |
           ! git grep -nE 'taila|127\.0\.0\.1:7890|/Users/[^/]+' -- ':!*.icns' ':!.github/workflows/build.yml' ':!Scripts/check-identity.sh'
+      - name: Self-test the secret scanner
+        run: ./Scripts/scan-secrets.sh --self-test
+      - name: Scan tracked files for committed secrets
+        run: ./Scripts/scan-secrets.sh
       - name: Check shell scripts
-        run: sh -n Scripts/build.sh Scripts/install.sh Scripts/check-identity.sh Scripts/smoke.sh
+        run: sh -n Scripts/*.sh
       - name: Package smoke artifact
         run: ditto -c -k --sequesterRsrc --keepParent build/Pi-Web-Desktop.app Pi-Web-Desktop-alpha.zip
       - name: Checksum

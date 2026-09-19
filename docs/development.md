@@ -167,7 +167,7 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 ./Scripts/smoke.sh
 ```
 
-`./Scripts/check-identity.sh` 退出 0 表示身份、版本与服务默认值一致，并且仓库文本扫描通过。`./Scripts/scan-secrets.sh --self-test` 必须证明每条规则都会命中，`./Scripts/scan-secrets.sh` 必须退出 0（没有已跟踪文件命中）。`xcodebuild build` / `xcodebuild test` 需要完整 Xcode：`xcode-select -p` 指向 Command Line Tools 时这两条命令会失败，此时以上面的脚本链替代（脚本链不运行 XCTest），并在 PR 中说明 XCTest 由 CI 的 `macos-14` job 覆盖。
+`./Scripts/check-identity.sh` 退出 0 表示身份、版本与服务默认值一致，并且仓库文本扫描通过。`./Scripts/scan-secrets.sh --self-test` 必须证明每条规则都会命中、抑制标记只跳过带标记的那一行且计数正确，`./Scripts/scan-secrets.sh` 必须退出 0（没有已跟踪文件命中）。`xcodebuild build` / `xcodebuild test` 需要完整 Xcode：`xcode-select -p` 指向 Command Line Tools 时这两条命令会失败，此时以上面的脚本链替代（脚本链不运行 XCTest），并在 PR 中说明 XCTest 由 CI 的 `macos-14` job 覆盖。
 
 ### personal-data 与 secret 扫描能力
 
@@ -175,15 +175,23 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 
 - **CI 的 personal-data 步骤**（`.github/workflows/build.yml` 的 `Check for accidental personal data` 步骤）：一条 `git grep -nE`，匹配几个固定字面量（一个私有 VPN 厂商名的小写形式、一个固定本地代理端点、以 `/Users` 开头的主目录路径），并排除 `*.icns`、该 workflow 自身和 `Scripts/check-identity.sh`。
 - **`Scripts/check-identity.sh` 的仓库文本扫描**（脚本里 `# --- 6. repository text scan ---` 一节）：用另一组模式：小写的私有 VPN 主机名、tailnet DNS 后缀、CGNAT 私网地址段、以 `/Users` 开头的路径、固定本地代理端点，再加 `MARKETING_VERSION` 字面值（限 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/`）。
-- **`Scripts/scan-secrets.sh`**（#11 新增；CI 的 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 两步）：按形状扫描**已跟踪文件**里的高信号凭据：AWS access key ID（`AKIA` + 16 位大写字母/数字）、GitHub token（`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_` + 长后缀）、PEM 私钥头、JWT（三段 base64url，`eyJ` 开头）、以及 `password=`/`passwd=`/`secret=`/`api_key=`/`access_token=`/`auth_token=`/`token=` 这类**紧贴等号且值至少 12 个字符**的赋值。规则、样本和匹配器本身也受同一条扫描约束。
+- **`Scripts/scan-secrets.sh`**（#11 新增；CI 的 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 两步）：按形状扫描**已跟踪文件**里的高信号凭据：AWS access key ID（`AKIA` + 16 位大写字母/数字）、GitHub token（`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_` + 长后缀）、PEM 私钥头、JWT（三段 base64url，`eyJ` 开头）、以及 `password=`/`passwd=`/`secret=`/`api_key=`/`access_token=`/`auth_token=`/`token=` 这类**紧贴等号且值至少 12 个字符**的赋值。规则、样本和匹配器本身也受同一条扫描约束。命中行只在同一行带 `scan-secrets: allow` 内联标记时才被跳过，每次运行结尾输出 `scan-secrets: suppressed N lines`。
 
 ```bash
-./Scripts/scan-secrets.sh --self-test    # 在临时目录里证明每条规则都会命中、代码类误报不会被报告
+./Scripts/scan-secrets.sh --self-test    # 在临时目录里证明每条规则都会命中、误报不会被报告、抑制标记与计数正确
 ./Scripts/scan-secrets.sh                # 扫描所有已跟踪文件
 ./Scripts/scan-secrets.sh path/to/file   # 提交前扫描待提交文件
 ```
 
 退出码 0 表示没有命中，1 表示至少命中一处，2 表示用法/环境错误（例如不在 Git work tree 里）。自检和仓库扫描在 CI 上是两个独立步骤，所以“规则失效”与“仓库里真有凭据”不会互相掩盖。
+
+内联抑制（`scan-secrets: allow`）：
+
+- 只对**匹配行自身**生效：同一行里既有命中形状又有标记才跳过；标记出现在同文件的其他行、其他文件或注释段落里都不生效。脚本没有按文件、目录或 pathspec 整体放行的开关。
+- 只用于**样例数据**：脱敏测试夹具（例如 `PiWebDesktopTests/LogRedactorTests.swift`、`PiWebDesktopTests/LogWriterTests.swift` 里的假 token/JWT/私钥）这类“形状像凭据但本来就不是”的行。真实凭据、疑似凭据和来源不明的字面值不得加标记。
+- 多行字符串里的夹具（Swift `"""` 块）把标记写在夹具行尾；单行字面量把标记写在语句行尾。标记只作为代码注释或夹具文本出现，不参与被断言的内容。
+- 每次运行结尾都打印 `scan-secrets: suppressed N lines`（没有抑制时为 0），CI 日志里能直接看到；`--self-test` 额外断言“带标记的行不报错、同一行去掉标记后报错、标记在别的行不影响、计数不多不少”。
+- 评审要求：把 N 与本次 diff 新增的标记数量对照，并逐条确认加标记的行确实是样例数据；标记出现在夹具之外（`Sources/`、`Scripts/`、`docs/` 等）时先质疑再合并。
 
 三层检查都只看文本模式、只看已跟踪内容（CI 上是已 checkout 的提交），不做熵分析、扫描 Git 历史、检查二进制/加密载荷或未列出的凭据类型；命中不等于一定泄漏（例如文档里的示例形状），漏报也不等于安全。凭据泄漏防线仍然是评审和作者自查，不要把“scan-secrets 通过”写成“没有秘密”。
 

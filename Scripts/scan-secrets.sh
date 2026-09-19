@@ -13,6 +13,14 @@
 # credential that does not match one of these shapes is not reported. It is a
 # complement to, not a replacement for, review and the personal-data scan.
 #
+# Inline suppression: a matched line is skipped only when that same line also
+# contains `scan-secrets: allow`. The marker exists for lines whose text is
+# deliberately credential-shaped sample data (redaction test fixtures); it must
+# not be used to mute a real finding, and it never exempts a whole file or
+# directory. Every run ends with `scan-secrets: suppressed N lines`, so a
+# reviewer can see how many hits were muted, and --self-test asserts that the
+# marker suppresses exactly its own line and that the counter is right.
+#
 # Usage:
 #   Scripts/scan-secrets.sh                 # scan every git-tracked file
 #   Scripts/scan-secrets.sh FILE [FILE...]  # scan explicit files
@@ -29,6 +37,13 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+
+# --- suppression marker ------------------------------------------------------
+
+# A matched line is skipped only when the matched line itself contains this
+# marker. The check is per line on purpose: there is no file, directory or
+# pathspec exemption anywhere in this script.
+SUPPRESS_MARKER='scan-secrets: allow'
 
 # --- rules -----------------------------------------------------------------
 
@@ -54,24 +69,124 @@ RULE_ASSIGNMENT='(password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?t
 
 RULE_ALL="($RULE_AWS)|($RULE_GITHUB)|($RULE_GITHUB_PAT)|($RULE_PRIVATE_KEY)|($RULE_JWT)|($RULE_ASSIGNMENT)"
 
-# --- scanning --------------------------------------------------------------
+# --- scratch space -----------------------------------------------------------
 
-# scan_file FILE: prints matches; returns 0 when the file matched, 1 when clean.
-scan_file() {
-    grep -nE -e "$RULE_ALL" -- "$1"
+# Scratch directories are created outside $ROOT so neither the repository scan
+# nor --self-test ever writes into the work tree. `cleanup` removes whatever
+# exists, also when the scan exits through an error path.
+TMP_SAMPLES=
+TMP_SCAN=
+SUPPRESSED_COUNT=
+
+cleanup() {
+    if [ -n "$TMP_SAMPLES" ]; then
+        rm -rf "$TMP_SAMPLES"
+    fi
+    if [ -n "$TMP_SCAN" ]; then
+        rm -rf "$TMP_SCAN"
+    fi
+}
+trap cleanup EXIT
+
+# make_temp_dir: print the path of a fresh scratch directory outside $ROOT.
+make_temp_dir() {
+    base=${TMPDIR:-/tmp}
+    if resolved=$(CDPATH= cd -- "$base" 2>/dev/null && pwd); then
+        base=$resolved
+    else
+        base=/tmp
+    fi
+    case $base in
+        "$ROOT"|"$ROOT"/*) base=/tmp ;;
+    esac
+    mktemp -d "$base/pi-web-desktop-scan-secrets.XXXXXX"
 }
 
-# scan_repository: `git grep` over every tracked file; returns 0 on match,
-# 1 on clean and 2 when the scan itself could not run.
+# ensure_scan_tmp: create the scratch directory used for raw match records on
+# first use and point SUPPRESSED_COUNT at the counter file inside it.
+ensure_scan_tmp() {
+    if [ -z "$TMP_SCAN" ]; then
+        TMP_SCAN=$(make_temp_dir)
+        SUPPRESSED_COUNT="$TMP_SCAN/suppressed.count"
+    fi
+}
+
+# suppressed_count: print how many matched lines were skipped by the marker.
+suppressed_count() {
+    if [ -n "$SUPPRESSED_COUNT" ] && [ -f "$SUPPRESSED_COUNT" ]; then
+        cat "$SUPPRESSED_COUNT"
+    else
+        printf '0\n'
+    fi
+}
+
+# report_suppressed: the end-of-run summary that keeps suppression auditable.
+report_suppressed() {
+    printf 'scan-secrets: suppressed %s lines\n' "$(suppressed_count)"
+}
+
+# --- scanning --------------------------------------------------------------
+
+# filter_hits RECORD_FILE: print the records that are not suppressed and count
+# the skipped ones. A record has the `<path>:<line>:<text>` shape produced by
+# `git grep -n` and `grep -Hn`, so only the matched line itself decides whether
+# the marker applies; a marker elsewhere in the same file does not. A record
+# whose prefix cannot be parsed (for example a path containing `:`) is reported
+# rather than suppressed, because the scanner must fail loudly instead of
+# hiding a finding. Returns 0 when at least one record was printed, 1 otherwise.
+filter_hits() {
+    awk -v marker="$SUPPRESS_MARKER" -v counter="$SUPPRESSED_COUNT" '
+        {
+            content = ""
+            if (match($0, /^[^:]*:[0-9]+:/)) {
+                content = substr($0, RSTART + RLENGTH)
+            }
+            if (content != "" && index(content, marker) > 0) {
+                suppressed++
+                next
+            }
+            print
+            printed++
+        }
+        END {
+            if (suppressed > 0) {
+                base = 0
+                if ((getline previous < counter) > 0) base = previous + 0
+                close(counter)
+                printf "%d\n", base + suppressed > counter
+            }
+            exit (printed > 0 ? 0 : 1)
+        }
+    ' "$1"
+}
+
+# scan_file FILE: print non-suppressed matches; 0 = at least one match printed,
+# 1 = clean or fully suppressed, 2 = the file could not be scanned.
+scan_file() {
+    ensure_scan_tmp
+    records="$TMP_SCAN/file-matches"
+    status=0
+    grep -HnE -e "$RULE_ALL" -- "$1" > "$records" || status=$?
+    case $status in
+        0) filter_hits "$records" ;;
+        1) return 1 ;;
+        *) return 2 ;;
+    esac
+}
+
+# scan_repository: `git grep` over every tracked file; 0 = at least one match
+# printed, 1 = clean or fully suppressed, 2 = the scan itself could not run.
 scan_repository() {
     if ! git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         printf 'scan-secrets: error: %s is not a git work tree\n' "$ROOT" >&2
         return 2
     fi
+    ensure_scan_tmp
+    records="$TMP_SCAN/repository-matches"
     status=0
-    git -C "$ROOT" grep -nIE -e "$RULE_ALL" -- . || status=$?
+    git -C "$ROOT" grep -nIE -e "$RULE_ALL" -- . > "$records" || status=$?
     case $status in
-        0) return 0 ;;
+        0) filter_hits "$records" ;;
         1) return 1 ;;
         *)
             printf 'scan-secrets: error: git grep failed with status %s\n' "$status" >&2
@@ -86,17 +201,30 @@ Usage: Scripts/scan-secrets.sh [FILE...]
        Scripts/scan-secrets.sh --self-test
 
 Without arguments every git-tracked file is scanned. Explicit files are useful
-for checking a candidate file before it is committed. --self-test writes sample
-files into a temporary directory, asserts that each rule fires there, asserts
-that harmless sample text is not reported, and removes the directory again.
+for checking a candidate file before it is committed. A matched line is skipped
+only when that same line contains `scan-secrets: allow`; the run always ends
+with `scan-secrets: suppressed N lines`. --self-test writes sample files into a
+temporary directory outside the repository, asserts that each rule fires there,
+asserts that harmless sample text is not reported, asserts that the inline
+marker suppresses exactly its own line and is counted correctly, and removes
+the directory again.
 USAGE
 }
 
 # --- self-test -------------------------------------------------------------
 
 self_test() {
-    tmp=$(mktemp -d "${TMPDIR:-/tmp}/pi-web-desktop-scan-secrets.XXXXXX")
-    trap 'rm -rf "$tmp"' EXIT
+    TMP_SAMPLES=$(make_temp_dir)
+    tmp=$TMP_SAMPLES
+
+    # The self-test must not touch the work tree: samples and scratch records
+    # live under a directory created outside $ROOT and are removed again.
+    case $tmp in
+        "$ROOT"|"$ROOT"/*)
+            printf 'self-test: FAIL: sample directory %s is inside the repository\n' "$tmp" >&2
+            return 1
+            ;;
+    esac
 
     failures=0
 
@@ -175,11 +303,61 @@ self_test() {
     } > "$tmp/clean.txt"
     expect_clean "placeholder-ish text" "$tmp/clean.txt"
 
+    # Inline suppression: the marker must skip exactly the matched line that
+    # carries it. The same text without the marker is still reported; a marker
+    # on another line of the same file does not suppress the match; a marker
+    # without any credential shape matches nothing and is not counted.
+    sample_suppressable='token='"suppressed-sample-value"
+    printf '%s  # %s\n' "$sample_suppressable" "$SUPPRESS_MARKER" > "$tmp/suppressed.txt"
+    printf '%s\n' "$sample_suppressable" > "$tmp/unsuppressed.txt"
+    {
+        printf '# %s\n' "$SUPPRESS_MARKER"
+        printf '%s\n' "$sample_suppressable"
+    } > "$tmp/marker_elsewhere.txt"
+    printf '# %s\n' "$SUPPRESS_MARKER" > "$tmp/marker_only.txt"
+
+    before_marked=$(suppressed_count)
+    expect_clean "a matched line carrying the suppression marker" "$tmp/suppressed.txt"
+    after_marked=$(suppressed_count)
+    if [ "$after_marked" -eq $((before_marked + 1)) ]; then
+        printf 'self-test: ok: suppression counter grew by exactly 1 (%s -> %s)\n' \
+            "$before_marked" "$after_marked"
+    else
+        printf 'self-test: FAIL: suppression counter went %s -> %s, expected %s\n' \
+            "$before_marked" "$after_marked" "$((before_marked + 1))" >&2
+        failures=$((failures + 1))
+    fi
+
+    expect_hit "the same matched line without the suppression marker" "$tmp/unsuppressed.txt"
+    expect_hit "a matched line in a file whose marker sits on another line" "$tmp/marker_elsewhere.txt"
+    expect_clean "a suppression marker with no credential shape" "$tmp/marker_only.txt"
+
+    after_unmarked=$(suppressed_count)
+    if [ "$after_unmarked" -eq "$after_marked" ]; then
+        printf 'self-test: ok: counter stayed at %s for lines that must not be suppressed\n' \
+            "$after_unmarked"
+    else
+        printf 'self-test: FAIL: counter moved from %s to %s for lines that must not be suppressed\n' \
+            "$after_marked" "$after_unmarked" >&2
+        failures=$((failures + 1))
+    fi
+
+    # Remove the samples here instead of relying on the EXIT trap and prove
+    # that they are gone; the raw match records are removed by the trap as well.
+    rm -rf "$tmp"
+    TMP_SAMPLES=
+    if [ -e "$tmp" ]; then
+        printf 'self-test: FAIL: sample directory %s was not removed\n' "$tmp" >&2
+        failures=$((failures + 1))
+    else
+        printf 'self-test: ok: sample directory removed\n'
+    fi
+
     if [ "$failures" -ne 0 ]; then
         printf 'self-test: FAILED (%s failure(s))\n' "$failures" >&2
         return 1
     fi
-    printf 'self-test: PASS (all rules fired, samples cleaned up)\n'
+    printf 'self-test: PASS (all rules fired, suppression verified, samples cleaned up)\n'
     return 0
 }
 
@@ -187,6 +365,7 @@ self_test() {
 
 if [ "$#" -eq 0 ]; then
     if scan_repository; then
+        report_suppressed
         printf 'scan-secrets: FAIL: matches listed above\n' >&2
         exit 1
     else
@@ -195,6 +374,7 @@ if [ "$#" -eq 0 ]; then
     if [ "$status" -ne 1 ]; then
         exit "$status"
     fi
+    report_suppressed
     printf 'scan-secrets: PASS (no matches in tracked files)\n'
     exit 0
 fi
@@ -226,11 +406,19 @@ for path in "$@"; do
         printf 'scan-secrets: error: %s is not a file\n' "$path" >&2
         exit 2
     fi
-    if scan_file "$path"; then
-        found=1
-    fi
+    status=0
+    scan_file "$path" || status=$?
+    case $status in
+        0) found=1 ;;
+        1) : ;;
+        *)
+            printf 'scan-secrets: error: scanning %s failed with status %s\n' "$path" "$status" >&2
+            exit 2
+            ;;
+    esac
 done
 
+report_suppressed
 if [ "$found" -ne 0 ]; then
     printf 'scan-secrets: FAIL: matches listed above\n' >&2
     exit 1

@@ -40,7 +40,7 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 
 - `Scripts/build.sh` 生成 arm64、macOS 14 目标、ad-hoc 签名的 `build/Pi-Web-Desktop.app`。
 - `Scripts/check-identity.sh` 退出 0 才表示身份与版本一致；它同时用固定模式集扫描仓库文本里的私人默认值。用法见 [开发说明](docs/development.md#personal-data-与-secret-扫描能力)。
-- `Scripts/scan-secrets.sh --self-test` 先用临时目录里的样本证明每条凭据规则都会命中，`Scripts/scan-secrets.sh` 再扫描所有已跟踪文件；两个命令都必须退出 0。提交前可以用 `./Scripts/scan-secrets.sh <file>` 只扫待提交文件。
+- `Scripts/scan-secrets.sh --self-test` 先用临时目录里的样本证明每条凭据规则都会命中、`scan-secrets: allow` 抑制标记只跳过带标记的那一行且计数正确，`Scripts/scan-secrets.sh` 再扫描所有已跟踪文件；两个命令都必须退出 0。提交前可以用 `./Scripts/scan-secrets.sh <file>` 只扫待提交文件。
 - `Scripts/smoke.sh` 在临时 support 目录里验证主窗口与诊断页启动路径，不写真实 UserDefaults、Application Support 与 Logs，也不启动真实 pi-web。
 
 如果改动了 Swift 代码，还要运行工程构建和 XCTest（需要完整 Xcode，只有 Command Line Tools 时会失败）：
@@ -74,6 +74,7 @@ xcodebuild "${XCODEBUILD_ARGS[@]}" test
 - `Scripts/check-identity.sh`（仓库文本扫描在 `# --- 6. repository text scan ---` 一节）：小写的私有 VPN 主机名、tailnet DNS 后缀、CGNAT 私网地址段、以 `/Users` 开头的主目录路径、固定本地代理端点，以及 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/` 里出现 `MARKETING_VERSION` 字面值。
 - CI 的 `Check for accidental personal data` 步骤（`.github/workflows/build.yml`）：一条 `git grep` 字面量检查，排除 `*.icns`、该 workflow 自身和 `Scripts/check-identity.sh`。
 - `Scripts/scan-secrets.sh`（#11 新增，CI 上由 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 两步执行）：按固定形状扫描已跟踪文件里的 AWS access key ID、GitHub token、PEM 私钥头、JWT 和 `password=`/`secret=`/`api_key=`/`token=` 这类赋值；`--self-test` 在临时目录里证明每条规则都会命中，且形似文本（只有前缀、空赋值、带空格的赋值、散文描述）不会被误报。
+- 内联抑制：匹配行只有在**同一行**带 `scan-secrets: allow` 时才被跳过，脚本没有按文件、目录或路径整体放行的开关；每次运行结尾输出 `scan-secrets: suppressed N lines`。这个标记只允许加在确定是样例数据的行上（例如脱敏测试夹具），不允许用来消音真实或来源不明的命中。
 
 退出码：0 表示没有命中，1 表示至少命中一处，2 表示用法/环境错误。
 
@@ -86,9 +87,17 @@ sh -c "$SCAN" && echo "personal-data scan: PASS"
 
 命令匹配到内容时以非零退出。三层检查都只覆盖上面列出的模式，只看已跟踪内容，不做熵分析、扫描 Git 历史、检查二进制/加密载荷或未列出的凭据类型；命中不等于一定泄漏（例如文档里的示例形状），漏报也不等于安全。凭据泄漏防线仍然是评审和作者自查，不要在 PR 或发布说明里把“scan-secrets 通过”写成“没有秘密”。能力边界与本地用法见 [开发说明](docs/development.md#personal-data-与-secret-扫描能力)。
 
+`scan-secrets: allow` 只用于样例数据，并且必须逐条评审：
+
+- 只有“同一行”的标记生效，所以标记不会连带放过文件里的其他命中。
+- 加标记的行必须在 PR 描述里说明它是样例数据以及用途；评审逐行确认该行确实不是真实凭据，而不是只看扫描器变绿。
+- 把运行结尾的 `scan-secrets: suppressed N lines` 与本次改动新增的标记数量对照；N 多于本次新增的标记数、或者标记出现在非夹具文件里，都应当先质疑再合并。
+- 真实凭据、疑似凭据、来源不明的字面值一律不加标记；先按 [SECURITY.md](SECURITY.md) 处理。
+
 ## 代码和隐私要求
 
 - 不提交构建产物、ZIP、用户路径、主机名、代理默认值、密码、token 或认证文件。
+- `scan-secrets: allow` 内联标记只能加在确定是样例数据的行上，并在 PR 里逐条说明；不要用它消音真实命中。
 - 不读取、复制或迁移 Pi 的认证内容。
 - 默认只允许 loopback 服务；远程访问必须使用认证的加密传输，并明确说明密码认证不等于传输加密。
 - 使用进程参数数组，不用未经审查的 shell 字符串拼接执行更新或服务命令。

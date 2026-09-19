@@ -55,8 +55,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var piWebUpdateMenuItem: NSMenuItem?
     /// 受限自动更新的编排器（安装器、重检测、启动/健康检查全部注入）。
     private var piWebUpdateCoordinator: PiWebUpdateCoordinator?
-    /// 生产安装器：`Process` + 参数数组，不使用 shell、不调用 sudo。
-    private let piWebUpdateInstaller = ProcessPiWebUpdateInstaller()
+    /// 生产安装器：`posix_spawn` + 参数数组 + 新独立进程组，不使用 shell、不调用
+    /// sudo；超时只终止**本次启动的** npm 子进程组（至多一次），绝不触碰 Pi 进程。
+    private let piWebUpdateInstaller: ProcessPiWebUpdateInstaller
     /// 安装后的版本重检测输入（每次更新前在主线程写入）。
     private var piWebUpdateRedetectionPath: String?
 
@@ -68,7 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var piProcessInspector = PiProcessInspector()
     /// Pi CLI 更新命令执行器：`Process` + 参数数组（`update --self`），不使用
     /// shell、不调用 sudo、不发送信号；超时只放弃等待（见 `PiCLIUpdateAdapter`）。
-    private let piCLIUpdateRunner: PiCLIUpdateRunning = ProcessPiCLIUpdateCommand()
+    private let piCLIUpdateRunner: PiCLIUpdateRunning
     /// Pi CLI 更新编排器（进程检查、命令执行、版本重检测、日志、投递队列注入）。
     private var piCLIUpdateCoordinator: PiCLIUpdateCoordinator?
     /// 最近一次 Pi 进程检查结果；nil = 本次运行还没有检查过（smoke 启动不检查）。
@@ -91,7 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     /// 扩展包更新命令执行器：`Process` + 参数数组（`update npm:<包名>`），不使用
     /// shell、不调用 sudo、不发送信号；超时只放弃等待（见 `PiPackageUpdateAdapter`）。
-    private let piPackageUpdateRunner: PiPackageUpdateRunning = ProcessPiPackageUpdateCommand()
+    private let piPackageUpdateRunner: PiPackageUpdateRunning
     /// 扩展包更新编排器（进程检查、命令执行、版本重检测、日志、投递队列注入）。
     private var piPackageUpdateCoordinator: PiPackageUpdateCoordinator?
     /// 最近一次规划结果（诊断/设置页展示用）。
@@ -103,6 +104,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 菜单里的持久告警项与扩展包更新入口项。
     private var piPackageUpdateWarningMenuItem: NSMenuItem?
     private var piPackageUpdateMenuItem: NSMenuItem?
+    /// 菜单里的「已放弃」记录项（GitHub #62）。
+    private var abandonedAttemptsMenuItem: NSMenuItem?
 
     /// 诊断页/设置窗口的状态时间格式。
     private static let updateTimestampFormatter: DateFormatter = {
@@ -171,6 +174,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             log: { [logWriter] message in _ = logWriter.append(message) }
         )
         self.updateChecker = updateChecker
+        // 三个更新执行器共用同一个「已放弃」记录写入器（GitHub #62）：超时或放弃
+        // 等待时写一条可持久化记录，命令摘要经同一个脱敏器实例处理，绝不写入
+        // Home 绝对路径或凭据；Pi CLI / 扩展包路径不会向任何进程发信号。
+        let recordAbandonedAttempt: (UpdateAbandonedAttempt) -> Void = { attempt in
+            appConfiguration.saveAbandonedAttempt(attempt)
+        }
+        self.piWebUpdateInstaller = ProcessPiWebUpdateInstaller(
+            redact: { text in logRedactor.redact(text) },
+            recordAbandonedAttempt: recordAbandonedAttempt
+        )
+        self.piCLIUpdateRunner = ProcessPiCLIUpdateCommand(
+            redact: { text in logRedactor.redact(text) },
+            recordAbandonedAttempt: recordAbandonedAttempt
+        )
+        self.piPackageUpdateRunner = ProcessPiPackageUpdateCommand(
+            redact: { text in logRedactor.redact(text) },
+            recordAbandonedAttempt: recordAbandonedAttempt
+        )
         super.init()
         updateChecker.onResultsChanged = { [weak self] summary in
             self?.handleUpdateCheckResults(summary)
@@ -199,7 +220,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 recordHistory: { [weak self] entry in self?.appConfiguration.recordUpdateHistory(entry) },
                 applyDegradation: { [weak self] plan in self?.applyPiWebUpdateDegradation(plan) },
                 now: Date.init
-            )
+            ),
+            clearAbandonedAttempt: { [weak self] component in self?.clearAbandonedAttempt(component) }
         ))
         // Pi CLI 更新与运行进程保护（GitHub #21）：进程检查复用同一个脱敏器；
         // 执行器不发送任何信号（超时只放弃等待）；版本重检测复用 #16 识别器。
@@ -226,7 +248,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 recordHistory: { [weak self] entry in self?.appConfiguration.recordUpdateHistory(entry) },
                 applyDegradation: { [weak self] plan in self?.applyPiCLIUpdateDegradation(plan) },
                 now: Date.init
-            )
+            ),
+            clearAbandonedAttempt: { [weak self] component in self?.clearAbandonedAttempt(component) }
         ))
         // Pi 扩展包更新（GitHub #22）：策略只有关闭 / 检查并通知 / 询问后更新，
         // 绝不无人值守更新；执行前复查 Pi 进程，执行后重新检测该包版本。
@@ -256,7 +279,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     _ = plan
                 },
                 now: Date.init
-            )
+            ),
+            clearAbandonedAttempt: { [weak self] component in self?.clearAbandonedAttempt(component) }
         ))
     }
 
@@ -968,8 +992,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             targetCacheWrittenAt: result?.cacheWrittenAt,
             serviceIsRunning: serviceIsRunning ?? (serviceManager.managedServicePID() != nil),
             npmExecutablePath: npmPath,
-            baseEnvironment: environment
+            baseEnvironment: environment,
+            abandonedAttempt: abandonedAttempt(for: .piWeb)
         )
+    }
+
+    /// 指定组件的未清除「已放弃」记录（GitHub #62）。三个组件互相独立：同组件
+    /// 的记录只阻断同组件的自动路径。
+    private func abandonedAttempt(for component: UpdateTransactionComponent) -> UpdateAbandonedAttempt? {
+        UpdateAbandonedAttemptGate.blockingAttempt(for: component, in: appConfiguration.abandonedAttempts())
+    }
+
+    /// 该组件成功完成一次更新后清除它的「已放弃」记录（GitHub #62）。
+    private func clearAbandonedAttempt(_ component: UpdateTransactionComponent) {
+        guard appConfiguration.abandonedAttempts().contains(where: { $0.component == component }) else { return }
+        appConfiguration.clearAbandonedAttempt(for: component)
+        logUpdateAbandoned("已清除「已放弃」记录：\(component.displayName) 成功完成了一次更新。")
+        refreshUpdateMenuState()
+        diagnosticsWindowController?.refreshUpdateStatus()
+        syncUpdateSettingsWindow()
+    }
+    private func logUpdateAbandoned(_ message: String) {
+        _ = logWriter.append(logRedactor.redact(message))
+    }
+
+    /// 菜单“已放弃的更新记录…”（GitHub #62）：展示记录（组件、开始时间、超时
+    /// 上限、结束时间未知、本次实际动作）并提供显式清除。清除只删除记录，不改动
+    /// 任何已安装文件、也不结束任何进程。
+    @objc private func showAbandonedUpdateAttempts(_ sender: Any?) {
+        let attempts = appConfiguration.abandonedAttempts()
+        let alert = NSAlert()
+        alert.messageText = attempts.isEmpty ? "没有已放弃的更新记录" : "已放弃的更新记录"
+        if attempts.isEmpty {
+            alert.informativeText = "没有「已放弃」记录：最近没有超时或放弃等待的更新命令。"
+        } else {
+            alert.informativeText = updateAbandonedStatusBlockText()
+                + "\n\n清除只删除记录，不改动任何已安装文件，也不会结束任何进程：应用绝不对 Pi 进程发送信号。"
+        }
+        alert.addButton(withTitle: "好")
+        if !attempts.isEmpty {
+            alert.addButton(withTitle: "清除全部记录")
+        }
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertSecondButtonReturn else { return }
+            self?.clearAllAbandonedAttempts()
+        }
+    }
+
+    /// 用户显式清除全部「已放弃」记录。
+    private func clearAllAbandonedAttempts() {
+        guard !appConfiguration.abandonedAttempts().isEmpty else { return }
+        appConfiguration.clearAllAbandonedAttempts()
+        logUpdateAbandoned("已清除全部「已放弃」记录（用户显式清除）。")
+        refreshUpdateMenuState()
+        diagnosticsWindowController?.refreshUpdateStatus()
+        syncUpdateSettingsWindow()
     }
 
     private func logPiWebUpdateDecision(_ decision: PiWebUpdateDecision) {
@@ -1137,17 +1214,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             presentPiWebUpdateInfo("环境检查尚未完成", detail: "请等待依赖诊断完成后再试。")
             return
         }
-        let input = piWebUpdatePlanningInput(report: report)
+        var input = piWebUpdatePlanningInput(report: report)
+        // 「已放弃」记录只挡住**自动**路径（GitHub #62）：手动入口仍然可用，但确认框
+        // 必须先展示这条记录。其余前置条件（设置位、来源、检查结果来源等）保持不变。
+        let abandoned = input.abandonedAttempt
+        input.abandonedAttempt = nil
         let decision = PiWebUpdatePlanner.decide(input)
         guard case .automatic(let plan) = decision else {
             presentPiWebUpdateInfo("当前不能立即更新 Pi Web", detail: manualUpdateUnavailableText(decision))
             return
         }
+        var detail = plan.confirmationText(redactingWith: logRedactor)
+        if let abandoned {
+            detail += "\n\n" + UpdateAbandonedAttemptPresenter.confirmationBlock(for: abandoned)
+        }
+        detail += "\n\n更新前会先停止本应用启动的 Pi Web 服务（需要短暂停服）；外部启动的服务不会被停止，"
+            + "如果服务仍在运行，更新会被取消。应用不会调用 sudo。"
         let alert = NSAlert()
         alert.messageText = "立即更新 Pi Web"
-        alert.informativeText = plan.confirmationText(redactingWith: logRedactor)
-            + "\n\n更新前会先停止本应用启动的 Pi Web 服务（需要短暂停服）；外部启动的服务不会被停止，"
-            + "如果服务仍在运行，更新会被取消。应用不会调用 sudo。"
+        alert.informativeText = detail
         alert.addButton(withTitle: "停止服务并更新")
         alert.addButton(withTitle: "取消")
         alert.beginSheetModal(for: window) { [weak self] response in
@@ -1180,9 +1265,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func runManualPiWebUpdate(plan: PiWebUpdateInstallPlan) {
         guard let coordinator = piWebUpdateCoordinator else { return }
         piWebUpdateRedetectionPath = serviceManager.configuration.piWebPath
-        let input = piWebUpdatePlanningInput(report: dependencyReport, serviceIsRunning: false)
         showPiWebUpdateProgressPage(plan: plan)
-        coordinator.run(input) { [weak self] outcome in
+        // 手动路径不再重跑自动判定（否则「已放弃」记录会把已确认的执行挡回去）。
+        coordinator.runManual(plan) { [weak self] outcome in
             guard let self else { return }
             switch outcome {
             case .succeeded(_, let oldVersion, let newVersion):
@@ -1256,7 +1341,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             targetConfidence: result?.confidence ?? .unknown,
             targetOrigin: result?.origin ?? .unavailable,
             targetCacheWrittenAt: result?.cacheWrittenAt,
-            processes: piProcessInspection ?? .unknown(.enumerationFailed)
+            processes: piProcessInspection ?? .unknown(.enumerationFailed),
+            abandonedAttempt: abandonedAttempt(for: .piCLI)
         )
     }
 
@@ -1332,6 +1418,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             plan: plan,
             commandText: plan.commandText,
             inspection: inspection,
+            abandonedAttempt: abandonedAttempt(for: .piCLI),
             redactingWith: logRedactor
         )
         alert.addButton(withTitle: "确认更新")
@@ -1502,7 +1589,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             packages: PiPackageCandidate.list(from: dependencyReport?.components ?? []),
             checks: PiPackageCheckOutcome.list(from: updateChecker?.summary.results ?? []),
             processes: piProcessInspection ?? .unknown(.enumerationFailed),
-            piExecutablePath: dependencyReport?.components.first { $0.kind == .piCLI }?.executablePath
+            piExecutablePath: dependencyReport?.components.first { $0.kind == .piCLI }?.executablePath,
+            abandonedAttempts: appConfiguration.abandonedAttempts().filter { $0.componentKind == .piPackage }
         )
     }
 
@@ -1588,9 +1676,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    /// 询问后更新：有可执行计划时展示整批确认框（取消为默认按钮）。
+    /// 询问后更新：有可执行计划（或需要先看「已放弃」记录的计划）时展示整批
+    /// 确认框（取消为默认按钮）。
     private func presentPiPackageConfirmation(_ planSet: PiPackageUpdatePlanSet) {
-        let plans = planSet.executablePlans
+        let plans = planSet.confirmationPlans
         guard !plans.isEmpty else {
             var lines: [String] = ["当前没有可以执行的扩展包更新。"]
             if planSet.packageCount == 0 {
@@ -1620,6 +1709,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
         let inspection = piProcessInspection ?? .unknown(.enumerationFailed)
+        // 「已放弃」记录（GitHub #62）：同一包的记录必须在确认框里先展示，确认后
+        // 才执行一次；一个包的记录不影响同批其它包。
+        let abandoned = planSet.abandonedAttempts.filter { attempt in
+            plans.contains { $0.packageName == attempt.packageName }
+        }
+        if !abandoned.isEmpty {
+            logPiPackageUpdate(
+                "Pi 扩展包更新：\(abandoned.count) 个包存在未清除的「已放弃」记录，"
+                    + "确认框会先展示记录；确认后只执行一次。"
+            )
+        }
         let alert = NSAlert()
         alert.messageText = plans.count == 1
             ? "确认更新 Pi 扩展包 \(plans[0].packageName)"
@@ -1627,6 +1727,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         alert.informativeText = PiPackageUpdateConfirmation.text(
             plans: plans,
             inspection: inspection,
+            abandonedAttempts: abandoned,
             redactingWith: logRedactor
         )
         // 取消是第一个按钮 = 默认按钮：回车即取消，不执行、不改状态。
@@ -2312,8 +2413,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             statuses: statusSnapshot(for: updateChecker),
             ignorableVersions: ignorableVersionCandidates(),
             piCLIStatus: piCLIStatusBlockText(),
-            piPackageStatus: piPackageStatusBlockText()
+            piPackageStatus: piPackageStatusBlockText(),
+            abandonedStatus: updateAbandonedStatusBlockText()
         )
+    }
+
+    /// 诊断页/设置页的「已放弃」记录块（GitHub #62）：组件、开始时间、超时上限、
+    /// 结束时间未知与本次实际动作。命令摘要已经过脱敏。
+    private func updateAbandonedStatusBlockText() -> String {
+        guard !appConfiguration.isSmokeLaunch else { return "" }
+        return UpdateAbandonedAttemptPresenter.block(
+            for: appConfiguration.abandonedAttempts(),
+            format: { Self.updateTimestampFormatter.string(from: $0) }
+        ) ?? ""
     }
 
     /// 每类组件的状态快照。检查器发布过汇总时用它的（在主线程发布，线程安全）；
@@ -2457,6 +2569,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         piPackageItem.target = self
         piPackageUpdateMenuItem = piPackageItem
         menu.addItem(piPackageItem)
+        // 「已放弃」记录（GitHub #62）：超时/放弃等待之后可能仍在运行的命令。这里
+        // 只展示记录并提供显式清除；清除不改动任何安装，也不结束任何进程。
+        let abandonedItem = NSMenuItem(
+            title: "已放弃的更新记录…",
+            action: #selector(showAbandonedUpdateAttempts(_:)),
+            keyEquivalent: ""
+        )
+        abandonedItem.target = self
+        abandonedAttemptsMenuItem = abandonedItem
+        menu.addItem(abandonedItem)
         menu.addItem(withTitle: "更新检查说明…", action: #selector(showUpdateCheckExplanation(_:)), keyEquivalent: "")
         item.submenu = menu
         updateSettingsMenu = menu
@@ -2485,6 +2607,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             piPackageUpdateWarningMenuItem.isHidden = piPackageUpdateWarning == nil
         }
         piPackageUpdateMenuItem?.isEnabled = dependencyGate == .ready
+        // 「已放弃」记录项：只有真的有记录时才可用并显示条数（GitHub #62）。
+        if let abandonedAttemptsMenuItem {
+            let attempts = appConfiguration.abandonedAttempts()
+            abandonedAttemptsMenuItem.title = attempts.isEmpty
+                ? "已放弃的更新记录（无）"
+                : "已放弃的更新记录（\(attempts.count) 条）"
+            abandonedAttemptsMenuItem.isEnabled = !attempts.isEmpty
+        }
         let preferences = updateChecker?.preferences ?? .factoryDefaults
         for (category, item) in updateCategoryMenuItems {
             item.state = preferences.isEnabled(category) ? .on : .off
@@ -2525,6 +2655,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // 建议动作（含静态手动命令文本，仅展示不执行）。
         lines.append("")
         lines.append(contentsOf: UpdateHistoryPresenter.lines(for: appConfiguration.updateHistory().first))
+        // 「已放弃」记录（GitHub #62）：超时/放弃等待之后可能仍在运行的命令。
+        let abandonedStatus = updateAbandonedStatusBlockText()
+        if !abandonedStatus.isEmpty {
+            lines.append("")
+            lines.append(abandonedStatus)
+        }
         return lines.joined(separator: "\n")
     }
 

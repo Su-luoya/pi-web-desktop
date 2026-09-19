@@ -212,6 +212,27 @@ struct AppConfiguration {
         UpdateHistoryStore.clear(from: defaults)
     }
 
+    /// 「已放弃」记录（GitHub #62）：超时或放弃等待之后“启动过但已停止等待”的
+    /// 命令。跨启动保留，直到用户显式清除或该组件成功完成一次更新。
+    func abandonedAttempts() -> [UpdateAbandonedAttempt] {
+        UpdateAbandonedAttemptStore.load(from: defaults)
+    }
+
+    /// 写入一条「已放弃」记录（同组件的旧记录被覆盖）。
+    func saveAbandonedAttempt(_ attempt: UpdateAbandonedAttempt) {
+        UpdateAbandonedAttemptStore.save(attempt, to: defaults)
+    }
+
+    /// 清除指定组件的「已放弃」记录（用户显式清除，或该组件成功完成一次更新）。
+    func clearAbandonedAttempt(for component: UpdateTransactionComponent) {
+        UpdateAbandonedAttemptStore.clear(component: component, from: defaults)
+    }
+
+    /// 清除全部「已放弃」记录。
+    func clearAllAbandonedAttempts() {
+        UpdateAbandonedAttemptStore.clearAll(from: defaults)
+    }
+
     /// Persists service settings through the same injected UserDefaults.
     func save(_ configuration: ServiceConfiguration) { configuration.save(to: defaults) }
 

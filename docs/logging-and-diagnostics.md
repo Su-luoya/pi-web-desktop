@@ -39,7 +39,7 @@
 | URL 查询串（整段替换） | `https://pi.example.invalid/api?a=b&c=d` | `https://pi.example.invalid/api?<redacted>` |
 | `Authorization:` / `Proxy-Authorization:` 头 | `Authorization: Basic dXNlcjpwYXNz` | `Authorization: <redacted>` |
 | `Bearer <token>` | `Bearer abc.def.ghi` | `Bearer <redacted>` |
-| 敏感键值（`=`、`:`、JSON 引号形式，大小写不敏感） | `token=…`、`password: …`、`secret=…`、`api_key=…`、`apikey=…`、`access_token=…`、`"token": "…"`、`PI_WEB_PASSWORD=…` | 值替换为 `<redacted>` |
+| 敏感键值（`=`、`:`、JSON 引号形式，大小写不敏感） | `token=…`、`password: …`、`secret=…`、`api_key=…`、`apikey=…`、`access_token=…`、`"token": "…"`、`PI_WEB_PASSWORD=…` | 值替换为 `<redacted>`（值含空格或被引号包裹时不完整，见下表“不覆盖的形态”） |
 | 命令行参数形式 | `--password …`、`--api-key …` | 值替换为 `<redacted>` |
 | JWT 形态（`eyJ` 开头的三段 base64url） | `eyJhbGciOi….eyJzdWIi….dozjgNry…` | `<redacted>` |
 | 代理凭据（userinfo） | `http://user:pass@proxy.example.invalid:8080` | `http://<redacted>@proxy.example.invalid:8080` |
@@ -49,10 +49,21 @@
 实现细节：
 
 - 多行输入逐行处理，行数与换行结构保持不变，不因换行漏判；整段私钥（头与体在同一次输入里）逐行替换。
-- 脱敏是幂等的：对已经脱敏的文本再运行一次结果不变。
+- 幂等性只对**已知形态**成立：对已经脱敏的文本再运行一次，在下表“不覆盖的形态”之外的输入上都保持结果不变。**已知例外**：JSON 引号键形态（`"token": "…"`）第二遍会把紧跟占位符的字符（如 `}`）一并当作值吞入，因此 `LogWriter` 的就地脱敏（`scrubExistingLogLocked`）重复执行会截断该行的尾随字符。这是文本完整性问题，不造成秘密泄漏；完整审查与修复建议见 [alpha.1 安全与发布审查](security-review-alpha.1.md)（风险 R-1）。
 - 规则只针对“像秘密”的形态：`tokenizer=fast`、`passwordless=true` 这类普通词不会被误伤。
 - 同一实例由 `AppDelegate` 创建后注入 `ServiceManager`（经由它的 `LogWriter`），所以“同一实例脱敏”是类型上的同一个对象，而不是两处各自复制规则。
 - 脱敏不替代自查：公开粘贴前必须自己检查内容。
+
+**不覆盖的形态**（实测确认，规则的值分支遇到空格或引号即停止，且不跨行取值；完整证据见 [alpha.1 安全与发布审查](security-review-alpha.1.md) 第 3 节）：
+
+| 形态 | 示例 | 实际结果 |
+| --- | --- | --- |
+| 键不带引号、值带引号 | `password="a b c"` | **完全不替换** |
+| 等号带空格 + 引号值 | `secret = "…"` | **完全不替换**（`secret = …` 不带引号时会被替换） |
+| 值在下一行（YAML 形态） | `password:` 后换行缩进 `…` | **完全不替换** |
+| 无引号但值含空格 | `password=a b c` | **只替换第一段**，`b c` 原样保留 |
+
+应用自身从不以上述形态写出密码（密码只进子进程环境，诊断只有“已设置/未设置”）；这些形态主要出现在**子进程 stdout/stderr** 里，而那部分由 `posix_spawn` 直接重定向到日志文件，应用不解析其格式，且只在**下一次启动/重启托管服务时**才做一次就地脱敏（见下节）。因此公开日志前必须自查。
 
 ### 子进程输出
 
@@ -102,7 +113,7 @@
 | 检查 | 命令 |
 | --- | --- |
 | 轮转、保留份数、失败路径、假时钟 | `PiWebDesktopTests/LogWriterTests.swift` |
-| 各条脱敏规则、多行、幂等、精度 | `PiWebDesktopTests/LogRedactorTests.swift` |
+| 各条脱敏规则、多行、已知形态的幂等、不覆盖形态的边界、精度 | `PiWebDesktopTests/LogRedactorTests.swift` |
 | 导出布局、脱敏后上下文保留、可信度映射 | `PiWebDesktopTests/DiagnosticsCollectorTests.swift` |
 | 启动失败消息先脱敏再进状态/回调/日志 | `PiWebDesktopTests/ServiceManagerTests.swift` |
 | 打包、身份、双模式 smoke | `./Scripts/build.sh`、`./Scripts/check-identity.sh`、`./Scripts/smoke.sh` |

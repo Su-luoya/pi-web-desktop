@@ -44,7 +44,7 @@ Pi Web Desktop 不收集或上传遥测、使用统计、会话内容、认证�
 ## 隐私相关的仓库约束
 
 - 文档、模板与默认配置里不得出现个人主机名、私有网络地址、凭据或以 `/Users` 开头的主目录绝对路径。
-- 仓库现有的自动文本检查能覆盖的范围有限：`./Scripts/check-identity.sh:433-446` 只用它的固定模式集（小写的私有 VPN 主机名、tailnet DNS 后缀、CGNAT 私网地址段、以 `/Users` 开头的路径、固定本地代理端点，以及 xcconfig 之外的 `MARKETING_VERSION` 字面值）；CI 的 `Check for accidental personal data` 步骤（`.github/workflows/build.yml:54-56`）只跑一条 `git grep` 字面量检查。两者都**不是**通用 secret scanner，任意凭据、token、私钥或未被列入的私网地址都不会被发现；通用 secret scan 尚未实现，属 [#11](https://github.com/Su-luoya/pi-web-desktop/issues/11) 的范围。
+- 仓库现有的自动文本检查能覆盖的范围有限：`./Scripts/check-identity.sh` 的仓库文本扫描（`# --- 6. repository text scan ---` 一节）只用它的固定模式集（小写的私有 VPN 主机名、tailnet DNS 后缀、CGNAT 私网地址段、以 `/Users` 开头的路径、固定本地代理端点，以及 xcconfig 之外的 `MARKETING_VERSION` 字面值）；CI 的 `Check for accidental personal data` 步骤（`.github/workflows/build.yml:54-56`）只跑一条 `git grep` 字面量检查。这两者都**不是**通用 secret scanner，任意凭据、token、私钥或未被列入的私网地址都不会被发现。`./Scripts/scan-secrets.sh`（[#11](https://github.com/Su-luoya/pi-web-desktop/issues/11)）补齐了高信号凭据形状的扫描，并由 CI 的 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 两步门禁，但它仍是固定规则集、只扫已跟踪文件、不扫 Git 历史；能力边界与未覆盖类型见[开发说明](development.md#personal-data-与-secret-扫描能力)与 [alpha.1 安全与发布审查](security-review-alpha.1.md)。
 - 诊断文本只包含本政策与 [日志与诊断导出](logging-and-diagnostics.md) 列出的字段，且全部经过同一个 `LogRedactor`；脱敏不替代用户提交前的自查。应用不读取、不复制、不上传 Pi 认证文件与日志。
 - 新增任何联网行为或新增本地数据位置前，必须先更新本文件，并在同一个 PR 里说明用户可见的开关与删除方式。
 

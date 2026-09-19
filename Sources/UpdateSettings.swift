@@ -140,6 +140,18 @@ enum UpdateSettingKeys {
     /// 阶段结果与失败原因（脱敏）。不含路径、环境变量值、凭据或子进程输出。
     static let updateHistory = "updateChecks.updateHistory"
 
+    /// 「已放弃」记录（GitHub #62）：超时或放弃等待之后“启动过但已停止等待”的
+    /// 命令。与更新历史同一类存储（单键 JSON、显式字段、读回校验），但使用独立
+    /// 键：Pi Web / Pi CLI 各一个槽位，扩展包一个按包名去重的数组槽位。内容只含
+    /// 组件、脱敏后的命令摘要、来源、时间与固定文案，不含路径、凭据或子进程输出。
+    static let piWebAbandonedAttempt = "updateChecks.piWeb.abandonedAttempt"
+    static let piCLIAbandonedAttempt = "updateChecks.pi.abandonedAttempt"
+    static let piPackageAbandonedAttempts = "updateChecks.piPackages.abandonedAttempts"
+
+    static var allAbandonedAttemptKeys: [String] {
+        [piWebAbandonedAttempt, piCLIAbandonedAttempt, piPackageAbandonedAttempts]
+    }
+
     static func stem(for category: UpdateCheckCategory) -> String {
         switch category {
         case .desktopApp: return "updateChecks.desktopApp"
@@ -179,7 +191,7 @@ enum UpdateSettingKeys {
     /// 保存策略不会清掉警告。
     static var allKeys: [String] {
         allPreferencesKeys + allIgnoredVersionKeys + allPiWebUpdateWarningKeys + allPiCLIUpdateWarningKeys
-            + allPiPackageUpdateWarningKeys + [updateHistory]
+            + allPiPackageUpdateWarningKeys + [updateHistory] + allAbandonedAttemptKeys
     }
 }
 

@@ -195,6 +195,10 @@ jobs:
       - name: Verify the checksum and create the draft prerelease
         env:
           GH_TOKEN: ${{ github.token }}
+          # The publish job has no checkout, so the repository has to be named
+          # explicitly. gh otherwise tries to read it from the local git
+          # metadata and fails with "not a git repository".
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
         run: |
           set -euo pipefail
@@ -209,12 +213,13 @@ jobs:
 
           # Replace a previous draft so a re-run can recreate it. A published
           # release is never modified or deleted by this workflow.
-          if gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx 'true'; then
+          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx 'true'; then
             echo "Replacing the existing draft release for ${RELEASE_TAG}."
-            gh release delete "${RELEASE_TAG}" --yes
+            gh release delete "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --yes
           fi
 
           gh release create "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
             "dist/${ZIP_NAME}" \
             "dist/${ZIP_NAME}.sha256" \
             "dist/${EVIDENCE_NAME}" \

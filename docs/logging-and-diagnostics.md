@@ -39,8 +39,9 @@
 | URL 查询串（整段替换） | `https://pi.example.invalid/api?a=b&c=d` | `https://pi.example.invalid/api?<redacted>` |
 | `Authorization:` / `Proxy-Authorization:` 头 | `Authorization: Basic dXNlcjpwYXNz` | `Authorization: <redacted>` |
 | `Bearer <token>` | `Bearer abc.def.ghi` | `Bearer <redacted>` |
-| 敏感键值（`=`、`:`、JSON 引号形式，大小写不敏感） | `token=…`、`password: …`、`secret=…`、`api_key=…`、`apikey=…`、`access_token=…`、`"token": "…"`、`PI_WEB_PASSWORD=…` | 值替换为 `<redacted>`（值含空格或被引号包裹时不完整，见下表“不覆盖的形态”） |
-| 命令行参数形式 | `--password …`、`--api-key …` | 值替换为 `<redacted>` |
+| 敏感键值（`=`、`:`、JSON 引号键，大小写不敏感） | `token=…`、`password: …`、`secret = "…"`、`api_key : '…'`、`apikey=…`、`access_token=…`、`"token": "…"`、`PI_WEB_PASSWORD=…` | 值替换为 `<redacted>`；单/双引号值与含空格的值整段替换，未加引号的值替换到 `,`、`;`、`&` 或行尾 |
+| 换行值（`key:` 后没有值） | `password:` 换行后紧跟缩进的一行 | 紧随的续行整体替换为 `<redacted>`（保留缩进与尾随的 `,` 等字符）；再往后的行不处理，见下表 |
+| 命令行参数形式 | `--password …`、`--api-key "… …"` | 值（单个词或带引号字符串）替换为 `<redacted>`，后续参数保留 |
 | JWT 形态（`eyJ` 开头的三段 base64url） | `eyJhbGciOi….eyJzdWIi….dozjgNry…` | `<redacted>` |
 | 代理凭据（userinfo） | `http://user:pass@proxy.example.invalid:8080` | `http://<redacted>@proxy.example.invalid:8080` |
 | Home 路径 | 注入的 Home 前缀，以及 `/Users` 后跟任意用户名的路径 | `~/…`（不残留用户名） |
@@ -48,20 +49,23 @@
 
 实现细节：
 
-- 多行输入逐行处理，行数与换行结构保持不变，不因换行漏判；整段私钥（头与体在同一次输入里）逐行替换。
-- 幂等性只对**已知形态**成立：对已经脱敏的文本再运行一次，在下表“不覆盖的形态”之外的输入上都保持结果不变。**已知例外**：JSON 引号键形态（`"token": "…"`）第二遍会把紧跟占位符的字符（如 `}`）一并当作值吞入，因此 `LogWriter` 的就地脱敏（`scrubExistingLogLocked`）重复执行会截断该行的尾随字符。这是文本完整性问题，不造成秘密泄漏；完整审查与修复建议见 [alpha.1 安全与发布审查](security-review-alpha.1.md)（风险 R-1）。
+- 多行输入逐行处理，行数与换行结构保持不变，不因换行漏判；`key:` 后没有值时紧随的续行按值处理；整段私钥（头与体在同一次输入里）逐行替换。
+- 键值匹配覆盖：键可带引号（JSON）或不带引号；`=` / `:` 两侧允许空白；值是双引号、单引号（都允许空格）或到 `,`、`;`、`&` 之前的未加引号文本。未加引号的值末尾的 `}`、`]`、`)`、`,`、`;` 与空白先拆出、替换后原样回填，所以 JSON 的 `}` 不会被吞掉。
+- **幂等（实测，GitHub #38）**：同一段文本连续两次 `redact` 逐字节一致；已覆盖的每种形态（URL 查询串、`Authorization`/`Bearer`、敏感键值的引号形式与含空格值、`key:` 续行、CLI 引号值、代理凭据、JWT、私钥块、Home 路径）都用“第一遍结果再跑一遍等于自身”的用例断言。值里已经含 `<redacted>` 的匹配整段跳过，所以已经脱敏过的文本（包括手工拼出的 `token=prefix-<redacted>`）保持原样；`{"token": "…"}` 第一次脱敏后紧跟占位符的 `}` 在第二遍也保持原样。此前 [alpha.1 安全与发布审查](security-review-alpha.1.md)（风险 R-1）实测的“JSON 引号键第二遍吞字符”已修复，`LogWriter` 的就地脱敏（`scrubExistingLogLocked`）重复执行不再截断该行（回归用例 `PiWebDesktopTests/LogWriterTests.swift` 的 `testScrubbingAnAlreadyRedactedLogIsByteStable`）。
 - 规则只针对“像秘密”的形态：`tokenizer=fast`、`passwordless=true` 这类普通词不会被误伤。
 - 同一实例由 `AppDelegate` 创建后注入 `ServiceManager`（经由它的 `LogWriter`），所以“同一实例脱敏”是类型上的同一个对象，而不是两处各自复制规则。
 - 脱敏不替代自查：公开粘贴前必须自己检查内容。
 
-**不覆盖的形态**（实测确认，规则的值分支遇到空格或引号即停止，且不跨行取值；完整证据见 [alpha.1 安全与发布审查](security-review-alpha.1.md) 第 3 节）：
+**不覆盖的形态**（GitHub #38 实测确认：下表记录本轮实测仍未覆盖或只部分覆盖的形态，其余已由上面的规则覆盖；逐条断言见 `PiWebDesktopTests/LogRedactorTests.swift`）：
 
-| 形态 | 示例 | 实际结果 |
+| 形态 | 示例 | 实测结果 |
 | --- | --- | --- |
-| 键不带引号、值带引号 | `password="a b c"` | **完全不替换** |
-| 等号带空格 + 引号值 | `secret = "…"` | **完全不替换**（`secret = …` 不带引号时会被替换） |
-| 值在下一行（YAML 形态） | `password:` 后换行缩进 `…` | **完全不替换** |
-| 无引号但值含空格 | `password=a b c` | **只替换第一段**，`b c` 原样保留 |
+| `key:` 之后的第 2 行及更后（块标量正文） | `password: \|` 换行后多行缩进文本 | 指示符行的值（`\|`）替换为 `<redacted>`，后续正文行原样保留 |
+| 无引号值中含 `,` `;` `&` | `password=a,b c` | `password=<redacted>,b c`（分隔符之后保留） |
+| 同缩进且像下一条 `label:` 的续行 | `password:` 换行 `other: value` | 不当作值，原样保留（避免吞掉后续字段） |
+| 值里已经含占位符 | `token=prefix-<redacted>` | 整段跳过、原样保留（保证幂等）；`prefix-` 不会消失 |
+| URL 查询串值含未编码空格 | `?password=a b` | 替换到空格：`?<redacted> b`（URL 里的空格本应编码为 `%20`） |
+| CLI 无引号多词值 | `--password a b` | 只替换第一个词：`--password <redacted> b`（多词请用引号） |
 
 应用自身从不以上述形态写出密码（密码只进子进程环境，诊断只有“已设置/未设置”）；这些形态主要出现在**子进程 stdout/stderr** 里，而那部分由 `posix_spawn` 直接重定向到日志文件，应用不解析其格式，且只在**下一次启动/重启托管服务时**才做一次就地脱敏（见下节）。因此公开日志前必须自查。
 
@@ -113,7 +117,7 @@
 | 检查 | 命令 |
 | --- | --- |
 | 轮转、保留份数、失败路径、假时钟 | `PiWebDesktopTests/LogWriterTests.swift` |
-| 各条脱敏规则、多行、已知形态的幂等、不覆盖形态的边界、精度 | `PiWebDesktopTests/LogRedactorTests.swift` |
+| 各条脱敏规则、引号/含空格值、续行、多行、幂等（含 JSON 边界）、不覆盖形态的边界、精度 | `PiWebDesktopTests/LogRedactorTests.swift` |
 | 导出布局、脱敏后上下文保留、可信度映射 | `PiWebDesktopTests/DiagnosticsCollectorTests.swift` |
 | 启动失败消息先脱敏再进状态/回调/日志 | `PiWebDesktopTests/ServiceManagerTests.swift` |
 | 打包、身份、双模式 smoke | `./Scripts/build.sh`、`./Scripts/check-identity.sh`、`./Scripts/smoke.sh` |

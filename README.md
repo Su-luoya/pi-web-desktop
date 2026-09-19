@@ -2,147 +2,216 @@
 
 > Unofficial native macOS companion for [`agegr/pi-web`](https://github.com/agegr/pi-web).
 
-Pi Web Desktop is a macOS AppKit/WebKit shell that starts, monitors, and displays a local Pi Web service. It does not modify the upstream Pi Web web application.
+Pi Web Desktop is a small native macOS app (AppKit + WebKit) that starts and displays a
+[Pi Web](https://github.com/agegr/pi-web) service running on your own Mac, in an ordinary desktop
+window. It does not upload your data, does not replace Pi or Pi Web, and is not a hosted or
+remotely managed cloud service: the service, the agent and all data stay on your machine. This
+repository is community-maintained and unofficial; the downloads are early alpha builds for Apple
+Silicon Macs only, ad-hoc signed but **not notarized**, with no support SLA (see
+[已知限制](#已知限制)).
 
-## 上游归属与非官方声明
+**中文指南**：下面是从「下载 → 放行 Gatekeeper → 打开应用 → 按诊断提示补齐依赖 → 日常使用」的完整步骤，面向不写代码的用户。构建、测试、发布与仓库策略见文末的[开发者入口](#开发者入口)。
 
-- 本仓库是社区维护的**非官方**项目，与上游 Pi Web 维护者没有隶属、赞助或背书关系，也不是上游的官方发行版。
-- 应用不 fork、不打包、不修改上游 Web 服务代码；上游 Pi Web、Pi CLI、`@earendil-works/pi-coding-agent` 或 Pi packages 的问题请先到对应上游仓库确认。
-- 上游项目：[`agegr/pi-web`](https://github.com/agegr/pi-web)。应用自身的问题请在本仓库提 Issue。
-- 本仓库以 MIT License 发布，见 [LICENSE](LICENSE)。
+---
+
+## 这是什么 / 谁需要它
+
+Pi Web Desktop 是一个 macOS 桌面应用，它在本机启动并托管 Pi Web 服务，再用一个原生窗口把这个网页服务显示出来——相当于给本机的 Pi Web 配了一个「应用外壳」，不需要自己记命令、开终端。
+
+- 适合：已经在用 Pi / Pi Web，想在 Mac 上用双击应用的方式启动和使用它的人。
+- 应用自己**不做**的事：不上传你的数据、不代替 Pi、也不提供把服务托管到别人服务器上的云服务（服务跑在你这台 Mac 上，默认只监听本机）；它不打包 Node.js、Pi 和 Pi Web（这些依赖由你自己安装，应用只检查和启动）。
+- 应用会做的事：启动/停止/重启本机 Pi Web 服务、显示服务页面、记录日志、做依赖诊断、只读地检查版本更新。
+
+## 安装（从 GitHub Releases 下载）
+
+1. **下载**：打开 [GitHub Releases 页面](https://github.com/Su-luoya/pi-web-desktop/releases)，在最新一个版本（标着 `Pre-release`）的 **Assets** 列表里下载 `Pi-Web-Desktop-<版本>.zip`。
+   - 预期结果：浏览器下载得到一个 ZIP 文件。
+   - 可选的完整性核对：同一份 Assets 里还有 `Pi-Web-Desktop-<版本>.zip.sha256`，把它和 ZIP 下载到同一个文件夹，然后在「终端」里进入这个文件夹并执行 `shasum -a 256 -c Pi-Web-Desktop-*.zip.sha256`。输出里出现 `<你的 ZIP 文件名>: OK` 才继续；不一致就重新下载。
+2. **解压**：双击 ZIP 解压，得到 `Pi-Web-Desktop.app`，把它拖到「应用程序」文件夹。
+3. **第一次打开（Gatekeeper 拦截处理）**：双击 `Pi-Web-Desktop.app`。
+   - 预期结果：如果这是第一次打开，macOS 可能弹出「无法打开，因为 Apple 无法检查其是否包含恶意软件」一类的提示，并只给一个「完成」/「好」按钮。这是正常现象，不是文件损坏。
+   - 处理方式一（旧版 macOS 有效）：在 Finder 里按住 Control 点按（或右键点按）这个应用 → 选择「打开」→ 在随后弹出的确认框里再点一次「打开」。
+   - 处理方式二（macOS 15 及更新版本的主要方式）：如果右键「打开」仍然被拦截，打开「系统设置 → 隐私与安全性」，向下滚动到安全提示处，找到被拦截的这个应用，点「仍要打开」→ 按系统提示用密码或 Touch ID 确认。Apple 从 macOS 15 起取消了右键放行未公证应用的方式，所以新版系统上只能走这一条。
+   - 预期结果：应用窗口打开，进入依赖诊断页（见下一节）。之后再次打开一般不再拦截。
+4. **为什么会被拦截**：本项目没有 Apple 开发者账号，下载的 alpha 应用只有 **ad-hoc 签名、未经 Apple 公证**，所以 Gatekeeper（macOS 的默认安全检查）会阻止直接打开。放行只是针对这一个应用的本地决定；重新下载 ZIP 后系统可能需要再次放行。**不要关闭 Gatekeeper**，也不需要关闭系统完整性保护（SIP）。
+
+## 第一次打开：依赖诊断与前置依赖
+
+启动后，应用先做一次只读的本机环境检查，并把结果显示在「首次启动环境检查」诊断页上：
+
+- 系统是否为 Apple Silicon（arm64）与 macOS 14 或更高。
+- Node.js 是否 `>= 22.19.0`。
+- 是否安装了 Pi CLI（`pi` 命令）。
+- 是否安装了 Pi Web（`pi-web` 命令，npm 包 `@agegr/pi-web`）。
+- 默认端口 `30141` 是否被占用（只提示，不阻塞使用）。
+- Pi 配置目录 `~/.pi/agent` 是否存在（只提示；应用不会读取目录里的任何文件）。
+
+必需项（Node.js、Pi CLI、Pi Web）缺任何一项时，诊断页会列出缺什么、下一步做什么，并且「启动/重启/停止服务」菜单项是灰的——应用不会带着不完整的环境去启动服务。
+
+### 前置依赖（Prerequisites）
+
+| 依赖 | 要求 | 安装方式 |
+| --- | --- | --- |
+| Node.js | 22.19.0 或更高 | 按官方安装说明操作：<https://nodejs.org/en/download>。应用不提供也不执行 Node.js 的安装命令 |
+| Pi CLI | `pi` 命令可用 | `npm install -g --ignore-scripts @earendil-works/pi-coding-agent`（包页面：<https://www.npmjs.com/package/@earendil-works/pi-coding-agent>） |
+| Pi Web | `pi-web` 命令可用 | `npm install -g @agegr/pi-web`（上游仓库：<https://github.com/agegr/pi-web>，包页面：<https://www.npmjs.com/package/@agegr/pi-web>） |
+
+以上命令与应用诊断页里「复制安装命令」给出的内容一致；上游可能调整包名或安装方式，执行前请核对上面的包页面与上游文档。
+
+### 缺什么就补什么
+
+1. 在诊断页上点「复制安装命令」。预期结果：对应命令进入剪贴板（只是复制文本，应用不会执行它）。
+2. 打开「终端」（Finder → 应用程序 → 实用工具 → 终端），粘贴命令并回车执行。预期结果：安装完成、终端提示符返回，没有报错。
+3. 回到应用，点「重新检测」。预期结果：装好的那一项变成绿色。
+4. 所有必需项都就绪后，点「开始使用 Pi Web」。预期结果：主窗口显示服务页面，服务自动启动。
+
+补充说明：
+
+- 应用**不会自动安装**这些依赖，也**不会调用 `sudo`**、不读取或迁移 Pi 的认证内容。
+- 如果 `pi-web` 装在非标准位置（例如自定义的 npm 全局目录），可以在「服务 → 依赖与环境诊断…」窗口里点「选择 pi-web 路径…」手动指定；应用只会读取它的版本与 `package.json` 名称来核对身份。
+- 手工核对依赖是否存在：`node --version`、`pi --version`、`npm ls -g @agegr/pi-web`。注意 `pi-web` 这个上游命令暂时没有 `--version` 选项，所以用 `npm ls -g` 看版本。
+
+## 日常使用
+
+### 打开服务页面
+
+主窗口本身就是服务页面（默认地址 `http://127.0.0.1:30141/`，只监听本机）。如果窗口被关掉或想用浏览器打开，用菜单「服务 → 在浏览器中打开」；「服务 → 复制本地地址」可以把地址复制到剪贴板。
+
+### 菜单项含义
+
+| 菜单 | 条目 | 作用 |
+| --- | --- | --- |
+| Pi Web Desktop | 关于 Pi Web Desktop | 查看版本信息 |
+| | 隐藏 / 隐藏其他应用 / 显示全部 | 常规 macOS 应用操作 |
+| | 设置…（⌘,） | 打开设置窗口 |
+| | 启动服务 / 重启服务 / 停止服务 | 控制本应用托管的 Pi Web 服务；依赖或工作目录有问题时置灰 |
+| | 在浏览器中打开 / 复制本地地址 | 用默认浏览器打开服务页面 / 复制服务地址 |
+| | 退出 Pi Web Desktop（⌘Q） | 按设置里的「退出行为」退出 |
+| | 退出 Pi Web Desktop（保持服务运行）/（停止服务） | 两个显式退出入口，不受设置影响 |
+| 服务 | 状态：… | 显示服务当前状态 |
+| | 设置… / 启动/重启/停止服务 / 在浏览器中打开 / 复制本地地址 | 同上 |
+| | 打开日志 / 打开日志文件夹 | 直接在文本编辑器中打开日志文件 / 打开日志所在文件夹 |
+| | 复制诊断 | 把脱敏后的诊断文本复制到剪贴板（复制前会提示） |
+| | 依赖与环境诊断… | 打开诊断窗口，查看每个依赖项并「重新检测」 |
+| | 检查更新… / 更新检查设置 | 立即检查一次版本 / 打开更新检查开关与偏好设置 |
+| 显示 | 重新加载 / 强制重新加载 | 重新加载页面 |
+| | 放大 / 缩小 / 实际大小 / 进入全屏幕 | 调整页面显示 |
+| 编辑 | 在页面中查找…（⌘F） | 在服务页面里搜索文字 |
+| 窗口 | 最小化 / 缩放 / 全屏幕 / 显示 Pi Web | 常规窗口操作 |
+
+### 设置项
+
+菜单「Pi Web Desktop → 设置…」或「服务 → 设置…」（⌘,），窗口分四组：
+
+- **服务**：`pi-web 路径`（默认自动检测）、`工作目录`（留空时使用默认目录 `~/Library/Application Support/Pi Web Desktop/Workspace`，也可以「选择…」指定一个已存在且可写的目录）、`端口`（默认 `30141`）、`监听地址`（默认 `127.0.0.1`）。
+- **远程访问**：`访问密码`保存在 macOS 钥匙串里，只有监听地址不是本机回环时才需要；可以点「生成高强度密码」；点「删除密码」会把监听地址收回 `127.0.0.1`。界面里也写明：密码认证只验证访问者，不等于传输加密。
+- **网络与代理**：`允许的主机名`、`HTTP 代理`、`HTTPS 代理`、`不使用代理`。默认值最保守（代理留空，不使用代理只含本机回环地址）。
+- **行为**：`应用启动时自动启动服务`、`退出行为`。
+
+更新检查不在这个窗口里：菜单「服务 → 更新检查设置 → 更新检查偏好设置…」可以逐类设置检查频率、查看最近检查结果、`忽略此版本`，以及控制两个「启动前自动更新」开关。
+
+### 日志、诊断与复制诊断
+
+- **打开日志**：菜单「服务 → 打开日志」打开日志文件；「打开日志文件夹」打开所在文件夹。日志写在 `~/Library/Logs/Pi Web Desktop/Pi Web Desktop.log`，超过 10 MB 自动轮转，最多保留 5 份。
+- **复制诊断**：菜单「服务 → 复制诊断」。写入剪贴板**之前会弹出提醒**，说明文本已按统一规则脱敏（例如把用户主目录路径换成 `~`，把 token、密码之类的值换成占位符）。但脱敏不等于万无一失：把它粘贴到公开的 Issue 或讨论之前，请自己再检查一遍，不要包含密码、token、私有主机名或你不希望公开的内容。
+- **依赖诊断窗口**：菜单「服务 → 依赖与环境诊断…」，列出每个依赖项的版本、路径与可信度，提供「复制安装命令」「重新检测」「选择 pi-web 路径…」。
+
+### 退出行为
+
+设置里的「行为 → 退出行为」提供三种取值（默认「每次退出时询问」）：
+
+| 设置 | 退出时发生什么 |
+| --- | --- |
+| 每次退出时询问（默认） | 弹框让你选「保持服务运行」「退出并停止服务」或「取消」 |
+| 退出但保持服务运行 | 直接退出，Pi Web 作为独立进程继续运行（下次打开应用时它会被当作外部服务） |
+| 退出并停止服务 | 直接退出，并停止由本应用托管的服务 |
+
+菜单里的两个显式入口「退出 Pi Web Desktop（保持服务运行）」和「退出 Pi Web Desktop（停止服务）」不受该设置影响；⌘Q 按设置执行。应用**不会停止不是它启动的服务**：如果你自己手动运行了 `pi-web`，任何退出方式都不会结束那个进程。
+
+## 常见问题
+
+### 双击应用时提示「无法验证开发者」「Apple 无法检查是否包含恶意软件」
+
+- **现象**：双击后系统拦截，只有一个「完成/好」按钮，应用打不开。
+- **原因**：应用是 ad-hoc 签名、未经 Apple 公证，Gatekeeper 默认拦截未公证的应用。
+- **怎么做**：见上文「安装」第 3 步：旧版 macOS 可以先试右键/Control 点按 → 「打开」→ 确认「打开」；macOS 15 及更新版本要打开「系统设置 → 隐私与安全性」，对被拦截的这个应用点「仍要打开」。不要关闭 Gatekeeper。重新下载 ZIP 后系统可能需要再次放行。
+
+### 诊断页显示缺少 Node.js 或 pi-web，服务起不来
+
+- **现象**：打开应用只看到诊断页，缺项被标红或标为「未知」，「启动/重启/停止服务」是灰的。
+- **原因**：应用不会替你安装依赖；必需项缺失或无法核对版本时，它会停在诊断页而不是启动服务。
+- **怎么做**：在诊断页点「复制安装命令」，到「终端」粘贴执行，然后回应用点「重新检测」。仍识别不到时，先确认命令本身可用（`node --version`、`pi --version`、`npm ls -g @agegr/pi-web`），`pi-web` 装在非标准位置就在诊断窗口点「选择 pi-web 路径…」手动指定。
+
+### 端口 30141 被占用
+
+- **现象**：诊断页提示默认端口被占用，或服务启动失败。
+- **原因**：可能已经有一个 Pi Web 服务在运行，也可能是别的程序占了这个端口。
+- **怎么做**：如果占用者就是你已有的 Pi Web 服务，应用会直接复用它，不需要处理。如果确实冲突，在「设置… → 服务 → 端口」里换一个空闲端口并保存，应用会用新端口重新启动服务。
+
+### 想从别的设备（手机、另一台电脑）访问
+
+- **现象**：在别的设备上打开 `http://<这台 Mac 的地址>:30141/` 连不上。
+- **原因**：默认只监听本机回环地址（`127.0.0.1`），局域网里其它设备无法访问。
+- **怎么做**：在「设置… → 远程访问」里先保存一个非空密码，再把「监听地址」改成你确实要监听的**具体地址**（应用会拒绝 `0.0.0.0`、`::` 这类「所有网络接口」的写法），保存后重启服务。**密码认证只验证访问者身份，不等于传输加密**：明文 HTTP 在网络上可能被窃听，请自备加密隧道（例如 SSH 端口转发）或 HTTPS 反向代理，并且只在你信任的网络里开放。用完把监听地址改回 `127.0.0.1`，或直接删除密码（应用会把地址收回 `127.0.0.1`）。
+
+### 如何彻底卸载并清理残留
+
+- **现象/目标**：不再使用这个应用，希望删干净。
+- **怎么做**：
+  1. 退出应用；如果之前选过「保持服务运行」，先停掉仍在运行的 `pi-web`。
+  2. 把 `Pi-Web-Desktop.app` 拖到废纸篓；你把它复制到过哪些位置（例如「应用程序」文件夹或 `~/Applications/`），就把哪几份都删掉。
+  3. 打开「终端」，执行下面的命令清理应用留下的内容（`~` 表示你的用户主目录）：
+
+     ```bash
+     defaults delete io.github.su-luoya.pi-web-desktop 2>/dev/null || true
+     rm -rf ~/Library/Application\ Support/Pi\ Web\ Desktop
+     rm -rf ~/Library/Logs/Pi\ Web\ Desktop
+     rm -rf ~/Library/WebKit/io.github.su-luoya.pi-web-desktop
+     rm -rf ~/Library/Caches/io.github.su-luoya.pi-web-desktop
+     ```
+
+  4. 如果设置过远程访问密码：打开「钥匙串访问」，搜索 `Pi Web Desktop`（服务名是 `io.github.su-luoya.pi-web-desktop`），删除账号为 `remote-access-password` 的条目；也可以在删除应用前先在应用里点「删除密码」。
+
+应用会留下的位置一共这几处：UserDefaults 里的设置、`~/Library/Application Support/Pi Web Desktop/`（运行状态、更新检查缓存、默认工作目录 `Workspace/`）、`~/Library/Logs/Pi Web Desktop/`（日志）、钥匙串里的访问密码，以及 WebKit 在 `~/Library/WebKit/` 和 `~/Library/Caches/` 下按 bundle identifier 保存的网站数据。删除这些不会影响 Pi CLI、Pi Web 或 Node.js 自己的数据。完整清单与说明见[隐私说明](docs/privacy.md#本地数据一览与删除)。
+
+## 更新与隐私
+
+- **检查频率**：应用启动后立即检查一次；之后桌面应用、Pi CLI、Pi Web 默认每 24 小时检查一次，Pi 扩展包默认每 7 天检查一次。四类都可以在「更新检查偏好设置」里单独改成每周或「关闭」；关闭后不再发起该类请求。应用退出后不检查，也不安装常驻后台组件。
+- **检查会访问哪些域名**：只有只读的 `GET` 请求——桌面应用发布查 `api.github.com`，Pi CLI、Pi Web 与扩展包查 `registry.npmjs.org`。请求不携带会话内容、账号凭据或诊断内容；发现新版本时用应用内提示框提示（只显示组件名与版本），不使用系统通知中心。
+- **什么情况下才会自动更新**（两个开关默认都关闭）：
+  - 「启动前自动更新 Pi Web」：只有本机 Pi Web 是应用能验证的 npm 全局安装时才可能在启动前自动更新；其它安装方式（pnpm、Homebrew、nvm/mise、git checkout、本地路径、来源不明）只显示更新命令，不会自动安装。
+  - 「启动前自动更新 Pi CLI」：同样要求已验证的 npm/pnpm 全局安装，并且必须先确认当次没有 Pi 进程在运行，否则推迟到下次启动（应用不会结束或接管任何 Pi 会话）。
+  - 桌面应用自身**不会**自动更新；受限制的更新失败时保留旧版本、写日志与持久警告，不卸载、不重装，也**不声称能回滚**。
+- **不上传会话或诊断内容**：应用不收集遥测。诊断文本只在你主动点「复制诊断」时才进入剪贴板，日志只写在本机；版本检查缓存 `~/Library/Application Support/Pi Web Desktop/update-check-cache.json` 里只有版本号、时间戳与条件请求字段。
+- 完整的字段、脱敏规则、本地数据位置与删除方式见[隐私说明](docs/privacy.md)与[日志与诊断导出](docs/logging-and-diagnostics.md)。
+
+## 已知限制
+
+- **未公证**：只有 ad-hoc 签名，没有 Developer ID 证书，也没有 Apple 公证；Gatekeeper 会拦截首次打开，需要按上文放行。
+- **没有 Intel 产物**：只构建并验证 Apple Silicon（arm64）；Intel Mac 不在支持范围。系统要求 macOS 14 或更高。
+- **早期 alpha**：这是 prerelease 版本，可能有 bug 或行为变化，没有任何 SLA、响应或修复时限。
+- **不做无人值守的扩展包更新**：Pi 扩展包只做只读检查与提示，需要你自己按各包的官方文档更新；应用不会代为执行。
+- 远程访问默认关闭，且不提供加密隧道或反向代理；密码认证不等于传输加密。
+- 桌面应用自身的应用内更新、下载缓存与更完整的回滚策略属于后续版本计划，不在当前 alpha 范围内。
 
 ## 支持矩阵
 
-以 `Configuration/AppIdentity.xcconfig`、`Scripts/build.sh` 和最近一次本地验证为准；下表中的“未承诺”表示项目不做出该保证，也不在自动验证范围内。
+上面「已知限制」是摘要。完整矩阵（CPU、系统、签名、公证、分发、应用内更新、支持承诺、远程访问、日志与诊断等维度，以及哪些组合属于明确未支持）见[开发说明的支持矩阵](docs/development.md#支持矩阵与非承诺)。
 
-| 维度 | 当前状态 |
-| --- | --- |
-| CPU | Apple Silicon（arm64）。Xcode 工程的 6 个 build configuration 与 `Scripts/build.sh` 都只构建 arm64 单一架构 |
-| 系统 | macOS 14.0 或更高（`APP_MINIMUM_SYSTEM_VERSION = 14.0`） |
-| Intel Mac | 不在支持范围，也没有支持承诺；没有 x86_64 产物，未做验证 |
-| 框架 | 只使用 Apple 系统框架（Cocoa/AppKit、WebKit、Security、CryptoKit、Foundation、Darwin）；没有第三方 Swift 包、CocoaPod 或 npm 运行时依赖 |
-| 构建工具 | 系统 Swift 编译器（`swiftc`）+ Xcode Command Line Tools；`xcodebuild build/test` 需要完整 Xcode |
-| 签名 | ad-hoc 签名（`codesign --sign -`），没有 Developer ID 证书，`TeamIdentifier` 为空 |
-| 公证 | 未公证。Gatekeeper 默认拒绝（`spctl --assess` 返回 rejected），需要用户在“系统设置 → 隐私与安全性”里手动批准 |
-| 发行状态 | 当前最新是早期 alpha `0.1.0-alpha.2`（build `2`），没有稳定发行版；`0.1.0-alpha.1` 仍然可以下载 |
-| 分发现状 | alpha 以 prerelease 形式发布在 [GitHub Releases](https://github.com/Su-luoya/pi-web-desktop/releases)：自 `v0.1.0-alpha.1` 起提供预编译 ZIP、`.sha256` 与签名/公证证据 Markdown；也可以按 [发布说明](docs/releasing.md) 从源码构建。所有资产都是 **ad-hoc 签名、未公证** |
-| 应用内更新 | 桌面应用自身更新的未实现（后续 issue）。当前 alpha 只做只读版本检查并按设置提示：四类可分别关闭 / 每日 / 每周（扩展包：关闭 / 检查并通知 / 询问后更新），可忽略某个具体版本；桌面应用自身不下载、不安装、不降级。GitHub #20 起，设置里的“启动前自动更新 Pi Web”开关可以在启动前自动更新 Pi Web 依赖，但仅限来源为已验证的 npm 全局安装（默认关闭，其它来源只显示命令）。见 [隐私说明](docs/privacy.md) 的“版本检查、提示与忽略版本”与 [设置说明](docs/settings-and-workspace.md) |
-| 支持承诺 | 无 SLA，无响应或修复时限。Issue 和 PR 按维护者可用时间处理 |
-| 远程访问 | 默认只监听 loopback；远程访问必须自备加密隧道或 HTTPS 反向代理，密码认证 ≠ 传输加密 |
-| 日志与诊断 | 日志写在 `~/Library/Logs/Pi Web Desktop/`，10 MB 轮转、保留 5 份；日志行、错误消息、环境变量/命令行展示与“复制诊断”导出共用同一个脱敏器。规则与字段见 [日志与诊断导出](docs/logging-and-diagnostics.md) |
+## 开发者入口
 
-未在表中列出的组合（Intel、更旧的系统版本、稳定发行版、应用内更新）都视为未支持：文档、Issue 和 Release 说明里都不能暗示它们已经可用。
-
-## 依赖
-
-应用自身没有第三方运行时依赖，但被托管的服务需要用户自行安装：
-
-- Apple Silicon Mac
-- macOS 14 或更高
-- Node.js `>=22.19.0`（当前 `@agegr/pi-web` 声明的 `engines.node` 下限）
-- Pi CLI
-- `@agegr/pi-web`
-
-安装命令（与 `Sources/InstallCommandManifest.swift` 中的应用内建议一致，可能随上游变化，请先核对上游文档与包元数据）：
+从源码构建、测试、目录结构、一致性检查与测试分层见[开发说明](docs/development.md)；发布流程、版本门槛与 CI/Actions 固定策略见[发布流程](docs/releasing.md)；提交 Issue 与 PR 的流程、personal-data 与 secret 扫描边界见[贡献指南](CONTRIBUTING.md)；安全漏洞请按[安全政策](SECURITY.md)私密报告，不要在公开 Issue、PR 或日志里粘贴凭据或未脱敏内容。
 
 ```bash
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-npm install -g @agegr/pi-web
+./Scripts/build.sh          # 构建 build/Pi-Web-Desktop.app（arm64、ad-hoc 签名）
+./Scripts/check-identity.sh # 校验身份、版本与仓库文本
 ```
 
-应用不会自动安装这些依赖，不调用 `sudo`，也不会读取或迁移 Pi 的认证内容。Pi packages 与 extensions 可能以当前用户权限执行代码。
+从源码构建需要 Apple Silicon Mac、macOS 14 或更高、Xcode Command Line Tools（`xcodebuild build/test` 需要完整 Xcode）；环境要求、Xcode 工程测试、smoke 运行与逐条验证清单都在[开发说明](docs/development.md)里。
 
-## 从源码构建
+## 上游归属、非官方声明与许可
 
-```bash
-./Scripts/build.sh
-# 产物：build/Pi-Web-Desktop.app（arm64、ad-hoc 签名）
-./Scripts/check-identity.sh
-open build/Pi-Web-Desktop.app
-```
-
-`Scripts/build.sh` 用系统 Swift 编译器构建 arm64、macOS 14 目标的 app，并生成 `Contents/Info.plist`、复制图标、做 ad-hoc 签名与签名校验。校验身份后可选的端到端启动验证：
-
-```bash
-./Scripts/smoke.sh
-```
-
-`Scripts/smoke.sh` 在临时 support 目录里跑“主窗口”和“诊断页”两种 smoke 模式，都必须在超时内以 0 退出并打印各自标记；它不会写真实 UserDefaults、`~/Library/Application Support` 或 `~/Library/Logs`，也不会启动真实 pi-web。完整说明见 [开发说明](docs/development.md)。
-
-应用身份、版本与最低系统版本只有一个来源：`Configuration/AppIdentity.xcconfig`。当前 alpha 为 `0.1.0-alpha.2`（build `2`），bundle identifier `io.github.su-luoya.pi-web-desktop`，显示名 `Pi Web Desktop`，最低系统版本 `14.0`。`PiWebDesktop.xcodeproj` 通过 `baseConfigurationReference` 继承该文件，`Scripts/build.sh` 也从同一文件生成 `Info.plist`，所以 Xcode 工程、测试 target、脚本产物与 CI 不会各自漂移。任何身份或版本改动后都要重跑：
-
-```bash
-./Scripts/build.sh
-./Scripts/check-identity.sh
-```
-
-`Scripts/check-identity.sh` 会比对 xcconfig、`project.pbxproj`、每个传入 bundle 的 `Info.plist` 与图标资源、本地服务默认值，并拒绝仓库里出现私人默认值（私有 VPN 主机名、tailnet DNS 后缀、CGNAT 私网地址、以 `/Users` 开头的主目录绝对路径、固定本地代理端点）和 xcconfig 之外的版本字面值。用法与检查项见 [开发说明](docs/development.md#一致性检查)。
-
-## 安装 alpha 应用
-
-```bash
-./Scripts/install.sh
-open "$HOME/Applications/Pi-Web-Desktop.app"
-```
-
-`Scripts/install.sh` 会把 `build/Pi-Web-Desktop.app` 复制到 `~/Applications/`，覆盖前把已有同名 app 改名为带时间戳的备份，然后重新做 ad-hoc 签名与校验。它要求 `~/Applications` 已存在（脚本不会创建目录），目录缺失时先执行 `mkdir -p ~/Applications`，否则复制会以 No such file or directory 失败。早期二进制未公证：macOS 可能阻止首次打开，需要在“系统设置 → 隐私与安全性”里针对这个 app 手动批准。不要全局关闭 Gatekeeper。
-
-## 功能范围
-
-- 启动、监控并显示本机已安装的 Pi Web 服务。
-- 用原生 WebKit 窗口承载服务页面，提供启动/停止/重启、日志、诊断、上传下载、外链处理、页面查找与缩放。
-- 默认使用 loopback，不在当前 alpha 基线里开启远程监听。
-- 服务配置存 UserDefaults，运行文件与日志写到标准 Application Support 与 Logs 目录，远程访问密码只存 Keychain。
-
-## 安全与隐私边界
-
-- 不收集遥测。桌面应用 / Pi CLI / Pi Web / Pi 扩展包的四类版本检查只做只读查询，不下载、不安装，可以分别关闭；只有“启动前自动更新 Pi Web”（默认关闭、仅限已验证的 npm 全局安装）会在启动前执行一次受限安装。访问的域名、频率与关闭方式见 [隐私说明](docs/privacy.md)。
-- 默认只监听 `127.0.0.1`。远程访问需要用户先在 Keychain 保存非空密码，并且需要用户自备加密传输；**密码认证只验证访问者，不等于传输加密**。
-- 不要把 agent 服务暴露给不可信网络。
-- 不要在公开 Issue、PR 或讨论里粘贴密码、API key、token、代理凭据、私有主机名、包含主目录绝对路径（以 `/Users` 开头）的环境信息或未脱敏日志。
-- 本地数据位置与清理方式见 [隐私说明](docs/privacy.md)。WebView 使用系统默认的持久化网站数据存储，cookies、缓存与 local storage 写在 `~/Library/WebKit/<bundle id>/` 与 `~/Library/Caches/<bundle id>/` 下；应用当前没有内置的“清空网站数据”入口，只能退出应用后手动删除。
-
-## 参与贡献
-
-1. 先搜索[已有 Issue](https://github.com/Su-luoya/pi-web-desktop/issues)。用 [Bug 表单](https://github.com/Su-luoya/pi-web-desktop/issues/new/choose)报告可复现问题，用 Feature 表单提议用户可见能力；两者都要写清可观察的验收方式。
-2. 大功能、架构调整和安全相关改动先开 Issue 并满足 Definition of Ready（见 [Orca 工作流](docs/orca-workflow.md)）。
-3. 用 `issue-<number>-<slug>` 建分支，一个 Issue 对应一个分支、一个 PR。
-4. PR 必须关联 Issue，并按 [PR 模板](.github/pull_request_template.md)填写变更说明、验收证据、安全与兼容性影响。维护者验证后用 squash merge 合入 `main`。
-5. 提交前按 [贡献指南](CONTRIBUTING.md)运行构建、身份检查、smoke 和仓库文本（personal-data）扫描。
-
-标签体系统一使用 `type:`（bug/feature/maintenance/documentation/security）、`area:`（app/service/diagnostics/security/updates/build-release/documentation）、`status:`（needs-decision/ready/blocked/needs-reproduction）和 `priority:`（P0–P3）。公开版本目前只有 alpha prerelease（最新 `0.1.0-alpha.2`，ad-hoc 签名、未公证），安装或升级前请先看[发布页](https://github.com/Su-luoya/pi-web-desktop/releases)的说明与 checksum。
-
-## 报告安全问题
-
-不要在公开 Issue、PR 或日志中报告安全漏洞。请使用[私密漏洞报告](https://github.com/Su-luoya/pi-web-desktop/security/advisories/new)，具体流程、覆盖范围和“不承诺 SLA”的说明见 [SECURITY.md](SECURITY.md)。
-
-## 依赖与 CI 固定策略
-
-- 应用不引入第三方 Swift 包、CocoaPod 或 npm 运行时依赖；新增依赖前必须在 Issue 或 PR 里记录许可证、维护状态和供应链理由。
-- CI 只使用 GitHub 托管的 `macos-14` runner，工作流权限是只读的 `contents: read`，不使用 secrets。
-- 所有 GitHub Actions 按**提交 SHA 固定**（例如 `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`），不使用浮动 tag。
-- `.github/dependabot.yml` 每周检查 GitHub Actions 固定版本的更新，并通过带 `dependencies`、`github_actions` 标签的 PR 提出升级，必须走正常评审和 CI。
-- 仓库与 CI 共有三层固定模式文本检查，覆盖的是固定模式，不是通用泄露检测：`Scripts/check-identity.sh` 的仓库文本扫描、`.github/workflows/build.yml` 的 `Check for accidental personal data` 步骤（一条 `git grep` 字面量检查），以及 `Scripts/scan-secrets.sh`（[#11](https://github.com/Su-luoya/pi-web-desktop/issues/11) 已实现，CI 上由 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 两步门禁）——后者按形状扫描已跟踪文件里的高信号凭据（AWS access key ID、GitHub token、PEM 私钥头、JWT 和 `password=` 这类赋值），命中行只有**同一行**带 `scan-secrets: allow` 时才被跳过，每次实际执行的扫描结尾输出 `scan-secrets: suppressed N lines`；仓库级扫描发现未跟踪且未被 `.gitignore` 忽略的文件时会拒绝给出结论并退出 3，提示先 `git add` 或显式用 `--include-untracked` 做本地排查（退出码：0 没有命中，1 至少命中一处，2 用法/环境错误，3 存在未跟踪文件）。
-- 三者的能力边界相同：只匹配固定规则、只处理工作区文本、不做熵分析、不扫 Git 历史、不检查二进制或加密载荷，也不识别未列出的凭据类型。它们的共同盲区是未 `git add` 的文件（`git grep` 只读已跟踪内容）：CI 在干净 checkout 上不存在这类文件，所以 `Check for accidental personal data` 步骤仍然只覆盖提交内容；本地默认不再给出假绿——`./Scripts/scan-secrets.sh` 退出 3，`./Scripts/check-identity.sh` 在未跟踪文件落在扫描范围内时判失败（被扫描 pathspec 排除的 `*.icns` 只打印提醒）。**“扫描通过”不等于“仓库里没有秘密”**；发布门槛要求 `./Scripts/scan-secrets.sh` 与 `./Scripts/scan-secrets.sh --self-test` 都退出 0，并把结尾的 N 与本次新增的抑制标记数对照。规则、退出码与本地用法见 [贡献指南](CONTRIBUTING.md#personal-data-与-secret-扫描能力) 与 [开发说明](docs/development.md#personal-data-与-secret-扫描能力)。
-
-## 项目文档
-
-- [架构](docs/architecture.md)
-- [设置、工作目录与退出行为](docs/settings-and-workspace.md)
-- [日志与诊断导出](docs/logging-and-diagnostics.md)
-- [开发](docs/development.md)
-- [安全设计](docs/security-ownership.md)
-- [发布](docs/releasing.md)
-- [Alpha 发布门槛清单](docs/alpha-release-checklist.md)
-- [Release notes 模板](docs/release-notes-template.md)
-- [v0.1.0-alpha.2 Release 说明](docs/release-notes-v0.1.0-alpha.2.md)
-- [v0.1.0-alpha.1 Release 说明](docs/release-notes-v0.1.0-alpha.1.md)
-- [隐私](docs/privacy.md)
-- [Orca 工作流](docs/orca-workflow.md)
-- [贡献指南](CONTRIBUTING.md)
-- [安全政策](SECURITY.md)
-- [行为准则](CODE_OF_CONDUCT.md)
-
-## License
-
-MIT. See [LICENSE](LICENSE).
+- 本仓库是社区维护的**非官方**项目，与上游 Pi Web 维护者没有隶属、赞助或背书关系，也不是上游的官方发行版。
+- 应用不 fork、不打包、不修改上游 Web 服务代码；上游 Pi Web、Pi CLI、`@earendil-works/pi-coding-agent` 或 Pi packages 的问题请先到对应上游仓库确认。上游项目：[`agegr/pi-web`](https://github.com/agegr/pi-web)。应用自身的问题请在本仓库提 [Issue](https://github.com/Su-luoya/pi-web-desktop/issues/new/choose)，安全问题用[私密漏洞报告](https://github.com/Su-luoya/pi-web-desktop/security/advisories/new)。
+- 以 MIT License 发布，见 [LICENSE](LICENSE)；参与讨论和贡献请先读[行为准则](CODE_OF_CONDUCT.md)。
+- 其他文档：[设置、工作目录与退出行为](docs/settings-and-workspace.md)、[日志与诊断导出](docs/logging-and-diagnostics.md)、[隐私说明](docs/privacy.md)、[架构说明](docs/architecture.md)、[安全设计](docs/security-ownership.md)。

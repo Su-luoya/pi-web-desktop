@@ -1,6 +1,6 @@
 # 隐私说明
 
-本政策只覆盖 Pi Web Desktop 应用本体（含仓库内的构建与安装脚本）在本机处理的数据。Pi Web 服务、Pi CLI、Node.js 与 npm 由各自上游提供，它们的数据处理不属于本仓库范围；上游归属与支持矩阵见 [README](../README.md)。
+本政策只覆盖 Pi Web Desktop 应用本体（含仓库内的构建与安装脚本）在本机处理的数据。Pi Web 服务、Pi CLI、Node.js 与 npm 由各自上游提供，它们的数据处理不属于本仓库范围；用户侧说明与上游归属见 [README](../README.md)，支持矩阵见[开发说明](development.md#支持矩阵与非承诺)。
 
 ## 无遥测
 

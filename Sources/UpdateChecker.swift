@@ -2,8 +2,9 @@ import Foundation
 
 // MARK: - 检查目标（GitHub #17）
 
-/// 更新检查的分类。每一类都可以独立关闭（“服务 → 更新检查设置”），复查间隔
-/// 也不同：桌面应用 / Pi CLI / Pi Web 每 24 小时，扩展包每 7 天。
+/// 更新检查的分类。每一类都可以按策略独立控制（“服务 → 更新检查设置 → 更新检查
+/// 偏好设置…”）：桌面应用 / Pi CLI / Pi Web 为关闭 / 每日 / 每周，扩展包为关闭 /
+/// 检查并通知 / 询问后更新；策略定义在 `Sources/UpdateSettings.swift`。
 enum UpdateCheckCategory: String, CaseIterable, Equatable {
     case desktopApp = "desktop-app"
     case piCLI = "pi"
@@ -16,15 +17,6 @@ enum UpdateCheckCategory: String, CaseIterable, Equatable {
         case .piCLI: return "Pi CLI"
         case .piWeb: return "Pi Web"
         case .piPackages: return "Pi 扩展包"
-        }
-    }
-
-    /// 默认复查间隔（秒）。实际使用的值来自 `UpdateCheckIntervals`，因此测试
-    /// 可以注入更短的间隔并用假时钟推进，不需要真实 sleep。
-    var defaultInterval: TimeInterval {
-        switch self {
-        case .desktopApp, .piCLI, .piWeb: return 24 * 60 * 60
-        case .piPackages: return 7 * 24 * 60 * 60
         }
     }
 }
@@ -112,103 +104,6 @@ struct UpdateCheckInventory: Equatable {
     }
 }
 
-/// 各分类的复查间隔（秒）。默认值与 `UpdateCheckCategory.defaultInterval` 一致。
-struct UpdateCheckIntervals: Equatable {
-    var desktopApp: TimeInterval
-    var piCLI: TimeInterval
-    var piWeb: TimeInterval
-    var piPackages: TimeInterval
-
-    init(
-        desktopApp: TimeInterval = UpdateCheckCategory.desktopApp.defaultInterval,
-        piCLI: TimeInterval = UpdateCheckCategory.piCLI.defaultInterval,
-        piWeb: TimeInterval = UpdateCheckCategory.piWeb.defaultInterval,
-        piPackages: TimeInterval = UpdateCheckCategory.piPackages.defaultInterval
-    ) {
-        self.desktopApp = desktopApp
-        self.piCLI = piCLI
-        self.piWeb = piWeb
-        self.piPackages = piPackages
-    }
-
-    static let standard = UpdateCheckIntervals()
-
-    func interval(for category: UpdateCheckCategory) -> TimeInterval {
-        switch category {
-        case .desktopApp: return desktopApp
-        case .piCLI: return piCLI
-        case .piWeb: return piWeb
-        case .piPackages: return piPackages
-        }
-    }
-}
-
-/// 用户可以分别关闭的四类检查。默认全部开启，值写入 UserDefaults。
-struct UpdateCheckPreferences: Equatable {
-    var desktopAppEnabled: Bool
-    var piCLIEnabled: Bool
-    var piWebEnabled: Bool
-    var piPackagesEnabled: Bool
-
-    init(
-        desktopAppEnabled: Bool = true,
-        piCLIEnabled: Bool = true,
-        piWebEnabled: Bool = true,
-        piPackagesEnabled: Bool = true
-    ) {
-        self.desktopAppEnabled = desktopAppEnabled
-        self.piCLIEnabled = piCLIEnabled
-        self.piWebEnabled = piWebEnabled
-        self.piPackagesEnabled = piPackagesEnabled
-    }
-
-    static let allEnabled = UpdateCheckPreferences()
-
-    static let desktopAppKey = "updateChecks.desktopApp.enabled"
-    static let piCLIKey = "updateChecks.pi.enabled"
-    static let piWebKey = "updateChecks.piWeb.enabled"
-    static let piPackagesKey = "updateChecks.piPackages.enabled"
-
-    /// 读取开关。键不存在时按“开启”处理（首次启动默认开启）。
-    static func load(from defaults: UserDefaults) -> UpdateCheckPreferences {
-        func value(_ key: String) -> Bool {
-            guard defaults.object(forKey: key) != nil else { return true }
-            return defaults.bool(forKey: key)
-        }
-        return UpdateCheckPreferences(
-            desktopAppEnabled: value(desktopAppKey),
-            piCLIEnabled: value(piCLIKey),
-            piWebEnabled: value(piWebKey),
-            piPackagesEnabled: value(piPackagesKey)
-        )
-    }
-
-    func save(to defaults: UserDefaults) {
-        defaults.set(desktopAppEnabled, forKey: Self.desktopAppKey)
-        defaults.set(piCLIEnabled, forKey: Self.piCLIKey)
-        defaults.set(piWebEnabled, forKey: Self.piWebKey)
-        defaults.set(piPackagesEnabled, forKey: Self.piPackagesKey)
-    }
-
-    func isEnabled(_ category: UpdateCheckCategory) -> Bool {
-        switch category {
-        case .desktopApp: return desktopAppEnabled
-        case .piCLI: return piCLIEnabled
-        case .piWeb: return piWebEnabled
-        case .piPackages: return piPackagesEnabled
-        }
-    }
-
-    mutating func setEnabled(_ enabled: Bool, for category: UpdateCheckCategory) {
-        switch category {
-        case .desktopApp: desktopAppEnabled = enabled
-        case .piCLI: piCLIEnabled = enabled
-        case .piWeb: piWebEnabled = enabled
-        case .piPackages: piPackagesEnabled = enabled
-        }
-    }
-}
-
 // MARK: - 上游端点（白名单）
 
 /// 更新检查访问的全部上游。只有这里列出的主机与路径会被请求；仓库外地址、
@@ -226,20 +121,23 @@ enum UpdateCheckUpstream {
 }
 
 /// 用户可见的更新检查说明（菜单“更新检查说明…”与 `docs/privacy.md` 用同一
-/// 组事实：域名、请求内容、频率、关闭方式、缓存位置）。
+/// 组事实：域名、请求内容、策略与默认值、提示方式、忽略语义、缓存位置）。
 ///
-/// 措辞约束：只描述版本查询，不把请求称作遥测；不安装、不下载任何东西。
+/// 措辞约束：只描述版本查询，不把请求称作遥测；不安装、不下载任何东西；明确
+/// 写出 alpha.3 才会生效的预留设置位。
 enum UpdateCheckDisclosure {
     static func text(cachePath: String) -> String {
-        let desktopHours = Int(UpdateCheckCategory.desktopApp.defaultInterval / 3600)
-        let packageDays = Int(UpdateCheckCategory.piPackages.defaultInterval / (24 * 3600))
+        let desktopHours = Int(UpdateCheckIntervals.standard.daily / 3600)
+        let packageDays = Int(UpdateCheckIntervals.standard.packageCheck / (24 * 3600))
         return """
         更新检查只做只读的版本查询，不下载、不安装任何东西。
 
         · 访问的域名：\(UpdateCheckUpstream.githubHost)（桌面应用发布）、\(UpdateCheckUpstream.npmRegistryHost)（Pi CLI、Pi Web 与扩展包）。
         · 请求内容：GET + JSON 解析；User-Agent 只含应用名、版本与 bundle identifier；不发送 cookies、账号凭据、会话内容或诊断信息。
-        · 频率：应用启动后立即检查一次，之后桌面应用 / Pi CLI / Pi Web 每 \(desktopHours) 小时、扩展包每 \(packageDays) 天复查；应用关闭后不再检查。
-        · 关闭方式：“更新检查设置”里的四类开关各自独立；关闭后不再发起对应请求。
+        · 频率：应用启动后立即检查一次；之后桌面应用 / Pi CLI / Pi Web 默认每 \(desktopHours) 小时（每日）、Pi 扩展包默认每 \(packageDays) 天（检查并通知）复查。四类可分别设为关闭 / 每日 / 每周（扩展包为关闭 / 检查并通知 / 询问后更新）；关闭后不发起对应请求，也不安排复查。应用关闭后不检查（不安装 LaunchAgent）。
+        · 提示方式：应用内提示框（不使用系统通知中心、不申请通知权限）；提示只含组件名与版本。发现可用更新时最多在本次运行里提示一次，忽略某个版本后不再提示它。
+        · 忽略版本：可以逐类忽略当前提示的版本；忽略与安装来源无关，只抑制这一个版本，上游发布更高版本时会再次提示。不实现版本锁定或降级。
+        · alpha.3 预留：设置里的“启动前自动更新 Pi Web”尚未生效，默认关闭；当前版本只保存这个值，不产生任何安装或更新行为。
         · 结果缓存：\(cachePath)（只含版本、时间戳与条件请求字段），删除该文件即可清空。
 
         版本查询不是遥测：请求只用于比较版本，不会上传使用数据、会话或诊断内容。
@@ -606,6 +504,25 @@ enum UpdateCheckFailure: String, Equatable {
     case unparsableVersion
     case installedVersionUnknown
     case invalidPackageName
+
+    /// 用户可见的原因文本，不含 HTTP 状态码（状态码由调用方按需追加）。
+    var text: String {
+        switch self {
+        case .timedOut: return "请求超时"
+        case .offline: return "网络不可用"
+        case .cancelled: return "请求被取消"
+        case .transport: return "网络错误"
+        case .rateLimited: return "上游限流"
+        case .serverError: return "上游服务错误"
+        case .httpError: return "上游返回非预期状态码"
+        case .unexpectedRedirect: return "上游尝试重定向到非预期地址"
+        case .unexpectedHost: return "响应来自非预期主机"
+        case .invalidResponse: return "响应无法解析"
+        case .unparsableVersion: return "上游版本无法进行语义化比较"
+        case .installedVersionUnknown: return "无法确定本机已安装版本，未发起请求"
+        case .invalidPackageName: return "包名不符合 npm 规范，未发起请求"
+        }
+    }
 }
 
 /// 结果来源：本次真实响应、沿用的缓存、或没有可用结果。
@@ -616,7 +533,7 @@ enum UpdateResultFreshness: String, Equatable {
 }
 
 /// 一个对象的用户可见结论。只包含版本、状态与固定文案，不含路径、请求细节或
-/// 诊断内容。
+/// 诊断内容。`ignoredVersion` 记录用户为该分类忽略、因而本次不再提示的版本。
 struct UpdateCheckResult: Equatable {
     var target: UpdateCheckTarget
     var status: UpdateCheckStatus
@@ -629,24 +546,17 @@ struct UpdateCheckResult: Equatable {
     var httpStatusCode: Int?
     var checkedAt: Date?
     var lastSuccessAt: Date?
+    /// 本次结论对应的版本被用户忽略时，这里是那个版本（等于 `latestVersion`）。
+    var ignoredVersion: String? = nil
 
     var failureText: String {
         guard let failure else { return "未知原因" }
-        let code = httpStatusCode.map { "（HTTP \($0)）" } ?? ""
         switch failure {
-        case .timedOut: return "请求超时"
-        case .offline: return "网络不可用"
-        case .cancelled: return "请求被取消"
-        case .transport: return "网络错误"
-        case .rateLimited: return "上游限流\(code)"
-        case .serverError: return "上游服务错误\(code)"
-        case .httpError: return "上游返回非预期状态码\(code)"
-        case .unexpectedRedirect: return "上游尝试重定向到非预期地址\(code)"
-        case .unexpectedHost: return "响应来自非预期主机"
-        case .invalidResponse: return "响应无法解析\(code)"
-        case .unparsableVersion: return "上游版本无法进行语义化比较"
-        case .installedVersionUnknown: return "无法确定本机已安装版本，未发起请求"
-        case .invalidPackageName: return "包名不符合 npm 规范，未发起请求"
+        case .rateLimited, .serverError, .httpError, .unexpectedRedirect:
+            let code = httpStatusCode.map { "（HTTP \($0)）" } ?? ""
+            return failure.text + code
+        default:
+            return failure.text
         }
     }
 
@@ -655,6 +565,9 @@ struct UpdateCheckResult: Equatable {
         switch status {
         case .updateAvailable:
             text = "\(target.displayName)：上游有新版本 \(latestVersion ?? "未知")，本机 \(installedVersion ?? "未知")。只提示，不自动安装。"
+            if let latestVersion, ignoredVersion == latestVersion {
+                text += "该版本已被忽略，上游发布更高版本时会再次提示。"
+            }
         case .upToDate:
             text = "\(target.displayName)：已是最新（本机 \(installedVersion ?? "未知")，上游 \(latestVersion ?? "未知")）。"
         case .unknown:
@@ -686,26 +599,37 @@ enum UpdateCheckTrigger: String, Equatable {
     }
 }
 
-/// 一次检查（或一次“没有可检查对象”的判定）的汇总。
+/// 一次检查（或一次“没有可检查对象”的判定）的汇总。`categoryStatuses` 是四类
+/// 组件的状态快照（最近检查 / 结果 / 忽略版本 / 下次检查），由检查器在主线程
+/// 发布，供诊断页与偏好窗口渲染。
 struct UpdateCheckSummary: Equatable {
     var results: [UpdateCheckResult]
     var checkedAt: Date?
     var trigger: UpdateCheckTrigger
     /// 本次运行中处于开启状态的分类；全部关闭时 `results` 必然为空。
     var enabledCategories: [UpdateCheckCategory]
+    var categoryStatuses: [UpdateCategoryStatus]
 
     static let empty = UpdateCheckSummary(
         results: [],
         checkedAt: nil,
         trigger: .manual,
-        enabledCategories: UpdateCheckCategory.allCases
+        enabledCategories: UpdateCheckCategory.allCases,
+        categoryStatuses: []
     )
 
-    init(results: [UpdateCheckResult], checkedAt: Date?, trigger: UpdateCheckTrigger, enabledCategories: [UpdateCheckCategory]) {
+    init(
+        results: [UpdateCheckResult],
+        checkedAt: Date?,
+        trigger: UpdateCheckTrigger,
+        enabledCategories: [UpdateCheckCategory],
+        categoryStatuses: [UpdateCategoryStatus] = []
+    ) {
         self.results = results
         self.checkedAt = checkedAt
         self.trigger = trigger
         self.enabledCategories = enabledCategories
+        self.categoryStatuses = categoryStatuses
     }
 
     var allDisabled: Bool { enabledCategories.isEmpty }
@@ -954,10 +878,11 @@ private final class TimerUpdateToken: UpdateTimerToken {
 
 // MARK: - 检查器
 
-/// 版本检查器（GitHub #17）。
+/// 版本检查器（GitHub #17，设置与忽略版本见 GitHub #18）。
 ///
 /// 行为边界：
-/// - 只检查、不安装：本类型没有任何安装/下载/执行路径；
+/// - 只检查、不安装：本类型没有任何安装/下载/执行路径，也不读 alpha.3 的预留
+///   设置位；
 /// - 只 GET 固定白名单端点；请求头只有 `Accept` / `User-Agent` / 条件请求字段；
 /// - 失败（网络、超时、限流、5xx、解析失败、非预期主机）只改变检查结果状态，
 ///   不抛出、不重试轰炸、不触碰服务状态；
@@ -966,11 +891,13 @@ private final class TimerUpdateToken: UpdateTimerToken {
 ///   会话或诊断内容；
 /// - 所有时间与网络都来自注入的时钟、HTTP 客户端与调度器，测试不 sleep、
 ///   不联网；
+/// - 调度完全由设置驱动（`UpdateCheckPreferences`）：关闭的分类既不调度也不
+///   请求；每日 / 每周 / 扩展包 7 天分别对应 `UpdateCheckIntervals` 里的间隔；
 /// - `stop()` 之后不再检查：应用退出路径不发起任何请求，也不安装 LaunchAgent。
 ///
 /// 线程约定：`start` / `stop` / `updateInventory` / `checkNow` / `checkIfDue` /
-/// `preferences` 在主线程调用；检查主体在调度器提供的执行队列上运行，结果经
-/// `deliver` 回到主线程后回调 `onResultsChanged`。
+/// `preferences` / `ignoredVersions` / `summary` 在主线程调用；检查主体在调度器
+/// 提供的执行队列上运行，结果经 `deliver` 回到主线程后回调 `onResultsChanged`。
 final class UpdateChecker {
     /// 单次请求超时（秒）。
     static let requestTimeout: TimeInterval = 15
@@ -989,13 +916,17 @@ final class UpdateChecker {
     /// 最近一次发布的汇总（主线程读取）。
     private(set) var summary: UpdateCheckSummary = .empty
 
-    /// 用户开关。改变后（已 `start` 时）立即重建周期计时器。
+    /// 用户策略。改变后（已 `start` 时）立即按新策略重建周期计时器，因此关闭
+    /// 某一类后该分类不再被调度。
     var preferences: UpdateCheckPreferences {
         didSet {
             guard started, !stopped else { return }
             restartTimers()
         }
     }
+
+    /// 被用户忽略的版本。只影响提示与状态标记，不影响已写入的缓存；改变后
+    /// 下一次检查立即生效。
 
     private var inventory: UpdateCheckInventory = .empty
     private var cache: UpdateCheckCacheFile = .empty
@@ -1005,6 +936,10 @@ final class UpdateChecker {
     private var isChecking = false
     private var timerTokens: [UpdateTimerToken] = []
 
+    /// 忽略版本。由调用方（`AppDelegate`）从 UserDefaults 读入并在界面里更新；
+    /// `UpdateChecker` 自己从不写 UserDefaults。
+    var ignoredVersions: UpdateIgnoredVersions = .empty
+
     init(
         httpClient: UpdateHTTPClient,
         clock: UpdateClock = .system,
@@ -1012,7 +947,8 @@ final class UpdateChecker {
         scheduler: UpdateCheckScheduling,
         identity: UpdateCheckIdentity = .current,
         intervals: UpdateCheckIntervals = .standard,
-        preferences: UpdateCheckPreferences = .allEnabled,
+        preferences: UpdateCheckPreferences = .factoryDefaults,
+        ignoredVersions: UpdateIgnoredVersions = .empty,
         log: ((String) -> Void)? = nil
     ) {
         self.httpClient = httpClient
@@ -1022,6 +958,7 @@ final class UpdateChecker {
         self.identity = identity
         self.intervals = intervals
         self.preferences = preferences
+        self.ignoredVersions = ignoredVersions
         self.log = log
     }
 
@@ -1090,10 +1027,11 @@ final class UpdateChecker {
         for token in timerTokens { token.cancel() }
         timerTokens = []
         // 每个不同的间隔一个计时器；计时器只负责“到期判断”，真正的检查范围
-        // 仍由 plan 按各自 lastAttemptAt 决定。
+        // 仍由 plan 按各自 lastAttemptAt 决定。关闭的分类不产生计时器，也不
+        // 产生请求。
         var intervalsInUse: [TimeInterval] = []
-        for category in UpdateCheckCategory.allCases where preferences.isEnabled(category) {
-            let interval = intervals.interval(for: category)
+        for category in UpdateCheckCategory.allCases {
+            guard let interval = intervals.interval(for: category, policy: preferences.policy(for: category)) else { continue }
             guard !intervalsInUse.contains(interval) else { continue }
             intervalsInUse.append(interval)
         }
@@ -1149,7 +1087,14 @@ final class UpdateChecker {
                 results: results,
                 checkedAt: self.clock.now(),
                 trigger: trigger,
-                enabledCategories: enabled
+                enabledCategories: enabled,
+                categoryStatuses: UpdateCategoryStatusBuilder.statuses(
+                    preferences: self.preferences,
+                    intervals: self.intervals,
+                    cache: self.cache,
+                    ignoredVersions: self.ignoredVersions,
+                    results: results
+                )
             )
             self.logSummary(summary)
             self.scheduler.deliver {
@@ -1191,7 +1136,10 @@ final class UpdateChecker {
         let target = UpdateCheckTarget(category: category, packageName: packageName)
         let cached = cache.entry(for: target.id)
         if let onlyDueAt {
-            let interval = intervals.interval(for: category)
+            // 关闭的分类没有间隔，永远不会成为到期对象。
+            guard let interval = intervals.interval(for: category, policy: preferences.policy(for: category)) else {
+                return
+            }
             if let lastAttempt = cached?.lastAttemptAt, onlyDueAt.timeIntervalSince(lastAttempt) < interval {
                 return
             }
@@ -1318,6 +1266,11 @@ final class UpdateChecker {
             if keepSuccessFields {
                 entry.lastSuccessAt = now
             }
+            // 只抑制用户明确忽略的那一个版本：上游版本不同就不算忽略，
+            // 因此新版本会重新进入提示。
+            let ignoredVersion = status == .updateAvailable
+                ? latestVersion.flatMap { self.ignoredVersions.isIgnored($0, for: item.target.category) ? $0 : nil }
+                : nil
             let result = UpdateCheckResult(
                 target: item.target,
                 status: status,
@@ -1328,7 +1281,8 @@ final class UpdateChecker {
                 failure: failure,
                 httpStatusCode: httpStatusCode,
                 checkedAt: now,
-                lastSuccessAt: entry.lastSuccessAt
+                lastSuccessAt: entry.lastSuccessAt,
+                ignoredVersion: ignoredVersion
             )
             return (entry, result)
         }
@@ -1485,8 +1439,8 @@ final class UpdateChecker {
         guard allowStatus else {
             return (.unknown, latestVersion, .unknown, .cached)
         }
-        let ttl = UpdateCheckCategory(rawValue: entry.category).map { intervals.interval(for: $0) }
-            ?? intervals.interval(for: .desktopApp)
+        let ttl = UpdateCheckCategory(rawValue: entry.category).map { intervals.ttl(for: $0) }
+            ?? intervals.ttl(for: .desktopApp)
         if entry.isReusable(at: now, ttl: ttl),
            let status = entry.decodedStatus,
            status != .unknown {

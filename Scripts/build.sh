@@ -91,6 +91,7 @@ swiftc "$ROOT/Sources/PiWebApp.swift" \
   "$ROOT/Sources/DiagnosticsClipboard.swift" \
   "$ROOT/Sources/ComponentInstallation.swift" \
   "$ROOT/Sources/UpdateChecker.swift" \
+  "$ROOT/Sources/UpdateSettings.swift" \
   "$ROOT/Sources/DependencyChecker.swift" \
   "$ROOT/Sources/FirstLaunchDiagnostics.swift" \
   "$ROOT/Sources/InstallCommandManifest.swift" \
@@ -106,6 +107,7 @@ swiftc "$ROOT/Sources/PiWebApp.swift" \
   "$ROOT/Sources/WebViewNavigationPolicy.swift" \
   "$ROOT/Sources/WorkspaceDirectory.swift" \
   "$ROOT/Sources/PreferencesWindowController.swift" \
+  "$ROOT/Sources/UpdateSettingsWindowController.swift" \
   "$ROOT/Sources/DiagnosticsWindowController.swift" \
   "$ROOT/Sources/main.swift" \
   -target "arm64-apple-macosx$APP_MINIMUM_SYSTEM_VERSION" \

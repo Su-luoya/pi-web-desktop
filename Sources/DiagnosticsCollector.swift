@@ -67,6 +67,10 @@ struct DiagnosticsInput: Equatable {
     /// 远程访问密码的状态文案（例如 `RemoteAccessPassword.statusText(isSet:)`）。
     /// 只允许“已设置/未设置”这类描述：不得传入密码值、长度或 Keychain 原始数据。
     var remoteAccessPasswordStatus: String
+    /// 组件安装识别结果（GitHub #16）：每项一行，包含路径、包名、版本、来源、
+    /// 可信度与建议命令。由调用方传入**已经脱敏**的条目（Home 前缀为 `~`）；
+    /// 收集器自身不执行命令、不读磁盘，只做文本组装。默认空数组，旧调用点不受影响。
+    var componentInstallations: [ComponentInstallation] = []
 }
 
 enum DiagnosticsCollector {
@@ -105,7 +109,10 @@ enum DiagnosticsCollector {
             ("启动环境", input.launchEnvironment),
             ("日志文件", input.logPath),
             ("日志写入", input.logWriteStatus),
-            ("远程访问密码", input.remoteAccessPasswordStatus)
+            ("远程访问密码", input.remoteAccessPasswordStatus),
+            // #16 的组件安装信息追加在末尾，保持既有字段顺序稳定；每项占一行
+            // （多行值由 `fieldLines` 拆成 `组件安装[2]:` 这样的唯一标签行）。
+            ("组件安装", input.componentInstallations.map(\.summaryLine).joined(separator: "\n"))
         ]
         let lines = fields.flatMap { fieldLines(label: $0.label, value: $0.value) }
         return redactor.redact(lines.joined(separator: "\n"))

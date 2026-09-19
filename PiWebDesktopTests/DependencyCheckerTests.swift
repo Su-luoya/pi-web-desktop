@@ -121,7 +121,11 @@ private func makeHarness(
     harness.fileSystem.executables = [
         "/opt/homebrew/bin/node",
         "/opt/homebrew/bin/pi",
-        "/opt/homebrew/bin/pi-web"
+        "/opt/homebrew/bin/pi-web",
+        // 真实安装里链接目标也是存在的可执行文件；不登记的话链接链会被当成悬空。
+        nodeResolvedPath,
+        piResolvedPath,
+        piWebResolvedPath
     ]
     harness.fileSystem.symlinks = [
         "/opt/homebrew/bin/node": "../Cellar/node/22.19.0/bin/node",
@@ -761,12 +765,16 @@ final class DependencyCheckerTests: XCTestCase {
         let harness = makeHarness()
         _ = harness.checker().run()
 
+        // #16 的组件识别只多了这些只读查询：npm/pnpm 全局 root 与 `pi list`。
         XCTAssertEqual(
             Set(harness.runner.invocationLines),
             Set([
                 "/usr/bin/env npm prefix -g",
+                "/usr/bin/env npm root -g",
+                "/usr/bin/env pnpm root -g",
                 "/opt/homebrew/bin/node --version",
                 "/opt/homebrew/bin/pi --version",
+                "/opt/homebrew/bin/pi list",
                 "/opt/homebrew/bin/pi-web --version"
             ])
         )
@@ -775,6 +783,44 @@ final class DependencyCheckerTests: XCTestCase {
             XCTAssertFalse(line.contains("install"))
             XCTAssertFalse(line.lowercased().contains("http"))
             XCTAssertFalse(line.contains("curl"))
+        }
+    }
+
+    /// #16：报告里带上组件安装模型；npm 全局 + 证据齐全时给静态清单里的更新命令，
+    /// `pi list` 无输出时降级为 unknown 而不是崩溃。
+    func testReportCarriesComponentInstallationsFromTheSameProbes() {
+        let harness = makeHarness()
+        let report = harness.checker().run()
+
+        XCTAssertEqual(report.components.map(\.kind), [.piCLI, .piWeb, .piPackage])
+
+        let piWeb = report.component(for: .piWeb)
+        XCTAssertEqual(piWeb?.packageName, InstallCommandManifest.piWebPackageName)
+        XCTAssertEqual(piWeb?.version, "1.2.3")
+        XCTAssertEqual(piWeb?.executablePath, "/opt/homebrew/bin/pi-web")
+        XCTAssertEqual(piWeb?.resolvedPath, piWebResolvedPath)
+        XCTAssertEqual(piWeb?.source, .npmGlobal)
+        XCTAssertEqual(piWeb?.confidence, .verified)
+        XCTAssertEqual(piWeb?.suggestedCommand, InstallCommandManifest.updateNPMPiWeb.command)
+
+        let piCLI = report.component(for: .piCLI)
+        XCTAssertEqual(piCLI?.packageName, InstallCommandManifest.piCLIPackageName)
+        XCTAssertEqual(piCLI?.version, "9.9.9")
+        XCTAssertEqual(piCLI?.source, .npmGlobal)
+        XCTAssertEqual(piCLI?.suggestedCommand, InstallCommandManifest.updateNPMPiCLI.command)
+
+        let piPackage = report.component(for: .piPackage)
+        XCTAssertEqual(piPackage?.source, .unknown)
+        XCTAssertEqual(piPackage?.confidence, .unknown)
+        XCTAssertNil(piPackage?.suggestedCommand)
+        XCTAssertTrue(
+            piPackage?.evidence.contains { $0.contains("pi list") } == true,
+            "降级原因必须写进证据"
+        )
+
+        for component in report.components {
+            XCTAssertFalse(component.summaryLine.contains(harness.fileSystem.home))
+            XCTAssertFalse(component.evidence.contains { $0.contains(harness.fileSystem.home) })
         }
     }
 

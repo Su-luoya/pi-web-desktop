@@ -181,9 +181,18 @@ struct DependencyFinding: Equatable {
 /// 整体诊断结果。
 struct DependencyReport: Equatable {
     var findings: [DependencyFinding]
+    /// 组件安装识别结果（GitHub #16）：路径、包名、版本、来源、可信度与
+    /// 建议命令，路径在离开 `DependencyChecker` 前已完成 Home 脱敏。
+    /// 默认空数组，因此旧调用点（测试、smoke 夹具）不受影响。
+    var components: [ComponentInstallation] = []
 
     func finding(for kind: DependencyFinding.Kind) -> DependencyFinding? {
         findings.first { $0.kind == kind }
+    }
+
+    /// 某一类组件的安装识别结果；没检测到时返回 nil。
+    func component(for kind: ComponentKind) -> ComponentInstallation? {
+        components.first { $0.kind == kind }
     }
 
     /// 硬性前置（必需项）的固定顺序：Node.js、Pi CLI、Pi Web。
@@ -408,7 +417,8 @@ struct DependencyChecker {
 
     static let shellPath = "/bin/zsh"
     static let runnerPath = "/usr/bin/env"
-    static let piWebPackageName = "@agegr/pi-web"
+    /// 上游包名的单一来源在 `InstallCommandManifest`。
+    static var piWebPackageName: String { InstallCommandManifest.piWebPackageName }
     /// Pi 配置目录相对 Home 的路径；只检查存在与可读，不读取内容。
     static let piConfigurationDirectoryRelativePath = ".pi/agent"
     /// package.json 向上查找的最大层数。
@@ -421,6 +431,8 @@ struct DependencyChecker {
     private let serviceHostname: String
     private let servicePort: Int
     private let portProbe: DependencyPortProbing
+    private let environment: [String: String]
+    private let applicationInstallation: ApplicationInstallationProbe
 
     init(
         commandRunner: CommandRunning = SystemCommandRunner(),
@@ -429,7 +441,9 @@ struct DependencyChecker {
         configuredPiWebPath: String = "",
         serviceHostname: String = ServiceConfiguration.defaultHostname,
         servicePort: Int = ServiceConfiguration.defaultPort,
-        portProbe: DependencyPortProbing = SystemDependencyPortProbe()
+        portProbe: DependencyPortProbing = SystemDependencyPortProbe(),
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        applicationInstallation: ApplicationInstallationProbe = .none
     ) {
         self.commandRunner = commandRunner
         self.fileSystem = fileSystem
@@ -438,20 +452,37 @@ struct DependencyChecker {
         self.serviceHostname = serviceHostname
         self.servicePort = servicePort
         self.portProbe = portProbe
+        self.environment = environment
+        self.applicationInstallation = applicationInstallation
     }
 
-    /// 运行全部检查。顺序固定：系统、Node.js、Pi CLI、Pi Web、默认端口、Pi 配置目录。
+    /// 运行全部检查。顺序固定：系统、Node.js、Pi CLI、Pi Web、默认端口、Pi 配置目录，
+    /// 最后附上组件安装识别（GitHub #16；复用同一组探针与已解析的版本）。
     func run() -> DependencyReport {
         let redactor = DependencyPathRedactor(homeDirectory: fileSystem.homeDirectoryPath())
         let npmPrefix = localNPMPrefix()
-        return DependencyReport(findings: [
-            makeSystemFinding(),
-            makeNodeFinding(npmPrefix: npmPrefix, redactor: redactor),
-            makePiFinding(npmPrefix: npmPrefix, redactor: redactor),
-            makePiWebFinding(npmPrefix: npmPrefix, redactor: redactor),
-            makePortFinding(),
-            makePiConfigurationDirectoryFinding(redactor: redactor)
-        ])
+        let piPath = resolvePiExecutable()
+        let piWebPath = resolvePiWebExecutable()
+        let piFinding = makePiFinding(path: piPath, npmPrefix: npmPrefix, redactor: redactor)
+        let piWebFinding = makePiWebFinding(path: piWebPath, npmPrefix: npmPrefix, redactor: redactor)
+        return DependencyReport(
+            findings: [
+                makeSystemFinding(),
+                makeNodeFinding(npmPrefix: npmPrefix, redactor: redactor),
+                piFinding,
+                piWebFinding,
+                makePortFinding(),
+                makePiConfigurationDirectoryFinding(redactor: redactor)
+            ],
+            components: componentInstallations(
+                redactor: redactor,
+                npmPrefix: npmPrefix,
+                piPath: piPath,
+                piWebPath: piWebPath,
+                piFinding: piFinding,
+                piWebFinding: piWebFinding
+            )
+        )
     }
 
     // MARK: - 路径选择的身份证据
@@ -696,8 +727,34 @@ struct DependencyChecker {
         )
     }
 
-    private func makePiFinding(npmPrefix: String?, redactor: DependencyPathRedactor) -> DependencyFinding {
-        guard let path = resolveExecutable(named: "pi", candidates: defaultCandidates(named: "pi")) else {
+    /// Pi CLI 的可执行文件路径（只读解析；找不到时 nil）。
+    private func resolvePiExecutable() -> String? {
+        resolveExecutable(named: "pi", candidates: defaultCandidates(named: "pi"))
+    }
+
+    /// Pi Web 的候选路径：用户显式配置的路径优先，否则退回默认候选与
+    /// 登录 shell 的 `command -v`。
+    private func piWebCandidates() -> [String] {
+        let configured = configuredPiWebPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        return configured.isEmpty ? defaultCandidates(named: "pi-web") : [configured]
+    }
+
+    /// Pi Web 的可执行文件路径。用户显式配置的路径不可执行时按缺失报告，
+    /// 不悄悄改用其它副本。
+    private func resolvePiWebExecutable() -> String? {
+        let configured = configuredPiWebPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if configured.isEmpty {
+            return resolveExecutable(named: "pi-web", candidates: defaultCandidates(named: "pi-web"))
+        }
+        return fileSystem.isExecutableFile(atPath: configured) ? configured : nil
+    }
+
+    private func makePiFinding(
+        path: String?,
+        npmPrefix: String?,
+        redactor: DependencyPathRedactor
+    ) -> DependencyFinding {
+        guard let path else {
             return missingFinding(kind: .piCLI, remediationID: InstallCommandManifest.piCLI.id)
         }
         let evidence = executableEvidence(at: path)
@@ -726,15 +783,11 @@ struct DependencyChecker {
         )
     }
 
-    private func makePiWebFinding(npmPrefix: String?, redactor: DependencyPathRedactor) -> DependencyFinding {
-        let configured = configuredPiWebPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        let path: String?
-        if configured.isEmpty {
-            path = resolveExecutable(named: "pi-web", candidates: defaultCandidates(named: "pi-web"))
-        } else {
-            // 用户显式配置的路径优先：不可执行时按缺失报告，而不是悄悄改用别的副本。
-            path = fileSystem.isExecutableFile(atPath: configured) ? configured : nil
-        }
+    private func makePiWebFinding(
+        path: String?,
+        npmPrefix: String?,
+        redactor: DependencyPathRedactor
+    ) -> DependencyFinding {
         guard let path else {
             return missingFinding(kind: .piWeb, remediationID: InstallCommandManifest.piWeb.id)
         }
@@ -771,6 +824,63 @@ struct DependencyChecker {
             packageName: metadata.name,
             packageVersion: metadata.version
         )
+    }
+
+    // MARK: - 组件安装识别（GitHub #16）
+
+    /// 组件安装识别：复用同一组注入探针（命令、文件系统、环境变量），并沿用
+    /// `pi`/`pi-web` 的 finding 已解析的版本，因此不会重复执行 `--version`。
+    /// 结果在返回前完成 Home 脱敏（`~`）。
+    private func componentInstallations(
+        redactor: DependencyPathRedactor,
+        npmPrefix: String?,
+        piPath: String?,
+        piWebPath: String?,
+        piFinding: DependencyFinding,
+        piWebFinding: DependencyFinding
+    ) -> [ComponentInstallation] {
+        let detector = ComponentInstallationDetector(
+            commandRunner: commandRunner,
+            fileSystem: fileSystem,
+            environment: environment,
+            homeDirectory: fileSystem.homeDirectoryPath(),
+            knownNPMPrefix: npmPrefix
+        )
+        // 候选路径直接用已经解析出的可执行文件；`probesShellPath: false` 表示
+        // 不再重复执行 `command -v`（`resolveExecutable` 已经做过）。
+        var requests: [ComponentInstallationDetector.ComponentDetectionRequest] = [
+            ComponentInstallationDetector.ComponentDetectionRequest(
+                kind: .piCLI,
+                packageName: InstallCommandManifest.piCLIPackageName,
+                executableNames: ["pi"],
+                candidates: piPath.map { [$0] } ?? defaultCandidates(named: "pi"),
+                knownVersion: piFinding.version,
+                probesShellPath: false
+            ),
+            ComponentInstallationDetector.ComponentDetectionRequest(
+                kind: .piWeb,
+                packageName: Self.piWebPackageName,
+                executableNames: ["pi-web"],
+                candidates: piWebPath.map { [$0] } ?? piWebCandidates(),
+                knownVersion: piWebFinding.version,
+                probesShellPath: false
+            )
+        ]
+        // 应用自身：默认不检测（`.none`），只有 app target 传入 `.current`。
+        if let bundlePath = applicationInstallation.bundlePath {
+            requests.append(ComponentInstallationDetector.ComponentDetectionRequest(
+                kind: .desktopApp,
+                packageName: nil,
+                executableNames: [],
+                candidates: [bundlePath],
+                knownVersion: applicationInstallation.version,
+                runsVersionCommand: false,
+                isApplicationBundle: true
+            ))
+        }
+        var components = detector.detectAll(requests)
+        components.append(contentsOf: detector.detectPiPackages(piExecutablePath: piPath))
+        return components.map { $0.redacted(using: redactor) }
     }
 
     /// 默认服务端口是否可用。只做本地 `bind(2)`，不连接网络、不调用命令。
@@ -943,6 +1053,50 @@ enum DependencyReportPresenter {
         }
     }
 
+    // MARK: - 组件安装呈现（GitHub #16）
+
+    /// 组件安装的单行摘要（诊断状态页用）：每项都给出路径、包名、版本、来源、
+    /// 可信度与建议命令，缺值用占位符。
+    static func componentSummaryLines(for report: DependencyReport) -> [String] {
+        report.components.map { "· " + $0.summaryLine }
+    }
+
+    /// 组件安装块（诊断窗口用）：路径、包名、版本、来源、可信度、建议命令与证据。
+    /// 只消费已经脱敏的 `ComponentInstallation`，不执行任何命令。
+    static func componentInstallationsText(for report: DependencyReport) -> String {
+        guard !report.components.isEmpty else { return "" }
+        var lines = ["组件安装（只展示，应用不会执行更新命令）："]
+        for component in report.components {
+            lines.append("· \(component.kind.displayName)（\(component.kind.rawValue)）")
+            lines.append("  路径：\(component.executablePath ?? "未找到")")
+            if let resolved = component.resolvedPath, resolved != component.executablePath {
+                lines.append("  真实路径：\(resolved)")
+            }
+            if component.symlinkChain.count > 1 {
+                lines.append("  符号链接链：\(component.symlinkChain.joined(separator: " → "))")
+            }
+            lines.append("  包名：\(component.packageName ?? "未找到")")
+            lines.append("  版本：\(component.version ?? "未知")")
+            if let packageJSONPath = component.packageJSONPath {
+                lines.append("  package.json：\(packageJSONPath)")
+            }
+            lines.append("  来源：\(component.source.displayName)（\(component.source.rawValue)）")
+            lines.append("  可信度：\(component.confidence.displayName)")
+            if let command = component.suggestedCommand {
+                lines.append("  建议命令：\(command)")
+            } else if let guidance = InstallCommandManifest.updateGuidance(for: component.kind, source: component.source) {
+                lines.append("  建议命令：无；\(guidance.note)")
+            } else {
+                lines.append("  建议命令：无；请按来源文档更新。")
+            }
+            if !component.evidence.isEmpty {
+                lines.append("  证据：")
+                lines.append(contentsOf: component.evidence.map { "    - \($0)" })
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
     static func rows(for report: DependencyReport) -> [Row] {
         report.findings.map { finding in
             Row(
@@ -1065,6 +1219,13 @@ enum DependencyReportPresenter {
                 "可信度：\(confidenceText(for: finding.confidence))"
             ]
             lines.append(fields.joined(separator: "  "))
+        }
+
+        let componentLines = componentSummaryLines(for: report)
+        if !componentLines.isEmpty {
+            lines.append("")
+            lines.append("组件安装（只展示，应用不会执行更新命令）：")
+            lines.append(contentsOf: componentLines)
         }
 
         let hints = report.findings.compactMap { finding -> String? in

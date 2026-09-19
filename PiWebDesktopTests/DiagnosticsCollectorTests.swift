@@ -5,6 +5,28 @@ import XCTest
 /// into this target. Every value below is fake, so the assembled text must not
 /// contain a real user path or any secret — and it must still carry the failure
 /// context (versions, status, port, confidence) that makes the export useful.
+///
+/// #16 的组件安装夹具：单条组件 → 导出里只有一行 `组件安装:`（不需要序号标签）。
+private let piWebComponentFixture = ComponentInstallation(
+    kind: .piWeb,
+    packageName: "@agegr/pi-web",
+    version: "1.2.3",
+    executablePath: "/opt/homebrew/bin/pi-web",
+    resolvedPath: "/opt/homebrew/lib/node_modules/@agegr/pi-web/dist/cli.js",
+    symlinkChain: [
+        "/opt/homebrew/bin/pi-web",
+        "/opt/homebrew/lib/node_modules/@agegr/pi-web/dist/cli.js"
+    ],
+    packageJSONPath: "/opt/homebrew/lib/node_modules/@agegr/pi-web/package.json",
+    source: .npmGlobal,
+    confidence: .verified,
+    evidence: ["npm root -g → /opt/homebrew/lib/node_modules"],
+    suggestedCommand: "npm install -g @agegr/pi-web"
+)
+
+/// 组件摘要行的期望文本（导出布局与模型摘要共用一份字面值）。
+private let piWebComponentSummary = "Pi Web（pi-web）：路径 /opt/homebrew/bin/pi-web；包名 @agegr/pi-web@1.2.3；来源 npm 全局；可信度 已验证；建议命令 npm install -g @agegr/pi-web"
+
 final class DiagnosticsCollectorTests: XCTestCase {
     private let input = DiagnosticsInput(
         appVersion: "9.9.9",
@@ -30,7 +52,8 @@ final class DiagnosticsCollectorTests: XCTestCase {
         launchEnvironment: "PI_WEB_NO_OPEN=1",
         logPath: "/tmp/PiWebDesktopTests/logs/Pi Web Desktop.log",
         logWriteStatus: "正常",
-        remoteAccessPasswordStatus: "已设置（仅存于 Keychain）"
+        remoteAccessPasswordStatus: "已设置（仅存于 Keychain）",
+        componentInstallations: [piWebComponentFixture]
     )
 
     /// 导出文本的标签集合（字段顺序由 `testTextMatchesTheExpectedLayout` 单独固定）。
@@ -55,7 +78,8 @@ final class DiagnosticsCollectorTests: XCTestCase {
         "启动环境",
         "日志文件",
         "日志写入",
-        "远程访问密码"
+        "远程访问密码",
+        "组件安装"
     ]
 
     /// 按 `标签: 值` 解析导出文本。每一行都必须可解析（多行值由实现拆成带序号的
@@ -119,6 +143,7 @@ final class DiagnosticsCollectorTests: XCTestCase {
         日志文件: /tmp/PiWebDesktopTests/logs/Pi Web Desktop.log
         日志写入: 正常
         远程访问密码: 已设置（仅存于 Keychain）
+        组件安装: \(piWebComponentSummary)
         """
         XCTAssertEqual(DiagnosticsCollector.text(for: input), expected)
     }
@@ -145,7 +170,8 @@ final class DiagnosticsCollectorTests: XCTestCase {
             "~/.pi/agent",
             "PI_WEB_NO_OPEN=1",
             "/tmp/PiWebDesktopTests/logs/Pi Web Desktop.log",
-            "日志写入: 正常"
+            "日志写入: 正常",
+            "组件安装: \(piWebComponentSummary)"
         ] {
             XCTAssertTrue(text.contains(value), "diagnostics is missing \(value)")
         }
@@ -335,6 +361,34 @@ final class DiagnosticsCollectorTests: XCTestCase {
         XCTAssertEqual(value("Node.js 版本", in: fields), "v22.19.0（可信度 verified（已验证））")
         XCTAssertEqual(value("托管关系", in: fields), DiagnosticsManagement.managed(pid: "4321").text)
         XCTAssertEqual(value("远程访问密码", in: fields), "已设置（仅存于 Keychain）")
+        XCTAssertEqual(value("组件安装", in: fields), piWebComponentSummary)
+    }
+
+    /// #16：多条组件时每项一行，续行用带序号的唯一标签（与启动环境同一机制），
+    /// 标签可以按 `组件安装[N]` 拆回每一项。
+    func testComponentInstallationsRenderOneLabeledLinePerComponent() {
+        let second = ComponentInstallation(
+            kind: .piCLI,
+            packageName: "@earendil-works/pi-coding-agent",
+            version: "0.5.0",
+            executablePath: "~/dev/pi-coding-agent/dist/cli.js",
+            resolvedPath: "~/dev/pi-coding-agent/dist/cli.js",
+            symlinkChain: ["~/dev/pi-coding-agent/dist/cli.js"],
+            packageJSONPath: "~/dev/pi-coding-agent/package.json",
+            source: .gitCheckout,
+            confidence: .verified,
+            evidence: ["git checkout 证据：~/dev/pi-coding-agent/.git"],
+            suggestedCommand: nil
+        )
+        var multiple = input
+        multiple.componentInstallations = [piWebComponentFixture, second]
+
+        let fields = parseExport(DiagnosticsCollector.text(for: multiple))
+
+        XCTAssertEqual(value("组件安装", in: fields), piWebComponentSummary)
+        XCTAssertEqual(value("组件安装[2]", in: fields), second.summaryLine)
+        XCTAssertTrue(second.summaryLine.contains("建议命令 无（请按来源文档更新）"), "非包管理器来源不给命令")
+        XCTAssertEqual(fields.filter { $0.label.hasPrefix("组件安装") }.count, 2)
     }
 
     /// 多行值不产生无标签的续行：每个环境变量条目独占一行，标签唯一，值逐字保留。

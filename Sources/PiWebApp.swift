@@ -452,7 +452,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             commandRunner: commandRunner,
             configuredPiWebPath: configuration.piWebPath,
             serviceHostname: configuration.hostname,
-            servicePort: configuration.port
+            servicePort: configuration.port,
+            // 组件安装识别（GitHub #16）：只读运行中的应用包信息；unhosted 测试
+            // 与 smoke 用默认 `.none`，因此不会读到真实 bundle 路径。
+            applicationInstallation: .current
         )
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let report = checker.run()
@@ -1079,7 +1082,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 logWriteStatus: serviceManager.logWriter.writeStatusDescription,
                 remoteAccessPasswordStatus: RemoteAccessPassword.statusText(
                     isSet: RemoteAccessPassword.isSet(in: keychain)
-                )
+                ),
+                // #16 的组件安装识别结果（已脱敏）直接进入导出文本。
+                componentInstallations: dependencyReport?.components ?? []
             ),
             redactor: logRedactor
         )

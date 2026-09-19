@@ -23,6 +23,13 @@ set -eu
 # is case sensitive (lowercase) so a documentation sentence that spells the
 # product name with a capital letter is not a hit, while real defaults such as
 # command lines or configuration values are.
+#
+# The repository text scan reads tracked content only (`git grep`). Untracked,
+# non-ignored files that the scan's pathspecs would cover are therefore
+# reported as a failed check before the patterns run -- the scan cannot
+# certify text it never read -- while untracked files the pathspecs already
+# exclude (`*.icns`) only produce an informational line. CI checks out a
+# commit, so this affects local runs; it is the fix for security review R-11.
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 XCCONFIG_REL="Configuration/AppIdentity.xcconfig"
@@ -430,6 +437,29 @@ printf '\n== repository text scan ==\n'
 if ! git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   fail "repository text scan needs a Git work tree at $ROOT"
 else
+  # The scans below use `git grep`, which reads tracked content only: a new
+  # file that has not been `git add`ed is invisible, so a local run would
+  # report a clean tree that was never scanned (security review R-11 and the
+  # header note above). Untracked files the scan would cover are a failure;
+  # untracked files the scan already excludes (`*.icns`) are information only.
+  # Both lists come from `git ls-files --others --exclude-standard`, so paths
+  # ignored by .gitignore never count as untracked.
+  untracked_all=$(git -C "$ROOT" -c core.quotePath=false ls-files --others --exclude-standard 2>/dev/null) || untracked_all=''
+  if [ -n "$untracked_all" ]; then
+    untracked_all_count=$(printf '%s\n' "$untracked_all" | wc -l | tr -d '[:space:]')
+    untracked_in_scope=$(git -C "$ROOT" -c core.quotePath=false ls-files --others --exclude-standard -- ':!*.icns' 2>/dev/null) || untracked_in_scope=''
+    if [ -n "$untracked_in_scope" ]; then
+      untracked_in_scope_count=$(printf '%s\n' "$untracked_in_scope" | wc -l | tr -d '[:space:]')
+      fail "$untracked_in_scope_count untracked file(s) are inside the repository text scan scope and were not scanned (run git add and re-run, or delete them)"
+      printf '%s\n' "$untracked_in_scope" | sed -n '1,5p' | sed 's/^/     /'
+      if [ "$untracked_in_scope_count" -gt 5 ]; then
+        printf '     ... and %s more\n' "$((untracked_in_scope_count - 5))"
+      fi
+    else
+      info "$untracked_all_count untracked file(s) are outside the repository text scan scope (excluded by ':!*.icns'), so the scan still covers everything it checks"
+    fi
+  fi
+
   VENDOR_PATTERN='tail''scale'
   TAILNET_SUFFIX_PATTERN='\.ts\.net'
   CGNAT_PATTERN='100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.'

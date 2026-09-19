@@ -238,7 +238,7 @@ Release 说明由 `docs/release-notes-template.md` 渲染。`Scripts/package-rel
 
 ## 应用自身更新
 
-`v0.1.0` 不实现应用内更新。应用只在后续版本检查 GitHub Release，并引导用户打开下载页。
+`v0.1.0` 不实现应用内更新。应用只在后续版本检查 GitHub Release 并提示版本，不下载、不安装；下载与安装流程属于后续 issue。
 
 ## CI 与依赖固定策略
 

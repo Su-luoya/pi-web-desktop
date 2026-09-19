@@ -128,11 +128,15 @@ final class PiCLIUpdateAdapterTests: XCTestCase {
         )
     }
 
+    /// `targetOrigin` 的默认值是 `.network`：既有用例描述的是“本次运行刚从白名单
+    /// 主机取得结果”的场景。缓存回退场景由专门用例显式传入（GitHub #59）。
     private func input(
         installation: ComponentInstallation?,
         targetVersion: String? = "0.4.2",
         targetStatus: UpdateCheckStatus = .updateAvailable,
         targetConfidence: DetectionConfidence = .verified,
+        targetOrigin: UpdateCheckOrigin = .network,
+        targetCacheWrittenAt: Date? = nil,
         processes: PiProcessInspection = .noProcesses,
         autoUpdate: Bool = true
     ) -> PiCLIUpdatePlanningInput {
@@ -144,6 +148,8 @@ final class PiCLIUpdateAdapterTests: XCTestCase {
             targetVersion: targetVersion,
             targetStatus: targetStatus,
             targetConfidence: targetConfidence,
+            targetOrigin: targetOrigin,
+            targetCacheWrittenAt: targetCacheWrittenAt,
             processes: processes
         )
     }
@@ -269,6 +275,70 @@ final class PiCLIUpdateAdapterTests: XCTestCase {
             PiCLIUpdatePlanner.decide(input(installation: installation(version: nil))),
             .manualOnly(commandText: "\(piPath) update --self", reason: .noNewerTargetVersion)
         )
+    }
+
+    // MARK: - 1b. 来源硬前置：缓存回退不驱动自动更新（GitHub #59）
+
+    /// 只有缓存结果、没有本次网络结果：即使其余前置条件（含进程检查）全部满足，
+    /// 也只给手动入口，执行次数为 0；拒绝原因包含“缓存”与缓存写入时间。
+    func testCacheFallbackOriginOnlyOffersManualCommand() {
+        let cachedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let decision = PiCLIUpdatePlanner.decide(input(
+            installation: installation(),
+            targetOrigin: .cachedFallback,
+            targetCacheWrittenAt: cachedAt
+        ))
+
+        guard case .manualOnly(let commandText, let reason) = decision else {
+            return XCTFail("缓存回退不应自动更新，实际是 \(decision)")
+        }
+        XCTAssertEqual(reason, .targetNotFromNetwork(origin: .cachedFallback, cacheWrittenAt: cachedAt))
+        XCTAssertEqual(commandText, "\(piPath) update --self")
+        XCTAssertFalse(decision.isAutomatic)
+        XCTAssertNil(decision.plan)
+        XCTAssertTrue(reason.text.contains("本机缓存"))
+        XCTAssertTrue(reason.text.contains(UpdateCheckTimestamp.text(cachedAt)))
+        XCTAssertFalse(reason.text.contains("已验证"))
+        XCTAssertFalse(reason.text.contains("官方"))
+    }
+
+    func testCacheFallbackOriginNeverInvokesRunner() {
+        let world = World(fixtureHome: fixtureHome)
+        let cachedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        var outcome: PiCLIUpdateRunOutcome?
+        world.makeCoordinator().run(input(
+            installation: installation(),
+            targetOrigin: .cachedFallback,
+            targetCacheWrittenAt: cachedAt
+        )) { outcome = $0 }
+
+        guard case .notAttempted(let reason, let commandText) = outcome else {
+            return XCTFail("缓存回退不应执行命令，实际是 \(String(describing: outcome))")
+        }
+        XCTAssertEqual(reason, .targetNotFromNetwork(origin: .cachedFallback, cacheWrittenAt: cachedAt))
+        XCTAssertEqual(commandText, "\(piPath) update --self")
+        XCTAssertTrue(world.runner.plans.isEmpty, "缓存回退时执行次数必须为 0")
+        XCTAssertTrue(world.log.text.contains("本机缓存"))
+    }
+
+    /// 缓存缺失（`.unavailable`）同样不自动更新；规划输入的默认来源是最安全的一档。
+    func testUnavailableOriginAndDefaultNeverUpdateAutomatically() {
+        let unavailable = PiCLIUpdatePlanner.decide(input(installation: installation(), targetOrigin: .unavailable))
+        XCTAssertEqual(
+            unavailable,
+            .manualOnly(
+                commandText: "\(piPath) update --self",
+                reason: .targetNotFromNetwork(origin: .unavailable, cacheWrittenAt: nil)
+            )
+        )
+        XCTAssertFalse(unavailable.isAutomatic)
+
+        var preferences = UpdateCheckPreferences.factoryDefaults
+        preferences.autoUpdatePiBeforeLaunch = true
+        let bare = PiCLIUpdatePlanningInput(preferences: preferences, installation: installation())
+        XCTAssertEqual(bare.targetOrigin, .unavailable)
+        XCTAssertFalse(bare.targetOrigin.isEligibleForAutomaticInstall)
+        XCTAssertFalse(PiCLIUpdatePlanner.decide(bare).isAutomatic)
     }
 
     // MARK: - 2. 进程保护优先于自动更新

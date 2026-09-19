@@ -964,6 +964,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             targetVersion: result?.latestVersion,
             targetStatus: result?.status ?? .unknown,
             targetConfidence: result?.confidence ?? .unknown,
+            targetOrigin: result?.origin ?? .unavailable,
+            targetCacheWrittenAt: result?.cacheWrittenAt,
             serviceIsRunning: serviceIsRunning ?? (serviceManager.managedServicePID() != nil),
             npmExecutablePath: npmPath,
             baseEnvironment: environment
@@ -1252,6 +1254,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             targetVersion: result?.latestVersion,
             targetStatus: result?.status ?? .unknown,
             targetConfidence: result?.confidence ?? .unknown,
+            targetOrigin: result?.origin ?? .unavailable,
+            targetCacheWrittenAt: result?.cacheWrittenAt,
             processes: piProcessInspection ?? .unknown(.enumerationFailed)
         )
     }
@@ -1297,7 +1301,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             logPiCLIUpdate(decision.logLine(redactingWith: logRedactor))
             refreshUpdateMenuState()
         case .manualOnly, .unavailable:
-            break
+            // 不自动更新的原因（含 GitHub #59 的“来源不是本次网络结果”）写入日志；
+            // 上一个分支已经刷新过菜单，这里只需要把拒绝原因持久化。
+            logPiCLIUpdate(decision.logLine(redactingWith: logRedactor))
         }
     }
 

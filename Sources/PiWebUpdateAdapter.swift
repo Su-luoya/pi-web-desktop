@@ -4,7 +4,10 @@ import Foundation
 //
 // 本文件是唯一一处“应用自己执行安装命令”的实现。边界：
 // - 只有“设置位打开 + #16 检测结果 source == .npmGlobal 且 confidence == .verified +
-//   有已验证的目标版本 + 当前没有以本应用名义运行的服务”四条同时成立才允许自动安装；
+//   有已验证的目标版本 + 检查结果来源是本次网络响应 + 当前没有以本应用名义运行的
+//   服务”五条同时成立才允许自动安装；
+// - 缓存回退（`UpdateCheckOrigin.cachedFallback`）与没有结果一律不自动安装：
+//   缓存文件不是可信输入（同一用户可改写），只用于提示（GitHub #59 / 安全审查 A-1）；
 // - 其它来源只产出可展示的命令文本，绝不自动安装；
 // - 命令只以参数数组传给子进程（`Process` + `arguments`），没有 shell 字符串，
 //   也不调用 `sudo`；
@@ -28,6 +31,9 @@ enum PiWebUpdateRefusal: Equatable {
     case noTargetVersion
     /// 目标版本未经上游响应验证（confidence != verified）。
     case targetNotVerified
+    /// 判定所用的检查结果不是本次运行从白名单主机取得的网络结果（缓存回退或
+    /// 没有结果）。缓存文件不是可信输入，因此这条前置条件不允许被绕过。
+    case targetNotFromNetwork(origin: UpdateCheckOrigin, cacheWrittenAt: Date?)
     /// 目标版本不是可比较的语义化版本。
     case invalidTargetVersion
     /// 本机版本不低于目标版本。
@@ -53,6 +59,8 @@ enum PiWebUpdateRefusal: Equatable {
             return "没有可用的目标版本"
         case .targetNotVerified:
             return "目标版本未经上游响应验证"
+        case .targetNotFromNetwork(let origin, let cacheWrittenAt):
+            return origin.autoInstallRefusalText(cacheWrittenAt: cacheWrittenAt)
         case .invalidTargetVersion:
             return "目标版本无法解析为语义化版本"
         case .noNewerTargetVersion:
@@ -288,6 +296,11 @@ struct PiWebUpdatePlanningInput: Equatable {
     var targetStatus: UpdateCheckStatus = .unknown
     /// 检查结论的可信度；只有 `.verified` 才允许自动安装。
     var targetConfidence: DetectionConfidence = .unknown
+    /// 检查结论的来源；只有 `.network`（本次运行刚从白名单主机取得）才允许
+    /// 自动安装。默认值是最安全的一档，漏传时不会退化成“允许自动安装”。
+    var targetOrigin: UpdateCheckOrigin = .unavailable
+    /// 来源为缓存回退时的缓存写入时间（仅用于展示与拒绝原因）。
+    var targetCacheWrittenAt: Date? = nil
     /// 当前是否有以本应用名义运行的服务。
     var serviceIsRunning: Bool = false
     /// 已由 `PiWebUpdateNPMResolver` 解析并通过可执行位确认的 npm 路径。
@@ -341,6 +354,15 @@ enum PiWebUpdatePlanner {
         }
         guard input.targetConfidence == .verified else {
             return .manualOnly(commandText: commandText, reason: .targetNotVerified)
+        }
+        // 硬前置（GitHub #59 / alpha.3 安全审查 A-1）：判定所用的检查结果必须是
+        // 本次运行刚从白名单主机取得的响应。缓存回退或没有结果一律不自动执行，
+        // 只保留手动入口；缓存文件不是可信输入（同一用户可改写）。
+        guard input.targetOrigin.isEligibleForAutomaticInstall else {
+            return .manualOnly(
+                commandText: commandText,
+                reason: .targetNotFromNetwork(origin: input.targetOrigin, cacheWrittenAt: input.targetCacheWrittenAt)
+            )
         }
         guard let target = SemanticVersion(targetVersion) else {
             return .manualOnly(commandText: commandText, reason: .invalidTargetVersion)

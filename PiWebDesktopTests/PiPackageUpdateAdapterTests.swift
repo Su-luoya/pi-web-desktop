@@ -98,17 +98,23 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
         )
     }
 
+    /// `origin` 的默认值是 `.network`：既有用例描述的是“本次运行刚从白名单主机
+    /// 取得结果”的场景。缓存回退场景由专门用例显式传入（GitHub #59）。
     private func check(
         name: String? = nil,
         latest: String? = "2.0.0",
         status: UpdateCheckStatus = .updateAvailable,
-        confidence: DetectionConfidence = .verified
+        confidence: DetectionConfidence = .verified,
+        origin: UpdateCheckOrigin = .network,
+        cacheWrittenAt: Date? = nil
     ) -> PiPackageCheckOutcome {
         PiPackageCheckOutcome(
             packageName: name ?? packageName,
             latestVersion: latest,
             status: status,
-            confidence: confidence
+            confidence: confidence,
+            origin: origin,
+            cacheWrittenAt: cacheWrittenAt
         )
     }
 
@@ -574,6 +580,96 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
             XCTAssertNil(notice.manualCommandText)
             XCTAssertTrue(reason == .piExecutableUnresolved || reason == .unsafeCommand)
         }
+    }
+
+    // MARK: - 3b. 来源硬前置：缓存回退不提供执行入口（GitHub #59）
+
+    /// 目标版本只来自缓存（没有本次网络结果）时：即使其余条件全部满足，也不
+    /// 提供可点的执行入口，只保留可复制的官方命令文本；扩展包仍然是“永不自动”。
+    func testCacheFallbackOriginOnlyOffersManualCommand() {
+        let cachedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let set = PiPackageUpdatePlanner.decide(input(
+            checks: [check(origin: .cachedFallback, cacheWrittenAt: cachedAt)]
+        ))
+
+        XCTAssertTrue(set.executablePlans.isEmpty, "缓存回退不得给出执行入口")
+        XCTAssertFalse(set.executionAvailable)
+        XCTAssertTrue(set.allPlans.isEmpty)
+        XCTAssertEqual(set.notices.count, 1)
+        let notice = set.notices[0]
+        XCTAssertEqual(notice.targetVersion, "2.0.0")
+        XCTAssertEqual(notice.manualCommandText, "\(piPath) update npm:\(packageName)")
+        XCTAssertFalse(notice.executionAvailable)
+        let reason = PiPackageUpdateRefusal.targetNotFromNetwork(origin: .cachedFallback, cacheWrittenAt: cachedAt)
+        XCTAssertEqual(set.decisions[0].refusalReason, reason)
+        XCTAssertTrue(set.refusalRecords.contains { $0.reason == reason })
+        XCTAssertTrue(reason.text.contains("本机缓存"))
+        XCTAssertTrue(reason.text.contains(UpdateCheckTimestamp.text(cachedAt)))
+        XCTAssertFalse(reason.text.contains("已验证"))
+        XCTAssertFalse(reason.text.contains("官方"))
+        // 拒绝原因写入日志/诊断：包含包名与固定原因文案。
+        let logLines = set.logLines(redactingWith: LogRedactor(homeDirectory: fixtureHome))
+        XCTAssertTrue(logLines.contains { $0.contains("本机缓存") })
+    }
+
+    /// “检查并通知”不提供执行入口，因此缓存回退仍然只提示，决策类型不变。
+    func testCheckAndNotifyKeepsNotifyOnlyForCacheOrigin() {
+        let set = PiPackageUpdatePlanner.decide(input(
+            policy: .checkAndNotify,
+            checks: [check(origin: .cachedFallback)]
+        ))
+
+        guard case .notifyOnly(let notice) = set.decisions[0] else {
+            return XCTFail("检查并通知应仍为只通知，实际是 \(set.decisions[0])")
+        }
+        XCTAssertEqual(notice.targetVersion, "2.0.0")
+        XCTAssertTrue(set.executablePlans.isEmpty)
+        XCTAssertEqual(set.decisions[0].refusalReason, .policyNotifiesOnly)
+    }
+
+    /// `UpdateCheckResult` → `PiPackageCheckOutcome` 时来源与缓存写入时间一并带入，
+    /// 否则执行入口会在映射处丢掉硬前置所需的证据。
+    func testCheckOutcomeMappingCarriesOrigin() throws {
+        let cachedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let result = UpdateCheckResult(
+            target: UpdateCheckTarget(category: .piPackages, packageName: packageName),
+            status: .updateAvailable,
+            installedVersion: "1.0.0",
+            latestVersion: "2.0.0",
+            confidence: .verified,
+            freshness: .cached,
+            failure: .offline,
+            httpStatusCode: nil,
+            checkedAt: cachedAt,
+            lastSuccessAt: cachedAt,
+            origin: .cachedFallback,
+            cacheWrittenAt: cachedAt
+        )
+        let outcome = try XCTUnwrap(PiPackageCheckOutcome(result: result))
+        XCTAssertEqual(outcome.origin, .cachedFallback)
+        XCTAssertEqual(outcome.cacheWrittenAt, cachedAt)
+        XCTAssertEqual(PiPackageCheckOutcome.list(from: [result]).count, 1)
+    }
+
+    /// 缓存缺失与默认值同样不提供执行入口。
+    func testUnavailableOriginAndDefaultNeverOfferExecution() {
+        let set = PiPackageUpdatePlanner.decide(input(checks: [check(origin: .unavailable)]))
+        XCTAssertTrue(set.executablePlans.isEmpty)
+        XCTAssertEqual(
+            set.decisions[0].refusalReason,
+            .targetNotFromNetwork(origin: .unavailable, cacheWrittenAt: nil)
+        )
+
+        let bare = PiPackageCheckOutcome(
+            packageName: packageName,
+            latestVersion: "2.0.0",
+            status: .updateAvailable,
+            confidence: .verified
+        )
+        XCTAssertEqual(bare.origin, .unavailable)
+        XCTAssertFalse(bare.origin.isEligibleForAutomaticInstall)
+        let bareSet = PiPackageUpdatePlanner.decide(input(checks: [bare]))
+        XCTAssertTrue(bareSet.executablePlans.isEmpty)
     }
 
     // MARK: - 4. 计划与参数数组

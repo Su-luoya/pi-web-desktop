@@ -137,11 +137,15 @@ final class PiWebUpdateAdapterTests: XCTestCase {
         )
     }
 
+    /// `targetOrigin` 的默认值是 `.network`：既有用例描述的是“本次运行刚从白名单
+    /// 主机取得结果”的场景。缓存回退场景由专门用例显式传入（GitHub #59）。
     private func input(
         installation: ComponentInstallation?,
         targetVersion: String? = "0.9.2",
         targetStatus: UpdateCheckStatus = .updateAvailable,
         targetConfidence: DetectionConfidence = .verified,
+        targetOrigin: UpdateCheckOrigin = .network,
+        targetCacheWrittenAt: Date? = nil,
         serviceIsRunning: Bool = false,
         npmExecutablePath: String? = "/opt/homebrew/bin/npm",
         autoUpdate: Bool = true,
@@ -155,6 +159,8 @@ final class PiWebUpdateAdapterTests: XCTestCase {
             targetVersion: targetVersion,
             targetStatus: targetStatus,
             targetConfidence: targetConfidence,
+            targetOrigin: targetOrigin,
+            targetCacheWrittenAt: targetCacheWrittenAt,
             serviceIsRunning: serviceIsRunning,
             npmExecutablePath: npmExecutablePath,
             baseEnvironment: baseEnvironment ?? self.baseEnvironment
@@ -293,6 +299,74 @@ final class PiWebUpdateAdapterTests: XCTestCase {
         XCTAssertEqual(world.installer.timeouts, [42])
         XCTAssertEqual(outcome, .succeeded(plan: plan, oldVersion: "0.9.0", newVersion: "0.9.2"))
         XCTAssertEqual(world.startCallCount, 1)
+    }
+
+    // MARK: - 3b. 来源硬前置：缓存回退不驱动自动安装（GitHub #59）
+
+    /// 只有缓存结果、没有本次网络结果：即使其余前置条件全部满足，也只给手动
+    /// 入口，安装调用次数为 0；拒绝原因写入日志且包含“缓存”与缓存写入时间。
+    func testCacheFallbackOriginOnlyOffersManualCommand() throws {
+        let world = CoordinatorWorld(homeDirectory: fixtureHome)
+        let cachedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let request = input(
+            installation: installation(),
+            targetOrigin: .cachedFallback,
+            targetCacheWrittenAt: cachedAt
+        )
+        let decision = PiWebUpdatePlanner.decide(request)
+
+        guard case .manualOnly(let commandText, let reason) = decision else {
+            return XCTFail("缓存回退不应允许自动安装，实际是 \(decision)")
+        }
+        XCTAssertEqual(reason, .targetNotFromNetwork(origin: .cachedFallback, cacheWrittenAt: cachedAt))
+        XCTAssertFalse(decision.isAutomatic)
+        XCTAssertEqual(commandText, InstallCommandManifest.updateNPMPiWeb.command)
+
+        var outcome: PiWebUpdateRunOutcome?
+        world.makeCoordinator().run(request) { outcome = $0 }
+        guard case .skipped(let skippedReason, let skippedCommand) = outcome else {
+            return XCTFail("缓存回退应只跳过，实际是 \(String(describing: outcome))")
+        }
+        XCTAssertEqual(skippedReason, reason)
+        XCTAssertEqual(skippedCommand, commandText)
+        XCTAssertTrue(world.installer.plans.isEmpty, "缓存回退时安装调用次数必须为 0")
+        XCTAssertEqual(world.startCallCount, 0)
+        XCTAssertEqual(world.detectionCount, 0)
+
+        // 可读的拒绝原因写入日志：包含“缓存”与缓存写入时间，不含误导措辞。
+        let expectedCommand = try XCTUnwrap(InstallCommandManifest.updateNPMPiWeb.command)
+        let log = world.log.text
+        XCTAssertTrue(log.contains("本机缓存"))
+        XCTAssertTrue(log.contains(UpdateCheckTimestamp.text(cachedAt)))
+        XCTAssertFalse(log.contains("已验证"))
+        XCTAssertFalse(log.contains("官方"))
+        XCTAssertTrue(log.contains(expectedCommand))
+    }
+
+    /// 缓存缺失（`.unavailable`）同样不自动安装。
+    func testUnavailableOriginOnlyOffersManualCommand() {
+        let request = input(installation: installation(), targetOrigin: .unavailable)
+        let decision = PiWebUpdatePlanner.decide(request)
+
+        XCTAssertEqual(
+            decision,
+            .manualOnly(
+                commandText: InstallCommandManifest.updateNPMPiWeb.command,
+                reason: .targetNotFromNetwork(origin: .unavailable, cacheWrittenAt: nil)
+            )
+        )
+        XCTAssertFalse(decision.isAutomatic)
+    }
+
+    /// 规划输入的默认来源是最安全的一档：漏传来源时不会退化成“允许自动安装”。
+    func testPlanningInputDefaultsToNoAutomaticInstallOrigin() {
+        var preferences = UpdateCheckPreferences.factoryDefaults
+        preferences.autoUpdatePiWebBeforeLaunch = true
+        let bare = PiWebUpdatePlanningInput(preferences: preferences, installation: installation())
+
+        XCTAssertEqual(bare.targetOrigin, .unavailable)
+        XCTAssertFalse(bare.targetOrigin.isEligibleForAutomaticInstall)
+        XCTAssertFalse(PiWebUpdatePlanner.decide(bare).isAutomatic)
     }
 
     func testArgumentPolicyRejectsShellMetacharactersAndSudo() {

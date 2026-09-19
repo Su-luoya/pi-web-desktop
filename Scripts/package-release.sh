@@ -19,6 +19,7 @@ set -eu
 #
 # Usage:
 #   ./Scripts/package-release.sh [--app PATH] [--out DIR] [--tag TAG] [--build]
+#   ./Scripts/package-release.sh --self-test
 #
 #   --app PATH   app bundle to package, default build/Pi-Web-Desktop.app
 #   --out DIR    output directory, default dist/
@@ -26,6 +27,19 @@ set -eu
 #                without it that script reads GITHUB_REF_NAME, and with neither
 #                the tag comparison is skipped (normal for a local rehearsal)
 #   --build      run ./Scripts/build.sh first when the bundle is stale or absent
+#   --self-test  run the whitelist and rejection cases in a temporary directory
+#                outside the work tree, then exit without packaging anything
+#
+# release-metadata.env is `source`d by .github/workflows/release.yml, so every
+# value this script writes into it is checked against a small character set
+# first: VERSION and BUILD (from Info.plist), APP_STEM (from the app bundle
+# name), SHA256 and COMMIT. A value that fails is refused with a readable error
+# that names the allowed set and prints the value escaped, never raw, because
+# the raw bytes are the untrusted part. APP_STEM is checked before the bundle is
+# read and before --out is created, so a refused name cannot leave a dist/
+# directory behind; the checks for SHA256 and COMMIT run where those values are
+# produced. docs/releasing.md lists the whitelists and the audited values that
+# deliberately have none.
 #
 # Outputs (in DIR):
 #   <App>-<MARKETING_VERSION>.zip            the release asset
@@ -33,12 +47,17 @@ set -eu
 #   <App>-<MARKETING_VERSION>.evidence.md    signature/Gatekeeper evidence section
 #   release-metadata.env                     shell assignments sourced by the workflow
 #
-# Exit status: 0 packaged, 1 a check or packaging step failed, 2 usage error.
+# Exit status: 0 packaged (or --self-test passed), 1 a check or packaging step
+# failed (or a --self-test case failed), 2 usage error.
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# Absolute path of this script, so --self-test can run the real script again
+# from its scratch directory.
+SCRIPT_PATH=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/$(basename -- "$0")
 
 usage() {
   printf 'usage: ./Scripts/package-release.sh [--app PATH] [--out DIR] [--tag TAG] [--build]\n'
+  printf '       ./Scripts/package-release.sh --self-test\n'
 }
 
 usage_error() {
@@ -50,6 +69,315 @@ usage_error() {
 fail() {
   printf 'package-release: FAILED - %s\n' "$1" >&2
   exit 1
+}
+
+# --- metadata whitelists -----------------------------------------------------
+
+# Every value written into release-metadata.env is `source`d by
+# .github/workflows/release.yml. Each one is checked against a small character
+# set before it is written, so a crafted app bundle name or Info.plist value
+# cannot change the meaning of that file (extra assignments, command
+# substitution, forged log lines). The sets are deliberately narrower than
+# "anything that is not a shell metacharacter": artifact names are a small
+# value space, so an unusual name is refused instead of escaped.
+
+# safe_value VALUE ALLOWED: render VALUE for a log line. Bytes inside ALLOWED
+# (an awk bracket-expression body such as 0-9A-Za-z_-) are kept; every other
+# byte becomes \xNN, so a value that failed its whitelist is reported with
+# exactly the offending bytes escaped and suspicious content is never echoed
+# raw, and a newline cannot forge a log line. The rendering is capped so an
+# oversized argument cannot flood the log, and VALUE is terminated with a 0x01
+# sentinel so a trailing newline or space is reported instead of being dropped.
+safe_value() {
+  printf '%s\001' "$1" | LC_ALL=C awk -v allowed="$2" '
+    BEGIN {
+      for (i = 0; i < 256; i++) hex[sprintf("%c", i)] = i
+      keep = "^[" allowed "]$"
+      sentinel = sprintf("%c", 1)
+      limit = 80
+    }
+    {
+      if (NR > 1) { out = out "\\x0a"; count = count + 4 }
+      for (i = 1; i <= length($0); i++) {
+        c = substr($0, i, 1)
+        if (c == sentinel) { done = 1; break }
+        if (c ~ keep) piece = c
+        else piece = sprintf("\\x%02x", hex[c])
+        if (count + length(piece) > limit) { out = out "..."; exit }
+        out = out piece
+        count = count + length(piece)
+      }
+      if (done) exit
+    }
+    END { print out }
+  '
+}
+
+# reject_value NAME VALUE ALLOWED_TEXT ALLOWED_SET: refuse a value whose
+# whitelist check failed. The message names the whitelist and reports the value
+# with the bytes outside ALLOWED_SET escaped; the raw bytes are never printed.
+reject_value() {
+  fail "$1 must be non-empty and use only $3; the value is written to release-metadata.env, which the release workflow sources. Escaped value (bytes outside the set as \\xNN): \"$(safe_value "$2" "$4")\""
+}
+
+# is_allowed_stem VALUE: 0 when VALUE is usable as an artifact name. A bundle
+# name becomes APP_STEM, and APP_STEM becomes APP_NAME, ZIP_NAME and
+# EVIDENCE_NAME in release-metadata.env, so this is the same whitelist idea as
+# VERSION with a stricter set: `.` is not allowed because a bundle name never
+# needs one and both artifact names add `.` only as their own suffix.
+is_allowed_stem() {
+  case $1 in
+    ''|*[!0-9A-Za-z_-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# --- self-test ---------------------------------------------------------------
+
+# Scratch directory for --self-test. It is created outside $ROOT and removed
+# again, also when a case fails; packaging never uses it.
+TMP_DIR=
+cleanup_temp_dir() {
+  if [ -n "$TMP_DIR" ]; then
+    rm -rf "$TMP_DIR"
+  fi
+}
+trap cleanup_temp_dir EXIT
+
+# self_test_temp_dir: print the path of a fresh scratch directory outside $ROOT.
+self_test_temp_dir() {
+  base=${TMPDIR:-/tmp}
+  if resolved=$(CDPATH= cd -- "$base" 2>/dev/null && pwd); then
+    base=$resolved
+  else
+    base=/tmp
+  fi
+  case $base in
+    "$ROOT"|"$ROOT"/*) base=/tmp ;;
+  esac
+  mktemp -d "$base/pi-web-desktop-package-release.XXXXXX"
+}
+
+# self_test_check_stem LABEL VALUE EXPECTED: EXPECTED is accept or reject.
+self_test_check_stem() {
+  label=$1
+  value=$2
+  expected=$3
+  if is_allowed_stem "$value"; then
+    actual=accept
+  else
+    actual=reject
+  fi
+  if [ "$actual" = "$expected" ]; then
+    printf 'self-test: ok: %s -> %s\n' "$label" "$actual"
+  else
+    printf 'self-test: FAIL: %s -> %s, expected %s (escaped: "%s")\n' \
+      "$label" "$actual" "$expected" "$(safe_value "$value" '0-9A-Za-z_-')" >&2
+    failures=$((failures + 1))
+  fi
+}
+
+# self_test_expect_reject LABEL APP_NAME ESCAPED: an existing bundle directory
+# named APP_NAME inside the sandbox must be refused. The copied script must exit
+# 1, name the allowed set, print the ESCAPED form, never echo the raw stem, and
+# leave the sandbox's default dist/ directory absent.
+self_test_expect_reject() {
+  label=$1
+  app_name=$2
+  escaped=$3
+  app="$TMP_DIR/repo/$app_name"
+  stem=${app_name%.app}
+  mkdir -p "$app"
+  status=0
+  output=$("$TMP_DIR/repo/Scripts/package-release.sh" --app "$app" 2>&1) || status=$?
+  rm -rf "$app"
+
+  ok=1
+  case $status in
+    1) ;;
+    *)
+      printf 'self-test: FAIL: %s exited %s instead of 1\n' "$label" "$status" >&2
+      ok=0
+      ;;
+  esac
+  case $output in
+    *'0-9A-Za-z_-'*) ;;
+    *)
+      printf 'self-test: FAIL: %s does not name the allowed character set\n' "$label" >&2
+      ok=0
+      ;;
+  esac
+  case $output in
+    *"$escaped"*) ;;
+    *)
+      printf 'self-test: FAIL: %s does not print the escaped value %s\n' "$label" "$escaped" >&2
+      ok=0
+      ;;
+  esac
+  case $output in
+    *"$stem"*)
+      printf 'self-test: FAIL: %s echoed the raw bundle name\n' "$label" >&2
+      ok=0
+      ;;
+  esac
+  if [ -e "$TMP_DIR/repo/dist" ]; then
+    printf 'self-test: FAIL: %s created %s/dist\n' "$label" "$TMP_DIR/repo" >&2
+    ok=0
+  fi
+  if [ "$ok" -eq 1 ]; then
+    printf 'self-test: ok: %s is rejected before anything is written\n' "$label"
+  else
+    failures=$((failures + 1))
+  fi
+}
+
+# self_test_expect_gate_pass LABEL APP_NAME: a whitelisted name must get past
+# the stem check and stop at the next gate instead (the sandbox bundle has no
+# Info.plist), which proves the whitelist is not what rejected it, and still
+# must not create dist/.
+self_test_expect_gate_pass() {
+  label=$1
+  app_name=$2
+  app="$TMP_DIR/repo/$app_name"
+  mkdir -p "$app"
+  status=0
+  output=$("$TMP_DIR/repo/Scripts/package-release.sh" --app "$app" 2>&1) || status=$?
+  rm -rf "$app"
+
+  ok=1
+  case $status in
+    1) ;;
+    *)
+      printf 'self-test: FAIL: %s exited %s instead of 1\n' "$label" "$status" >&2
+      ok=0
+      ;;
+  esac
+  case $output in
+    *Contents/Info.plist*) ;;
+    *)
+      printf 'self-test: FAIL: %s did not stop at the missing Info.plist check\n' "$label" >&2
+      ok=0
+      ;;
+  esac
+  case $output in
+    *'0-9A-Za-z_-'*)
+      printf 'self-test: FAIL: %s was refused by the stem whitelist\n' "$label" >&2
+      ok=0
+      ;;
+  esac
+  if [ -e "$TMP_DIR/repo/dist" ]; then
+    printf 'self-test: FAIL: %s created %s/dist\n' "$label" "$TMP_DIR/repo" >&2
+    ok=0
+  fi
+  if [ "$ok" -eq 1 ]; then
+    printf 'self-test: ok: %s passes the whitelist and reaches the next check\n' "$label"
+  else
+    failures=$((failures + 1))
+  fi
+}
+
+# self_test_full_package: positive end-to-end case with the real bundle. It is
+# skipped, not failed, when the bundle is absent or when the work tree has
+# untracked files, because the packaging path runs Scripts/check-identity.sh,
+# which refuses an unscanned work tree (security review R-11).
+self_test_full_package() {
+  app="$ROOT/build/Pi-Web-Desktop.app"
+  if [ ! -d "$app" ]; then
+    printf 'self-test: skip: %s is absent, so the positive end-to-end case needs ./Scripts/build.sh first\n' "$app"
+    return 0
+  fi
+  if [ -n "$(git -C "$ROOT" ls-files --others --exclude-standard 2>/dev/null)" ]; then
+    printf 'self-test: skip: the work tree has untracked files, which Scripts/check-identity.sh refuses (security review R-11); stage them and rerun for the positive end-to-end case\n'
+    return 0
+  fi
+
+  out="$TMP_DIR/full-package"
+  status=0
+  output=$("$SCRIPT_PATH" --app "$app" --out "$out" 2>&1) || status=$?
+  if [ "$status" -ne 0 ]; then
+    printf 'self-test: FAIL: packaging a whitelisted bundle name failed with status %s (last 20 lines):\n' "$status" >&2
+    printf '%s\n' "$output" | tail -n 20 >&2
+    failures=$((failures + 1))
+    return 0
+  fi
+
+  # The workflow `source`s this file, so source it here the same way: the
+  # whitelist is what keeps that operation predictable.
+  if ( set -eu
+       . "$out/release-metadata.env"
+       [ -n "$VERSION" ] && [ -n "$APP_NAME" ] && [ -f "$out/$ZIP_NAME" ] \
+         && [ -f "$out/$ZIP_NAME.sha256" ] && [ -f "$out/$EVIDENCE_NAME" ]
+     ); then
+    zip_name=$(sed -n 's/^ZIP_NAME=//p' "$out/release-metadata.env")
+    evidence_name=$(sed -n 's/^EVIDENCE_NAME=//p' "$out/release-metadata.env")
+    printf 'self-test: ok: a whitelisted bundle name packaged end to end and release-metadata.env sources cleanly (%s, %s)\n' "$zip_name" "$evidence_name"
+  else
+    printf 'self-test: FAIL: %s is missing, or sourcing it does not yield VERSION/APP_NAME/ZIP_NAME/EVIDENCE_NAME with matching files\n' "$out/release-metadata.env" >&2
+    failures=$((failures + 1))
+  fi
+  return 0
+}
+
+self_test() {
+  failures=0
+
+  # The self-test must not touch the work tree: the script is copied into a
+  # temporary directory outside $ROOT, the copy resolves ROOT there, and its
+  # default --out is a throwaway <tmp>/repo/dist that must stay absent.
+  TMP_DIR=$(self_test_temp_dir) || return 1
+  case $TMP_DIR in
+    "$ROOT"|"$ROOT"/*)
+      printf 'self-test: FAIL: scratch directory %s is inside the repository\n' "$TMP_DIR" >&2
+      return 1
+      ;;
+  esac
+  mkdir -p "$TMP_DIR/repo/Scripts"
+  if ! cp "$SCRIPT_PATH" "$TMP_DIR/repo/Scripts/package-release.sh"; then
+    printf 'self-test: FAIL: cannot copy %s into %s\n' "$SCRIPT_PATH" "$TMP_DIR" >&2
+    return 1
+  fi
+  chmod +x "$TMP_DIR/repo/Scripts/package-release.sh"
+
+  printf 'self-test: whitelist table\n'
+  self_test_check_stem 'representative bundle name' 'Pi-Web-Desktop' accept
+  self_test_check_stem 'digits, underscore and hyphen' 'Pi_Web_1-2' accept
+  self_test_check_stem 'single character' 'A' accept
+  self_test_check_stem 'empty name' '' reject
+  self_test_check_stem 'space' 'Pi Web' reject
+  self_test_check_stem 'semicolon' 'Pi;Web' reject
+  self_test_check_stem 'command substitution' 'Pi$(id)Web' reject
+  self_test_check_stem 'backticks' 'Pi`id`Web' reject
+  self_test_check_stem 'single quote' "Pi'Web" reject
+  self_test_check_stem 'double quote' 'Pi"Web' reject
+  self_test_check_stem 'glob character' 'Pi*Web' reject
+  self_test_check_stem 'dot (stricter than VERSION on purpose)' 'Pi.Web' reject
+  self_test_check_stem 'path separator' 'Pi/Web' reject
+  self_test_check_stem 'newline' "$(printf 'Pi\nWeb')" reject
+  self_test_check_stem 'non-ASCII bytes' "$(printf 'Pi\347\211\210')" reject
+
+  printf 'self-test: rejection path (copied script, scratch dist/)\n'
+  self_test_expect_reject 'space in the bundle name' 'pi web.app' '\x20'
+  self_test_expect_reject 'semicolon in the bundle name' 'pi;web.app' '\x3b'
+  self_test_expect_reject 'command substitution in the bundle name' 'pi$(id).app' '\x24'
+  self_test_expect_reject 'backticks in the bundle name' 'pi`id`.app' '\x60'
+  self_test_expect_reject 'single quote in the bundle name' "pi'web.app" '\x27'
+  self_test_expect_reject 'newline in the bundle name' "$(printf 'pi\nweb.app')" '\x0a'
+  self_test_expect_reject 'dot in the bundle name' 'pi.web.app' '\x2e'
+  self_test_expect_reject 'non-ASCII bytes in the bundle name' "$(printf 'pi\347\211\210.app')" '\xe7'
+
+  printf 'self-test: legal names\n'
+  self_test_expect_gate_pass 'default-looking bundle name' 'Pi-Web-Desktop.app'
+  self_test_expect_gate_pass 'letters, digits, underscore and hyphen' 'Pi_Web_1-2.app'
+
+  printf 'self-test: positive end-to-end case\n'
+  self_test_full_package
+
+  if [ "$failures" -ne 0 ]; then
+    printf 'self-test: FAILED (%s failure(s))\n' "$failures" >&2
+    return 1
+  fi
+  printf 'self-test: PASS (whitelist table, rejection path without dist/, legal names, scratch directory cleaned up)\n'
+  return 0
 }
 
 # Finder and the iCloud/File Provider stack attach extended attributes
@@ -83,6 +411,7 @@ APP=''
 OUT=''
 TAG=''
 BUILD_FIRST=0
+SELF_TEST=0
 
 while [ "$#" -gt 0 ]; do
   case $1 in
@@ -105,6 +434,10 @@ while [ "$#" -gt 0 ]; do
       BUILD_FIRST=1
       shift
       ;;
+    --self-test)
+      SELF_TEST=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -114,6 +447,16 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+if [ "$SELF_TEST" -eq 1 ]; then
+  if [ -n "$APP" ] || [ -n "$OUT" ] || [ -n "$TAG" ] || [ "$BUILD_FIRST" -eq 1 ]; then
+    usage_error '--self-test does not take --app, --out, --tag or --build'
+  fi
+  if self_test; then
+    exit 0
+  fi
+  exit 1
+fi
 
 [ -n "$APP" ] || APP="$ROOT/build/Pi-Web-Desktop.app"
 [ -n "$OUT" ] || OUT="$ROOT/dist"
@@ -128,6 +471,14 @@ fi
 APP=$(CDPATH= cd -- "$(dirname -- "$APP")" && pwd)/$(basename -- "$APP")
 APP_PARENT=$(dirname -- "$APP")
 APP_BASENAME=$(basename -- "$APP")
+APP_STEM=${APP_BASENAME%.app}
+
+# Validate the artifact name before the bundle is read and before --out is
+# created, so a refused name cannot leave a dist/ directory behind (--self-test
+# asserts exactly that). APP_STEM reaches APP_NAME, ZIP_NAME and EVIDENCE_NAME
+# in release-metadata.env and the evidence section of the release notes.
+is_allowed_stem "$APP_STEM" || reject_value 'the app bundle name (--app basename minus .app, i.e. APP_STEM)' "$APP_STEM" 'ASCII letters, digits, hyphen and underscore (0-9A-Za-z_-)' '0-9A-Za-z_-'
+
 PLIST="$APP/Contents/Info.plist"
 [ -f "$PLIST" ] || fail "missing $PLIST"
 
@@ -139,16 +490,14 @@ if ! BUILD=$(plutil -extract CFBundleVersion raw -o - "$PLIST" 2>/dev/null); the
 fi
 
 # release-metadata.env is sourced by the workflow, so keep the value space small
-# and reject anything that could turn into a surprising assignment.
+# and reject anything that could turn into a surprising assignment. The value is
+# reported escaped, not raw: the plist bytes are what is not trusted.
 case $VERSION in
-  ''|*[!0-9A-Za-z._+-]*) fail "unsupported CFBundleShortVersionString '$VERSION' in $PLIST" ;;
+  ''|*[!0-9A-Za-z._+-]*) reject_value 'CFBundleShortVersionString' "$VERSION" 'the characters 0-9A-Za-z._+-' '0-9A-Za-z._+-' ;;
 esac
 case $BUILD in
-  ''|*[!0-9A-Za-z._+-]*) fail "unsupported CFBundleVersion '$BUILD' in $PLIST" ;;
+  ''|*[!0-9A-Za-z._+-]*) reject_value 'CFBundleVersion' "$BUILD" 'the characters 0-9A-Za-z._+-' '0-9A-Za-z._+-' ;;
 esac
-
-APP_STEM=${APP_BASENAME%.app}
-[ -n "$APP_STEM" ] || fail "cannot derive an artifact name from '$APP_BASENAME'"
 
 ZIP_NAME="$APP_STEM-$VERSION.zip"
 EVIDENCE_NAME="$APP_STEM-$VERSION.evidence.md"
@@ -238,6 +587,12 @@ clear_extended_attributes "$APP"
 ( cd "$OUT" && shasum -a 256 "$ZIP_NAME" > "$ZIP_NAME.sha256" )
 SHA256=$(awk '{print $1}' "$OUT/$ZIP_NAME.sha256")
 [ -n "$SHA256" ] || fail "cannot read the SHA-256 of $ZIP_NAME"
+# The digest goes into release-metadata.env as well, so check the shape the
+# checksum tool is expected to produce before trusting its output.
+case $SHA256 in
+  *[!0-9a-f]*) reject_value 'SHA256' "$SHA256" '64 lowercase hexadecimal characters (0-9a-f)' '0-9a-f' ;;
+esac
+[ "${#SHA256}" -eq 64 ] || reject_value 'SHA256' "$SHA256" '64 lowercase hexadecimal characters (0-9a-f)' '0-9a-f'
 
 # Verify the checksum file with the same command the release notes give users.
 ( cd "$OUT" && shasum -a 256 -c "$ZIP_NAME.sha256" )
@@ -252,6 +607,10 @@ fi
 
 COMMIT=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)
 [ -n "$COMMIT" ] || COMMIT=unknown
+case $COMMIT in
+  unknown) ;;
+  *[!0-9a-f]*) reject_value 'COMMIT' "$COMMIT" 'a lowercase hexadecimal git object name or "unknown" (0-9a-f)' '0-9a-f' ;;
+esac
 if [ "$COMMIT" != "unknown" ] && [ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null || true)" ]; then
   WORKTREE='dirty (packaged from a working tree with uncommitted changes)'
 else

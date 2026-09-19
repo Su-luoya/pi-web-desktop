@@ -55,6 +55,7 @@ git diff --check
 ./Scripts/build.sh
 ./Scripts/check-identity.sh
 ./Scripts/check-release-version.sh "$(./Scripts/check-release-version.sh --print-tag)"
+./Scripts/package-release.sh --self-test
 ./Scripts/package-release.sh --tag v<MARKETING_VERSION>
 ./Scripts/smoke.sh
 ```
@@ -65,6 +66,8 @@ git diff --check
 - 产物写入 `dist/`（已被 `.gitignore` 忽略）：`Pi-Web-Desktop-<版本>.zip`、
   `<...>.zip.sha256`、`<...>.evidence.md` 与 `release-metadata.env`。
 - 证据文件包含运行机器的路径与 macOS 版本，不要把它提交到仓库，也不要把 `dist/` 加进版本控制。
+- `./Scripts/package-release.sh --self-test` 在仓库外的临时目录里自检白名单与拒绝路径（见下节），
+  不需要 bundle，也不会在仓库里留下 `dist/`。
 
 ### 本地演练与 Finder / iCloud 扩展属性
 
@@ -94,6 +97,57 @@ xattr -cr build/Pi-Web-Desktop.app
 清除扩展属性不会破坏封条，不需要重新签名；ZIP 流程不变（`ditto -c -k --sequesterRsrc` 只把剩余元数据
 写进 `__MACOSX/` AppleDouble 条目，打包前已经清理过一次）。CI 在干净目录 checkout，不受影响。
 更详细的机制与实测见[开发说明的“Finder / iCloud 扩展属性与签名校验”](development.md#finder--icloud-扩展属性与签名校验)。
+
+## 发布元数据的字符集白名单
+
+`Scripts/package-release.sh` 生成的 `release-metadata.env` 会被 `.github/workflows/release.yml`
+用 `. dist/release-metadata.env` 直接 `source`（build job 里渲染说明与 step summary 各一处，
+publish job 里复验与上传前一处）。所以脚本对写入该文件的每个值先做字符集白名单校验：
+宁可拒绝一个不常见的名字，也不把一个可能像赋值或命令的值“转义后写进去”。
+
+| 写入的变量 | 取值来源 | 允许的字符集 | 失败行为 |
+| --- | --- | --- | --- |
+| `VERSION`（`CFBundleShortVersionString`） | bundle 的 `Info.plist` | `0-9A-Za-z._+-` | 退出 1，不打包 |
+| `BUILD`（`CFBundleVersion`） | bundle 的 `Info.plist` | `0-9A-Za-z._+-` | 退出 1，不打包 |
+| `APP_STEM`，进而 `APP_NAME`、`ZIP_NAME`、`EVIDENCE_NAME` | `--app` 路径的 basename 去掉 `.app` | `0-9A-Za-z_-` | 退出 1，且不创建 `--out` 目录 |
+| `SHA256` | `shasum -a 256` 的输出 | 恰好 64 位小写十六进制 `0-9a-f` | 退出 1 |
+| `COMMIT` | `git rev-parse HEAD` | 小写十六进制，或缺省值 `unknown` | 退出 1 |
+
+- `APP_STEM` 的白名单比 `VERSION` 更严：**不允许 `.`**。bundle 名不需要 `.`；产物名里的 `.`
+  只来自脚本自己追加的固定后缀（`.zip`、`.zip.sha256`、`.evidence.md`），所以不必放开。
+- 校验位置：`APP_STEM` 在读取 `Info.plist` 之前、创建 `--out` 之前校验，因此被拒绝的运行
+  **不会生成任何 `dist/` 文件**；`SHA256` 与 `COMMIT` 在各自产生的地方立即校验。
+- 失败信息给出允许的字符集与当前值的**转义表示**：允许集之外的字节显示为 `\xNN`，因此空格、`;`、
+  `$()`、引号、控制字符与非 ASCII 字节都不会原样回显，这条日志行无法被伪造，也不会变成终端转义序列。
+  实测（把已构建的 bundle 复制改名后打包，仓库里没有 `dist/`）：
+
+  ```text
+  $ ./Scripts/package-release.sh --app "/tmp/…/Pi Web Desktop.app"
+  package-release: FAILED - the app bundle name (--app basename minus .app, i.e. APP_STEM) must be non-empty and use only ASCII letters, digits, hyphen and underscore (0-9A-Za-z_-); the value is written to release-metadata.env, which the release workflow sources. Escaped value (bytes outside the set as \xNN): "Pi\x20Web\x20Desktop"
+  $ echo $?
+  1
+  $ ls dist
+  ls: dist: No such file or directory
+  ```
+
+- 自测路径：`./Scripts/package-release.sh --self-test` 在仓库外的临时目录里复制脚本，构造非法
+  （空格、`;`、`$()`、反引号、引号、`.`、换行、非 ASCII）与合法的 bundle 名，断言非法值被拒绝、
+  输出里只有转义形式且不产生 `dist/`，合法值通过白名单并到达下一个检查。`build/` 里已有 bundle
+  且工作区没有未跟踪文件时，它还会用临时 `--out` 跑一次完整打包（结束后删除），并像 workflow 一样
+  真正 `source` 一次生成的 `release-metadata.env`；工作区存在未跟踪文件时这一项会跳过，因为打包路径上的
+  `Scripts/check-identity.sh` 会拒绝未扫描的工作区（安全审查 R-11）。
+
+### 已核对、但不需要白名单的值
+
+| 值 | 为什么不加 |
+| --- | --- |
+| `TAG` | 只作为参数传给 `Scripts/check-release-version.sh`；不写入 `release-metadata.env`，也不拼进任何被 `sh -c`/`eval` 执行的字符串 |
+| `APP`、`OUT` | 路径；始终带引号使用，只用于读取 bundle 与写文件，不进入被 `source` 的文件，其中会被写进元数据的部分已经由 `APP_STEM` 覆盖 |
+| `APP_NAME`、`ZIP_NAME`、`EVIDENCE_NAME` | 由已校验的 `APP_STEM`/`VERSION` 加固定后缀组成，传递性覆盖，不重复校验 |
+| `WORKTREE`、`SW_VERS`、`ARCH`、`VERIFY_STATUS`、`SPCTL_STATUS`、`SPCTL_NOTE` 与 `codesign`/`spctl` 原始输出 | 只写进证据 Markdown，不写进 `release-metadata.env`；原始输出放在围栏代码块里，工作区状态是脚本自己拼的固定字符串 |
+
+白名单保证的是 `release-metadata.env` 的含义不会被这些值改变，不是“脚本可以在任意输入下安全运行”；
+参数解析、`--out` 目标、签名与 Gatekeeper 校验仍是各自独立的门槛。
 
 ## Tag 驱动 workflow（`.github/workflows/release.yml`）
 

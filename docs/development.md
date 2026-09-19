@@ -2,7 +2,7 @@
 
 ## 环境
 
-首版目标是 Apple Silicon 和 macOS 14 或以上。构建需要 Xcode Command Line Tools、Swift 编译器和 Cocoa/WebKit SDK。
+首版目标是 Apple Silicon 和 macOS 14 或以上。构建需要 Xcode Command Line Tools、Swift 编译器和 Cocoa/WebKit SDK。`PiWebDesktop.xcodeproj` 的 6 个 build configuration 与 `Scripts/build.sh` 都只构建 arm64；应用只使用 Apple 系统框架（Cocoa/AppKit、WebKit、Security、CryptoKit、Foundation、Darwin），没有第三方运行时依赖。支持矩阵与“未承诺”事项（无 Intel 产物、ad-hoc 签名且未公证、无 SLA）见 [README 支持矩阵](../README.md#支持矩阵)。
 
 运行服务还需要用户自行安装：
 
@@ -112,8 +112,11 @@ open build/Pi-Web-Desktop.app
 node --version
 npm prefix -g
 pi --version
-pi-web --version
+npm ls -g @agegr/pi-web
+pi-web --help
 ```
+
+注意：上游 `@agegr/pi-web` CLI 当前没有 `--version` 选项（本地在 `@agegr/pi-web@0.9.1` 上执行 `pi-web --version` 会打印 `Unknown option '--version'` 并以非零退出），因此要核对版本请用 `npm ls -g @agegr/pi-web`，或读取该包 `package.json` 的 `version`。`DependencyChecker` 先用 `--version` 解析、失败后回落到 `package.json` 的 `version`，所以只要 `package.json` 能提供版本，这个上游 CLI 行为就不会阻断启动；两条路径都解析不出时才把该项记为 `unknown` 并保持门控关闭。
 
 无头环境里也可以用假命令输出、假文件系统探针和假端口探针覆盖同样的判定：`PiWebDesktopTests/DependencyCheckerTests.swift` 使用 `DependencyFakeRunner`（命令）、`DependencyFakeFileSystem`（磁盘）和固定的架构/系统版本与端口结果，覆盖缺少命令、Node 版本过低、符号链接、安装来源未知、版本无法解析为 unknown（pi/pi-web 的 unknown 同样关闭门控）、路径选择的只读身份证据（`--version` 版本 / package.json 名称 / 不可执行）、`canStartService` 门控矩阵、脱敏断言；`PiWebDesktopTests/FirstLaunchDiagnosticsTests.swift` 覆盖首次启动路由（干净环境 → 诊断页并列出缺失项与下一步、缺少 pi/pi-web 不会退出、就绪但未完成首次设置 → 诊断页、就绪 + 已完成 → 主窗口、缺项（含空报告）/版本无法解析必须停在诊断页）、路径选择（可执行且可核对身份（版本或 package.json 名称）→ 写配置并解除门控；可执行但不是 pi-web（如 `/bin/echo`）/不可执行/空/相对路径 → 配置不变 + 可读错误）、首次设置完成后的启动语义（显式启动，普通启动尊重 `autoStart`）、状态页字段完整性（每项都输出路径/版本/来源/可信度）、默认端口（占用/无法判定不阻塞）、Pi 配置目录（缺失/不可读只提示且从未读取目录内容）与控件可用性映射（blocked/checking 时 start/stop/restart 全不可用）。测试不执行真实 npm/pi/pi-web，不访问网络、`~/.pi`、用户 Home、真实端口或真实 npm 前缀。
 
@@ -139,19 +142,40 @@ smoke 变量只影响那一次启动：
 - 启动 smoke 跳过依赖门控：`applicationDidFinishLaunching` 在 smoke 分支直接返回，不运行 `DependencyChecker`、不等待后台结果、不显示诊断窗口；因此即使本机缺少 Node.js/Pi/Pi Web，仍然验证主窗口建立与退出路径。
 - 诊断 smoke 不运行真实探针：`DiagnosticsSmokeFixture` 用假命令 runner、空文件系统和固定端口探针生成确定性报告（系统项用 `DependencyChecker.minimumMacOSVersion` 而不是另一份版本字面值），但路由、诊断行、状态页和窗口都由真实代码生成；前置固定判定为缺失，所以它同时验证了门控路径。
 - 建立窗口/诊断页后向 stdout 打印标记并以 0 退出；临时目录创建失败、主窗口未建立或诊断夹具不再进入诊断页时向 stderr 报错并以 1 退出，不打印标记。
+- 不隔离 WebKit 数据：启动模式仍会创建默认数据存储的 `WKWebView`（`Sources/WebViewController.swift:37` 的 `.default()`，`Sources/` 里没有任何 `WKWebsiteDataStore` 删除调用）。实测跑一次 `./Scripts/smoke.sh` 会更新 `~/Library/WebKit/<bundle id>/WebsiteData/` 下已有文件的 mtime/size，所以临时目录只隔离应用自己的 support 目录、日志与 UserDefaults，**不**隔离 WebKit 的持久化网站数据；位置与删除方式见 [隐私说明](privacy.md#本地数据一览与删除)。
 
 变量未设置时行为完全不变。smoke 只验证窗口、诊断页与退出路径，不验证服务功能，也不替代 `xcodebuild` 的构建和 `xcodebuild test` 的单元测试：本机只有 Command Line Tools 时无法运行 XCTest，smoke 不声称覆盖测试用例。
 
 ## 验证
 
 ```bash
-sh -n Scripts/build.sh Scripts/install.sh Scripts/check-identity.sh Scripts/smoke.sh
+sh -n Scripts/*.sh
 git diff --check
 ./Scripts/build.sh
 codesign --verify --deep --strict build/Pi-Web-Desktop.app
 ./Scripts/check-identity.sh
 ./Scripts/smoke.sh
 ```
+
+`./Scripts/check-identity.sh` 退出 0 表示身份、版本与服务默认值一致，并且仓库文本扫描通过。`xcodebuild build` / `xcodebuild test` 需要完整 Xcode：`xcode-select -p` 指向 Command Line Tools 时这两条命令会失败，此时以上面的脚本链替代，并在 PR 中说明 XCTest 由 CI 的 `macos-14` job 覆盖。
+
+### personal-data 与 secret 扫描能力
+
+CI（`.github/workflows/build.yml` 的 `Check for accidental personal data` 步骤，第 54-56 行）和 `Scripts/check-identity.sh` 的仓库文本扫描（`Scripts/check-identity.sh:428-447`）都只是**模式有限的字面量检查**，不是通用 secret scanner：
+
+- CI 只跑一条 `git grep -nE`，匹配几个固定字面量（一个私有 VPN 厂商名的小写形式、一个固定本地代理端点、以 `/Users` 开头的主目录路径），并排除 `*.icns`、该 workflow 自身和 `Scripts/check-identity.sh`。
+- `Scripts/check-identity.sh` 用另一组模式：小写的私有 VPN 主机名、tailnet DNS 后缀、CGNAT 私网地址段、以 `/Users` 开头的路径、固定本地代理端点，再加 `MARKETING_VERSION` 字面值（限 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/`）。
+
+两组检查都不覆盖凭据、token、私钥或其他未列入的私网地址。通用 secret scan 尚未实现，属 [#11](https://github.com/Su-luoya/pi-web-desktop/issues/11) 的范围；在它落地前不要声称已通过 secret scan。
+
+本地复现 CI 的那条命令时，从工作流里取出再执行，避免在文档、注释或脚本里复制模式字面值：
+
+```bash
+SCAN=$(awk '/^ *! git grep/{sub(/^ */, ""); print; exit}' .github/workflows/build.yml)
+sh -c "$SCAN" && echo "personal-data scan: PASS"
+```
+
+命令匹配到内容时以非零退出；文档 PR 也必须让这条扫描通过。
 
 服务生命周期、依赖诊断、版本解析、安装来源、脱敏和所有权判定应使用单元测试和本地假服务测试。测试不得访问真实 npm、GitHub、用户 Keychain 或 `~/.pi`。
 
@@ -162,4 +186,6 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 - 一个 GitHub Issue 对应一个主要实现 task、worktree、分支和 PR。
 - 修改前先确认 Issue 的 Target、Change、Constraints、Ownership 和 Observable acceptance。
 - worker 默认只提交本地 commit；coordinator 验证后 push、创建 PR 和映射 GitHub 状态。
-- 新增第三方依赖必须单独记录许可证、维护状态和供应链理由。
+- 新增第三方依赖必须单独记录许可证、维护状态和供应链理由；CI 只使用 GitHub 托管的 runner，Actions 按提交 SHA 固定，升级由 `.github/dependabot.yml` 每周提出。
+- 文档里新增的命令必须实际执行过，并在 PR 中给出结果；无法在当前环境执行的命令要显式标注为未执行。
+- 不得写入未验证的兼容承诺。支持矩阵、签名与公证状态以 `Configuration/AppIdentity.xcconfig`、`Scripts/build.sh` 和实际产物检查为准。

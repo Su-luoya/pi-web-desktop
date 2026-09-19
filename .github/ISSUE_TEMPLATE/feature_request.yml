@@ -16,6 +16,34 @@ body:
       description: 谁遇到了什么问题？当前如何处理？
     validations:
       required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 影响范围（area 标签）
+      description: 维护者会按选择设置 `area:` 标签。
+      multiple: true
+      options:
+        - app — 应用生命周期和 UI
+        - service — Pi Web 服务管理
+        - diagnostics — 诊断和日志
+        - security — 网络、进程和凭据安全
+        - updates — 版本检查和更新
+        - build-release — 构建、CI 和发布
+        - documentation — 项目文档
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: 影响程度（priority 标签建议）
+      description: 维护者在分诊时确认；未排期前不会自动套用标签。
+      options:
+        - P0 — 安全、数据损坏或广泛不可启动
+        - P1 — 里程碑阻塞
+        - P2 — 正常计划工作
+        - P3 — 可延后改进
+    validations:
+      required: true
   - type: textarea
     id: proposed_behavior
     attributes:

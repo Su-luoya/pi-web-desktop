@@ -393,7 +393,7 @@ struct UpdateCheckIdentity: Equatable {
         )
     }
 
-    /// `Pi-Web-Desktop/0.1.0-alpha.2 (io.github.su-luoya.pi-web-desktop)` 形态；
+    /// `Pi-Web-Desktop/<版本> (<bundle id>)` 形态（不在源码里写版本字面值）；
     /// 缺字段时省略对应片段，至少保留应用名。
     var userAgent: String {
         var token = appName.replacingOccurrences(of: " ", with: "-")

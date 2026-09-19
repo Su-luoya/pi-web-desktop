@@ -280,3 +280,82 @@ SHA-256 每次都不同，原因见上）。
 ### 发布后遗留（不阻断 alpha.1）
 
 安全审查 R 清单中的低风险项已建 Issue：#38（R-1/R-2 脱敏缺口与幂等）、#39（R-3 启动路径地址校验）、#40（R-9 `APP_STEM` 白名单）、#41（R-7/R-11 门禁处理未跟踪文件与 README 表述）。
+
+## 本次发布执行记录（v0.1.0-alpha.2）
+
+本节记录 `v0.1.0-alpha.2` 候选提交上**实际执行过**的本地门槛与输出摘要，供 Release Issue 与草稿
+Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不要把它们写成已实测。
+
+- 被测候选提交：`98e4f71`（`chore(release): v0.1.0-alpha.2 版本 bump、发布说明与文档更新`）；
+  前置提交为 `c02b02d`（`fix(update): 移除 UpdateChecker 注释中的版本字面值`，见下方“发布前置修复”），
+  两者共同构成候选提交
+- 执行环境：Apple M4（Mac mini，`Mac16,10`）、macOS 27.0（`26A428`）、arm64；Node.js v24.21.0、
+  npm 11.19.0、Pi CLI（`@earendil-works/pi-coding-agent`）0.85.1、`@agegr/pi-web` 0.9.1
+  （Homebrew 前缀下的 npm 全局安装）；`xcode-select -p` 指向 `/Library/Developer/CommandLineTools`
+- 版本与 build 的唯一来源仍是 `Configuration/AppIdentity.xcconfig`（`0.1.0-alpha.2` / `2`）；
+  下面所有命令都在候选提交上重跑，输出摘要为本次实际输出
+- 同一批事实也写在 [v0.1.0-alpha.2 Release 说明](release-notes-v0.1.0-alpha.2.md) 的
+  “本机实测环境与版本”与“构建与签名验证记录”两节
+- 本地演练的 SHA-256 每次都不同（见 [发布流程](releasing.md#可复现性与诚实的边界)）；
+  Release 说明的校验值必须从 workflow 产出的资产复制，不能使用本节的本机值
+
+### 已在候选提交上实测
+
+| # | 门槛 | 命令 | 实测输出摘要 | 判定 |
+| --- | --- | --- | --- | --- |
+| 1 | 脚本语法 | `sh -n Scripts/*.sh` | 无输出 | 退出 0，通过 |
+| 2 | 空白与补丁格式 | `git diff --check` | 无输出 | 退出 0，通过 |
+| 3 | 构建 | `./Scripts/build.sh` | `Built: build/Pi-Web-Desktop.app`；`Mach-O 64-bit executable arm64` | 退出 0，通过 |
+| 4 | 身份与版本一致性 | `./Scripts/check-identity.sh` | `check-identity: PASSED (45 checks)`；bundle `CFBundleShortVersionString=0.1.0-alpha.2`、`CFBundleVersion=2`、`LSMinimumSystemVersion=14.0`、`CFBundleIdentifier=io.github.su-luoya.pi-web-desktop`、`CFBundleIconFile=ApplicationIcon` | 退出 0，通过 |
+| 5 | tag 与 bundle 版本一致 | `sh Scripts/check-release-version.sh v0.1.0-alpha.2` | `PASSED (tag v0.1.0-alpha.2, MARKETING_VERSION 0.1.0-alpha.2, CURRENT_PROJECT_VERSION 2)`；另有 `ok tag pre-release counter 2 matches CURRENT_PROJECT_VERSION` | 退出 0，通过 |
+| 6 | 签名校验 | `codesign --verify --deep --strict build/Pi-Web-Desktop.app` | `valid on disk`、`satisfies its Designated Requirement` | 退出 0，通过 |
+| 7 | 签名身份与公证状态 | `codesign -dv --verbose=4 build/Pi-Web-Desktop.app` | `Identifier=io.github.su-luoya.pi-web-desktop`、`Format=app bundle with Mach-O thin (arm64)`、`Signature=adhoc`、`TeamIdentifier=not set` | 预期结果：ad-hoc、未公证 |
+| 8 | Gatekeeper 行为 | `spctl -a -vv build/Pi-Web-Desktop.app` | 输出 `rejected`；本机不打印拒绝原因（审查 R-10） | 退出 3；未公证 ad-hoc 产物的预期结果 |
+| 9 | smoke 启动模式 | `./Scripts/smoke.sh` | app exit 0（0s）；标记 `smoke: ready` | 通过 |
+| 10 | smoke 诊断模式 | `./Scripts/smoke.sh` | app exit 0（0s）；标记 `smoke: diagnostics items=6 blockers=3` 与 `smoke: diagnostics ready` | 通过（脚本整体退出 0） |
+| 11 | 扫描器自检 | `./Scripts/scan-secrets.sh --self-test` | `self-test: PASS (all rules fired, suppression verified, untracked-file gate verified, samples cleaned up)` | 退出 0，通过 |
+| 12 | 仓库 secret 扫描 | `./Scripts/scan-secrets.sh` | `scan-secrets: suppressed 11 lines`、`scan-secrets: PASS (no matches in tracked files; no untracked files)`；N=11 与 alpha.1 记录相同，本提交没有新增内联标记 | 退出 0，通过（工作区已全部提交，没有未跟踪文件） |
+| 13 | 本地打包与证据 | `./Scripts/package-release.sh --tag v0.1.0-alpha.2` | 退出 0；产出 `Pi-Web-Desktop-0.1.0-alpha.2.zip`、`.zip.sha256`、`.evidence.md`、`release-metadata.env`；元数据为 `VERSION=0.1.0-alpha.2`、`BUILD=2`、`COMMIT=98e4f71…`；证据段落含 `Signature=adhoc`、`spctl` 退出码 3 与未公证说明 | 通过 |
+| 14 | ZIP 内容清单 | `unzip -l dist/Pi-Web-Desktop-0.1.0-alpha.2.zip` | 23 项，只有 `Pi-Web-Desktop.app/`（`_CodeSignature/`、`Info.plist`、`MacOS/PiWebDesktop`、`Resources/ApplicationIcon.icns`）与 `__MACOSX/` AppleDouble 元数据；按源码、测试、日志、`.DS_Store` 与本地绝对路径前缀逐一过滤后无命中 | 通过 |
+| 15 | checksum 复验 | `cd dist && shasum -a 256 -c Pi-Web-Desktop-0.1.0-alpha.2.zip.sha256` | `Pi-Web-Desktop-0.1.0-alpha.2.zip: OK` | 退出 0，通过 |
+| 16 | 版本字面值门禁（回归） | `./Scripts/check-identity.sh` 第 6 节 | `ok no hardcoded MARKETING_VERSION outside Configuration/AppIdentity.xcconfig`（见下方“发布前置修复”） | 通过 |
+
+### 发布前置修复：`Sources/UpdateChecker.swift` 的版本字面值
+
+- 现象：PR #50 在 `Sources/UpdateChecker.swift` 的 User-Agent 文档注释里写了与下一版相同的版本
+  字面值。`MARKETING_VERSION` bump 到 `0.1.0-alpha.2` 后，`check-identity.sh` 的“xcconfig 之外
+  不得出现版本字面值”门禁命中该注释，`check-identity.sh` 退出 1，`package-release.sh`（内部调用
+  `check-identity.sh`）随之失败。
+- 处置：提交 `c02b02d` 只把该注释改成占位形态，不改变逻辑（`userAgent` 仍从 Info.plist 读取
+  版本）。该改动不在 #19 原本允许的写范围内（“只改 `Configuration/`、`docs/`、`README.md`”），
+  由发布 worker 作为解除门槛的最小改动单独提交，便于维护者单独 revert。
+- 现状：该门禁在候选提交上退出 0；如果维护者不接受改动 `Sources/`，revert `c02b02d` 后
+  `check-identity.sh` 会重新失败，`v0.1.0-alpha.2` 不能发布。
+
+### 仍需 CI / 发布 workflow 完成
+
+| # | 门槛 | 覆盖位置 | 本机状态 |
+| --- | --- | --- | --- |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-14` job 覆盖 |
+| C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds` | 本机只检查了脚本产物，由 CI 覆盖 |
+| C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`；该步骤由 CI 覆盖 |
+| C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；Issue 中记录 run 链接 |
+| C5 | Release 资产校验：ZIP/`.sha256`/证据上传、`sha256sum -c`、Release 说明渲染 | `release.yml` 的打包与渲染步骤 | 由 workflow 覆盖（tag push 时执行；`workflow_dispatch` 只产出 artifact） |
+| C6 | 草稿 prerelease 创建与发布前人工复核（assets 名称、checksum 与 Issue 一致、prerelease 勾选） | `release.yml` 的 `publish` job | 由 workflow + 维护者完成；workflow 渲染的是 [Release notes 模板](release-notes-template.md)，若要用版本化正文需在草稿编辑页粘贴 [v0.1.0-alpha.2 Release 说明](release-notes-v0.1.0-alpha.2.md) 并填入实际 SHA-256 |
+| C7 | 真机 smoke 的机器与依赖版本写入 Release Issue | Release Issue 的“真机 smoke 记录” | `./Scripts/smoke.sh` 已在本机（Apple Silicon 真机）通过，版本值见 Release 说明的“本机实测环境与版本”一节；仍待填入 Issue |
+| C8 | 上一版资产的回退路径确认 | Release Issue 的“回退路径确认” | `v0.1.0-alpha.1` 已作为 prerelease 发布，资产应在 Releases 中仍可下载；发布时在 Issue 中确认 |
+
+本节的边界：C1–C4 只在 CI 上运行，本机没有对应的实测输出，不要写成已在本机验证；C5–C6 的产物
+（ZIP、checksum、证据、Release 正文）由 workflow 生成，本机 `dist/` 下的同名文件只是演练产物。
+`v0.1.0-alpha.2` **没有新的独立安全审查**：[alpha.1 安全与发布审查](security-review-alpha.1.md)
+的审查对象是 alpha.1，本版本的安全门槛 S1–S8 仍须在候选提交上重跑并把结论写入 Release Issue；
+审查报告的 R-1、R-2、R-3、R-7、R-9、R-11 已在 #15 与 PR #45–#48 修复，R-4、R-5、R-6、R-8、
+R-10 按非阻断风险在 Release 说明的“已知问题”一节逐条列出。
+
+### 本次没有改动的、仍写死 alpha.1 的位置（超出 #19 的写范围）
+
+- `.github/ISSUE_TEMPLATE/bug_report.yml` 的 `placeholder` 仍是 `0.1.0-alpha.1`。
+- `SECURITY.md` 的受影响版本示例与“当前只有 alpha 基线”一句仍写 `0.1.0-alpha.1`。
+
+两处都属于会随版本变化的引用，但不在本次允许修改的路径（`Configuration/AppIdentity.xcconfig`、
+`docs/`、`README.md`）内，因此原样保留，留给后续文档 Issue 处理。

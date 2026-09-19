@@ -22,8 +22,8 @@
 与 `CURRENT_PROJECT_VERSION`；`PiWebDesktop.xcodeproj` 通过 `baseConfigurationReference`
 继承该文件，`Scripts/build.sh` 也从同一文件生成 `Info.plist`。因此：
 
-- tag 名称固定为 `v<MARKETING_VERSION>`（例如 `MARKETING_VERSION = 0.1.0-alpha.1` 对应
-  tag `v0.1.0-alpha.1`）；tag 与该值不一致时不得发布。
+- tag 名称固定为 `v<MARKETING_VERSION>`（例如 `MARKETING_VERSION = 0.1.0-alpha.2` 对应
+  tag `v0.1.0-alpha.2`）；tag 与该值不一致时不得发布。
 - 打 tag 前先提交版本改动，再运行 `./Scripts/build.sh && ./Scripts/check-identity.sh`，
   确认 xcconfig、Xcode 工程、已构建 bundle 的 `Info.plist` 与本地服务默认值一致。
 - `Scripts/check-identity.sh` 会拒绝 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、
@@ -34,7 +34,7 @@
 ### `Scripts/check-release-version.sh`
 
 - `./Scripts/check-release-version.sh v<MARKETING_VERSION>`：完整比较。tag 必须等于
-  `v<MARKETING_VERSION>`；当 tag 带数字预发布计数（`v0.1.0-alpha.1` 里的 `1`）时，
+  `v<MARKETING_VERSION>`；当 tag 带数字预发布计数（`v0.1.0-alpha.2` 里的 `2`）时，
   该计数还必须等于 `CURRENT_PROJECT_VERSION`。不一致时退出 1 并给出修正提示。
 - 不带参数且环境里没有 `GITHUB_REF_NAME`：打印期望的 tag，跳过比较，退出 0。
   这是本地 checkout 的默认情况，演练不需要先打 tag。
@@ -188,8 +188,10 @@ publish job 里复验与上传前一处）。所以脚本对写入该文件的�
 
 ## Release 说明与证据段落
 
-Release 说明由 `docs/release-notes-template.md` 渲染。`Scripts/package-release.sh` 生成的
-“签名与公证证据”段落会写入固定位置，内容包括：
+Release 说明由 `docs/release-notes-template.md` 渲染；每个版本还会留一份现成的正文（例如
+[v0.1.0-alpha.2 Release 说明](release-notes-v0.1.0-alpha.2.md)），可以在草稿编辑页粘贴并把
+`校验值` 换成草稿资产的实际 SHA-256；workflow 渲染的始终是模板。
+`Scripts/package-release.sh` 生成的“签名与公证证据”段落会写入固定位置，内容包括：
 
 - `codesign --verify --deep --strict` 的退出码（必须为 0）；
 - `codesign -dv --verbose=4` 原始输出，其中必须出现 `Signature=adhoc` 与 `TeamIdentifier=not set`；

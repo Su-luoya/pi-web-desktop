@@ -20,6 +20,12 @@ final class UpdateTransactionTests: XCTestCase {
         var realPaths: [String: String] = [:]
         var sizes: [String: Int] = [:]
         var mtimes: [String: Date] = [:]
+        /// GitHub #63：inode、内容哈希与 npm `integrity` 同样只回答登记值。
+        var inodes: [String: UInt64] = [:]
+        var contentHashes: [String: String] = [:]
+        /// 登记的“未做内容哈希”结果（超限/不可读）；优先于 `contentHashes`。
+        var contentHashFailures: [String: UpdateArtifactContentHashResult] = [:]
+        var npmIntegrities: [String: String] = [:]
         var packageNamesAtJSON: [String: String] = [:]
         var packageNamesNear: [String: String] = [:]
 
@@ -31,6 +37,13 @@ final class UpdateTransactionTests: XCTestCase {
                 resolveRealPath: { [self] path in realPaths[path] },
                 fileSize: { [self] path in sizes[path] },
                 modificationDate: { [self] path in mtimes[path] },
+                fileInode: { [self] path in inodes[path] },
+                contentHash: { [self] path in
+                    if let failure = contentHashFailures[path] { return failure }
+                    if let hash = contentHashes[path] { return .hashed(hash) }
+                    return .unsupported
+                },
+                npmIntegrity: { [self] path, _ in npmIntegrities[path] },
                 packageNameAtPackageJSON: { [self] path in packageNamesAtJSON[path] },
                 packageNameNear: { [self] path in packageNamesNear[path] }
             )
@@ -451,6 +464,7 @@ final class UpdateTransactionTests: XCTestCase {
         probe.executables.insert(newExecutable)
         probe.readable.insert(newExecutable)
         probe.realPaths[newExecutable] = newExecutable
+        probe.packageNamesNear[newExecutable] = InstallCommandManifest.piWebPackageName
         let report = UpdateVerifier.verify(
             UpdateVerificationInput(
                 component: .piWeb,
@@ -486,7 +500,7 @@ final class UpdateTransactionTests: XCTestCase {
             failureReason: report.failureReason ?? "",
             probe: probe.make()
         )
-        // 路径未变且指纹一致（无 size/mtime 记录）：仍按“仍在更新前的文件上”处理。
+        // 路径未变且证据一致（身份一致、无 size/mtime 记录）：仍按“仍在更新前的文件上”处理。
         XCTAssertEqual(plan.kind, .stillUsingPreviousArtifact)
     }
 
@@ -498,6 +512,12 @@ final class UpdateTransactionTests: XCTestCase {
         probe.realPaths[newExecutable] = newExecutable
         probe.sizes[oldExecutable] = 100
         probe.mtimes[oldExecutable] = referenceDate
+        // GitHub #63：旧路径同时登记身份、inode、内容哈希与 npm integrity，
+        // 降级前必须逐个重新核对。
+        probe.inodes[oldExecutable] = 4321
+        probe.contentHashes[oldExecutable] = "sha256:" + String(repeating: "e", count: 64)
+        probe.npmIntegrities[oldExecutable] = "sha512-" + String(repeating: "F", count: 86)
+        probe.packageNamesNear[oldExecutable] = InstallCommandManifest.piWebPackageName
         probe.packageNamesNear[newExecutable] = InstallCommandManifest.piWebPackageName
 
         let history = HistoryRecorder()
@@ -542,6 +562,12 @@ final class UpdateTransactionTests: XCTestCase {
         XCTAssertEqual(plan.restoredExecutablePath, oldExecutable)
         XCTAssertEqual(plan.restoredVersion, "0.9.0")
         XCTAssertTrue(plan.warningText.contains("已降级"))
+        XCTAssertEqual(plan.evidence?.level, .contentHash)
+        XCTAssertEqual(plan.evidence?.contentHashVerified, true)
+        XCTAssertTrue(plan.warningText.contains("已重新核对旧文件内容哈希"))
+        XCTAssertFalse(plan.warningText.contains("不校验旧文件内容"))
+        XCTAssertEqual(entry.evidenceLevel, .contentHash)
+        XCTAssertTrue(entry.evidenceNote?.contains("内容哈希一致") == true)
         XCTAssertFalse(plan.warningText.contains(oldExecutable), "警告文本不得包含本机绝对路径")
         XCTAssertFalse(log.text.contains(oldExecutable))
         XCTAssertFalse(log.text.contains(fixtureHome))
@@ -553,6 +579,7 @@ final class UpdateTransactionTests: XCTestCase {
         let probe = FakeProbe()
         probe.executables.formUnion([oldExecutable, newExecutable])
         probe.realPaths[newExecutable] = newExecutable
+        probe.packageNamesNear[oldExecutable] = InstallCommandManifest.piWebPackageName
         probe.sizes[oldExecutable] = 100
         probe.mtimes[oldExecutable] = referenceDate
         // 旧路径在版本指纹里记录为 100 字节；这里模拟安装覆盖后变成另一个大小。
@@ -994,5 +1021,442 @@ final class UpdateTransactionTests: XCTestCase {
         // 版本未变化：如实报告“仍在使用更新前的版本”，不移动任何文件。
         XCTAssertEqual(plan.kind, .stillUsingPreviousArtifact)
         XCTAssertFalse(plan.performedAutomaticDegradation)
+    }
+
+    // MARK: - 10. GitHub #63：有限降级的证据强度与证据等级
+
+    /// 在 `$TMPDIR` 下的临时目录：只用于假 npm 包目录夹具，不碰真实用户目录。
+    private func makeTemporaryDirectory() throws -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("pi-web-rollback-evidence-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    /// 内容被替换但大小与 mtime 完全相同：只有 inode / 内容哈希能检出，
+    /// 判定必须是“无法自动回滚”，不得报“已降级”。
+    func testReplacedContentWithSameSizeAndMtimeIsNotDegradedAsRollback() throws {
+        let probe = FakeProbe()
+        probe.executables.insert(oldExecutable)
+        probe.realPaths[newExecutable] = newExecutable
+        probe.sizes[oldExecutable] = 100
+        probe.mtimes[oldExecutable] = referenceDate
+        probe.packageNamesNear[oldExecutable] = InstallCommandManifest.piWebPackageName
+        probe.inodes[oldExecutable] = 222
+        probe.contentHashes[oldExecutable] = "sha256:" + String(repeating: "b", count: 64)
+
+        func fingerprint(inode: UInt64, hash: String) -> UpdateArtifactFingerprint {
+            UpdateArtifactFingerprint(
+                executablePath: oldExecutable,
+                resolvedPath: oldExecutable,
+                version: "0.9.0",
+                packageName: InstallCommandManifest.piWebPackageName,
+                fileSize: 100,
+                modifiedAt: referenceDate,
+                fileInode: inode,
+                contentHash: hash
+            )
+        }
+
+        func plan(inode: UInt64, hash: String) -> UpdateDegradationPlan {
+            UpdateDegradationPlanner.verificationFailure(
+                component: .piWeb,
+                source: .npmGlobal,
+                fingerprint: fingerprint(inode: inode, hash: hash),
+                newVersion: "0.9.2",
+                newResolvedPath: newExecutable,
+                failureReason: "版本重新检测达到目标失败",
+                probe: probe.make()
+            )
+        }
+
+        let originalHash = "sha256:" + String(repeating: "a", count: 64)
+        // inode 变化（内容也已变化）：大小与 mtime 相同也不得降级。
+        let inodeChanged = plan(inode: 111, hash: originalHash)
+        XCTAssertEqual(inodeChanged.kind, .cannotAutomaticallyRollback)
+        XCTAssertEqual(inodeChanged.rollbackEligibility, .evidenceChangedOrMissing)
+        XCTAssertNil(inodeChanged.restoredExecutablePath)
+        XCTAssertFalse(inodeChanged.performedAutomaticDegradation)
+        XCTAssertTrue(inodeChanged.reason.contains("inode 与更新前记录不一致"))
+        XCTAssertFalse(inodeChanged.warningText.contains("已降级"))
+
+        // inode 被保持（例如原地改写）：只有内容哈希能检出。
+        probe.inodes[oldExecutable] = 111
+        let hashChanged = plan(inode: 111, hash: originalHash)
+        XCTAssertEqual(hashChanged.kind, .cannotAutomaticallyRollback)
+        XCTAssertNil(hashChanged.restoredExecutablePath)
+        XCTAssertTrue(hashChanged.reason.contains("内容哈希与更新前记录不一致"))
+        XCTAssertFalse(hashChanged.warningText.contains("已降级"))
+
+        // 身份名称不一致或读不到：同样不得降级。
+        probe.contentHashes[oldExecutable] = originalHash
+        probe.packageNamesNear[oldExecutable] = "left-pad"
+        let identityMismatch = plan(inode: 111, hash: originalHash)
+        XCTAssertEqual(identityMismatch.kind, .cannotAutomaticallyRollback)
+        XCTAssertTrue(identityMismatch.reason.contains("package.json 名称与更新前记录不一致"))
+
+        probe.packageNamesNear.removeValue(forKey: oldExecutable)
+        let identityUnreadable = plan(inode: 111, hash: originalHash)
+        XCTAssertEqual(identityUnreadable.kind, .cannotAutomaticallyRollback)
+        XCTAssertTrue(identityUnreadable.reason.contains("读不到旧文件所在包的 package.json 名称"))
+    }
+
+    /// inode 与内容哈希都一致时允许降级，证据等级为 `contentHash`；
+    /// 哈希是更强的证据，记录在案的 size/mtime 不再阻塞（明示的等价规则）。
+    func testConsistentInodeAndContentHashAllowDegradationAsContentHashEvidence() throws {
+        let probe = FakeProbe()
+        probe.executables.insert(oldExecutable)
+        probe.realPaths[newExecutable] = newExecutable
+        probe.packageNamesNear[oldExecutable] = InstallCommandManifest.piWebPackageName
+        probe.inodes[oldExecutable] = 42
+        let hash = "sha256:" + String(repeating: "c", count: 64)
+        probe.contentHashes[oldExecutable] = hash
+        // 当前文件的大小与 mtime 都与更新前记录的（故意）不同：内容哈希一致时
+        // 不得因此阻塞。
+        probe.sizes[oldExecutable] = 4096
+        probe.mtimes[oldExecutable] = referenceDate.addingTimeInterval(120)
+
+        let plan = UpdateDegradationPlanner.verificationFailure(
+            component: .piWeb,
+            source: .npmGlobal,
+            fingerprint: UpdateArtifactFingerprint(
+                executablePath: oldExecutable,
+                resolvedPath: oldExecutable,
+                version: "0.9.0",
+                packageName: InstallCommandManifest.piWebPackageName,
+                fileSize: 100,
+                modifiedAt: referenceDate,
+                fileInode: 42,
+                contentHash: hash
+            ),
+            newVersion: "0.9.2",
+            newResolvedPath: newExecutable,
+            failureReason: "服务健康检查失败",
+            probe: probe.make()
+        )
+        XCTAssertEqual(plan.kind, .degradedToPreviousArtifact)
+        XCTAssertEqual(plan.rollbackEligibility, .eligibleRetainedEvidence)
+        XCTAssertEqual(plan.restoredExecutablePath, oldExecutable)
+        XCTAssertEqual(plan.evidence?.level, .contentHash)
+        XCTAssertEqual(plan.evidence?.identityVerified, true)
+        XCTAssertEqual(plan.evidence?.inodeVerified, true)
+        XCTAssertEqual(plan.evidence?.contentHashVerified, true)
+        XCTAssertTrue(plan.reason.contains("内容哈希一致"))
+        XCTAssertTrue(plan.warningText.contains("这只是把调用方指回更新前记录的路径"))
+        XCTAssertTrue(plan.warningText.contains("已重新核对旧文件内容哈希与身份名称一致"))
+        XCTAssertFalse(plan.warningText.contains("不校验旧文件内容"))
+    }
+
+    /// 超限/不可读时证据等级降级，且文案必须写明“未做内容哈希”；降级仍可
+    /// 进行，但必须如实标注未校验旧文件内容。
+    func testUnavailableContentHashDowngradesEvidenceAndSaysSoInWording() throws {
+        let probe = FakeProbe()
+        probe.executables.insert(oldExecutable)
+        probe.realPaths[newExecutable] = newExecutable
+        probe.sizes[oldExecutable] = 100
+        probe.mtimes[oldExecutable] = referenceDate
+        probe.inodes[oldExecutable] = 7
+        probe.packageNamesNear[oldExecutable] = InstallCommandManifest.piWebPackageName
+        probe.contentHashFailures[oldExecutable] = .aboveSizeLimit
+
+        func capture() -> UpdateArtifactFingerprint {
+            UpdateArtifactFingerprint.capture(
+                executablePath: oldExecutable,
+                resolvedPath: oldExecutable,
+                version: "0.9.0",
+                packageName: InstallCommandManifest.piWebPackageName,
+                probe: probe.make()
+            )
+        }
+
+        let oversized = capture()
+        XCTAssertNil(oversized.contentHash)
+        XCTAssertEqual(oversized.contentHashUnavailableReason, .aboveSizeLimit)
+        XCTAssertEqual(oversized.evidenceLevel, .inode)
+        XCTAssertTrue(oversized.contentHashEvidenceText.contains("未做内容哈希"))
+        XCTAssertTrue(oversized.summaryLine.contains("未做内容哈希"))
+        XCTAssertTrue(oversized.npmIntegrityEvidenceText.contains("未获取"))
+
+        let plan = UpdateDegradationPlanner.verificationFailure(
+            component: .piWeb,
+            source: .npmGlobal,
+            fingerprint: oversized,
+            newVersion: "0.9.2",
+            newResolvedPath: newExecutable,
+            failureReason: "版本重新检测达到目标失败",
+            probe: probe.make()
+        )
+        XCTAssertEqual(plan.kind, .degradedToPreviousArtifact)
+        XCTAssertEqual(plan.evidence?.level, .inode)
+        XCTAssertEqual(plan.evidence?.contentHashVerified, false)
+        XCTAssertTrue(plan.warningText.contains("不校验旧文件内容"))
+        XCTAssertTrue(plan.warningText.contains("未做内容哈希"))
+        XCTAssertTrue(plan.warningText.contains("超过大小上限"))
+        XCTAssertTrue(UpdateHistoryDescription.rollbackDescription(for: plan).contains("不校验旧文件内容"))
+
+        // 不可读 → 同一回退与同一“未做内容哈希”标注。
+        probe.contentHashFailures[oldExecutable] = .unreadable
+        let unreadable = capture()
+        XCTAssertNil(unreadable.contentHash)
+        XCTAssertEqual(unreadable.contentHashUnavailableReason, .unreadable)
+        XCTAssertTrue(unreadable.contentHashEvidenceText.contains("未做内容哈希（文件不可读）"))
+
+        // 没有探针能力时也如实标注，不伪造哈希。
+        let withoutProbe = UpdateArtifactFingerprint.capture(
+            executablePath: oldExecutable,
+            resolvedPath: oldExecutable,
+            version: "0.9.0",
+            packageName: InstallCommandManifest.piWebPackageName,
+            probe: .disabled
+        )
+        XCTAssertNil(withoutProbe.contentHash)
+        XCTAssertEqual(withoutProbe.contentHashUnavailableReason, .probeUnavailable)
+        XCTAssertEqual(withoutProbe.evidenceLevel, .pathOnly)
+    }
+
+    /// npm 完整性：取到就记录为附加证据，取不到就标注“未获取”，并且不影响
+    /// 既有判定逻辑；形状非法的值不得写进指纹。
+    func testNpmIntegrityIsRecordedOrMarkedNotObtainedWithoutChangingJudgement() throws {
+        let probe = FakeProbe()
+        probe.executables.insert(oldExecutable)
+        probe.realPaths[newExecutable] = newExecutable
+        probe.sizes[oldExecutable] = 100
+        probe.mtimes[oldExecutable] = referenceDate
+        probe.inodes[oldExecutable] = 9
+        probe.packageNamesNear[oldExecutable] = InstallCommandManifest.piWebPackageName
+        let hash = "sha256:" + String(repeating: "d", count: 64)
+        probe.contentHashes[oldExecutable] = hash
+
+        func capture() -> UpdateArtifactFingerprint {
+            UpdateArtifactFingerprint.capture(
+                executablePath: oldExecutable,
+                resolvedPath: oldExecutable,
+                version: "0.9.0",
+                packageName: InstallCommandManifest.piWebPackageName,
+                probe: probe.make()
+            )
+        }
+
+        let withoutIntegrity = capture()
+        XCTAssertNil(withoutIntegrity.npmIntegrity)
+        XCTAssertEqual(withoutIntegrity.npmIntegrityEvidenceText, "npm 完整性未获取")
+        XCTAssertTrue(withoutIntegrity.evidenceSummaryLine.contains("npm 完整性未获取"))
+
+        let intact = "sha512-" + String(repeating: "A", count: 86)
+        probe.npmIntegrities[oldExecutable] = intact
+        let withIntegrity = capture()
+        XCTAssertEqual(withIntegrity.npmIntegrity, intact)
+        XCTAssertTrue(withIntegrity.npmIntegrityEvidenceText.contains("npm 完整性已记录"))
+
+        probe.npmIntegrities[oldExecutable] = "totally-not-an-integrity-value"
+        let bogus = capture()
+        XCTAssertNil(bogus.npmIntegrity, "形状非法的完整性值不得写进指纹")
+        XCTAssertTrue(bogus.npmIntegrityEvidenceText.contains("未获取"))
+
+        // 有没有 integrity 不改变降级判定：只影响附加证据说明。
+        probe.npmIntegrities.removeValue(forKey: oldExecutable)
+        let plan = UpdateDegradationPlanner.verificationFailure(
+            component: .piWeb,
+            source: .npmGlobal,
+            fingerprint: withoutIntegrity,
+            newVersion: "0.9.2",
+            newResolvedPath: newExecutable,
+            failureReason: "版本重新检测达到目标失败",
+            probe: probe.make()
+        )
+        XCTAssertEqual(plan.kind, .degradedToPreviousArtifact)
+        XCTAssertEqual(plan.evidence?.npmIntegrityEvidenceText, "npm 完整性未获取")
+        XCTAssertEqual(plan.evidence?.level, .contentHash)
+        XCTAssertTrue(plan.warningText.contains("已重新核对旧文件内容哈希"))
+        XCTAssertFalse(plan.warningText.contains("不校验旧文件内容"), "内容哈希已核对时不得写“不校验旧文件内容”")
+    }
+
+    /// 用真实的临时目录（假可执行文件 + 假 npm 包目录）验证生产探针：内容哈希、
+    /// 身份读取与 npm `integrity` 读取都不执行 npm、不联网。
+    func testLiveProbeReadsContentHashIdentityAndNpmIntegrityFromFakePackageDirectory() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let packageDir = root.appendingPathComponent(
+            "lib/node_modules/@scope/pi-rollback-fixture", isDirectory: true
+        )
+        let binDir = packageDir.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true)
+        let executable = binDir.appendingPathComponent("pi-rollback-fixture")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data(#"{"name":"@scope/pi-rollback-fixture","version":"1.0.0"}"#.utf8)
+            .write(to: packageDir.appendingPathComponent("package.json"))
+        let integrity = "sha512-" + String(repeating: "A", count: 86)
+        let lockfile = root.appendingPathComponent("lib/node_modules/.package-lock.json")
+        let lockJSON = "{\"packages\":{\"node_modules/@scope/pi-rollback-fixture\":"
+            + "{\"version\":\"1.0.0\",\"integrity\":\"\(integrity)\"}}}"
+        try Data(lockJSON.utf8).write(to: lockfile)
+
+        let fingerprint = UpdateArtifactFingerprint.capture(
+            executablePath: executable.path,
+            resolvedPath: executable.path,
+            version: "1.0.0",
+            packageName: "@scope/pi-rollback-fixture",
+            probe: .live
+        )
+        XCTAssertEqual(
+            fingerprint.contentHash,
+            "sha256:306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb"
+        )
+        XCTAssertEqual(fingerprint.evidenceLevel, .contentHash)
+        XCTAssertNotNil(fingerprint.fileInode)
+        XCTAssertEqual(fingerprint.npmIntegrity, integrity)
+        XCTAssertEqual(UpdateArtifactProbe.readPackageName(near: executable.path), "@scope/pi-rollback-fixture")
+
+        // 没有锁文件 → 不伪造证据：直接返回 nil，由调用方展示“未获取”。
+        try FileManager.default.removeItem(at: lockfile)
+        XCTAssertNil(UpdateArtifactProbe.readNpmIntegrity(
+            executablePath: executable.path,
+            packageName: "@scope/pi-rollback-fixture"
+        ))
+        // 不存在的文件不读取内容，返回 unreadable。
+        XCTAssertEqual(
+            UpdateArtifactProbe.readContentHash(atPath: root.appendingPathComponent("missing").path),
+            .unreadable
+        )
+        // 超过大小上限的文件不读取内容：退回元数据证据并标注“未做内容哈希”。
+        let oversized = root.appendingPathComponent("oversized")
+        FileManager.default.createFile(atPath: oversized.path, contents: Data("x".utf8))
+        let handle = try FileHandle(forWritingTo: oversized)
+        try handle.truncate(atOffset: UInt64(UpdateArtifactProbe.contentHashSizeLimitBytes + 1))
+        try handle.close()
+        XCTAssertEqual(UpdateArtifactProbe.readContentHash(atPath: oversized.path), .aboveSizeLimit)
+        XCTAssertTrue(UpdateArtifactProbe.isIntegrityValue(integrity))
+        XCTAssertFalse(UpdateArtifactProbe.isIntegrityValue("not-a-hash"))
+    }
+
+    /// 文案断言：“检查完成/已降级”不得写成“来源可信/安全检查通过”，
+    /// 且“已降级”在证据等级不是 contentHash 时必须写明不校验旧文件内容。
+    func testUserVisibleWordingAvoidsTrustClaims() throws {
+        let forbiddenConclusions = ["来源可信", "官方来源已确认", "安全检查通过", "验证通过"]
+
+        // 1) 验证阶段的成功记录只写具体事实（与目标版本一致 / 身份名称一致）。
+        let probe = FakeProbe()
+        probe.executables.insert(newExecutable)
+        probe.readable.insert(newExecutable)
+        probe.realPaths[newExecutable] = newExecutable
+        probe.packageNamesNear[newExecutable] = InstallCommandManifest.piWebPackageName
+        var journal = UpdateTransactionJournal(
+            configuration: UpdateTransactionJournal.Configuration(
+                component: .piWeb,
+                source: .npmGlobal,
+                previousVersion: "0.9.0",
+                targetVersion: "0.9.2",
+                fingerprint: UpdateArtifactFingerprint.versionOnly(version: "0.9.0", packageName: nil)
+            ),
+            now: { self.referenceDate }
+        )
+        let report = UpdateVerifier.report(
+            UpdateVerifier.verify(
+                UpdateVerificationInput(
+                    component: .piWeb,
+                    packageName: InstallCommandManifest.piWebPackageName,
+                    previousVersion: "0.9.0",
+                    targetVersion: "0.9.2",
+                    detectedVersion: "0.9.2",
+                    detectedPackageName: InstallCommandManifest.piWebPackageName,
+                    detectedExecutablePath: newExecutable,
+                    detectedResolvedPath: newExecutable,
+                    detectedPackageJSONPath: nil,
+                    fingerprint: UpdateArtifactFingerprint.versionOnly(version: "0.9.0", packageName: nil)
+                ),
+                probe: probe.make()
+            ),
+            healthCheck: .passed
+        )
+        XCTAssertTrue(journal.recordVerification(report, detectedVersion: "0.9.2"))
+        let verifyReason = try XCTUnwrap(journal.phases.first { $0.phase == .verify }?.reason)
+        XCTAssertTrue(verifyReason.contains("版本与目标版本一致"))
+        XCTAssertTrue(verifyReason.contains("身份名称一致"))
+        XCTAssertTrue(verifyReason.contains("未做代码签名或来源验证"))
+        for conclusion in forbiddenConclusions {
+            XCTAssertFalse(verifyReason.contains(conclusion), "verify 阶段文案不得出现 \(conclusion)")
+        }
+
+        // 2) “已降级”（证据等级 pathOnly）文案必须写明只指回路径且不校验旧内容。
+        let rollbackProbe = FakeProbe()
+        rollbackProbe.executables.insert(oldExecutable)
+        rollbackProbe.realPaths[newExecutable] = newExecutable
+        rollbackProbe.sizes[oldExecutable] = 100
+        rollbackProbe.mtimes[oldExecutable] = referenceDate
+        rollbackProbe.packageNamesNear[oldExecutable] = InstallCommandManifest.piWebPackageName
+        let plan = UpdateDegradationPlanner.verificationFailure(
+            component: .piWeb,
+            source: .npmGlobal,
+            fingerprint: UpdateArtifactFingerprint(
+                executablePath: oldExecutable,
+                resolvedPath: oldExecutable,
+                version: "0.9.0",
+                packageName: InstallCommandManifest.piWebPackageName,
+                fileSize: 100,
+                modifiedAt: referenceDate,
+                contentHashUnavailableReason: .noPath
+            ),
+            newVersion: "0.9.2",
+            newResolvedPath: newExecutable,
+            failureReason: "服务健康检查失败",
+            probe: rollbackProbe.make()
+        )
+        XCTAssertEqual(plan.kind, .degradedToPreviousArtifact)
+        XCTAssertEqual(plan.evidence?.level, .pathOnly)
+        var presentation = UpdateTransactionJournal(
+            configuration: UpdateTransactionJournal.Configuration(
+                component: .piWeb,
+                source: .npmGlobal,
+                previousVersion: "0.9.0",
+                targetVersion: "0.9.2",
+                fingerprint: plan.previousExecutablePath.map { path in
+                    UpdateArtifactFingerprint(
+                        executablePath: path,
+                        resolvedPath: path,
+                        version: "0.9.0",
+                        packageName: InstallCommandManifest.piWebPackageName,
+                        fileSize: 100,
+                        modifiedAt: referenceDate
+                    )
+                } ?? UpdateArtifactFingerprint.versionOnly(version: "0.9.0", packageName: nil)
+            ),
+            now: { self.referenceDate }
+        )
+        presentation.recordPreflight()
+        presentation.recordInstallSucceeded()
+        presentation.recordCommitNotAttempted(reason: "验证阶段失败，未启用新版本")
+        presentation.recordDegradation(plan)
+        let entry = presentation.historyEntry(
+            degradation: plan,
+            advice: plan.manualAdvice,
+            resultingVersion: "0.9.2"
+        )
+        let presenterText = UpdateHistoryPresenter.lines(for: entry).joined(separator: " ")
+        let rollbackDescription = UpdateHistoryDescription.rollbackDescription(for: plan)
+        for text in [plan.warningText, plan.reason, rollbackDescription, presenterText] {
+            for conclusion in forbiddenConclusions {
+                XCTAssertFalse(text.contains(conclusion), "用户可见文案不得出现 \(conclusion)：\(text)")
+            }
+        }
+        XCTAssertTrue(plan.warningText.contains("这只是把调用方指回更新前记录的路径"))
+        XCTAssertTrue(plan.warningText.contains("不校验旧文件内容"))
+        XCTAssertTrue(rollbackDescription.contains("不校验旧文件内容"))
+        XCTAssertTrue(presenterText.contains("降级证据等级：pathOnly"))
+        XCTAssertTrue(presenterText.contains("证据说明："))
+        // “无法自动回滚”保留原意：只报告 + 手动命令提示。
+        let cannot = UpdateDegradationPlanner.verificationFailure(
+            component: .piWeb,
+            source: .homebrew,
+            fingerprint: UpdateArtifactFingerprint.versionOnly(version: "0.9.0", packageName: nil),
+            newVersion: "0.9.2",
+            newResolvedPath: newExecutable,
+            failureReason: "版本重新检测达到目标失败",
+            probe: rollbackProbe.make()
+        )
+        XCTAssertEqual(cannot.kind, .cannotAutomaticallyRollback)
+        XCTAssertTrue(cannot.warningText.contains("无法自动回滚"))
+        XCTAssertTrue(cannot.warningText.contains("请按下面的手动方式处理："))
+        XCTAssertFalse(cannot.performedAutomaticDegradation)
     }
 }

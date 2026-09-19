@@ -102,11 +102,64 @@ struct UpdateTransactionPhaseResult: Equatable {
 
 // MARK: - 更新前指纹
 
-/// 更新前记录的可执行文件指纹（GitHub #23 第 1 项）。
+/// 更新前指纹使用的证据等级（GitHub #63）。`rawValue` 直接进历史记录，
+/// 历史展示与降级文案都据此说明“到底校验到了哪一层”。
+enum UpdateArtifactEvidenceLevel: String, Equatable, CaseIterable {
+    /// 只记录路径/版本/包名/size/mtime 等元数据，没有 inode 也没有内容哈希。
+    case pathOnly
+    /// 记录了 inode（+ 元数据），仍然没有内容哈希。
+    case inode
+    /// 记录了可执行文件内容哈希（+ inode）。
+    case contentHash
+
+    var text: String {
+        switch self {
+        case .pathOnly: return "仅路径与元数据（未做内容哈希）"
+        case .inode: return "inode + 元数据（未做内容哈希）"
+        case .contentHash: return "inode + 内容哈希"
+        }
+    }
+}
+
+/// 没有内容哈希时的固定原因。取不到就如实标注“未做内容哈希”，绝不伪造哈希。
+enum UpdateContentHashUnavailableReason: String, Equatable {
+    case aboveSizeLimit
+    case unreadable
+    case unsupported
+    case probeUnavailable
+    case noPath
+
+    /// 完整说明（用户可见/日志），固定写明“未做内容哈希”。
+    var text: String {
+        switch self {
+        case .aboveSizeLimit:
+            return "未做内容哈希（文件超过大小上限 \(UpdateArtifactProbe.contentHashSizeLimitBytes) 字节）"
+        case .unreadable: return "未做内容哈希（文件不可读）"
+        case .unsupported: return "未做内容哈希（本机没有内容哈希能力）"
+        case .probeUnavailable: return "未做内容哈希（本次运行没有文件系统探针）"
+        case .noPath: return "未做内容哈希（没有可执行文件路径）"
+        }
+    }
+
+    /// 摘要里的短原因。
+    var shortText: String {
+        switch self {
+        case .aboveSizeLimit: return "超过大小上限"
+        case .unreadable: return "文件不可读"
+        case .unsupported: return "没有内容哈希能力"
+        case .probeUnavailable: return "没有文件系统探针"
+        case .noPath: return "没有可执行文件路径"
+        }
+    }
+}
+
+/// 更新前记录的可执行文件指纹（GitHub #23 第 1 项，GitHub #63 加强）。
 ///
 /// 只记录可验证到的事实：可执行文件路径、真实路径、版本、`package.json` 名称，
-/// 以及可选的（不保证存在的）文件大小与 mtime。**不**包含代码签名状态，也
-/// **不**声称这些字段能验证官方签名。
+/// 文件大小与 mtime，inode，可执行文件内容哈希，以及 npm 记录的 `integrity`。
+/// 取不到哈希时 `contentHash` 为 nil 并带固定的“未做内容哈希”原因；取不到 npm
+/// 完整性时 `npmIntegrity` 为 nil（展示为“未获取”）。**不**包含代码签名状态，
+/// 也**不**声称这些字段能验证官方签名或来源可信。
 struct UpdateArtifactFingerprint: Equatable {
     var executablePath: String?
     var resolvedPath: String?
@@ -114,6 +167,14 @@ struct UpdateArtifactFingerprint: Equatable {
     var packageName: String?
     var fileSize: Int?
     var modifiedAt: Date?
+    /// `st_ino`。nil 表示没有记录（或读取失败）。
+    var fileInode: UInt64?
+    /// 可执行文件内容哈希；nil 表示“未做内容哈希”，原因见 `contentHashUnavailableReason`。
+    var contentHash: String?
+    /// 未做内容哈希的固定原因；`contentHash != nil` 时必须为 nil。
+    var contentHashUnavailableReason: UpdateContentHashUnavailableReason?
+    /// npm 记录的完整性（`integrity`）；nil 表示“未获取”，不是空字符串。
+    var npmIntegrity: String?
 
     /// 用于回滚/降级的候选路径：优先真实路径，其次调用方给出的可执行文件路径。
     var evidencePath: String? {
@@ -121,6 +182,36 @@ struct UpdateArtifactFingerprint: Equatable {
     }
 
     var hasVersionEvidence: Bool { version != nil }
+
+    /// 这份指纹实际用到的证据等级。
+    var evidenceLevel: UpdateArtifactEvidenceLevel {
+        if contentHash != nil { return .contentHash }
+        return fileInode != nil ? .inode : .pathOnly
+    }
+
+    /// 内容哈希证据的固定说明（含“未做内容哈希”原因）。
+    var contentHashEvidenceText: String {
+        if let contentHash { return "已记录内容哈希（\(String(contentHash.prefix(14)))…）" }
+        return contentHashUnavailableReason?.text ?? "未做内容哈希"
+    }
+
+    /// npm 完整性证据的固定说明：取不到时明确写“未获取”。
+    var npmIntegrityEvidenceText: String {
+        if let npmIntegrity { return "npm 完整性已记录（\(String(npmIntegrity.prefix(12)))…）" }
+        return "npm 完整性未获取"
+    }
+
+    /// 历史记录用的一行证据说明（含“未做内容哈希”与 npm “未获取”标注）。
+    var evidenceSummaryLine: String {
+        var parts = [
+            "证据等级 \(evidenceLevel.rawValue)（\(evidenceLevel.text)）",
+            contentHashEvidenceText,
+            npmIntegrityEvidenceText
+        ]
+        if let fileInode { parts.append("inode \(fileInode)") }
+        if let fileSize { parts.append("大小 \(fileSize) 字节") }
+        return parts.joined(separator: "；")
+    }
 
     /// 从 #16 的识别结果采集指纹。`probe` 不可用时只记录识别结果里的字段，
     /// 不猜文件大小与 mtime。
@@ -145,9 +236,34 @@ struct UpdateArtifactFingerprint: Equatable {
         let path = resolvedPath ?? executablePath
         var size: Int?
         var modified: Date?
-        if probe.isAvailable, let path {
-            size = probe.fileSize(path)
-            modified = probe.modificationDate(path)
+        var inode: UInt64?
+        var contentHash: String?
+        var contentHashReason: UpdateContentHashUnavailableReason?
+        var integrity: String?
+        if let path {
+            if probe.isAvailable {
+                size = probe.fileSize(path)
+                modified = probe.modificationDate(path)
+                inode = probe.fileInode(path)
+                let hashResult = probe.contentHash(path)
+                contentHash = hashResult.hash
+                if contentHash == nil {
+                    switch hashResult {
+                    case .aboveSizeLimit: contentHashReason = .aboveSizeLimit
+                    case .unreadable: contentHashReason = .unreadable
+                    case .unsupported: contentHashReason = .unsupported
+                    case .hashed: contentHashReason = nil
+                    }
+                }
+                // 只接受形状合法的完整性值；其它一律按“未获取”处理。
+                integrity = probe.npmIntegrity(path, packageName).flatMap { value in
+                    UpdateArtifactProbe.isIntegrityValue(value) ? value : nil
+                }
+            } else {
+                contentHashReason = .probeUnavailable
+            }
+        } else {
+            contentHashReason = .noPath
         }
         return UpdateArtifactFingerprint(
             executablePath: executablePath,
@@ -155,7 +271,11 @@ struct UpdateArtifactFingerprint: Equatable {
             version: version,
             packageName: packageName,
             fileSize: size,
-            modifiedAt: modified
+            modifiedAt: modified,
+            fileInode: inode,
+            contentHash: contentHash,
+            contentHashUnavailableReason: contentHashReason,
+            npmIntegrity: integrity
         )
     }
 
@@ -167,17 +287,22 @@ struct UpdateArtifactFingerprint: Equatable {
             version: version,
             packageName: packageName,
             fileSize: nil,
-            modifiedAt: nil
+            modifiedAt: nil,
+            contentHashUnavailableReason: .noPath
         )
     }
 
-    /// 诊断/日志可安全展示的一行摘要：不含路径。
+    /// 诊断/日志可安全展示的一行摘要：不含路径，并明确写出证据等级、是否做了
+    /// 内容哈希以及 npm 完整性是“已记录”还是“未获取”。
     var summaryLine: String {
         [
             "版本 \(version ?? "未知")",
             "包名 \(packageName ?? "未知")",
             fileSize.map { "大小 \($0) 字节" } ?? "大小 未知",
-            modifiedAt.map { "mtime \(Int($0.timeIntervalSince1970))" } ?? "mtime 未知"
+            modifiedAt.map { "mtime \(Int($0.timeIntervalSince1970))" } ?? "mtime 未知",
+            "inode \(fileInode.map(String.init) ?? "未知")",
+            contentHashEvidenceText,
+            npmIntegrityEvidenceText
         ].joined(separator: "；")
     }
 }
@@ -273,6 +398,71 @@ enum UpdateDegradationKind: String, Equatable {
     var performedAutomaticDegradation: Bool { self == .degradedToPreviousArtifact }
 }
 
+/// 降级前重新核对的证据（GitHub #63）。这些字段都是“实际核对到的事实”，
+/// 不包含“来源可信”或“已确认安全”类结论。
+struct UpdateRollbackEvidence: Equatable {
+    var level: UpdateArtifactEvidenceLevel
+    var identityVerified: Bool
+    var inodeVerified: Bool
+    var contentHashVerified: Bool
+    /// 未做内容哈希的原因（`contentHashVerified == false` 时非 nil）。
+    var contentHashUnavailableReason: UpdateContentHashUnavailableReason?
+    /// npm 完整性证据的固定说明（“已记录”/“未获取”）。
+    var npmIntegrityEvidenceText: String
+
+    /// 用户可见事实句：明确写出证据等级、核对过的字段，以及未做内容哈希的原因。
+    var summaryText: String {
+        var parts: [String] = ["证据等级 \(level.rawValue)"]
+        if identityVerified { parts.append("身份名称一致") }
+        if inodeVerified { parts.append("inode 一致") }
+        if contentHashVerified {
+            parts.append("内容哈希一致")
+        } else {
+            parts.append(contentHashUnavailableReason?.text ?? "未做内容哈希")
+        }
+        parts.append(npmIntegrityEvidenceText)
+        return parts.joined(separator: "；")
+    }
+
+    /// “已降级”文案里必须写明的句子：证据等级不是 `contentHash` 时，明确写出
+    /// “不校验旧文件内容”。
+    var contentVerificationClause: String {
+        contentHashVerified
+            ? "降级前已重新核对旧文件内容哈希与身份名称一致"
+            : "不校验旧文件内容（\(contentHashUnavailableReason?.text ?? "未做内容哈希")）"
+    }
+}
+
+/// 证据核对失败的原因（固定文案；不含路径，也不回显实际包名）。
+enum UpdateRollbackEvidenceIssue: Equatable {
+    case missingExpectedName
+    case identityUnreadable
+    case identityMismatch
+    case inodeUnreadable
+    case inodeMismatch
+    case contentHashUnreadable
+    case contentHashMismatch
+
+    var text: String {
+        switch self {
+        case .missingExpectedName:
+            return "更新前指纹没有记录可比的包名，无法确认旧文件身份"
+        case .identityUnreadable:
+            return "读不到旧文件所在包的 package.json 名称，无法确认旧文件身份"
+        case .identityMismatch:
+            return "旧文件所在包的 package.json 名称与更新前记录不一致"
+        case .inodeUnreadable:
+            return "读不到旧文件的 inode，无法确认仍是同一个文件"
+        case .inodeMismatch:
+            return "旧文件的 inode 与更新前记录不一致"
+        case .contentHashUnreadable:
+            return "无法重新计算旧文件的内容哈希，无法确认旧文件内容一致"
+        case .contentHashMismatch:
+            return "旧文件的内容哈希与更新前记录不一致"
+        }
+    }
+}
+
 /// 一次降级/回滚判定。`restoredExecutablePath` 只在
 /// `kind == .degradedToPreviousArtifact` 时非 nil：它是调用方应当继续使用的
 /// 更新前可执行文件路径。
@@ -288,6 +478,8 @@ struct UpdateDegradationPlan: Equatable {
     var manualAdvice: UpdateManualAdvice
     /// 用户可见的持久警告文案（明确区分“仍在使用旧版本 / 已降级 / 无法自动回滚”）。
     var warningText: String
+    /// 降级前实际核对到的证据；没有做核对（不需降级/安装失败/证据缺失）时为 nil。
+    var evidence: UpdateRollbackEvidence?
 
     var performedAutomaticDegradation: Bool { kind.performedAutomaticDegradation }
 }
@@ -320,8 +512,59 @@ enum UpdateDegradationPlanner {
             restoredExecutablePath: nil,
             restoredVersion: nil,
             manualAdvice: advice,
-            warningText: warning
+            warningText: warning,
+            evidence: nil
         )
+    }
+
+    /// 在新版本安装后重新核对旧路径的证据（GitHub #63）：身份名称、inode、
+    /// 内容哈希。全部读得到且一致才返回证据；任一不满足或读不到都返回固定
+    /// 原因，调用方必须按“无法自动回滚”处理。
+    ///
+    /// 明示的等价规则：内容哈希是比 size/mtime 更强的证据——指纹记录了内容哈希
+    /// 时以哈希为准（哈希已覆盖文件内容），但 inode 与身份仍必须一致；指纹没有
+    /// 记录内容哈希（超限/不可读）时，退回 size/mtime 元数据检查，并在证据与
+    /// 文案里明确写出“未做内容哈希”。
+    static func evaluateRollbackEvidence(
+        fingerprint: UpdateArtifactFingerprint,
+        expectedPackageName: String?,
+        previousPath: String,
+        probe: UpdateArtifactProbe
+    ) -> (evidence: UpdateRollbackEvidence?, issue: UpdateRollbackEvidenceIssue?) {
+        let expected = fingerprint.packageName ?? expectedPackageName
+        guard let expected, !expected.isEmpty else { return (nil, .missingExpectedName) }
+        guard let actual = probe.packageNameNear(previousPath) else { return (nil, .identityUnreadable) }
+        guard actual == expected else { return (nil, .identityMismatch) }
+
+        var inodeVerified = false
+        if let recordedInode = fingerprint.fileInode {
+            guard let currentInode = probe.fileInode(previousPath) else { return (nil, .inodeUnreadable) }
+            guard currentInode == recordedInode else { return (nil, .inodeMismatch) }
+            inodeVerified = true
+        }
+
+        var contentHashVerified = false
+        var contentHashUnavailableReason: UpdateContentHashUnavailableReason?
+        if let recordedHash = fingerprint.contentHash {
+            let result = probe.contentHash(previousPath)
+            guard let currentHash = result.hash else { return (nil, .contentHashUnreadable) }
+            guard currentHash == recordedHash else { return (nil, .contentHashMismatch) }
+            contentHashVerified = true
+        } else {
+            contentHashUnavailableReason = fingerprint.contentHashUnavailableReason ?? .unsupported
+        }
+
+        let level: UpdateArtifactEvidenceLevel = contentHashVerified
+            ? .contentHash
+            : (inodeVerified ? .inode : .pathOnly)
+        return (UpdateRollbackEvidence(
+            level: level,
+            identityVerified: true,
+            inodeVerified: inodeVerified,
+            contentHashVerified: contentHashVerified,
+            contentHashUnavailableReason: contentHashUnavailableReason,
+            npmIntegrityEvidenceText: fingerprint.npmIntegrityEvidenceText
+        ), nil)
     }
 
     /// 验证阶段失败：按有限回滚边界决定“仍在使用旧版本 / 已降级 / 无法自动回滚”。
@@ -339,6 +582,7 @@ enum UpdateDegradationPlanner {
         let previousPath = fingerprint.evidencePath
 
         func plan(kind: UpdateDegradationKind, eligibility: UpdateRollbackEligibility, reason: String,
+                  evidence: UpdateRollbackEvidence? = nil,
                   restoredPath: String? = nil, restoredVersion: String? = nil) -> UpdateDegradationPlan {
             let warning = UpdateWarningText.verificationFailed(
                 component: component,
@@ -346,7 +590,8 @@ enum UpdateDegradationPlanner {
                 newVersion: newVersion,
                 kind: kind,
                 reason: reason,
-                advice: advice
+                advice: advice,
+                evidence: evidence
             )
             return UpdateDegradationPlan(
                 kind: kind,
@@ -357,7 +602,8 @@ enum UpdateDegradationPlanner {
                 restoredExecutablePath: restoredPath,
                 restoredVersion: restoredVersion,
                 manualAdvice: advice,
-                warningText: warning
+                warningText: warning,
+                evidence: evidence
             )
         }
 
@@ -388,7 +634,7 @@ enum UpdateDegradationPlanner {
             )
         }
 
-        // 真实边界 3：证据必须在新版本安装后仍然存在并可用。
+        // 真实边界 3：探针可用，且旧路径仍然存在并带可执行位。
         guard probe.isAvailable else {
             return plan(
                 kind: .cannotAutomaticallyRollback,
@@ -396,10 +642,7 @@ enum UpdateDegradationPlanner {
                 reason: "验证失败（\(failureReason)）；本次运行没有可用的文件系统探针，无法确认更新前的证据仍然可用，因此不回滚"
             )
         }
-        let stillExecutable = probe.isExecutableFile(previousPath)
-        let sizeMatches = fingerprint.fileSize.map { probe.fileSize(previousPath) == $0 } ?? true
-        let mtimeMatches = fingerprint.modifiedAt.map { probe.modificationDate(previousPath) == $0 } ?? true
-        guard stillExecutable, sizeMatches, mtimeMatches else {
+        guard probe.isExecutableFile(previousPath) else {
             return plan(
                 kind: .cannotAutomaticallyRollback,
                 eligibility: .evidenceChangedOrMissing,
@@ -407,20 +650,53 @@ enum UpdateDegradationPlanner {
             )
         }
 
-        // 路径未变且指纹一致：文件仍是更新前的版本。
+        // 真实边界 4（GitHub #63）：身份名称、inode 与内容哈希必须与更新前记录
+        // 一致；任一读不到或不一致都只能报告“无法自动回滚”，不得声称“已降级”。
+        let (evidence, issue) = evaluateRollbackEvidence(
+            fingerprint: fingerprint,
+            expectedPackageName: component.expectedPackageName,
+            previousPath: previousPath,
+            probe: probe
+        )
+        guard let evidence else {
+            return plan(
+                kind: .cannotAutomaticallyRollback,
+                eligibility: .evidenceChangedOrMissing,
+                reason: "验证失败（\(failureReason)）；更新前证据重新核对未通过（\(issue?.text ?? "证据不可用")），不能确认旧文件仍是更新前那份，无法回滚"
+            )
+        }
+
+        // 没有内容哈希（超限/不可读）时退回 size/mtime 元数据检查，并在证据与
+        // 文案里写明“未做内容哈希”。内容哈希一致时不再要求 size/mtime 相同：
+        // 哈希是更强的证据（上面明示的等价规则）。
+        if !evidence.contentHashVerified {
+            let sizeMatches = fingerprint.fileSize.map { probe.fileSize(previousPath) == $0 } ?? true
+            let mtimeMatches = fingerprint.modifiedAt.map { probe.modificationDate(previousPath) == $0 } ?? true
+            guard sizeMatches, mtimeMatches else {
+                return plan(
+                    kind: .cannotAutomaticallyRollback,
+                    eligibility: .evidenceChangedOrMissing,
+                    reason: "验证失败（\(failureReason)）；更新前的可执行文件已被覆盖或替换（大小/mtime 与指纹不一致，且未做内容哈希，只能用元数据比对），无法回滚"
+                )
+            }
+        }
+
+        // 路径未变且证据一致：文件仍是更新前的版本。
         if newResolvedPath == nil || newResolvedPath == previousPath {
             return plan(
                 kind: .stillUsingPreviousArtifact,
                 eligibility: .alreadyOnPreviousArtifact,
-                reason: "验证失败（\(failureReason)）；更新前的可执行文件仍在原位且指纹一致，仍在使用更新前的版本"
+                reason: "验证失败（\(failureReason)）；更新前的可执行文件仍在原位且证据等级 \(evidence.level.rawValue) 的指纹一致，仍在使用更新前的版本",
+                evidence: evidence
             )
         }
 
-        // 真正的有限降级：更新前路径与当前路径不同，且旧路径仍然可用。
+        // 真正的有限降级：更新前路径与当前路径不同，且旧路径的证据已重新核对。
         return plan(
             kind: .degradedToPreviousArtifact,
             eligibility: .eligibleRetainedEvidence,
-            reason: "验证失败（\(failureReason)）；已把调用方指回更新前仍然可用的可执行文件",
+            reason: "验证失败（\(failureReason)）；已把调用方指回更新前记录的路径（\(evidence.summaryText)）",
+            evidence: evidence,
             restoredPath: previousPath,
             restoredVersion: previousVersion
         )
@@ -450,14 +726,15 @@ enum UpdateWarningText {
         newVersion: String?,
         kind: UpdateDegradationKind,
         reason: String,
-        advice: UpdateManualAdvice
+        advice: UpdateManualAdvice,
+        evidence: UpdateRollbackEvidence? = nil
     ) -> String {
         let head: String
         switch kind {
         case .stillUsingPreviousArtifact:
             head = "\(component.displayName)更新后验证失败，仍在使用更新前的版本 \(previousVersion ?? "未知")"
         case .degradedToPreviousArtifact:
-            head = "\(component.displayName)更新后验证失败，已降级到更新前的可用版本 \(previousVersion ?? "未知")"
+            head = "\(component.displayName)更新后验证失败，已降级到更新前记录的版本 \(previousVersion ?? "未知")"
         case .cannotAutomaticallyRollback:
             head = "\(component.displayName)更新后验证失败，无法自动回滚"
         case .installFailedKeepingPreviousVersion, .notNeeded:
@@ -467,7 +744,15 @@ enum UpdateWarningText {
         parts.append(reason + "。")
         switch kind {
         case .degradedToPreviousArtifact:
-            parts.append("应用不会卸载新版本，也不会自动回滚之后的更改。")
+            // 必须写明：这只是把调用方指回更新前记录的路径；证据等级不是
+            // contentHash 时还必须写明“不校验旧文件内容”。
+            parts.append("这只是把调用方指回更新前记录的路径。")
+            if let evidence {
+                parts.append("\(evidence.contentVerificationClause)（\(evidence.summaryText)）。")
+            } else {
+                parts.append("不校验旧文件内容（没有可用的证据核对记录）。")
+            }
+            parts.append("应用不复制、不移动、不恢复文件内容，也不卸载新版本，也不会自动回滚之后的更改。")
         case .cannotAutomaticallyRollback:
             parts.append("请按下面的手动方式处理：")
         default:
@@ -495,7 +780,7 @@ struct UpdateTransactionJournal {
 
     let configuration: Configuration
     private(set) var phases: [UpdateTransactionPhaseResult] = []
-    /// 验证通过后重新检测到的版本（用于历史的“到版本”）。
+    /// 检查通过后重新检测到的版本（用于历史的“到版本”）。
     private(set) var verifiedVersion: String?
 
     private let now: () -> Date
@@ -537,12 +822,13 @@ struct UpdateTransactionJournal {
         }
         let reason: String
         if passed {
-            reason = "验证通过（" + report.checks.map { "\($0.check.title)\($0.status.displayName)" }
-                .joined(separator: "、") + "）"
+            // 只写“实际检查到什么”的事实句，不使用可能被读成“来源可信”的措辞。
+            let facts = report.checks.map(\.factText).joined(separator: "；")
+            reason = "检查结果（未做代码签名或来源验证）：" + facts
         } else if let failure = report.failureReason {
-            reason = "验证失败：\(failure)"
+            reason = "检查未通过：\(failure)"
         } else {
-            reason = "验证未通过"
+            reason = "检查未通过"
         }
         let result = UpdateTransactionPhaseResult(
             phase: .verify,
@@ -584,7 +870,7 @@ struct UpdateTransactionJournal {
     /// 提交前的降级阶段：没有失败、无需降级。明确记录“跳过”，让历史里
     /// 五个阶段都有明确结果。
     mutating func recordDegradationNotNeeded() {
-        record(.degrade, status: .skipped, reason: "验证通过并准备提交，无需降级/回滚")
+        record(.degrade, status: .skipped, reason: "版本与目标一致并准备提交，无需降级/回滚")
     }
 
     /// 最后一个明确成功的阶段。降级是失败后的恢复动作，不算“完成阶段”。
@@ -624,7 +910,9 @@ struct UpdateTransactionJournal {
             failureReason: firstFailureReason,
             manualCommandText: degradation?.manualAdvice.commandText ?? advice.commandText,
             manualGuidanceText: degradation?.manualAdvice.guidanceText ?? advice.guidanceText,
-            rollbackDescription: degradation.map(UpdateHistoryDescription.rollbackDescription(for:))
+            rollbackDescription: degradation.map(UpdateHistoryDescription.rollbackDescription(for:)),
+            evidenceLevel: degradation?.evidence?.level ?? configuration.fingerprint.evidenceLevel,
+            evidenceNote: degradation?.evidence?.summaryText ?? configuration.fingerprint.evidenceSummaryLine
         )
     }
 
@@ -654,7 +942,13 @@ enum UpdateHistoryDescription {
         case .stillUsingPreviousArtifact:
             return "验证失败，当前仍是更新前的文件，未尝试回滚"
         case .degradedToPreviousArtifact:
-            return "验证失败，已降级到更新前的可用可执行文件（版本 \(plan.restoredVersion ?? "未知")）"
+            var text = "验证失败，已降级到更新前记录的可用可执行文件（版本 \(plan.restoredVersion ?? "未知")）；这只是把调用方指回更新前记录的路径，不复制、不移动、不恢复文件内容"
+            if let evidence = plan.evidence {
+                text += "；\(evidence.contentVerificationClause)；证据等级 \(evidence.level.rawValue)（\(evidence.summaryText)）"
+            } else {
+                text += "；不校验旧文件内容（没有可用的证据核对记录）"
+            }
+            return text
         case .cannotAutomaticallyRollback:
             return "验证失败，无法自动回滚（\(plan.rollbackEligibility.text)）"
         }
@@ -707,6 +1001,10 @@ struct UpdateHistoryEntry: Equatable {
     var manualCommandText: String?
     var manualGuidanceText: String?
     var rollbackDescription: String?
+    /// 本次更新使用的指纹/降级证据等级（GitHub #63）。
+    var evidenceLevel: UpdateArtifactEvidenceLevel?
+    /// 证据等级的具体说明（含“未做内容哈希”与 npm “未获取”标注）。
+    var evidenceNote: String?
 
     /// 是否是一次成功更新（提交阶段成功且没有失败阶段）。
     var isSuccessful: Bool {
@@ -765,6 +1063,7 @@ enum UpdateHistoryStore {
         copy.manualCommandText = clipped(copy.manualCommandText)
         copy.manualGuidanceText = clipped(copy.manualGuidanceText)
         copy.rollbackDescription = clipped(copy.rollbackDescription)
+        copy.evidenceNote = clipped(copy.evidenceNote)
         copy.phases = copy.phases.map { phase in
             var phaseCopy = phase
             phaseCopy.reason = clipped(phaseCopy.reason) ?? "（原因已省略）"
@@ -805,6 +1104,8 @@ enum UpdateHistoryStore {
         var manualCommandText: String?
         var manualGuidanceText: String?
         var rollbackDescription: String?
+        var evidenceLevel: String?
+        var evidenceNote: String?
 
         init(entry: UpdateHistoryEntry) {
             recordedAt = entry.recordedAt.timeIntervalSince1970
@@ -821,6 +1122,8 @@ enum UpdateHistoryStore {
             manualCommandText = entry.manualCommandText
             manualGuidanceText = entry.manualGuidanceText
             rollbackDescription = entry.rollbackDescription
+            evidenceLevel = entry.evidenceLevel?.rawValue
+            evidenceNote = entry.evidenceNote
         }
 
         func entry() -> UpdateHistoryEntry? {
@@ -839,7 +1142,9 @@ enum UpdateHistoryStore {
                 failureReason: failureReason,
                 manualCommandText: manualCommandText,
                 manualGuidanceText: manualGuidanceText,
-                rollbackDescription: rollbackDescription
+                rollbackDescription: rollbackDescription,
+                evidenceLevel: evidenceLevel.flatMap(UpdateArtifactEvidenceLevel.init(rawValue:)),
+                evidenceNote: evidenceNote
             )
         }
     }
@@ -893,6 +1198,12 @@ enum UpdateHistoryPresenter {
         }
         if let rollback = entry.rollbackDescription {
             lines.append("降级/回滚：\(rollback)")
+        }
+        if let level = entry.evidenceLevel {
+            lines.append("降级证据等级：\(level.rawValue)（\(level.text)）")
+        }
+        if let note = entry.evidenceNote {
+            lines.append("证据说明：\(note)")
         }
         lines.append("建议动作：" + adviceText(for: entry))
         return lines

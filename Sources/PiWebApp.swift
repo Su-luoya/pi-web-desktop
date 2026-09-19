@@ -1114,14 +1114,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         configuration.piWebPath = restored
         appConfiguration.save(configuration)
         serviceManager.updateConfiguration(configuration)
-        logPiWebUpdate("更新降级（GitHub #23）：已把 Pi Web 服务指向更新前的可执行文件；不移动、不复制、不卸载任何文件。")
+        logPiWebUpdate("更新降级（GitHub #23/#63）：已把 Pi Web 服务指向更新前记录的路径（"
+            + (plan.evidence?.summaryText ?? "证据等级未知")
+            + "）；不移动、不复制、不卸载任何文件。")
     }
 
     /// 应用 Pi CLI 的有限降级：只把后续版本重检测指向更新前的可执行文件。
     private func applyPiCLIUpdateDegradation(_ plan: UpdateDegradationPlan) {
         guard plan.performedAutomaticDegradation, let restored = plan.restoredExecutablePath else { return }
         piCLIUpdateRedetectionPath = restored
-        logPiCLIUpdate("更新降级（GitHub #23）：已把 Pi CLI 重检测指向更新前的可执行文件；不移动、不复制、不卸载任何文件。")
+        logPiCLIUpdate("更新降级（GitHub #23/#63）：已把 Pi CLI 重检测指向更新前记录的路径（"
+            + (plan.evidence?.summaryText ?? "证据等级未知")
+            + "）；不移动、不复制、不卸载任何文件。")
     }
 
     /// 手动“立即更新 Pi Web…”：必须先确认（说明需要停服），确认后先停服务

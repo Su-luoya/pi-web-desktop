@@ -128,12 +128,47 @@ enum ServiceOwnershipVerdict: Equatable {
     }
 }
 
+/// 重启后的认领决策（GitHub #9）。
+///
+/// 应用重启时磁盘上可能留着上一次运行写的 `service-owner.json`。只有通过
+/// `ServiceOwnershipVerifier` 逐项校验的进程组才可以继续被管理；记录缺失或校验
+/// 失败一律按外部服务处理，不认领、不发信号、不改状态。
+enum ServiceAdoption: Equatable {
+    /// 校验通过：可以继续管理这个进程组。
+    case adopt(ServiceOwnershipRecord)
+    /// 校验失败或没有记录：只读的外部服务。
+    case external(ServiceOwnershipMismatch)
+
+    /// 认领到的记录；外部服务为 nil。
+    var adoptedRecord: ServiceOwnershipRecord? {
+        guard case .adopt(let record) = self else { return nil }
+        return record
+    }
+
+    var isAdopted: Bool { adoptedRecord != nil }
+}
+
 /// Decides whether an ownership record still describes a process this app
 /// instance started.
 ///
 /// Pure logic over injected probes, so the whole decision table can be
 /// exercised with fake `ps` output and an injected liveness function.
 enum ServiceOwnershipVerifier {
+    /// 记录 + 校验结果 → 认领决策（GitHub #9）。
+    ///
+    /// 没有记录，或校验结果是 `.managed` 却没有记录，都按“不能认领”处理：
+    /// 认领必须有可复核的证据。
+    static func adoption(
+        record: ServiceOwnershipRecord?,
+        verdict: ServiceOwnershipVerdict
+    ) -> ServiceAdoption {
+        guard let record, case .managed = verdict else {
+            if case .external(let mismatch) = verdict { return .external(mismatch) }
+            return .external(.invalidRecord)
+        }
+        return .adopt(record)
+    }
+
     static func verify(
         record: ServiceOwnershipRecord,
         expectation: ServiceOwnershipExpectation,

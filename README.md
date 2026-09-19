@@ -126,6 +126,7 @@ open "$HOME/Applications/Pi-Web-Desktop.app"
 ## 项目文档
 
 - [架构](docs/architecture.md)
+- [设置、工作目录与退出行为](docs/settings-and-workspace.md)
 - [开发](docs/development.md)
 - [安全设计](docs/security-ownership.md)
 - [发布](docs/releasing.md)

@@ -2,12 +2,12 @@ import Foundation
 
 /// App-owned filesystem locations and the UserDefaults-backed service settings.
 ///
-/// Every path the app reads or writes is derived from `supportURL` and
-/// `logsRootURL`, so tests and the smoke launch can inject temporary directories
-/// instead of the user's real `Application Support` and `Logs` folders. Defaults
-/// stay unchanged: `~/Library/Application Support/Pi Web Desktop`,
-/// `~/Library/Logs/Pi Web Desktop.log` and the loopback service defaults from
-/// `ServiceConfiguration`.
+/// Every path the app reads or writes is derived from `paths` (see `AppPaths`),
+/// so tests and the smoke launch can inject temporary directories instead of the
+/// user's real `Application Support` and `Logs` folders. Defaults stay unchanged
+/// for runtime state: `~/Library/Application Support/Pi Web Desktop`; logs live
+/// in `~/Library/Logs/Pi Web Desktop`, and service settings keep the loopback
+/// defaults from `ServiceConfiguration`.
 struct AppConfiguration {
     /// Smoke 启动模式。两种模式都使用临时 support 目录、跳过单实例锁和服务
     /// 自动启动，也都不写真实 UserDefaults。
@@ -29,12 +29,8 @@ struct AppConfiguration {
     /// Fixed marker the diagnostics smoke launch prints once the status page exists.
     static let smokeDiagnosticsReadyMarker = "smoke: diagnostics ready"
 
-    /// Runtime state root: PID files, instance lock and service workspace.
-    /// Defaults to `~/Library/Application Support/Pi Web Desktop`.
-    let supportURL: URL
-
-    /// Directory that holds `Pi Web Desktop.log`. Defaults to `~/Library/Logs`.
-    let logsRootURL: URL
+    /// 运行状态、日志与默认工作目录的位置提供者（可注入）。
+    let paths: AppPaths
 
     /// Which smoke launch (if any) this process is running.
     let smokeLaunchMode: SmokeLaunchMode
@@ -49,31 +45,80 @@ struct AppConfiguration {
         static let firstLaunchSetupCompleted = "firstLaunch.setupCompleted"
     }
 
+    init(paths: AppPaths, defaults: UserDefaults = .standard, smokeLaunchMode: SmokeLaunchMode = .none) {
+        self.paths = paths
+        self.defaults = defaults
+        self.smokeLaunchMode = smokeLaunchMode
+    }
+
+    /// 便捷初始化：直接给出两个根目录（单元测试与 smoke 用）。
     init(
         supportURL: URL,
         logsRootURL: URL,
         defaults: UserDefaults = .standard,
         smokeLaunchMode: SmokeLaunchMode = .none
     ) {
-        self.supportURL = supportURL
-        self.logsRootURL = logsRootURL
-        self.defaults = defaults
-        self.smokeLaunchMode = smokeLaunchMode
+        self.init(
+            paths: AppPaths(supportDirectory: supportURL, logsDirectory: logsRootURL),
+            defaults: defaults,
+            smokeLaunchMode: smokeLaunchMode
+        )
     }
 
-    var logURL: URL { logsRootURL.appendingPathComponent("Pi Web Desktop.log") }
-    var serviceWorkingDirectory: URL { supportURL.appendingPathComponent("Workspace", isDirectory: true) }
+    /// Runtime state root: PID files, instance lock and the default workspace.
+    var supportURL: URL { paths.supportDirectory }
+
+    /// Log directory. Defaults to `~/Library/Logs/Pi Web Desktop`.
+    var logsDirectoryURL: URL { paths.logsDirectory }
+
+    var logURL: URL { paths.logFileURL }
+
+    /// 打开日志前的准备：确保日志目录与日志文件存在。
+    ///
+    /// 日志位于 `~/Library/Logs/Pi Web Desktop/` 子目录（GitHub #9 的存储分层）。
+    /// 从未启动过服务、或关闭了自动启动时这个目录还不存在，直接
+    /// `createFile(atPath:)` 会因为父目录缺失而失败，所以这里先建目录再建文件。
+    /// 重复调用是幂等的。返回可读错误信息；`nil` 表示日志文件已经可以打开。
+    func prepareLogFileForOpening(fileManager: FileManager = .default) -> String? {
+        let logURL = self.logURL
+        let directory = logURL.deletingLastPathComponent()
+        do {
+            // 目录已存在时 `withIntermediateDirectories` 不会报错，所以这里不需要
+            // 先探测；目录位置被同名文件占据时会抛出可读错误。
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            return "无法创建日志目录：\(directory.path)（\(error.localizedDescription)）"
+        }
+        if !fileManager.fileExists(atPath: logURL.path),
+           !fileManager.createFile(atPath: logURL.path, contents: nil) {
+            return "无法创建日志文件：\(logURL.path)"
+        }
+        return nil
+    }
+
+    /// 默认工作目录 `~/Library/Application Support/Pi Web Desktop/Workspace`。
+    /// 首次使用时创建；用户在偏好窗口选择其他目录后，`service.workspacePath`
+    /// 覆盖它（见 `workspaceDirectory(for:)`）。
+    var defaultWorkspaceDirectory: URL { paths.workspaceDirectory }
+
+    /// 生效的工作目录：配置里的绝对路径优先，空字符串表示使用默认目录。
+    func workspaceDirectory(for configuration: ServiceConfiguration) -> URL {
+        guard let configured = configuration.workspacePath.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty else {
+            return paths.workspaceDirectory
+        }
+        return URL(fileURLWithPath: configured, isDirectory: true)
+    }
 
     /// Ownership record of the app-managed service. It is the only evidence
     /// that allows the app to stop a process (see `ServiceOwnershipRecord`).
-    var serviceOwnerURL: URL { supportURL.appendingPathComponent("service-owner.json") }
+    var serviceOwnerURL: URL { paths.serviceOwnerRecordURL }
 
     /// Legacy single-PID record written by older builds. It is only removed on
     /// startup and never used as an ownership proof again.
-    var legacyServicePIDURL: URL { supportURL.appendingPathComponent("service.pid") }
+    var legacyServicePIDURL: URL { paths.legacyServicePIDURL }
 
-    var appPIDURL: URL { supportURL.appendingPathComponent("app.pid") }
-    var instanceLockURL: URL { supportURL.appendingPathComponent("instance.lock") }
+    var appPIDURL: URL { paths.appPIDURL }
+    var instanceLockURL: URL { paths.instanceLockURL }
 
     /// Service settings as stored in UserDefaults. The default values are the
     /// safe ones from `ServiceConfiguration`: loopback host, empty proxies and a
@@ -91,23 +136,6 @@ struct AppConfiguration {
     /// Records that the first-launch review passed. Called only after a ready
     /// `DependencyReport`; a blocked report never marks setup complete.
     func markFirstLaunchSetupCompleted() { defaults.set(true, forKey: SetupKey.firstLaunchSetupCompleted) }
-
-    static func defaultSupportURL(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
-        homeDirectory.appendingPathComponent("Library/Application Support/Pi Web Desktop", isDirectory: true)
-    }
-
-    static func defaultLogsRootURL(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
-        homeDirectory.appendingPathComponent("Library/Logs", isDirectory: true)
-    }
-
-    /// `$TMPDIR/pi-web-desktop-smoke-<pid>`: the smoke launch must not touch the
-    /// user's real support directory.
-    static func smokeSupportURL(
-        temporaryDirectory: URL = FileManager.default.temporaryDirectory,
-        processIdentifier: Int32 = ProcessInfo.processInfo.processIdentifier
-    ) -> URL {
-        temporaryDirectory.appendingPathComponent("pi-web-desktop-smoke-\(processIdentifier)", isDirectory: true)
-    }
 
     static func isSmokeLaunch(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
         smokeLaunchMode(environment: environment) != .none
@@ -132,18 +160,12 @@ struct AppConfiguration {
         defaults: UserDefaults = .standard
     ) -> AppConfiguration {
         if isSmokeLaunch(environment: environment) {
-            let root = smokeSupportURL(temporaryDirectory: temporaryDirectory, processIdentifier: processIdentifier)
             return AppConfiguration(
-                supportURL: root,
-                logsRootURL: root.appendingPathComponent("Logs", isDirectory: true),
+                paths: AppPaths.smoke(temporaryDirectory: temporaryDirectory, processIdentifier: processIdentifier),
                 defaults: defaults,
                 smokeLaunchMode: smokeLaunchMode(environment: environment)
             )
         }
-        return AppConfiguration(
-            supportURL: defaultSupportURL(homeDirectory: homeDirectory),
-            logsRootURL: defaultLogsRootURL(homeDirectory: homeDirectory),
-            defaults: defaults
-        )
+        return AppConfiguration(paths: AppPaths.standard(homeDirectory: homeDirectory), defaults: defaults)
     }
 }

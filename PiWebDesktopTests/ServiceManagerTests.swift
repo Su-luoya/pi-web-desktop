@@ -164,6 +164,48 @@ private final class ManagerFakeFileManager: FileManager {
     }
 }
 
+/// 可注入的工作目录探针：把“目录存在/可写/创建”变成测试可控的状态，
+/// 从而在不碰真实用户目录的情况下模拟“运行期间目录被删除”。
+private final class ManagerFakeWorkspaceProbe {
+    private var directories: Set<String> = []
+    private var writableDirectories: Set<String> = []
+    private var files: Set<String> = []
+    private(set) var createdDirectories: [String] = []
+
+    /// 声明一个已存在且可写的目录（模拟用户选好的自选目录）。
+    func addWritableDirectory(_ path: String) {
+        directories.insert(path)
+        writableDirectories.insert(path)
+    }
+
+    /// 删除目录：等价于用户在应用运行期间把它删掉或改名。
+    func removeDirectory(_ path: String) {
+        directories.remove(path)
+        writableDirectories.remove(path)
+    }
+
+    func isDirectory(_ path: String) -> Bool { directories.contains(path) }
+
+    var probe: WorkspaceDirectoryProbe {
+        WorkspaceDirectoryProbe(
+            pathExists: { self.directories.contains($0) || self.files.contains($0) },
+            isDirectory: { self.directories.contains($0) },
+            isWritable: { self.writableDirectories.contains($0) },
+            createDirectory: { path in
+                self.createdDirectories.append(path)
+                self.directories.insert(path)
+                self.writableDirectories.insert(path)
+            }
+        )
+    }
+}
+
+/// 一次 `onWorkspaceProblem` 回调的记录。
+private struct ManagerWorkspaceProblem: Equatable {
+    let problem: WorkspaceDirectoryProblem
+    let path: String
+}
+
 /// Records every signal the manager sends.
 ///
 /// `ServiceSignaling` has no single-PID API, so "the app sent TERM/KILL to a
@@ -287,6 +329,7 @@ private final class ServiceManagerHarness {
     private(set) var states: [ServiceState] = []
     private(set) var pageMessages: [String] = []
     private(set) var startupFailures: [String] = []
+    private(set) var workspaceProblems: [ManagerWorkspaceProblem] = []
     private(set) var loadRequests = 0
     private(set) var closedRemoteConfigurations: [ServiceConfiguration] = []
 
@@ -298,7 +341,8 @@ private final class ServiceManagerHarness {
         fileManager: FileManager,
         baseEnvironment: [String: String],
         ownershipStore: ServiceOwnershipStoring? = nil,
-        remoteAccessPassword: @escaping () -> String? = { nil }
+        remoteAccessPassword: @escaping () -> String? = { nil },
+        workspaceProbe: WorkspaceDirectoryProbe? = nil
     ) throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("PiWebDesktopTests-\(UUID().uuidString)", isDirectory: true)
@@ -335,6 +379,7 @@ private final class ServiceManagerHarness {
             ownershipStore: store,
             signaler: signaler,
             remoteAccessPassword: remoteAccessPassword,
+            workspaceProbe: workspaceProbe,
             instanceID: Self.instanceID
         )
         // 既有测试覆盖的是依赖门控打开后的行为；门控本身的测试会显式关闭它。
@@ -346,6 +391,9 @@ private final class ServiceManagerHarness {
         manager.onLoadPage = { [weak self] in self?.loadRequests += 1 }
         manager.onRemoteAccessClosed = { [weak self] configuration in
             self?.closedRemoteConfigurations.append(configuration)
+        }
+        manager.onWorkspaceProblem = { [weak self] problem, path in
+            self?.workspaceProblems.append(ManagerWorkspaceProblem(problem: problem, path: path))
         }
     }
 
@@ -415,6 +463,11 @@ private let fakeBaseEnvironment = [
     "NO_PROXY": "stale.invalid"
 ]
 
+/// 测试用的“用户自选工作目录”（GitHub #9 复审）。
+/// 它只存在于假探针里：真实文件系统上不存在，也必须在测试结束时仍然不存在；
+/// 断言这一点正是“自选目录不得被自动创建”的防线。
+private let fakeCustomWorkspace = "/tmp/PiWebDesktopTests/custom-workspace"
+
 private func makeHarness(
     configuration: ServiceConfiguration = .default,
     alive: @escaping (pid_t) -> Bool = { _ in false },
@@ -423,7 +476,8 @@ private func makeHarness(
     fileManager: FileManager = .default,
     baseEnvironment: [String: String] = fakeBaseEnvironment,
     ownershipStore: ServiceOwnershipStoring? = nil,
-    remoteAccessPassword: @escaping () -> String? = { nil }
+    remoteAccessPassword: @escaping () -> String? = { nil },
+    workspaceProbe: WorkspaceDirectoryProbe? = nil
 ) throws -> ServiceManagerHarness {
     try ServiceManagerHarness(
         configuration: configuration,
@@ -433,7 +487,8 @@ private func makeHarness(
         fileManager: fileManager,
         baseEnvironment: baseEnvironment,
         ownershipStore: ownershipStore,
-        remoteAccessPassword: remoteAccessPassword
+        remoteAccessPassword: remoteAccessPassword,
+        workspaceProbe: workspaceProbe
     )
 }
 
@@ -731,7 +786,7 @@ final class ServiceManagerTests: XCTestCase {
         }
         XCTAssertEqual(specification.executablePath, executable)
         XCTAssertEqual(specification.arguments, ["--hostname", "127.0.0.1", "--port", "30141", "--no-open"])
-        XCTAssertEqual(specification.workingDirectory.standardizedFileURL, harness.appConfiguration.serviceWorkingDirectory.standardizedFileURL)
+        XCTAssertEqual(specification.workingDirectory.standardizedFileURL, harness.appConfiguration.defaultWorkspaceDirectory.standardizedFileURL)
 
         let environment = specification.environment
         XCTAssertEqual(environment["PI_WEB_NO_OPEN"], "1")
@@ -966,7 +1021,7 @@ final class ServiceManagerTests: XCTestCase {
         harness.manager.setState(.running)
 
         harness.manager.stopService()
-        harness.manager.stopAllServices {}
+        harness.manager.stopManagedServiceOnQuit {}
         harness.scheduler.runAllBackgroundWork()
 
         XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
@@ -1016,7 +1071,7 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
     }
 
-    func testStopAllServicesStopsTheVerifiedChildAndInvokesTheCompletion() throws {
+    func testStopManagedServiceOnQuitStopsTheVerifiedChildAndInvokesTheCompletion() throws {
         let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
         defer { harness.cleanUp() }
         harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
@@ -1025,7 +1080,7 @@ final class ServiceManagerTests: XCTestCase {
         harness.signaler.aliveProcessGroups = [5150]
 
         var completionRan = false
-        harness.manager.stopAllServices { completionRan = true }
+        harness.manager.stopManagedServiceOnQuit { completionRan = true }
         harness.scheduler.runAllBackgroundWork()
 
         XCTAssertTrue(completionRan)
@@ -1037,7 +1092,7 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertNil(harness.readOwnershipRecord())
     }
 
-    func testStopAllServicesLeavesAnExternalServiceRunning() throws {
+    func testStopManagedServiceOnQuitLeavesAnExternalServiceRunning() throws {
         let harness = try makeHarness(
             alive: { $0 == 4321 },
             processOutput: processOutput(for: 4321, listenerPort: 30141)
@@ -1045,10 +1100,303 @@ final class ServiceManagerTests: XCTestCase {
         defer { harness.cleanUp() }
 
         var completionRan = false
-        harness.manager.stopAllServices { completionRan = true }
+        harness.manager.stopManagedServiceOnQuit { completionRan = true }
 
         XCTAssertTrue(completionRan)
         XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
+    }
+
+    /// 三种退出行为与 `QuitPlan` 的对应关系：只有“退出并停止服务”会向已验证的
+    /// 托管进程组发信号；“保持运行”与“询问（未回答前）”都不停止服务。
+    func testEveryQuitBehaviourKeepsTheServiceUnlessStoppingWasRequested() throws {
+        for behavior in ServiceConfiguration.QuitBehavior.allCases {
+            let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+            defer { harness.cleanUp() }
+            var configuration = configured(try harness.makeExecutable())
+            configuration.quitBehavior = behavior
+            harness.manager.updateConfiguration(configuration)
+            harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+            harness.manager.startManagedService()
+            harness.manager.startHealthMonitor()
+            let plan = QuitPlan.plan(for: behavior)
+
+            if plan.stopsManagedService {
+                harness.signaler.aliveProcessGroups = [5150]
+                harness.manager.stopManagedServiceOnQuit {}
+                harness.scheduler.runAllBackgroundWork()
+
+                XCTAssertEqual(
+                    harness.signaler.groupSignals,
+                    [ManagerFakeSignaler.GroupSignal(signal: SIGTERM, processGroupID: 5150)],
+                    "\(behavior) 应停止已验证的托管服务"
+                )
+                XCTAssertNil(harness.readOwnershipRecord())
+            } else {
+                harness.manager.keepRunningOnQuit()
+
+                XCTAssertTrue(harness.signaler.groupSignals.isEmpty, "\(behavior) 不得停止服务")
+                XCTAssertNotNil(harness.readOwnershipRecord())
+                XCTAssertEqual(harness.manager.managedServicePID(), 5150)
+            }
+            XCTAssertTrue(harness.manager.isQuitting)
+            // 应用关闭期间不再有后台轮询。
+            XCTAssertEqual(harness.scheduler.repeatTokens.last?.invalidateCount, 1)
+        }
+    }
+
+    /// 外部服务在三种退出行为下都不被停止：没有可验证的记录就没有信号。
+    func testNoQuitBehaviourEverStopsAnExternalService() throws {
+        for behavior in ServiceConfiguration.QuitBehavior.allCases {
+            let harness = try makeHarness(
+                alive: { $0 == 4321 },
+                processOutput: processOutput(for: 4321, listenerPort: 30141)
+            )
+            defer { harness.cleanUp() }
+            var configuration = ServiceConfiguration.default
+            configuration.quitBehavior = behavior
+            harness.manager.updateConfiguration(configuration)
+            harness.manager.setState(.running)
+
+            let plan = QuitPlan.plan(for: behavior)
+            if plan.stopsManagedService {
+                harness.manager.stopManagedServiceOnQuit {}
+            } else {
+                harness.manager.keepRunningOnQuit()
+            }
+            harness.scheduler.runAllBackgroundWork()
+
+            XCTAssertNil(harness.manager.managedServicePID())
+            XCTAssertTrue(harness.signaler.groupSignals.isEmpty, "\(behavior) 不得停止外部服务")
+            // 外部服务的状态不由本应用管理：退出流程不改写它。
+            XCTAssertEqual(harness.manager.currentState, .running)
+        }
+    }
+
+    // MARK: 重启认领（GitHub #9）
+
+    /// 应用重启后只有通过所有权校验的服务才可被认领；校验失败的进程只作为
+    /// 外部服务出现，既不认领也不发送任何信号。
+    func testUnverifiableRecordFromAnEarlierRunIsNeverReclaimedOrSignalled() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        try harness.writeOwnershipRecord(harness.makeOwnershipRecord(instanceID: "instance-from-an-earlier-run"))
+
+        harness.manager.reconcileOwnershipRecord()
+        XCTAssertNil(harness.manager.managedServicePID())
+
+        harness.manager.setState(.running)
+        harness.manager.stopManagedServiceOnQuit {}
+        harness.scheduler.runAllBackgroundWork()
+
+        XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
+        XCTAssertNil(harness.readOwnershipRecord())
+        XCTAssertNil(harness.manager.managedServicePID())
+        XCTAssertEqual(harness.manager.currentState, .running)
+    }
+
+    // MARK: 工作目录门控（GitHub #9）
+
+    /// 工作目录不存在或不可写时阻止一切启动入口，并给出可读修复提示。
+    func testWorkspaceProblemBlocksEveryStartEntryAndReportsTheFix() throws {
+        let harness = try makeHarness(alive: { _ in false })
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.manager.setWorkspaceAvailability(problem: .notWritable, path: "/tmp/PiWebDesktopTests/read-only-workspace")
+
+        harness.manager.startAtLaunch()
+        harness.manager.startService()
+        harness.manager.ensureServerIsRunning()
+        harness.manager.reloadAfterConfigurationChange()
+        harness.manager.startManagedService()
+
+        XCTAssertEqual(harness.launcher.launchCount, 0)
+        XCTAssertEqual(harness.loadRequests, 0)
+        XCTAssertEqual(harness.startupFailures.count, 4)
+        XCTAssertTrue(harness.startupFailures.allSatisfy { $0.contains("不可写") })
+        XCTAssertTrue(harness.startupFailures.allSatisfy { $0.contains("/tmp/PiWebDesktopTests/read-only-workspace") })
+        XCTAssertTrue(harness.startupFailures.allSatisfy { $0.contains("设置") })
+    }
+
+    /// 可读提示区分默认工作目录与用户自选目录。
+    func testWorkspaceProblemMessageDistinguishesTheDefaultLocation() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+        harness.manager.setWorkspaceAvailability(
+            problem: .missing,
+            path: "/tmp/PiWebDesktopTests/support/Workspace",
+            usesDefaultLocation: true
+        )
+        harness.manager.startAtLaunch()
+        XCTAssertTrue(harness.startupFailures.last?.contains("默认工作目录不存在") == true)
+
+        harness.manager.setWorkspaceAvailability(
+            problem: .missing,
+            path: "/tmp/PiWebDesktopTests/custom-workspace",
+            usesDefaultLocation: false
+        )
+        harness.manager.startAtLaunch()
+        let message = try XCTUnwrap(harness.startupFailures.last)
+        XCTAssertTrue(message.contains("工作目录不存在"))
+        XCTAssertTrue(message.contains("/tmp/PiWebDesktopTests/custom-workspace"))
+        XCTAssertFalse(message.contains("默认工作目录"))
+    }
+
+    /// 工作目录恢复可用后门控重新打开，启动入口照常工作。
+    func testRestoringTheWorkspaceReopensEveryStartEntry() throws {
+        let harness = try makeHarness(alive: { _ in false })
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.manager.setWorkspaceAvailability(problem: .missing, path: "/tmp/PiWebDesktopTests/workspace")
+
+        harness.manager.ensureServerIsRunning()
+        XCTAssertEqual(harness.loadRequests, 0)
+
+        harness.manager.setWorkspaceAvailability(problem: nil, path: "/tmp/PiWebDesktopTests/workspace")
+        harness.manager.ensureServerIsRunning()
+
+        // 假探针默认报告服务已就绪：门控打开后直接加载服务页，不启动新进程。
+        XCTAssertEqual(harness.loadRequests, 1)
+        XCTAssertEqual(harness.launcher.launchCount, 0)
+    }
+
+    // MARK: 工作目录创建语义（GitHub #9 复审）
+
+    /// 用户自选的工作目录在运行期间被删除：启动入口既不重建它，也不静默启动，
+    /// 而是阻止启动并回调调用方进入诊断状态（可读修复提示）。
+    func testDeletedCustomWorkspaceIsNotRecreatedAndBlocksTheLaunch() throws {
+        let probe = ManagerFakeWorkspaceProbe()
+        let harness = try makeHarness(
+            alive: { $0 == 5150 },
+            processOutput: processOutput(for: 5150),
+            workspaceProbe: probe.probe
+        )
+        defer { harness.cleanUp() }
+        var configuration = configured(try harness.makeExecutable())
+        configuration.workspacePath = fakeCustomWorkspace
+        harness.manager.updateConfiguration(configuration)
+        // 门控在上一次探测（AppDelegate 的 refreshWorkspaceState）时是放行的。
+        harness.manager.setWorkspaceAvailability(problem: nil, path: fakeCustomWorkspace, usesDefaultLocation: false)
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+
+        // 目录在监控期间被用户删除。
+        probe.removeDirectory(fakeCustomWorkspace)
+        harness.manager.startManagedService()
+
+        XCTAssertEqual(harness.launcher.launchCount, 0)
+        XCTAssertTrue(probe.createdDirectories.isEmpty, "用户自选目录不得被静默重建")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fakeCustomWorkspace))
+        XCTAssertEqual(harness.manager.workspaceProblem, .missing)
+        XCTAssertEqual(harness.manager.workspaceDirectoryPath, fakeCustomWorkspace)
+        XCTAssertFalse(harness.manager.workspaceUsesDefaultLocation)
+        // 回调就是“进入诊断状态”的入口：AppDelegate 据此重路由到诊断页/诊断窗口。
+        XCTAssertEqual(harness.workspaceProblems, [
+            ManagerWorkspaceProblem(problem: .missing, path: fakeCustomWorkspace)
+        ])
+
+        // 其它启动入口也因此保持关闭，且给出可读修复提示。
+        harness.manager.startService()
+        harness.manager.ensureServerIsRunning()
+        XCTAssertEqual(harness.launcher.launchCount, 0)
+        XCTAssertEqual(harness.loadRequests, 0)
+        XCTAssertEqual(harness.startupFailures.count, 2)
+        XCTAssertTrue(harness.startupFailures.allSatisfy { $0.contains(fakeCustomWorkspace) })
+        XCTAssertTrue(harness.startupFailures.allSatisfy { $0.contains("设置") })
+    }
+
+    /// 存在且可写的自选目录既不被创建也不阻止启动：自动创建只针对默认目录。
+    func testExistingCustomWorkspaceIsUsedWithoutBeingCreated() throws {
+        let probe = ManagerFakeWorkspaceProbe()
+        let harness = try makeHarness(
+            alive: { $0 == 5150 },
+            processOutput: processOutput(for: 5150),
+            workspaceProbe: probe.probe
+        )
+        defer { harness.cleanUp() }
+        var configuration = configured(try harness.makeExecutable())
+        configuration.workspacePath = fakeCustomWorkspace
+        harness.manager.updateConfiguration(configuration)
+        probe.addWritableDirectory(fakeCustomWorkspace)
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+
+        harness.manager.startManagedService()
+
+        XCTAssertEqual(harness.launcher.launchCount, 1)
+        XCTAssertTrue(probe.createdDirectories.isEmpty)
+        XCTAssertTrue(harness.workspaceProblems.isEmpty)
+        XCTAssertNil(harness.manager.workspaceProblem)
+        XCTAssertEqual(harness.manager.workspaceDirectoryPath, fakeCustomWorkspace)
+        // 真正的 `openLogForWriting` 用的是真实 FileManager：自选目录也没有被它创建。
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fakeCustomWorkspace))
+        XCTAssertTrue(harness.launcher.specifications.allSatisfy {
+            $0.workingDirectory.path == fakeCustomWorkspace
+        })
+    }
+
+    /// 默认工作目录缺失时仍会创建它，然后正常启动。
+    func testMissingDefaultWorkspaceIsCreatedBeforeLaunching() throws {
+        let probe = ManagerFakeWorkspaceProbe()
+        let harness = try makeHarness(
+            alive: { $0 == 5150 },
+            processOutput: processOutput(for: 5150),
+            workspaceProbe: probe.probe
+        )
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        let defaultWorkspace = harness.appConfiguration.defaultWorkspaceDirectory.path
+        XCTAssertFalse(probe.isDirectory(defaultWorkspace))
+
+        harness.manager.startManagedService()
+
+        XCTAssertEqual(probe.createdDirectories, [defaultWorkspace])
+        XCTAssertEqual(harness.launcher.launchCount, 1)
+        XCTAssertNil(harness.manager.workspaceProblem)
+        XCTAssertTrue(harness.manager.workspaceUsesDefaultLocation)
+        XCTAssertTrue(harness.workspaceProblems.isEmpty)
+    }
+
+    /// 健康监控期间自选目录被删除：受托管重启被拒绝，目录不被重建（复审场景）。
+    func testHealthRestartIsBlockedWhenTheCustomWorkspaceDisappeared() throws {
+        let liveness = ManagerFakeLiveness()
+        let probe = ManagerFakeWorkspaceProbe()
+        let harness = try makeHarness(
+            alive: { pid in pid == 5150 ? liveness.isAlive : true },
+            processOutput: processOutput(for: 5150),
+            workspaceProbe: probe.probe
+        )
+        defer { harness.cleanUp() }
+        var configuration = configured(try harness.makeExecutable())
+        configuration.workspacePath = fakeCustomWorkspace
+        harness.manager.updateConfiguration(configuration)
+        probe.addWritableDirectory(fakeCustomWorkspace)
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = true
+
+        harness.manager.startManagedService()
+        XCTAssertTrue(harness.scheduler.runNextDelayedWork())
+        harness.manager.startHealthMonitor()
+        XCTAssertEqual(harness.manager.currentState, .running)
+        XCTAssertEqual(harness.launcher.launchCount, 1)
+
+        // 用户删掉自选目录，服务随后断开：健康恢复不得重建目录，也不得启动新进程。
+        let process = try XCTUnwrap(harness.launcher.result.get() as? ManagerFakeProcess)
+        process.isRunning = false
+        liveness.isAlive = false
+        probe.removeDirectory(fakeCustomWorkspace)
+        harness.probe.ready = false
+        // 假如恢复真的尝试启动，这一次会成功（新 PID），从而暴露问题。
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5200))
+        harness.runner.handler = processOutput(for: 5200)
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+
+        XCTAssertEqual(harness.launcher.launchCount, 1)
+        XCTAssertTrue(probe.createdDirectories.isEmpty, "健康恢复不得重建用户自选目录")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fakeCustomWorkspace))
+        XCTAssertEqual(harness.manager.workspaceProblem, .missing)
+        XCTAssertEqual(harness.workspaceProblems, [
+            ManagerWorkspaceProblem(problem: .missing, path: fakeCustomWorkspace)
+        ])
     }
 
     // MARK: Spawn descriptors

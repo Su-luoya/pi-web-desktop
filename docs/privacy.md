@@ -17,7 +17,7 @@ Pi Web Desktop 不收集或上传遥测、使用统计、会话内容、认证�
 - 只有远程模式（监听地址不是 loopback）启动托管服务时，密码才经子进程环境变量 `PI_WEB_PASSWORD` 传给 pi-web；loopback 模式不注入，并会清除继承来的同名变量。
 - 删除 Keychain 密码条目会立即关闭远程模式：监听地址回到 `127.0.0.1` 并更新配置；若密码是在服务运行期间被删除或变成不可读，应用会先停止本应用启动且仍可验证所有权的远程进程组（外部服务不发信号），再把配置收回到 `127.0.0.1` 并显示可读提示。
 - 运行状态写入 `~/Library/Application Support/Pi Web Desktop/`。
-- 日志写入 `~/Library/Logs/Pi Web Desktop.log` 并轮转。
+- 日志写入 `~/Library/Logs/Pi Web Desktop/Pi Web Desktop.log`（见 `Sources/AppPaths.swift`）并按大小轮转。
 - `WKWebView` 使用系统默认的持久化网站数据存储：`Sources/WebViewController.swift:37` 设置 `configuration.websiteDataStore = .default()`，`Sources/` 里没有任何 `WKWebsiteDataStore` 的删除调用。WebKit 因此会以 bundle identifier 为键，在应用自己的 UserDefaults/Application Support 之外持久化网站数据：`~/Library/WebKit/io.github.su-luoya.pi-web-desktop/WebsiteData/`（本机观察到 `Default/`、`IndexedDB/`、`LocalStorage/`、`SearchHistory/`、`ResourceLoadStatistics/`、`EnhancedSecurity/` 等子目录）和 `~/Library/Caches/io.github.su-luoya.pi-web-desktop/WebKit/`（观察到 `NetworkCache/`、`CacheStorage/`、`ServiceWorkers/`、`HSTS/`、`AlternativeServices/`）。这些文件（WebKit 保存的 cookies、缓存、local storage、IndexedDB、Service Worker 记录等，具体取决于服务页面和 WebKit 版本；本机未在 `~/Library/Cookies/` 或 `~/Library/HTTPStorages/` 下观察到属于本 bundle id 的独立文件）由 WebKit 管理，应用自身不读取也不解析它们。当前构建未启用 App Sandbox，所以路径就在用户的 `~/Library` 下，而不是沙盒容器里。
 - 应用不读取、复制或迁移 `~/.pi/agent/auth.json` 等 Pi 认证内容。
 - 首次启动诊断只检查 `~/.pi/agent` 是否存在与可读（不列目录、不读取任何文件），报告里只出现脱敏后的路径 `~/.pi/agent`。

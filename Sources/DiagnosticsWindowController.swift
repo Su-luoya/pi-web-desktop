@@ -56,24 +56,44 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
     private var report: DependencyReport
     private var firstLaunchSetupIncomplete: Bool
     private var canContinueToService: Bool
+    /// 工作目录不可用时的可读修复提示（GitHub #9）；nil 表示目录可用。
+    private var workspaceMessage: String?
 
-    init(report: DependencyReport, firstLaunchSetupIncomplete: Bool, canContinueToService: Bool) {
+    init(
+        report: DependencyReport,
+        firstLaunchSetupIncomplete: Bool,
+        canContinueToService: Bool,
+        workspaceMessage: String? = nil
+    ) {
         self.report = report
         self.firstLaunchSetupIncomplete = firstLaunchSetupIncomplete
         self.canContinueToService = canContinueToService
+        self.workspaceMessage = workspaceMessage
         super.init(window: nil)
         buildWindow()
-        update(report: report, firstLaunchSetupIncomplete: firstLaunchSetupIncomplete, canContinueToService: canContinueToService)
+        update(
+            report: report,
+            firstLaunchSetupIncomplete: firstLaunchSetupIncomplete,
+            canContinueToService: canContinueToService,
+            workspaceMessage: workspaceMessage
+        )
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     /// 用新的诊断结果刷新表格和安装命令；窗口本身不重新执行检查。
-    func update(report: DependencyReport, firstLaunchSetupIncomplete: Bool, canContinueToService: Bool) {
+    /// `workspaceMessage` 非 nil 时在详情行里额外给出工作目录的可读修复提示。
+    func update(
+        report: DependencyReport,
+        firstLaunchSetupIncomplete: Bool,
+        canContinueToService: Bool,
+        workspaceMessage: String? = nil
+    ) {
         self.report = report
         self.firstLaunchSetupIncomplete = firstLaunchSetupIncomplete
         self.canContinueToService = canContinueToService
+        self.workspaceMessage = workspaceMessage
         tableView.reloadData()
         let commands = DependencyReportPresenter.installCommandsText(for: report)
         commandsTextView.string = commands.isEmpty ? "当前没有需要修复的依赖。" : commands
@@ -82,7 +102,9 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
     }
 
     private func updateLabels() {
-        if canContinueToService {
+        if let workspaceMessage, !workspaceMessage.isEmpty {
+            detailLabel.stringValue = "工作目录不可用，服务与 WebView 已暂停。\(workspaceMessage)"
+        } else if canContinueToService {
             detailLabel.stringValue = firstLaunchSetupIncomplete
                 ? "硬性前置已满足。点击“开始使用 Pi Web”完成首次设置并进入服务页面。"
                 : "未发现阻塞启动的依赖问题。安装命令只供复制，应用不会执行。"
@@ -107,7 +129,7 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         title.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
 
         detailLabel.lineBreakMode = .byWordWrapping
-        detailLabel.maximumNumberOfLines = 3
+        detailLabel.maximumNumberOfLines = 4
 
         hintLabel.lineBreakMode = .byWordWrapping
         hintLabel.maximumNumberOfLines = 3

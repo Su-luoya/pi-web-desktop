@@ -19,7 +19,9 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 - `ServiceOwnership`（`Sources/ServiceOwnership.swift`）：所有权记录（JSON 字段、规范化命令文本的 SHA-256 摘要、可执行标识来源）、记录文件存取（`ServiceOwnershipStoring`）、逐项校验的纯逻辑（`ServiceOwnershipVerifier`）和只按进程组发送信号的接口（`ServiceSignaling` / `POSIXServiceSignaler`）。
 - `WebViewController`（`Sources/WebViewController.swift`）：`WKWebView` 创建与配置、导航策略、下载、外部链接、查找栏、缩放和加载/错误状态页；加载状态页、错误页和带标题的诊断状态页（`showDependencyPage(title:message:)`）都由它拥有；通过 `onNavigationFailure`（以及 `onDownloadStarted`）回调把结果交给 `AppDelegate`，窗口由 `windowProvider` 闭包注入。
 - `WebViewNavigationPolicy`（`Sources/WebViewNavigationPolicy.swift`）：本地/外链 URL 判定（`127.0.0.1`/`localhost`/`::1` 加配置端口；`about`/`blob`/`data` 视为内联），不依赖 Cocoa/WebKit，可在 unhosted 测试目标里直接测试。
-- `AppConfiguration`：support 目录、日志目录、工作目录、`service-owner.json` / 旧 `service.pid` / app PID / 实例锁文件路径、UserDefaults 服务配置读写；支持注入 support/log 根目录，并为 smoke 运行派生 `$TMPDIR` 下的临时目录。
+- `AppConfiguration`（`Sources/AppConfiguration.swift`）与 `AppPaths`（`Sources/AppPaths.swift`）：设置分层与路径的唯一提供者——普通设置经 UserDefaults 读写，运行状态（`service-owner.json`、旧 `service.pid`、app PID、实例锁）在 `~/Library/Application Support/Pi Web Desktop/`，日志在 `~/Library/Logs/Pi Web Desktop/`，默认工作目录为其中的 `Workspace/`。两个根目录都可注入（support/log），因此测试与 smoke 运行不会写入真实目录。
+- `WorkspaceDirectory`（`Sources/WorkspaceDirectory.swift`）：工作目录的解析与校验（存在、是目录、可写）与可读修复提示；默认目录首次使用时创建，自选目录必须已存在且可写，不可用时阻止启动（见 [docs/settings-and-workspace.md](settings-and-workspace.md)）。
+- `QuitPlan`（`Sources/QuitPolicy.swift`）：退出行为的纯决策（询问 / 保持运行 / 停止服务），可 unhosted 测试；外部服务在任何退出行为下都不会被停止。
 - `ProcessInspector`：`ps`/`lsof` 命令、监听端口 PID、进程存活判断、`pgid`/`lstart`/`comm`/`args` 事实读取和进程描述；命令执行通过 `CommandRunning` 注入，可执行标识读取（`proc_pidpath`）也可注入，解析规则是不访问进程的纯函数。它只报告事实，不做所有权判定。
 - `DiagnosticsCollector`：把调用方已收集的版本、地址、状态、PID、进程描述和路径组装为诊断文本，自身不执行命令、不读磁盘。
 - `DependencyChecker`（`Sources/DependencyChecker.swift`）：启动前的只读依赖诊断。检查系统（`uname` 架构与 macOS 版本）、Node.js（必须 `>= 22.19.0`，自实现语义化版本比较）、Pi CLI、Pi Web（可执行文件、版本、真实路径、符号链接目标，以及 pi-web 的 package.json `name`/`version`）、默认服务端口（本机 `bind(2)` 判定可用/被占用）和 Pi 配置目录（`~/.pi/agent`，只问“存在吗/可读吗”）。命令经 `CommandRunning` 注入，磁盘经 `DependencyFileSystemProbing` 注入，架构与系统版本经 `DependencySystemProbe` 注入，端口经 `DependencyPortProbing` 注入。它不安装、不升级、不联网、不调用 `sudo`，也不读取认证内容；路径在离开 checker 前已经完成 Home 脱敏（`~`）。
@@ -108,7 +110,7 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 
 ### 停止与重启
 
-只有验证通过的记录才会收到信号：先向记录的进程组发送 `SIGTERM`，在 `stopPollAttempts`（40 × 0.1 秒）内等待进程组消失，仍存活才对同一进程组发送 `SIGKILL`。`ServiceSignaling` 接口只暴露进程组形式（`kill(-pgid, ...)`），因此不存在向单个 PID 发送信号的路径。外部服务或验证失败时不发送任何信号：`stopService()` 只在验证通过后才会把状态更新为已停止，找不到可验证记录时直接完成回调、保持当前状态（例如仍显示“正在运行（外部服务）”）并删除不匹配的记录；菜单的停止/重启动作仍然先显示原有的“这是外部启动的 Pi Web 服务”警告。`stopAllServices`（“退出并停止服务”）也只停止已验证的托管子进程，不再清理端口上的其他监听进程。
+只有验证通过的记录才会收到信号：先向记录的进程组发送 `SIGTERM`，在 `stopPollAttempts`（40 × 0.1 秒）内等待进程组消失，仍存活才对同一进程组发送 `SIGKILL`。`ServiceSignaling` 接口只暴露进程组形式（`kill(-pgid, ...)`），因此不存在向单个 PID 发送信号的路径。外部服务或验证失败时不发送任何信号：`stopService()` 只在验证通过后才会把状态更新为已停止，找不到可验证记录时直接完成回调、保持当前状态（例如仍显示“正在运行（外部服务）”）并删除不匹配的记录；菜单的停止/重启动作仍然先显示原有的“这是外部启动的 Pi Web 服务”警告。`stopManagedServiceOnQuit`（“退出并停止服务”，由 `QuitPlan` 决定是否调用）也只停止已验证的托管子进程，不再清理端口上的其他监听进程；外部服务在任何退出行为下都不发信号。
 
 ### 过期记录与应用重启
 
@@ -140,6 +142,8 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 - 普通设置：UserDefaults（读写都经 `AppConfiguration`）。
 - 远程访问密码：macOS Keychain（service = bundle identifier，account = `remote-access-password`，仅本文一处存储）。
 - 运行状态和 PID：`~/Library/Application Support/Pi Web Desktop/`。
-- 日志：`~/Library/Logs/Pi Web Desktop.log`，应用执行轮转。
+- 日志：`~/Library/Logs/Pi Web Desktop/`（`Pi Web Desktop.log`），应用执行轮转。
+
+设置分层、默认工作目录、退出行为与不可写目录的处理见 [docs/settings-and-workspace.md](settings-and-workspace.md)。
 
 应用不读取、复制或修改 Pi 的认证文件。

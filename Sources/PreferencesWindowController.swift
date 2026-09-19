@@ -11,6 +11,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     var onRemoteAccessCredentialsChanged: ((ServiceConfiguration) -> Void)?
 
     private let pathField = NSTextField()
+    private let workspaceField = NSTextField()
     private let hostnameField = NSTextField()
     private let portField = NSTextField()
     private let allowedHostsField = NSTextField()
@@ -31,11 +32,22 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     private let keychain: KeychainStoring
     /// 只保留“已设置/未设置”的结论：已保存的密码永远不会被读回并显示。
     private var hasStoredPassword: Bool
+    /// 默认工作目录（`~/Library/Application Support/Pi Web Desktop/Workspace`）。
+    private let defaultWorkspaceDirectory: String
+    /// 工作目录探针；测试/预览可注入。
+    private let workspaceProbe: WorkspaceDirectoryProbe
 
-    init(configuration: ServiceConfiguration, keychain: KeychainStoring = KeychainStore()) {
+    init(
+        configuration: ServiceConfiguration,
+        keychain: KeychainStoring = KeychainStore(),
+        defaultWorkspaceDirectory: String = "",
+        workspaceProbe: WorkspaceDirectoryProbe = .live()
+    ) {
         self.configuration = configuration
         self.keychain = keychain
         self.hasStoredPassword = RemoteAccessPassword.isSet(in: keychain)
+        self.defaultWorkspaceDirectory = defaultWorkspaceDirectory
+        self.workspaceProbe = workspaceProbe
         super.init(window: nil)
         buildWindow()
         loadValues()
@@ -61,6 +73,8 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         behaviorHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
 
         let pathPicker = NSButton(title: "选择…", target: self, action: #selector(selectPiWebPath(_:)))
+        let workspacePicker = NSButton(title: "选择…", target: self, action: #selector(selectWorkspaceDirectory(_:)))
+        let workspaceDefaultButton = NSButton(title: "使用默认目录", target: self, action: #selector(useDefaultWorkspaceDirectory(_:)))
         let resetButton = NSButton(title: "恢复默认", target: self, action: #selector(resetDefaults(_:)))
         let cancelButton = NSButton(title: "取消", target: self, action: #selector(cancel(_:)))
         let saveButton = NSButton(title: "保存", target: self, action: #selector(save(_:)))
@@ -75,6 +89,13 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         deletePasswordButton.action = #selector(deletePassword(_:))
 
         let pathRow = row(label: "pi-web 路径", field: pathField, trailing: pathPicker)
+        workspaceField.placeholderString = defaultWorkspaceDirectory
+        workspaceField.delegate = self
+        let workspaceButtons = NSStackView(views: [workspacePicker, workspaceDefaultButton])
+        workspaceButtons.orientation = .horizontal
+        workspaceButtons.spacing = 8
+        workspaceButtons.alignment = .centerY
+        let workspaceRow = row(label: "工作目录", field: workspaceField, trailing: workspaceButtons)
         let portRow = row(label: "端口", field: portField)
         hostnameField.delegate = self
         let hostnameRow = row(label: "监听地址", field: hostnameField)
@@ -95,7 +116,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         autoStartButton.target = self
         autoStartButton.action = #selector(autoStartChanged(_:))
 
-        for hint in [remoteAccessHintLabel, passwordHintLabel] {
+        for hint in [remoteAccessHintLabel, passwordHintLabel, workspaceHintLabel] {
             hint.lineBreakMode = .byWordWrapping
             hint.maximumNumberOfLines = 0
             hint.textColor = .secondaryLabelColor
@@ -112,7 +133,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
 
         let stack = NSStackView(views: [
             title,
-            serviceHeader, pathRow, portRow,
+            serviceHeader, pathRow, workspaceRow, workspaceHintLabel, portRow,
             remoteHeader, hostnameRow, passwordStatusRow, newPasswordRow, passwordActionsRow,
             passwordHintLabel, remoteAccessHintLabel,
             networkHeader, allowedHostsRow, httpProxyRow, httpsProxyRow, noProxyRow,
@@ -126,7 +147,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         content.addSubview(stack)
 
         for rowView in [
-            pathRow, portRow, hostnameRow, passwordStatusRow, newPasswordRow, passwordActionsRow,
+            pathRow, workspaceRow, portRow, hostnameRow, passwordStatusRow, newPasswordRow, passwordActionsRow,
             allowedHostsRow, httpProxyRow, httpsProxyRow, noProxyRow, quitRow
         ] {
             rowView.widthAnchor.constraint(equalToConstant: 520).isActive = true
@@ -135,6 +156,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         errorLabel.widthAnchor.constraint(equalToConstant: 520).isActive = true
         passwordHintLabel.widthAnchor.constraint(equalToConstant: 520).isActive = true
         remoteAccessHintLabel.widthAnchor.constraint(equalToConstant: 520).isActive = true
+        workspaceHintLabel.widthAnchor.constraint(equalToConstant: 520).isActive = true
 
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
@@ -145,10 +167,10 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
             autoStartButton.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
 
-        // 新增“远程访问”分区后内容变高（密码状态、新密码、密码按钮和两段说明）。
-        // 780 覆盖了带两行错误提示时的实测高度（约 770），因此固定高度的窗口不会
-        // 裁掉说明文字或底部按钮。
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 568, height: 780), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        // 新增“远程访问”分区后内容变高（密码状态、新密码、密码按钮和两段说明）；
+        // 再加入“工作目录”行与说明后，860 覆盖带两行错误提示时的实测高度，
+        // 因此固定高度的窗口不会裁掉说明文字或底部按钮。
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 568, height: 860), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Pi Web Desktop 设置"
         window.contentView = content
         window.isReleasedWhenClosed = false
@@ -159,6 +181,9 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     /// 远程访问密码与传输加密的区别：界面必须明确说明密码认证不等于加密。
     private let passwordHintLabel = NSTextField(labelWithString:
         "密码认证只验证访问者身份，不等于 HTTPS 或加密隧道。远程访问请自行配置受信任的加密隧道（例如 WireGuard、SSH 端口转发）或 HTTPS 反向代理。")
+
+    /// 工作目录说明：默认目录、首次使用时创建、必须可写。
+    private let workspaceHintLabel = NSTextField(labelWithString: "")
 
     private func row(label: String, field: NSView, trailing: NSView? = nil, isReadOnly: Bool = false) -> NSView {
         let labelView = NSTextField(labelWithString: label)
@@ -183,6 +208,8 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
 
     private func loadValues() {
         pathField.stringValue = configuration.piWebPath
+        workspaceField.stringValue = configuration.workspacePath
+        refreshWorkspaceHint()
         hostnameField.stringValue = configuration.hostname
         hostnameField.isEditable = true
         hostnameField.isEnabled = true
@@ -194,6 +221,18 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         autoStartButton.state = configuration.autoStart ? .on : .off
         quitBehaviorPopup.selectItem(at: ServiceConfiguration.QuitBehavior.allCases.firstIndex(of: configuration.quitBehavior) ?? 0)
         refreshRemoteAccessState()
+    }
+
+    /// 工作目录提示：留空 = 默认目录；自选目录必须存在且可写。
+    private func refreshWorkspaceHint() {
+        let configured = workspaceField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if configured.isEmpty {
+            workspaceHintLabel.stringValue = "留空时使用默认工作目录（\(defaultWorkspaceDirectory)）。"
+                + "首次使用时自动创建；目录不存在或不可写时会暂停启动服务并给出诊断提示。"
+        } else {
+            workspaceHintLabel.stringValue = "当前工作目录：\(configured)。"
+                + "pi-web 会在该目录写入运行文件，目录必须存在且可写。"
+        }
     }
 
     /// 刷新“已设置/未设置”和与 hostname 联动的提示。只读结论来自 Keychain，
@@ -231,6 +270,35 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
             guard response == .OK, let url = panel.url else { return }
             self?.pathField.stringValue = url.path
         }
+    }
+
+    /// 工作目录面板：只允许目录，选定后立即校验“存在 + 可写”，不通过时
+    /// 只显示可读错误，字段与配置都不变。
+    @objc private func selectWorkspaceDirectory(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.prompt = "选择"
+        panel.message = "选择 pi-web 的工作目录（必须可写）"
+        panel.beginSheetModal(for: window!) { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            switch WorkspaceDirectory.validate(path: url.path, probe: self.workspaceProbe) {
+            case .usable:
+                self.workspaceField.stringValue = url.path
+                self.errorLabel.isHidden = true
+            case .unusable(let problem, let path):
+                self.showError("无法使用该工作目录（\(problem.title)）：\(path)。请改选一个可写目录。")
+            }
+            self.refreshWorkspaceHint()
+        }
+    }
+
+    @objc private func useDefaultWorkspaceDirectory(_ sender: Any?) {
+        workspaceField.stringValue = ""
+        errorLabel.isHidden = true
+        refreshWorkspaceHint()
     }
 
     @objc private func resetDefaults(_ sender: Any?) {
@@ -322,12 +390,26 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
             httpsProxy: httpsProxyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             noProxy: noProxyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             autoStart: autoStartButton.state == .on,
-            quitBehavior: ServiceConfiguration.QuitBehavior.allCases[quitBehaviorPopup.indexOfSelectedItem]
+            quitBehavior: ServiceConfiguration.QuitBehavior.allCases[quitBehaviorPopup.indexOfSelectedItem],
+            workspacePath: configuration.workspacePath
         )
+        // 工作目录只接受已存在且可写的绝对路径；留空表示跟随默认目录。
+        // 校验失败时返回可读错误，配置不会被保存。
+        let workspaceSelection = WorkspaceDirectory.Selection.apply(
+            selectedPath: workspaceField.stringValue,
+            configuration: requested,
+            defaultPath: defaultWorkspaceDirectory,
+            probe: workspaceProbe
+        )
+        if let error = workspaceSelection.error {
+            showError(error)
+            return
+        }
+        let requestedWithWorkspace = workspaceSelection.configuration
         // 密码只写入 Keychain；配置只通过 onSave 交给 AppDelegate 写入 UserDefaults。
         // 远程 hostname 缺少密码时这一步直接返回可读错误，配置不会被保存。
         let pendingPassword = newPasswordField.stringValue.isEmpty ? nil : newPasswordField.stringValue
-        let outcome = RemoteAccessSetup.apply(requested: requested, newPassword: pendingPassword, keychain: keychain)
+        let outcome = RemoteAccessSetup.apply(requested: requestedWithWorkspace, newPassword: pendingPassword, keychain: keychain)
         guard let newConfiguration = outcome.configuration else {
             showError(outcome.error ?? "设置未保存。")
             return
@@ -341,8 +423,12 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     }
 
     func controlTextDidChange(_ notification: Notification) {
-        guard (notification.object as? NSTextField) === hostnameField else { return }
-        remoteAccessHintLabel.stringValue = remoteAccessHintText()
+        guard let field = notification.object as? NSTextField else { return }
+        if field === hostnameField {
+            remoteAccessHintLabel.stringValue = remoteAccessHintText()
+        } else if field === workspaceField {
+            refreshWorkspaceHint()
+        }
     }
 
     private func showError(_ message: String) {

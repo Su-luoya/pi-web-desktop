@@ -30,7 +30,7 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 - `FirstLaunchDiagnostics`（`Sources/FirstLaunchDiagnostics.swift`）：首次启动路由、门控控件映射、pi-web 路径选择和诊断 smoke 夹具的纯逻辑——`DiagnosticsGate`（`checking`/`ready`/`blocked`）、`ServiceControlState`（门控 → start/stop/restart 可用性）、`DiagnosticsRouting`（报告 + 首次设置状态 → `mainWindow`/`diagnostics(reasons)`）、`ServiceLaunchIntent`（首次设置刚完成 → 显式启动，否则尊重 `autoStart`）、`PiWebPathSelection` 与 `PiWebIdentityEvidence`（选中的路径 + 只读身份证据 → 新配置或可读错误）和 `DiagnosticsSmokeFixture`。不依赖 AppKit，可在 unhosted 测试目标里直接断言。
 - `DiagnosticsWindowController`（`Sources/DiagnosticsWindowController.swift`）：首次启动诊断状态页（诊断项表格 + 可复制的安装命令 + “选择 pi-web 路径…”“重新检测”“开始使用 Pi Web”）。它只渲染 `DependencyReport` 和收集用户选择：选择结果经 `onSelectPiWebPath` 交给 `AppDelegate` 校验并写入配置，重新检测经 `onRecheck` 回调；窗口不执行安装命令、不写配置。
 - `PreferencesWindowController`：用户设置界面；保存后由 `AppDelegate` 经 `AppConfiguration` 写回 UserDefaults。“远程访问”分区显示密码已设置/未设置，提供设置/生成/删除密码按钮，并说明密码认证不等于传输加密；删除密码会关闭远程模式并恢复默认 loopback。
-- `KeychainStore`（`Sources/KeychainStore.swift`）：远程访问密码的存储与门控纯逻辑。`KeychainStoring` 协议只提供 save/load/delete/exists，生产实现是 macOS Security 的 `kSecClassGenericPassword`（service = bundle identifier，account = `remote-access-password`，`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`）；`RemoteAccessPassword` 给出读取与“已设置/未设置”状态文本，`RemoteAccessPolicy` 判定 loopback、hostname 校验、远程监听前置条件与“删除密码后回到 loopback”，`RemoteAccessSetup` 是设置界面的保存流程（密码只进 Keychain，配置只进 UserDefaults），`PasswordGenerator` 用 `SecRandomCopyBytes` 在本地生成不低于 24 位、含大小写字母数字符号的密码，`SecretScrubbing` 在展示前移除已知秘密。
+- `KeychainStore`（`Sources/KeychainStore.swift`）：远程访问密码的存储与门控纯逻辑。`KeychainStoring` 协议只提供 save/load/delete/exists，生产实现是 macOS Security 的 `kSecClassGenericPassword`（service = bundle identifier，account = `remote-access-password`，`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`）；`RemoteAccessPassword` 给出读取与“已设置/未设置”状态文本，`RemoteAccessPolicy` 给出唯一的监听地址判定 `addressVerdict(hostname:)`（结果类型 `ServiceAddressVerdict`，保存/加载/启动共用）、loopback 判定、远程监听前置条件与“删除密码后回到 loopback”，`RemoteAccessSetup` 是设置界面的保存流程（密码只进 Keychain，配置只进 UserDefaults），`PasswordGenerator` 用 `SecRandomCopyBytes` 在本地生成不低于 24 位、含大小写字母数字符号的密码，`SecretScrubbing` 在展示前移除已知秘密。
 
 ### 注入点
 
@@ -123,20 +123,22 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 
 - 存储：`kSecClassGenericPassword`，`kSecAttrService` 是应用的 bundle identifier，`kSecAttrAccount` 是 `remote-access-password`，可访问性固定为 `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`。密码只存在于这一个条目里，不进入 UserDefaults、命令行参数、日志文件、诊断文本或错误消息；`KeychainStoreError` 只携带 notFound / OSStatus，不携带秘密。
 - 读取：`RemoteAccessPassword.load(from:)` 在条目缺失、为空或读取失败时都返回 nil（fail closed：读取失败不会被当成“可以用无认证方式启动”）。
-- 门控：`RemoteAccessPolicy.allowsRemoteListening(hostname:password:)`——loopback 恒允许；hostname 不是 loopback 时必须存在非空密码。`ServiceManager.isStartPermitted` 包含这个条件，所以启动、重启、配置变更重载、启动重试、启动轮询和健康检查都无法在缺密码时启动服务、探测外部服务或加载服务页；`ServiceStartDecision.missingRemotePassword` 给出可读的失败提示。
+- 门控：`RemoteAccessPolicy.allowsRemoteListening(hostname:password:)`——loopback 恒允许；hostname 不是 loopback 时必须存在非空密码。地址本身是否合法由同一处 `addressVerdict(hostname:)` 判定（见下文“监听边界”），`ServiceManager.isStartPermitted` 同时包含地址可用与凭证两个条件，所以启动、重启、配置变更重载、启动重试、启动轮询和健康检查都无法在地址非法或缺密码时启动服务、探测外部服务或加载服务页；`ServiceStartDecision.invalidAddress` 与 `.missingRemotePassword` 分别给出可读的失败提示。
 - 单次读取：`ServiceManager.startManagedService()` 在本次启动里只读一次凭证，并且把它同时传给门控和 `ServiceLaunchSpecification.make(..., remoteAccessPassword:)`（决策入口是 `startDecision(credentials:)`）。校验通过后不再读 Keychain，因此不存在“校验时有效、此后二次读取失效却仍然 `.launch`”的 fail-open 窗口（GitHub #8 复审）；读取失败或条目缺失一律按“无密码”拒绝启动。
-- 保存：`RemoteAccessSetup.apply(requested:newPassword:keychain:)` 是设置界面的保存流程。`newPassword` 为 nil 表示沿用已有密码，非空则先写入 Keychain；远程 hostname 没有可用密码时返回可读错误且不返回配置，调用方因此不会写 UserDefaults。密码写入失败时错误文本会先经过 `SecretScrubbing`，即使底层错误描述意外带上密码也不会展示。
+- 保存：`RemoteAccessSetup.apply(requested:newPassword:keychain:)` 是设置界面的保存流程。监听地址先经 `addressVerdict(hostname:)` 校验（通配地址、空值、空白与非法字符即使有密码也不能保存，这一步先于密码写入）；`newPassword` 为 nil 表示沿用已有密码，非空则再写入 Keychain；远程 hostname 没有可用密码时同样返回可读错误且不返回配置，调用方因此不会写 UserDefaults。密码写入失败时错误文本会先经过 `SecretScrubbing`，即使底层错误描述意外带上密码也不会展示。
 - 生成：界面上的“生成高强度密码”调用 `PasswordGenerator`（`SecRandomCopyBytes`，长度下限 24，保证大写字母/小写字母/数字/符号四类字符各至少一个，再用可注入随机源做 Fisher–Yates 洗牌），不联网、不引入依赖。
 - 删除：删除 Keychain 条目后 `RemoteAccessPolicy.disablingRemoteAccess(in:)` 把 hostname 收回 `127.0.0.1`，其余字段保持不变；`AppDelegate` 经 `AppConfiguration` 保存新配置，并且当远程服务正在运行时重启它，使新的（或已删除的）`PI_WEB_PASSWORD` 生效。
 - 运行中收敛：密码也可能在服务运行期间被外部删除或变成不可读，门控本身拦不住已经在跑的进程。`ServiceManager.closeRemoteAccessIfCredentialsAreUnavailable()` 是这类状态的收敛入口：配置是非 loopback 且取不到凭证时，若存在本应用启动、且仍能通过所有权验证的进程，则把 hostname 收回 `127.0.0.1`，走 `stopService()` 的既有验证路径停止该进程组（外部服务、无法验证的记录零信号），把状态改成带可读提示的 `.failed(RemoteAccessPolicy.revokedPasswordMessage)`，并通过 `onRemoteAccessClosed` 让 `AppDelegate` 持久化回落后的配置（不静默重启）。触发点是每 4 秒一次的健康轮询、所有启动入口的缺密码拒绝分支，以及依赖检查完成时（`AppDelegate.applyDependencyReport`）。没有可验证的托管进程时不改动用户配置，只给出“需要设置密码”的提示。
 
 传输密码的路径只有一处：`ServiceLaunchSpecification.make(..., remoteAccessPassword:)`。只有当 hostname 不是 loopback 且密码非空时，子进程环境才包含 `PI_WEB_PASSWORD`；否则该变量会被从环境里删除（包括清除父进程继承来的同名变量）。命令行参数 `--hostname/--port/--no-open`、所有权记录（只有命令文本的 SHA-256 摘要）、日志文件（只有子进程的 stdout/stderr）和诊断文本（只有“已设置/未设置”）都不包含密码值或长度。
 
-监听边界：默认值仍是 `127.0.0.1`；`0.0.0.0`、`::` 与 `[::]` 在界面保存时被拒绝，不会成为默认值也不会被一次误输入打开。保存时 `RemoteAccessPolicy.normalizedHostname(_:)` 把 IPv6 字面量统一成不带方括号的形式（`::1`，与 `--hostname` 参数和端口探测一致），拼 URL 时再由 `RemoteAccessPolicy.urlHost(for:)` 加方括号：`http://[::1]:端口/`（`URLComponents` 对未加方括号的 IPv6 host 会返回 nil，旧实现会静默回落到 `127.0.0.1`）。冒号只允许出现在合法的 IPv6 字面量里，`example.invalid:8443` 这类把端口写进地址的输入会在保存时被拒绝。密码认证只验证访问者，不是传输加密：设置界面和文档都明确要求远程访问自行配置受信任的加密隧道或 HTTPS 反向代理。
+监听边界：默认值仍是 `127.0.0.1`，地址校验只有一处实现：`RemoteAccessPolicy.addressVerdict(hostname:)` 返回 `ServiceAddressVerdict`，由偏好窗口保存路径（`hostnameValidationMessage` 与 `RemoteAccessSetup.apply`）、`ServiceConfiguration.load` 与 `ServiceManager.startDecision(credentials:)` 三处共用（GitHub #39 / 安全审查 R-3）。允许 loopback（`127.0.0.0/8`、`localhost`、`*.localhost`、`::1`）与用户显式配置的具体地址；拒绝空地址、前后空白、协议/路径/端口混写等非法字符，方括号只允许用于 IPv6 字面量，也不接受会被解析成通配地址的文本：`0.0.0.0`、`::`、`[::]`、`*` 之外，`0`、`0x0`、`000.000.000.000`、`0.0.0.0.`、`0:0:0:0:0:0:0:0`、`::ffff:0.0.0.0` 等 `getaddrinfo` 会按通配/其他规则解析的写法同样被拒绝（只接受规范点分四段、规范 IPv6 字面量与主机名）。
+
+`ServiceConfiguration.load` 读入时执行同一判定：`[::1]` 规范化为 `::1`（与 `--hostname` 参数和端口探测一致），非法值原样保留并由 `hostnameProblem` 标记为不可用，不静默替换成 loopback 或其他地址。`ServiceManager.isStartPermitted` 与 `startManagedService()` 都要求地址可用；非法地址返回 `ServiceStartDecision.invalidAddress`，不启动进程、不探测外部服务、不加载页面，并以 `.failed(非法值 + 允许范围)` 进入诊断状态。非 loopback 地址还必须已有非空密码（见上节），启动决策只使用调用方已读取的那一次凭证。拼 URL 时仍由 `RemoteAccessPolicy.urlHost(for:)` 给 IPv6 字面量加方括号：`http://[::1]:端口/`（`URLComponents` 对未加方括号的 IPv6 host 会返回 nil，旧实现会静默回落到 `127.0.0.1`）。密码认证只验证访问者，不是传输加密：设置界面和文档都明确要求远程访问自行配置受信任的加密隧道或 HTTPS 反向代理。
 
 ## 网络边界
 
-默认监听 `127.0.0.1`，非 loopback 监听地址必须先在 Keychain 中设置非空密码（见上节）。远程访问还需要用户显式配置受信任的加密隧道或 HTTPS 反向代理：密码认证不等于传输加密。桌面应用不把密码写入 UserDefaults、命令行、日志或诊断信息。
+默认监听 `127.0.0.1`，非 loopback 监听地址必须先在 Keychain 中设置非空密码（见上节）。通配地址（`0.0.0.0`、`::`、`[::]`、`*`）、空地址、前后空白与非法字符在保存、配置加载与启动决策三处都被同一个判定拒绝，直接改写 UserDefaults 不会绕过它。远程访问还需要用户显式配置受信任的加密隧道或 HTTPS 反向代理：密码认证不等于传输加密。桌面应用不把密码写入 UserDefaults、命令行、日志或诊断信息。
 
 ## 数据位置
 

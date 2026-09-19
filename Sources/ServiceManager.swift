@@ -419,6 +419,9 @@ enum ServiceStartDecision: Equatable {
     case missingExecutable
     /// 远程 hostname 已配置，但 Keychain 中没有可用的非空密码。
     case missingRemotePassword
+    /// 监听地址不可用：通配地址、空值、前后空白或非法字符（GitHub #39 / R-3）。
+    /// 关联值是包含非法值与允许范围的可读诊断。
+    case invalidAddress(String)
     /// Launch this specification.
     case launch(ServiceLaunchSpecification)
 }
@@ -591,15 +594,22 @@ final class ServiceManager {
         isDependencyGateOpen && workspaceProblem == nil && !isStoppingService && !isQuitting
     }
 
-    /// 允许启动服务与加载服务页的前置条件：依赖门控打开，工作目录可用，不在
-    /// 停止/退出流程中，并且远程访问的前置条件满足（非 loopback hostname 必须
-    /// 有非空密码）。
+    /// 允许启动服务与加载服务页的前置条件：依赖门控打开，工作目录可用，监听地址
+    /// 可用（GitHub #39 / R-3），不在停止/退出流程中，并且远程访问的前置条件满足
+    /// （非 loopback hostname 必须有非空密码）。
     /// 密码读取失败按“无密码”处理，因此远程模式不会在认证不可用时启动。
     private var isStartPermitted: Bool {
-        isBaseStartPermitted && hasRequiredRemoteAccessCredentials
+        isBaseStartPermitted && isListeningAddressUsable && hasRequiredRemoteAccessCredentials
+    }
+
+    /// 监听地址是否可用（统一判定，不含凭证）。非法地址不进入任何启动入口，
+    /// 也不会被静默替换成其他地址。
+    private var isListeningAddressUsable: Bool {
+        configuration.hostnameProblem == nil
     }
 
     /// 远程 hostname 是否具备可用的非空密码；loopback 恒为 true。
+    /// 地址本身是否合法由 `isListeningAddressUsable` 单独判定。
     private var hasRequiredRemoteAccessCredentials: Bool {
         RemoteAccessPolicy.allowsRemoteListening(hostname: configuration.hostname, password: remoteAccessPassword())
     }
@@ -614,7 +624,19 @@ final class ServiceManager {
     private func reportRemoteAccessRequirementIfNeeded() -> Bool {
         guard isDependencyGateOpen, !isStoppingService, !isQuitting, !hasRequiredRemoteAccessCredentials else { return false }
         if closeRemoteAccessIfCredentialsAreUnavailable() != nil { return true }
+        // 地址本身不合法时先给地址诊断（非法值 + 允许范围），而不是只报“缺密码”
+        // （GitHub #39 / R-3）。
+        if reportUnusableHostnameIfNeeded() { return true }
         reportStartupFailure(RemoteAccessPolicy.missingPasswordMessage)
+        return true
+    }
+
+    /// 监听地址不可用时的可读诊断（GitHub #39 / R-3）。只在不处于停止/退出流程
+    /// 时给出，避免退出过程中的回调把诊断页覆盖成启动失败。
+    @discardableResult
+    private func reportUnusableHostnameIfNeeded() -> Bool {
+        guard let problem = configuration.hostnameProblem, !isStoppingService, !isQuitting else { return false }
+        reportStartupFailure(problem)
         return true
     }
 
@@ -629,10 +651,13 @@ final class ServiceManager {
         return true
     }
 
-    /// 启动入口的统一前置提示：远程凭证收敛优先，其次是工作目录诊断。
+    /// 启动入口的统一前置提示：#8 的远程凭证收敛优先（可能仍在运行的远程进程
+    /// 必须先停止并收回 loopback），其次是监听地址诊断（GitHub #39 / R-3），最后
+    /// 是工作目录诊断。
     @discardableResult
     private func reportStartRequirementIfNeeded() -> Bool {
         if reportRemoteAccessRequirementIfNeeded() { return true }
+        if reportUnusableHostnameIfNeeded() { return true }
         return reportWorkspaceRequirementIfNeeded()
     }
 
@@ -752,8 +777,15 @@ final class ServiceManager {
     /// 读 Keychain；校验用的凭证和 `ServiceLaunchSpecification` 里的
     /// `PI_WEB_PASSWORD` 是同一个值，因此不存在“校验时有效、构造启动环境时二次
     /// 读取失效却仍然 .launch”的 fail-open 窗口（GitHub #8 复审）。
+    ///
+    /// 监听地址先经统一判定（GitHub #39 / R-3）：通配地址、空值、前后空白与非法
+    /// 字符一律返回 `.invalidAddress`，不会被静默替换成其他地址。
     func startDecision(credentials: String?) -> ServiceStartDecision {
         guard !isStoppingService else { return .ignored }
+        // 与保存路径、`ServiceConfiguration.load` 共用同一个判定函数。
+        if let message = RemoteAccessPolicy.addressVerdict(hostname: configuration.hostname).diagnosisMessage {
+            return .invalidAddress(message)
+        }
         // 远程监听的前置条件：Keychain 中必须存在非空密码。条目被删除、内容为空
         // 或读取失败时一律按“无密码”处理，绝不启动去掉认证的服务。
         guard RemoteAccessPolicy.allowsRemoteListening(hostname: configuration.hostname, password: credentials) else {
@@ -861,6 +893,13 @@ final class ServiceManager {
     /// 依赖门控关闭时直接返回，不产生任何进程或页面副作用。
     func startManagedService() {
         guard isBaseStartPermitted else { return }
+        // 监听地址判定（GitHub #39 / R-3）：非法地址在凭证读取与工作目录探测之前
+        // 就被拒绝，既不构造启动规格也不产生进程；诊断顺序（#8 收敛 → 地址诊断）
+        // 由 `reportStartRequirementIfNeeded()` 统一给出。
+        guard isListeningAddressUsable else {
+            reportStartRequirementIfNeeded()
+            return
+        }
         // 启动前的最后一次工作目录校验（GitHub #9 复审）：门控是上一次探测的
         // 结果，健康监控运行期间用户自选目录可能已被删除。只有默认工作目录允许
         // 被自动创建；自选目录缺失/不可写时一律不可用：阻止启动、回调调用方进入
@@ -888,6 +927,11 @@ final class ServiceManager {
             // 与上面传入的凭证同源，正常不可达；保留分支是为了任何未来改动都不会
             // 静默启动一个缺认证的远程监听。
             reportStartupFailure(RemoteAccessPolicy.missingPasswordMessage)
+            return
+        case .invalidAddress(let message):
+            // 与 `isListeningAddressUsable` 守卫同源，正常不可达；保留分支是为了
+            // 任何未来改动都不会静默启动一个监听地址非法的服务。
+            reportStartupFailure(message)
             return
         case .launch(let specification):
             do {

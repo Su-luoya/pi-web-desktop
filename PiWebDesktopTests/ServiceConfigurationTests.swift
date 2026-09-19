@@ -45,6 +45,76 @@ final class ServiceConfigurationTests: XCTestCase {
         XCTAssertEqual(ServiceConfiguration.load(from: defaults).port, ServiceConfiguration.defaultPort)
     }
 
+    // MARK: 监听地址复用校验（GitHub #39 / 安全审查 R-3）
+
+    /// 直接改写 UserDefaults 写入的通配地址、空值、带空白或非法字符的值：加载时
+    /// 必须被标记为非法，并保留原始值（不静默回退到 loopback 或其他地址）。
+    func testLoadingAHostileStoredHostnameMarksItUnusableWithoutSilentFallback() {
+        let hostileValues = [
+            "0.0.0.0", "::", "[::]", "*", "0", "0x0", "0.0.0", "00.0.0.0", "0.0.0.0.",
+            "0:0:0:0:0:0:0:0", "::ffff:0.0.0.0", "[0.0.0.0]", "", "   ", " 0.0.0.0", "127.0.0.1 ",
+            "127.0.0.1\n", "127.0.0.1:30141", "http://127.0.0.1", "pi example invalid"
+        ]
+        for (index, stored) in hostileValues.enumerated() {
+            let name = "ServiceConfigurationTests.hostile.\(index)"
+            let defaults = UserDefaults(suiteName: name)!
+            defer { defaults.removePersistentDomain(forName: name) }
+            defaults.set(stored, forKey: "service.hostname")
+
+            let configuration = ServiceConfiguration.load(from: defaults)
+
+            XCTAssertEqual(configuration.hostname, stored, "非法值不得被静默替换：\(stored.debugDescription)")
+            let problem = configuration.hostnameProblem
+            XCTAssertNotNil(problem, "\(stored.debugDescription) 应当被标记为非法")
+            // 诊断必须指认非法值，并给出允许范围与“不会启动”。
+            XCTAssertTrue(problem?.contains("不可用") == true, "\(stored.debugDescription)")
+            XCTAssertTrue(
+                problem?.contains(ServiceAddressVerdict.displayHostname(stored)) == true,
+                "\(stored.debugDescription)"
+            )
+            XCTAssertTrue(problem?.contains(ServiceConfiguration.defaultHostname) == true, "\(stored.debugDescription)")
+            XCTAssertTrue(problem?.contains("::1") == true, "\(stored.debugDescription)")
+            XCTAssertTrue(problem?.contains("服务不会启动") == true, "\(stored.debugDescription)")
+        }
+    }
+
+    /// loopback、可规范化的 IPv6 字面量与显式配置的具体地址加载后仍然可用；
+    /// `[::1]` 与保存路径一致地规范化为 `::1`。
+    func testLoadingUsableHostnamesKeepsThemUsable() {
+        let cases: [(stored: String, normalized: String)] = [
+            ("127.0.0.1", "127.0.0.1"),
+            ("127.0.0.53", "127.0.0.53"),
+            ("localhost", "localhost"),
+            ("::1", "::1"),
+            ("[::1]", "::1"),
+            ("pi.example.invalid", "pi.example.invalid"),
+            ("host-1.internal", "host-1.internal")
+        ]
+        for (index, entry) in cases.enumerated() {
+            let name = "ServiceConfigurationTests.usable.\(index)"
+            let defaults = UserDefaults(suiteName: name)!
+            defer { defaults.removePersistentDomain(forName: name) }
+            defaults.set(entry.stored, forKey: "service.hostname")
+
+            let configuration = ServiceConfiguration.load(from: defaults)
+
+            XCTAssertEqual(configuration.hostname, entry.normalized)
+            XCTAssertNil(configuration.hostnameProblem, entry.stored)
+        }
+    }
+
+    /// 键不存在仍回落到默认 loopback（既有行为），并且视为可用。
+    func testMissingStoredHostnameFallsBackToTheDefaultLoopback() {
+        let name = #function
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+
+        let configuration = ServiceConfiguration.load(from: defaults)
+
+        XCTAssertEqual(configuration.hostname, ServiceConfiguration.defaultHostname)
+        XCTAssertNil(configuration.hostnameProblem)
+    }
+
     /// 无法识别的退出行为取值回落到默认“询问”，而不是停在未定义状态。
     func testUnknownQuitBehaviourFallsBackToAsk() {
         let defaults = UserDefaults(suiteName: #function)!

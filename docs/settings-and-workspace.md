@@ -15,6 +15,16 @@
 
 所有路径由可注入的 `AppPaths` 提供者派生（`supportDirectory` + `logsDirectory`），因此单元测试与 smoke 启动可以注入临时目录，不会写入真实 Home。`PI_WEB_DESKTOP_SMOKE=1|diagnostics` 使用 `$TMPDIR/pi-web-desktop-smoke-<pid>`，日志放在该目录的 `Logs/` 下。日志写入与轮转由 `LogWriter` 负责，写入的每一行都经过与诊断导出、错误消息、环境变量/命令行展示共用的 `LogRedactor`（见 [日志与诊断导出](logging-and-diagnostics.md)）。
 
+### 监听地址校验
+
+监听地址（`service.hostname`）的校验只有一处实现：`RemoteAccessPolicy.addressVerdict(hostname:)`（`Sources/KeychainStore.swift`，结果类型 `ServiceAddressVerdict`）。同一判定同时作用于三个入口（GitHub #39 / 安全审查 R-3）：
+
+- 偏好窗口保存：`PreferencesWindowController` 保存前调用 `hostnameValidationMessage`，`RemoteAccessSetup.apply` 也先拒绝非法地址（先于密码写入），配置与 Keychain 都不会被写入。
+- 配置加载：`ServiceConfiguration.load` 执行同一判定，`[::1]` 规范化为 `::1`；非法值原样保留并由 `ServiceConfiguration.hostnameProblem` 标记为不可用，不会静默回退到 loopback 或其他地址。
+- 启动决策：`ServiceManager.startDecision(credentials:)` 与 `isStartPermitted` 要求地址可用；非法地址返回 `.invalidAddress`，不启动进程、不探测外部服务、不加载服务页，失败提示给出非法值与允许范围。
+
+允许 loopback（`127.0.0.0/8`、`localhost`、`*.localhost`、`::1`）与用户显式配置的具体地址；拒绝 `0.0.0.0`、`::`、`[::]`、`*` 等通配地址、空地址、前后空白、协议/路径/端口混写等非法字符，方括号只允许用于 IPv6 字面量。`getaddrinfo` 会解析成 `0.0.0.0`/`::` 的写法（`0`、`0x0`、`000.000.000.000`、`0.0.0.0.`、`0:0:0:0:0:0:0:0`、`::ffff:0.0.0.0` 等）与歧义的数值写法同样被拒绝：只接受规范点分四段、规范 IPv6 字面量与主机名。非 loopback 地址还必须已有非空密码（见 [architecture.md](architecture.md) 的“远程访问与密码”一节）。因此直接改写 UserDefaults 绕过界面校验不再能进入启动流程。
+
 ## 默认工作目录
 
 - 默认值：`~/Library/Application Support/Pi Web Desktop/Workspace`，首次使用时由应用创建。
@@ -67,8 +77,9 @@
 unhosted 测试（注入临时目录、假探针与假 Keychain，不触碰真实用户目录、进程或网络）：
 
 - `PiWebDesktopTests/AppConfigurationTests.swift`：三处存储位置、默认设置序列化后不含个人代理与远程 hostname、设置在重新读取后保留、smoke 使用临时目录、日志目录不存在时打开日志会先创建目录与文件（幂等、失败返回可读错误）。
-- `PiWebDesktopTests/ServiceConfigurationTests.swift`：默认退出行为与默认工作目录、既有键名、无法识别的退出行为回落为“询问”、工作目录进入运行时签名。
+- `PiWebDesktopTests/ServiceConfigurationTests.swift`：默认退出行为与默认工作目录、既有键名、无法识别的退出行为回落为“询问”、工作目录进入运行时签名；直接写入 UserDefaults 的通配地址、空值、带空白/非法字符的值加载后被标记为不可用且不被静默替换，合法地址与 `[::1]` 规范化后仍可用。
+- `PiWebDesktopTests/KeychainStoreTests.swift`：地址判定与保存流程共用同一规则（通配地址即使有密码也被拒绝，且先于密码写入），加载与启动诊断包含非法值与允许范围，非 loopback 缺密码仍走 #8 的缺密码提示。
 - `PiWebDesktopTests/WorkspaceDirectoryTests.swift`：默认目录首次使用时创建、自选目录不被静默重建、不存在/不是目录/不可写三种原因的校验与可读修复提示、状态页文本、设置窗口选择（相对路径、缺失、不可写被拒绝且配置不变，留空回到默认目录）。
 - `PiWebDesktopTests/QuitPolicyTests.swift`：三种退出行为与三种确认选择的决策表、取消不停止服务、只有显式“退出并停止服务”才请求停止托管服务、任何行为都不停止外部服务。
-- `PiWebDesktopTests/ServiceManagerTests.swift`：工作目录不可用时所有启动入口零启动零加载并给出可读提示、恢复后门控重新打开、启动前重新校验（自选目录被删后不重建且阻止启动；存在且可写的自选目录不被创建；默认目录缺失时仍创建；健康监控期间自选目录消失时受托管重启被拒绝）、三种退出行为（保持运行零信号、停止只对已验证进程组、外部服务零信号且状态不变）、关闭期间无后台轮询、校验失败的记录不被认领也不被发信号。
+- `PiWebDesktopTests/ServiceManagerTests.swift`：工作目录不可用时所有启动入口零启动零加载并给出可读提示、恢复后门控重新打开、启动前重新校验（自选目录被删后不重建且阻止启动；存在且可写的自选目录不被创建；默认目录缺失时仍创建；健康监控期间自选目录消失时受托管重启被拒绝）、三种退出行为（保持运行零信号、停止只对已验证进程组、外部服务零信号且状态不变）、关闭期间无后台轮询、校验失败的记录不被认领也不被发信号；非法监听地址（通配、空值、空白、非法字符）在所有启动入口零进程零探测并给出可读诊断，loopback 与“具体地址 + 密码”仍可启动，`0.0.0.0` 写入 UserDefaults 后无法进入启动流程。
 - `PiWebDesktopTests/ServiceOwnershipTests.swift`：重启认领判定表（只有 `.managed` 可认领，`instanceID` 不同、PID 复用、端口变化、`ps` 不可读等都停留在外部服务）。

@@ -224,12 +224,91 @@ final class KeychainStoreTests: XCTestCase {
 
     /// 保存时拒绝“所有接口”地址、协议前缀、路径、空格和空值。
     func testHostnameValidationRejectsAllInterfacesAndMalformedValues() {
-        for hostname in ["0.0.0.0", "::", "[::]", "", "   ", "http://pi.example.invalid", "pi.example.invalid/path", "pi example invalid", " pi.example.invalid"] {
+        for hostname in ["0.0.0.0", "::", "[::]", "*", "[0.0.0.0]", "", "   ", "http://pi.example.invalid", "pi.example.invalid/path", "pi example invalid", " pi.example.invalid", "pi.example.invalid\n"] {
             XCTAssertNotNil(RemoteAccessPolicy.hostnameValidationMessage(hostname), "\(hostname) 应当被拒绝")
         }
         for hostname in ["127.0.0.1", "pi.example.invalid", "[::1]", "host-1.internal"] {
             XCTAssertNil(RemoteAccessPolicy.hostnameValidationMessage(hostname), "\(hostname) 应当可以保存")
         }
+    }
+
+    /// `getaddrinfo` 会把 `0`、`0x0`、`000.000.000.000`、`0.0.0.0.`、
+    /// `0:0:0:0:0:0:0:0`、`::ffff:0.0.0.0` 等写法解析成 `0.0.0.0`/`::`（macOS
+    /// 实测都绑定所有接口），所以它们必须和字面值一样被拒绝（Issue #39 / R-3）。
+    func testWildcardEquivalentsAreRejectedNotTreatedAsConcreteAddresses() {
+        let wildcardEquivalents = [
+            "0", "00", "000", "0x0", "0x00000000", "0.0", "0.0.0", "00.0.0.0", "0.0.0.00",
+            "000.000.000.000", "0.0.0.0.", "0x0.0.0.0", "0x00.0x00.0x00.0x00",
+            "0:0:0:0:0:0:0:0", "::0", "0::", "0:0::", "::0:0", "::ffff:0.0.0.0", "::ffff:0:0"
+        ]
+        for hostname in wildcardEquivalents {
+            guard case .rejected(_, let message) = RemoteAccessPolicy.addressVerdict(hostname: hostname) else {
+                XCTFail("\(hostname) 应当被拒绝，而不是当成具体地址")
+                continue
+            }
+            let diagnosis = RemoteAccessPolicy.unusableHostnameMessage(hostname)
+            XCTAssertNotNil(diagnosis)
+            XCTAssertTrue(diagnosis?.contains("服务不会启动") == true, hostname)
+            XCTAssertTrue(
+                message.contains("所有网络接口") || message.contains("数值写法") || message.contains("每一段都不能为空"),
+                "\(hostname)：\(message)"
+            )
+        }
+
+        // 具体地址与主机名不受影响：规范点分四段、`127.0.0.0/8` 与普通主机名。
+        for hostname in ["127.0.0.1", "127.0.0.53", "0.0.0.1", "0.1.0.0", "1.2.3.4", "pi.example.invalid"] {
+            XCTAssertNil(RemoteAccessPolicy.hostnameValidationMessage(hostname), "\(hostname) 应当可以保存")
+        }
+    }
+
+    /// 保存、加载与启动共用同一个 `addressVerdict` 判定：拒绝时给出具体原因，
+    /// 加载/启动的诊断额外包含非法值、允许范围与“不会启动”；允许时返回规范化形式。
+    func testAddressVerdictDrivesSaveLoadAndStartAlike() {
+        for hostname in ["0.0.0.0", "::", "[::]", "*", "[0.0.0.0]", "0", "0x0", "0.0.0", "00.0.0.0", "0.0.0.0.", "0:0:0:0:0:0:0:0", "::ffff:0.0.0.0", "", "   ", " 127.0.0.1", "127.0.0.1 ", "127.0.0.1:30141", "http://127.0.0.1", "pi example invalid"] {
+            guard case .rejected(_, let message) = RemoteAccessPolicy.addressVerdict(hostname: hostname) else {
+                XCTFail("\(hostname.debugDescription) 应当被拒绝")
+                continue
+            }
+            XCTAssertEqual(message, RemoteAccessPolicy.hostnameValidationMessage(hostname))
+            let diagnosis = RemoteAccessPolicy.unusableHostnameMessage(hostname)
+            XCTAssertNotNil(diagnosis, hostname.debugDescription)
+            XCTAssertTrue(diagnosis?.contains(ServiceAddressVerdict.displayHostname(hostname)) == true)
+            XCTAssertTrue(diagnosis?.contains(ServiceConfiguration.defaultHostname) == true)
+            XCTAssertTrue(diagnosis?.contains("服务不会启动") == true)
+        }
+
+        for hostname in ["127.0.0.1", "127.0.0.53", "localhost", "::1", "[::1]", "pi.example.invalid"] {
+            guard case .allowed(let normalized) = RemoteAccessPolicy.addressVerdict(hostname: hostname) else {
+                XCTFail("\(hostname.debugDescription) 应当允许")
+                continue
+            }
+            XCTAssertEqual(normalized, RemoteAccessPolicy.normalizedHostname(hostname))
+            XCTAssertNil(RemoteAccessPolicy.hostnameValidationMessage(hostname))
+            XCTAssertNil(RemoteAccessPolicy.unusableHostnameMessage(hostname))
+        }
+
+        // 非 loopback 的凭证门控仍是 #8 的 `allowsRemoteListening`（唯一来源），
+        // 地址判定不代替它：通配地址由地址判定单独拒绝，有没有密码都不得放行。
+        XCTAssertTrue(RemoteAccessPolicy.allowsRemoteListening(hostname: "0.0.0.0", password: secret))
+        XCTAssertNotNil(RemoteAccessPolicy.unusableHostnameMessage("0.0.0.0"))
+        XCTAssertFalse(RemoteAccessPolicy.allowsRemoteListening(hostname: "pi.example.invalid", password: nil))
+        XCTAssertFalse(RemoteAccessPolicy.allowsRemoteListening(hostname: "pi.example.invalid", password: ""))
+        XCTAssertTrue(RemoteAccessPolicy.allowsRemoteListening(hostname: "pi.example.invalid", password: secret))
+    }
+
+    /// 保存流程本身也复用同一地址规则：通配地址即使提供了密码也不能保存，
+    /// 且错误文本与界面保存路径一致、不包含密码。
+    func testSaveFlowRejectsWildcardHostnameEvenWithAPassword() {
+        let keychain = InMemoryKeychainStore()
+
+        var requested = remoteConfiguration()
+        requested.hostname = "0.0.0.0"
+        let outcome = RemoteAccessSetup.apply(requested: requested, newPassword: secret, keychain: keychain)
+
+        XCTAssertNil(outcome.configuration)
+        XCTAssertEqual(outcome.error, RemoteAccessPolicy.hostnameValidationMessage("0.0.0.0"))
+        XCTAssertFalse(outcome.error?.contains(secret) == true)
+        XCTAssertTrue(keychain.items.isEmpty, "地址校验先于密码写入")
     }
 
     /// `::1` 与 `[::1]` 都要能保存，并且拼出合法的 `http://[::1]:…/` URL。

@@ -1881,6 +1881,137 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(harness.manager.currentState, .failed(RemoteAccessPolicy.missingPasswordMessage))
     }
 
+    // MARK: - 监听地址复用校验（GitHub #39 / 安全审查 R-3）
+
+    /// 直接构造的非法监听地址（通配、空值、空白、非法字符）：启动决策拒绝，
+    /// 所有启动入口零进程零页面零探测，提示指认非法值与允许范围。
+    func testUnusableListeningAddressBlocksEveryStartEntryWithoutLaunching() throws {
+        let hostileHostnames = [
+            "0.0.0.0", "::", "[::]", "*", "0", "0x0", "0.0.0.0.", "0:0:0:0:0:0:0:0", "::ffff:0.0.0.0",
+            "", "  0.0.0.0", "127.0.0.1 ", "127.0.0.1:30141"
+        ]
+        for hostname in hostileHostnames {
+            let harness = try makeHarness(remoteAccessPassword: { Self.remoteSecret })
+            defer { harness.cleanUp() }
+            var configuration = ServiceConfiguration.default
+            configuration.hostname = hostname
+            configuration.piWebPath = try harness.makeExecutable()
+            harness.manager.updateConfiguration(configuration)
+            harness.probe.ready = true
+
+            let diagnosis = try XCTUnwrap(configuration.hostnameProblem)
+            XCTAssertTrue(diagnosis.contains(ServiceAddressVerdict.displayHostname(hostname)), hostname.debugDescription)
+            XCTAssertTrue(diagnosis.contains("服务不会启动"), hostname.debugDescription)
+
+            guard case .invalidAddress(let message) = harness.manager.startDecision() else {
+                XCTFail("\(hostname.debugDescription) 应当被拒绝启动")
+                continue
+            }
+            XCTAssertEqual(message, diagnosis, hostname.debugDescription)
+
+            harness.manager.startAtLaunch()
+            harness.manager.ensureServerIsRunning()
+            harness.manager.startService()
+            harness.manager.reloadAfterConfigurationChange()
+            harness.manager.startManagedService()
+
+            XCTAssertEqual(harness.launcher.launchCount, 0, hostname.debugDescription)
+            XCTAssertEqual(harness.loadRequests, 0, hostname.debugDescription)
+            XCTAssertTrue(harness.probe.probedURLs.isEmpty, "\(hostname.debugDescription) 非法时不得探测")
+            XCTAssertEqual(harness.startupFailures, Array(repeating: diagnosis, count: 5), hostname.debugDescription)
+            XCTAssertEqual(harness.manager.currentState, .failed(diagnosis), hostname.debugDescription)
+        }
+    }
+
+    /// 安全审查 R-3 的复现路径：直接用 UserDefaults 写入 `0.0.0.0`（配合已有
+    /// 密码），加载后被标记为非法，启动入口零进程，且地址不被静默替换。
+    func testHostileDefaultsHostnameCannotEnterTheLaunchPath() throws {
+        let suiteName = "ServiceManagerTests.hostile.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("0.0.0.0", forKey: "service.hostname")
+        defaults.set(30141, forKey: "service.port")
+
+        let harness = try makeHarness(remoteAccessPassword: { Self.remoteSecret })
+        defer { harness.cleanUp() }
+        var configuration = ServiceConfiguration.load(from: defaults)
+        configuration.piWebPath = try harness.makeExecutable()
+        harness.manager.updateConfiguration(configuration)
+        harness.probe.ready = true
+
+        XCTAssertEqual(configuration.hostname, "0.0.0.0", "非法地址不得被静默替换")
+        let diagnosis = try XCTUnwrap(configuration.hostnameProblem)
+
+        harness.manager.startAtLaunch()
+
+        guard case .invalidAddress(let message) = harness.manager.startDecision() else {
+            XCTFail("0.0.0.0 应当被拒绝启动，实际为 \(harness.manager.startDecision())")
+            return
+        }
+        XCTAssertEqual(message, diagnosis)
+        XCTAssertEqual(harness.launcher.launchCount, 0)
+        XCTAssertEqual(harness.loadRequests, 0)
+        XCTAssertTrue(harness.probe.probedURLs.isEmpty)
+        XCTAssertEqual(harness.startupFailures, [diagnosis])
+        XCTAssertEqual(harness.manager.currentState, .failed(diagnosis))
+    }
+
+    /// 非法地址即使没有密码也报地址诊断（非法值 + 允许范围），而不是笼统的
+    /// “缺密码”。
+    func testUnusableAddressWithoutPasswordReportsTheAddressDiagnosis() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+        var configuration = ServiceConfiguration.default
+        configuration.hostname = "0.0.0.0"
+        configuration.piWebPath = try harness.makeExecutable()
+        harness.manager.updateConfiguration(configuration)
+
+        harness.manager.startAtLaunch()
+
+        let diagnosis = try XCTUnwrap(configuration.hostnameProblem)
+        XCTAssertNotEqual(diagnosis, RemoteAccessPolicy.missingPasswordMessage)
+        XCTAssertEqual(harness.startupFailures, [diagnosis])
+        XCTAssertEqual(harness.launcher.launchCount, 0)
+        XCTAssertEqual(harness.manager.currentState, .failed(diagnosis))
+    }
+
+    /// 合法组合仍可启动：loopback（含 `::1` 与 `localhost`）不需要密码，显式
+    /// 配置的具体远程地址 + 非空密码可以启动，命令行参数使用配置的地址。
+    func testUsableListeningAddressesStillReachTheLaunchPath() throws {
+        let cases: [(hostname: String, password: String?)] = [
+            ("127.0.0.1", nil),
+            ("::1", nil),
+            ("localhost", nil),
+            ("pi.example.invalid", Self.remoteSecret)
+        ]
+        for entry in cases {
+            let harness = try makeHarness(
+                alive: { $0 == 5150 },
+                processOutput: processOutput(for: 5150),
+                remoteAccessPassword: { entry.password }
+            )
+            defer { harness.cleanUp() }
+            var configuration = ServiceConfiguration.default
+            configuration.hostname = entry.hostname
+            configuration.piWebPath = try harness.makeExecutable()
+            harness.manager.updateConfiguration(configuration)
+            harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+            harness.probe.ready = false
+
+            XCTAssertNil(configuration.hostnameProblem, entry.hostname)
+            guard case .launch(let specification) = harness.manager.startDecision() else {
+                XCTFail("\(entry.hostname) 应当可以启动，实际为 \(harness.manager.startDecision())")
+                continue
+            }
+            XCTAssertEqual(specification.arguments, ["--hostname", entry.hostname, "--port", "30141", "--no-open"])
+
+            harness.manager.startManagedService()
+
+            XCTAssertEqual(harness.launcher.launchCount, 1, entry.hostname)
+            XCTAssertEqual(harness.manager.currentState, .starting, entry.hostname)
+        }
+    }
+
     // MARK: - 凭证只读一次（GitHub #8 复审）
 
     /// 决策与启动规格共用同一次凭证读取：凭证只返回一次时也必须带上它启动，

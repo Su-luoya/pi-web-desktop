@@ -472,11 +472,19 @@ private final class IntegrationCommandRunner: CommandRunning {
 
     func run(_ arguments: [String]) -> String? {
         invocations.append(arguments)
-        if arguments == ["/usr/bin/env", "npm", "prefix", "-g"] {
+        // npm/pnpm 查询显式短路：fixture 测试不执行真实 npm/pnpm，也不访问网络。
+        if Self.shortCircuitedInvocations.contains(arguments) {
             return nil
         }
         return base.run(arguments)
     }
+
+    /// 不交给真实二叉的只读命令（#6 的 npm 前缀与 #16 的 npm/pnpm 全局 root）。
+    static let shortCircuitedInvocations: [[String]] = [
+        ["/usr/bin/env", "npm", "prefix", "-g"],
+        ["/usr/bin/env", "npm", "root", "-g"],
+        ["/usr/bin/env", "pnpm", "root", "-g"]
+    ]
 }
 
 /// 真实文件系统探针 + 两个测试接缝：Home 指向 fixture，可执行文件只认 fixture
@@ -770,10 +778,20 @@ final class DependencyCheckerIntegrationTests: XCTestCase {
         XCTAssertEqual(runner.invocations.filter { $0 == ["/usr/bin/env", "npm", "prefix", "-g"] }.count, 1)
         for invocation in runner.invocations where invocation.first?.hasPrefix(fixture.homeURL.path) != true {
             XCTAssertTrue(
-                invocation == ["/usr/bin/env", "npm", "prefix", "-g"],
-                "只允许执行 fixture 里的脚本或短路 npm 查询: \(invocation)"
+                IntegrationCommandRunner.shortCircuitedInvocations.contains(invocation),
+                "只允许执行 fixture 里的脚本或短路 npm/pnpm 查询: \(invocation)"
             )
         }
+
+        // #16：组件安装识别在真实 fixture 上同样成立，且路径已脱敏。
+        let piComponent = try XCTUnwrap(report.component(for: .piCLI))
+        XCTAssertEqual(piComponent.packageName, InstallCommandManifest.piCLIPackageName)
+        XCTAssertEqual(piComponent.version, "0.9.0")
+        XCTAssertEqual(piComponent.executablePath, "~/.npm-global/bin/pi")
+        XCTAssertEqual(piComponent.source, .npmGlobal)
+        XCTAssertEqual(piComponent.confidence, .inferred, "没有 npm root -g 证据时只能推断")
+        XCTAssertNil(piComponent.suggestedCommand, "未验证的全局来源不给包管理器命令")
+        XCTAssertFalse(piComponent.evidence.contains { $0.contains(fixture.homeURL.path) }, "证据行也要脱敏")
     }
 }
 

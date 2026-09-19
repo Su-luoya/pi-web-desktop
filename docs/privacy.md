@@ -22,6 +22,7 @@ Pi Web Desktop 不收集或上传遥测、使用统计、会话内容、认证�
 - 应用不读取、复制或迁移 `~/.pi/agent/auth.json` 等 Pi 认证内容。
 - 首次启动诊断只检查 `~/.pi/agent` 是否存在与可读（不列目录、不读取任何文件），报告里只出现脱敏后的路径 `~/.pi/agent`。
 - 用户在诊断窗口选择 pi-web 路径时，只对该文件做两件本地只读的事：执行 `--version`、向上查找并读取 package.json 的 `name`（不安装、不联网、不读取其他文件）。
+- 组件安装识别（GitHub #16）同样只读：它只执行只读命令（`--version`、`npm root -g`、`pnpm root -g`、`pi list`、登录 shell 的 `command -v`）、只读可执行位/符号链接/真实路径、最多向上 6 层读 `package.json` 与检查 `.git` 是否存在（目录只看存在性；`.git` 是文件时只读它一次，不解析内容）。它不执行安装/升级/卸载命令、不调用 `sudo`、不联网、不读 Keychain、不读 `~/.pi` 认证内容；除了写日志/诊断（仍经同一个 `LogRedactor`）以外不写任何文件，也不修改用户全局目录（`~/.npm-global`、npm prefix、Homebrew 前缀都只读）。临时目录夹具的隔离断言见 [开发说明](development.md) 的测试分层一节。
 
 ## 本地数据一览与删除
 

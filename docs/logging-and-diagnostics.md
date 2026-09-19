@@ -98,6 +98,7 @@
 | `启动环境` | 应用显式设置的子进程变量，一行一个 `KEY=value`；远程模式下 `PI_WEB_PASSWORD` 只以 `<redacted>` 占位符进入，真实值不经过诊断代码 |
 | `日志文件` / `日志写入` | `AppPaths.logFileURL` 与 `LogWriter.writeStatusDescription`（正常 / 写入失败及时间） |
 | `远程访问密码` | 只有“已设置（仅存于 Keychain）”或“未设置”，没有密码值或长度 |
+| `组件安装` | `DependencyReport.components`（GitHub #16）：每个组件一行 `summaryLine`，包含组件类型、包名、版本、可执行文件路径、真实路径、安装来源、可信度与建议命令（没有建议命令时写“不给命令”及其原因）。多于一组件时同样使用 `组件安装[2]:` 这样的唯一标签行。路径在进入导出前已由 `DependencyChecker` 完成 Home 脱敏（`~`）；建议命令只可能来自 `InstallCommandManifest` 的静态条目，不包含动态拼接的包名 |
 
 可信度取值与依赖诊断一致，导出里同时给出英文取值与中文标注：`verified（已验证）`、`inferred（推断）`、`unknown（未知）`；没有报告时按 `unknown` 处理。
 
@@ -119,6 +120,8 @@
 | 轮转、保留份数、失败路径、假时钟 | `PiWebDesktopTests/LogWriterTests.swift` |
 | 各条脱敏规则、引号/含空格值、续行、多行、幂等（含 JSON 边界）、不覆盖形态的边界、精度 | `PiWebDesktopTests/LogRedactorTests.swift` |
 | 导出布局、脱敏后上下文保留、可信度映射 | `PiWebDesktopTests/DiagnosticsCollectorTests.swift` |
+| 组件安装区块的多行标签与逐项渲染（`组件安装[2]:`） | `PiWebDesktopTests/DiagnosticsCollectorTests.swift` |
+| 组件安装识别、只读约束与建议命令策略 | `PiWebDesktopTests/ComponentInstallationTests.swift` |
 | 启动失败消息先脱敏再进状态/回调/日志 | `PiWebDesktopTests/ServiceManagerTests.swift` |
 | 打包、身份、双模式 smoke | `./Scripts/build.sh`、`./Scripts/check-identity.sh`、`./Scripts/smoke.sh` |
 

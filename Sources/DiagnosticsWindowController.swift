@@ -53,6 +53,7 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
     private let tableView = NSTableView()
     private let detailLabel = NSTextField(labelWithString: "")
     private let hintLabel = NSTextField(labelWithString: "")
+    private let componentsTextView = NSTextView()
     private let commandsTextView = NSTextView()
     private let copyButton = NSButton(title: "复制安装命令", target: nil, action: nil)
     private let copyDiagnosticsButton = NSButton(title: "复制诊断", target: nil, action: nil)
@@ -99,6 +100,9 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         self.canContinueToService = canContinueToService
         self.workspaceMessage = workspaceMessage
         tableView.reloadData()
+        // 组件安装识别（GitHub #16）：只渲染已经脱敏的报告字段。
+        let components = DependencyReportPresenter.componentInstallationsText(for: report)
+        componentsTextView.string = components.isEmpty ? "未检测到组件安装信息。" : components
         let commands = DependencyReportPresenter.installCommandsText(for: report)
         commandsTextView.string = commands.isEmpty ? "当前没有需要修复的依赖。" : commands
         copyButton.isEnabled = !commands.isEmpty
@@ -159,6 +163,24 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         tableScroll.borderType = .bezelBorder
         tableScroll.translatesAutoresizingMaskIntoConstraints = false
 
+        let componentsHeader = NSTextField(labelWithString: "组件安装（路径 / 包名 / 版本 / 来源 / 可信度 / 建议命令；只展示，应用不会执行更新）")
+        componentsHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+
+        componentsTextView.isEditable = false
+        componentsTextView.isSelectable = true
+        componentsTextView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        componentsTextView.isVerticallyResizable = true
+        componentsTextView.isHorizontallyResizable = false
+        componentsTextView.autoresizingMask = [.width]
+        componentsTextView.textContainerInset = NSSize(width: 4, height: 4)
+        componentsTextView.textContainer?.widthTracksTextView = true
+
+        let componentsScroll = NSScrollView()
+        componentsScroll.documentView = componentsTextView
+        componentsScroll.hasVerticalScroller = true
+        componentsScroll.borderType = .bezelBorder
+        componentsScroll.translatesAutoresizingMaskIntoConstraints = false
+
         let commandsHeader = NSTextField(labelWithString: "安装命令（只展示与复制，应用不会执行）")
         commandsHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
 
@@ -194,7 +216,7 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         buttons.spacing = 8
         buttons.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = NSStackView(views: [title, detailLabel, hintLabel, tableScroll, commandsHeader, commandsScroll, buttons])
+        let stack = NSStackView(views: [title, detailLabel, hintLabel, tableScroll, componentsHeader, componentsScroll, commandsHeader, commandsScroll, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
@@ -210,7 +232,10 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
             detailLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
             hintLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
             tableScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            tableScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 200),
+            tableScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
+            componentsHeader.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            componentsScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            componentsScroll.heightAnchor.constraint(equalToConstant: 150),
             commandsHeader.widthAnchor.constraint(equalTo: stack.widthAnchor),
             commandsScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
             commandsScroll.heightAnchor.constraint(equalToConstant: 132),
@@ -218,7 +243,7 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         ])
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 820, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 860, height: 780),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -226,7 +251,7 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         window.title = "Pi Web Desktop 依赖与环境诊断"
         window.contentView = content
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 700, height: 460)
+        window.minSize = NSSize(width: 760, height: 620)
         window.center()
         self.window = window
     }

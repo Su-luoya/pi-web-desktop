@@ -193,7 +193,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             redactor: logRedactor,
             log: { [logWriter] message in _ = logWriter.append(message) },
             deliver: { work in DispatchQueue.main.async(execute: work) },
-            timeout: PiWebUpdateCoordinator.defaultTimeout
+            timeout: PiWebUpdateCoordinator.defaultTimeout,
+            transaction: UpdateTransactionEnvironment(
+                probe: .live,
+                recordHistory: { [weak self] entry in self?.appConfiguration.recordUpdateHistory(entry) },
+                applyDegradation: { [weak self] plan in self?.applyPiWebUpdateDegradation(plan) },
+                now: Date.init
+            )
         ))
         // Pi CLI 更新与运行进程保护（GitHub #21）：进程检查复用同一个脱敏器；
         // 执行器不发送任何信号（超时只放弃等待）；版本重检测复用 #16 识别器。
@@ -214,7 +220,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             redactor: logRedactor,
             log: { [logWriter] message in _ = logWriter.append(message) },
             deliver: { work in DispatchQueue.main.async(execute: work) },
-            timeout: PiCLIUpdateCoordinator.defaultTimeout
+            timeout: PiCLIUpdateCoordinator.defaultTimeout,
+            transaction: UpdateTransactionEnvironment(
+                probe: .live,
+                recordHistory: { [weak self] entry in self?.appConfiguration.recordUpdateHistory(entry) },
+                applyDegradation: { [weak self] plan in self?.applyPiCLIUpdateDegradation(plan) },
+                now: Date.init
+            )
         ))
         // Pi 扩展包更新（GitHub #22）：策略只有关闭 / 检查并通知 / 询问后更新，
         // 绝不无人值守更新；执行前复查 Pi 进程，执行后重新检测该包版本。
@@ -235,7 +247,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             redactor: logRedactor,
             log: { [logWriter] message in _ = logWriter.append(message) },
             deliver: { work in DispatchQueue.main.async(execute: work) },
-            timeout: PiPackageUpdateCoordinator.defaultTimeout
+            timeout: PiPackageUpdateCoordinator.defaultTimeout,
+            transaction: UpdateTransactionEnvironment(
+                probe: .live,
+                recordHistory: { [weak self] entry in self?.appConfiguration.recordUpdateHistory(entry) },
+                applyDegradation: { plan in
+                    // 扩展包没有可重新指向的可执行文件：只把降级结果写进日志与历史。
+                    _ = plan
+                },
+                now: Date.init
+            )
         ))
     }
 
@@ -975,7 +996,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 setupIncomplete: !appConfiguration.hasCompletedFirstLaunchSetup
             )
         }
-        let message = [warning.text, diagnosticsText]
+        let message = [warning.text, latestUpdateDegradationText(), diagnosticsText]
             .compactMap { $0 }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
@@ -990,7 +1011,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Pi Web 更新未完成"
-        alert.informativeText = warning.text
+        alert.informativeText = [warning.text, latestUpdateDegradationText()]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
         alert.addButton(withTitle: "好")
         alert.beginSheetModal(for: window)
     }
@@ -1070,6 +1094,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
             }
         }
+    }
+
+    /// 共享更新事务（GitHub #23）的展示辅助：最近一次更新的降级结果。
+    /// 只读历史，不重新执行任何动作。
+    private func latestUpdateDegradationText() -> String? {
+        guard let entry = appConfiguration.updateHistory().first,
+              let kind = entry.degradationKind else { return nil }
+        let detail = entry.rollbackDescription ?? ""
+        return "降级结果：\(kind.displayName)。\(detail)"
+    }
+
+    /// 应用 Pi Web 的有限降级：只把服务与重检测指向更新前仍然可用的可执行文件，
+    /// 不移动、不复制、不卸载任何文件，也不发送信号。
+    private func applyPiWebUpdateDegradation(_ plan: UpdateDegradationPlan) {
+        guard plan.performedAutomaticDegradation, let restored = plan.restoredExecutablePath else { return }
+        piWebUpdateRedetectionPath = restored
+        var configuration = appConfiguration.serviceConfiguration
+        configuration.piWebPath = restored
+        appConfiguration.save(configuration)
+        serviceManager.updateConfiguration(configuration)
+        logPiWebUpdate("更新降级（GitHub #23）：已把 Pi Web 服务指向更新前的可执行文件；不移动、不复制、不卸载任何文件。")
+    }
+
+    /// 应用 Pi CLI 的有限降级：只把后续版本重检测指向更新前的可执行文件。
+    private func applyPiCLIUpdateDegradation(_ plan: UpdateDegradationPlan) {
+        guard plan.performedAutomaticDegradation, let restored = plan.restoredExecutablePath else { return }
+        piCLIUpdateRedetectionPath = restored
+        logPiCLIUpdate("更新降级（GitHub #23）：已把 Pi CLI 重检测指向更新前的可执行文件；不移动、不复制、不卸载任何文件。")
     }
 
     /// 手动“立即更新 Pi Web…”：必须先确认（说明需要停服），确认后先停服务
@@ -1317,7 +1369,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 "Pi CLI 更新未通过版本验证：当前 \(oldVersion)，目标 \(targetVersion ?? "未知")，"
                     + "重新检测到 \(detectedVersion ?? "未知")。"
             )
-            presentPiCLIUpdateInfo("Pi CLI 更新未完成", detail: outcome.warning?.text ?? "")
+            presentPiCLIUpdateInfo(
+                "Pi CLI 更新未完成",
+                detail: [outcome.warning?.text, latestUpdateDegradationText()]
+                    .compactMap { $0 }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "\n\n")
+            )
         case .commandFailed(_, let failure, let oldVersion, _, let outputTail):
             // 应用退出时的“放弃等待”不算更新失败：命令可能仍在后台自己完成，下次
             // 启动的检查会给出结论，因此只记日志，不写持久告警也不弹框。
@@ -1327,6 +1385,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
             recordPiCLIUpdateWarning(outcome.warning)
             var detail = outcome.warning?.text ?? failure.text
+            if let degradation = latestUpdateDegradationText() {
+                detail += "\n\n" + degradation
+            }
             if let outputTail {
                 detail += "\n\n命令输出片段（已脱敏）：\(outputTail)"
             }
@@ -1605,7 +1666,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = "Pi 扩展包更新未完成"
-            alert.informativeText = (details + [batch.latestWarning?.text ?? ""]).joined(separator: "\n")
+            alert.informativeText = (details + [batch.latestWarning?.text ?? "", latestUpdateDegradationText() ?? ""])
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
             alert.addButton(withTitle: "好")
             alert.beginSheetModal(for: window)
         }
@@ -2448,6 +2511,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             lines.append("")
             lines.append(piPackageStatus)
         }
+        // 统一更新历史（GitHub #23）：展示最近一次更新的完成阶段、阶段结果与
+        // 建议动作（含静态手动命令文本，仅展示不执行）。
+        lines.append("")
+        lines.append(contentsOf: UpdateHistoryPresenter.lines(for: appConfiguration.updateHistory().first))
         return lines.joined(separator: "\n")
     }
 

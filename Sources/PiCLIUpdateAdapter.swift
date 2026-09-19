@@ -355,12 +355,7 @@ enum PiCLIUpdatePlanner {
     /// 有目标版本时要求“达到或超过目标版本”；没有目标版本（手动路径）时只要
     /// 版本发生变化就算成功；版本不可解析一律算失败。
     static func updateVerified(detected: String?, old: String, target: String?) -> Bool {
-        guard let detected, let detectedVersion = SemanticVersion(detected) else { return false }
-        if let target, let targetVersion = SemanticVersion(target) {
-            return detectedVersion >= targetVersion
-        }
-        guard let oldVersion = SemanticVersion(old) else { return false }
-        return detectedVersion != oldVersion
+        UpdateVerifier.versionReached(detected: detected, old: old, target: target)
     }
 
     /// 兼容旧调用名：重新检测的版本是否达到目标版本。
@@ -766,7 +761,7 @@ enum PiCLIUpdateRunOutcome: Equatable {
                 oldVersion: oldVersion,
                 newVersion: plan.installedVersion,
                 targetVersion: targetVersion,
-                reason: failure.text
+                reason: "更新失败，仍在使用旧版本：\(failure.text)"
             )
         case .versionUnchanged(_, let detectedVersion, let oldVersion, let targetVersion):
             return PiCLIUpdateWarning(
@@ -774,7 +769,7 @@ enum PiCLIUpdateRunOutcome: Equatable {
                 oldVersion: oldVersion,
                 newVersion: detectedVersion,
                 targetVersion: targetVersion,
-                reason: "更新命令已结束，但重新检测到的版本是 \(detectedVersion ?? "未知")，未达到目标版本"
+                reason: "更新后验证失败，仍在使用更新前的版本：更新命令已结束，但重新检测到的版本是 \(detectedVersion ?? "未知")，未达到目标版本"
             )
         }
     }
@@ -801,6 +796,8 @@ final class PiCLIUpdateCoordinator {
         var deliver: (@escaping () -> Void) -> Void
         /// 命令超时（秒）。超时按失败处理，但不发送任何信号。
         var timeout: TimeInterval
+        /// 共享更新事务（GitHub #23）：文件系统探针、统一历史与降级应用。
+        var transaction: UpdateTransactionEnvironment
 
         init(
             inspectProcesses: @escaping () -> PiProcessInspection,
@@ -809,7 +806,8 @@ final class PiCLIUpdateCoordinator {
             redactor: LogRedactor,
             log: @escaping (String) -> Void,
             deliver: @escaping (@escaping () -> Void) -> Void,
-            timeout: TimeInterval = PiCLIUpdateCoordinator.defaultTimeout
+            timeout: TimeInterval = PiCLIUpdateCoordinator.defaultTimeout,
+            transaction: UpdateTransactionEnvironment = .disabled
         ) {
             self.inspectProcesses = inspectProcesses
             self.runner = runner
@@ -818,6 +816,7 @@ final class PiCLIUpdateCoordinator {
             self.log = log
             self.deliver = deliver
             self.timeout = timeout
+            self.transaction = transaction
         }
     }
 
@@ -843,7 +842,7 @@ final class PiCLIUpdateCoordinator {
         case .deferred(_, let reason):
             environment.deliver { completion(.deferred(reason: reason)) }
         case .automatic(let plan):
-            runAutomatic(plan: plan, completion: completion)
+            runAutomatic(plan: plan, installation: input.installation, completion: completion)
         }
     }
 
@@ -855,11 +854,15 @@ final class PiCLIUpdateCoordinator {
             "Pi CLI 手动更新：已确认执行\n"
                 + plan.displayLines(redactingWith: environment.redactor).joined(separator: "\n")
         ))
-        execute(plan: plan, completion: completion)
+        execute(plan: plan, installation: nil, completion: completion)
     }
 
     /// 自动路径的执行前复查 + 执行：决策与执行之间可能有新的 Pi 进程启动。
-    private func runAutomatic(plan: PiCLIUpdatePlan, completion: @escaping (PiCLIUpdateRunOutcome) -> Void) {
+    private func runAutomatic(
+        plan: PiCLIUpdatePlan,
+        installation: ComponentInstallation?,
+        completion: @escaping (PiCLIUpdateRunOutcome) -> Void
+    ) {
         switch environment.inspectProcesses() {
         case .noProcesses:
             break
@@ -874,14 +877,55 @@ final class PiCLIUpdateCoordinator {
             environment.deliver { completion(.deferred(reason: deferral)) }
             return
         }
-        execute(plan: plan, completion: completion)
+        execute(plan: plan, installation: installation, completion: completion)
     }
 
-    private func execute(plan: PiCLIUpdatePlan, completion: @escaping (PiCLIUpdateRunOutcome) -> Void) {
+    private func execute(
+        plan: PiCLIUpdatePlan,
+        installation: ComponentInstallation?,
+        completion: @escaping (PiCLIUpdateRunOutcome) -> Void
+    ) {
+        // 共享事务（GitHub #23）：准备阶段记录更新前指纹，执行/验证/提交/降级
+        // 四个阶段的结果都进入同一份更新历史。
+        let component = UpdateTransactionComponent.piCLI
+        let advice = UpdateManualAdviceBuilder.advice(component: component, source: plan.source)
+        var journal = UpdateTransactionJournal(
+            configuration: UpdateTransactionJournal.Configuration(
+                component: component,
+                source: plan.source,
+                previousVersion: plan.installedVersion,
+                targetVersion: plan.targetVersion,
+                fingerprint: UpdateArtifactFingerprint.capture(
+                    executablePath: installation?.executablePath ?? plan.executablePath,
+                    resolvedPath: installation?.resolvedPath,
+                    version: installation?.version ?? plan.installedVersion,
+                    packageName: installation?.packageName ?? component.expectedPackageName,
+                    probe: environment.transaction.probe
+                )
+            ),
+            now: environment.transaction.now
+        )
+        journal.recordPreflight()
         environment.runner.run(plan, timeout: environment.timeout) { [weak self] result in
             guard let self else { return }
             let targetText = plan.targetVersion ?? "未知"
             if let failure = result.failure {
+                let degradation = UpdateDegradationPlanner.installFailure(
+                    component: component,
+                    source: plan.source,
+                    fingerprint: journal.configuration.fingerprint,
+                    targetVersion: plan.targetVersion,
+                    failureReason: failure.text
+                )
+                journal.recordInstallFailed(failure.text)
+                journal.recordCommitNotAttempted(reason: "执行阶段失败，未启用新版本")
+                journal.recordDegradation(degradation)
+                self.recordTransaction(
+                    journal,
+                    degradation: degradation,
+                    advice: advice,
+                    resultingVersion: nil
+                )
                 self.logOutcome(
                     "Pi CLI 更新失败（\(failure.text)）：退出码 \(result.exitCode.map(String.init) ?? "无")，"
                         + "耗时 \(Self.durationText(result.duration))，当前版本 \(plan.installedVersion)，"
@@ -902,13 +946,44 @@ final class PiCLIUpdateCoordinator {
                 return
             }
 
+            journal.recordInstallSucceeded()
             let detected = self.environment.detectInstallation()
             let detectedVersion = detected?.version
-            guard PiCLIUpdatePlanner.updateVerified(
-                detected: detectedVersion,
-                old: plan.installedVersion,
-                target: plan.targetVersion
-            ) else {
+            let verificationInput = UpdateVerificationInput(
+                component: .piCLI,
+                packageName: component.expectedPackageName,
+                previousVersion: plan.installedVersion,
+                targetVersion: plan.targetVersion,
+                detectedVersion: detectedVersion,
+                detectedPackageName: detected?.packageName,
+                detectedExecutablePath: detected?.executablePath,
+                detectedResolvedPath: detected?.resolvedPath,
+                detectedPackageJSONPath: detected?.packageJSONPath,
+                fingerprint: journal.configuration.fingerprint
+            )
+            let report = UpdateVerifier.verify(
+                verificationInput,
+                probe: self.environment.transaction.probe
+            )
+            guard journal.recordVerification(report, detectedVersion: detectedVersion) else {
+                let degradation = UpdateDegradationPlanner.verificationFailure(
+                    component: component,
+                    source: plan.source,
+                    fingerprint: journal.configuration.fingerprint,
+                    newVersion: detectedVersion,
+                    newResolvedPath: detected?.resolvedPath ?? detected?.executablePath,
+                    failureReason: report.failureReason ?? "验证未通过",
+                    probe: self.environment.transaction.probe
+                )
+                journal.recordCommitNotAttempted(reason: "验证阶段失败，未启用新版本")
+                journal.recordDegradation(degradation)
+                self.environment.transaction.applyDegradation(degradation)
+                self.recordTransaction(
+                    journal,
+                    degradation: degradation,
+                    advice: advice,
+                    resultingVersion: detectedVersion
+                )
                 self.logOutcome(
                     "Pi CLI 更新未通过版本验证：命令退出码 0，但重新检测到的版本是 "
                         + "\(detectedVersion ?? "未知")，目标版本 \(targetText)。"
@@ -925,6 +1000,14 @@ final class PiCLIUpdateCoordinator {
             }
 
             let newVersion = detectedVersion ?? plan.targetVersion ?? plan.installedVersion
+            journal.recordDegradationNotNeeded()
+            journal.recordCommit(version: newVersion)
+            self.recordTransaction(
+                journal,
+                degradation: nil,
+                advice: advice,
+                resultingVersion: newVersion
+            )
             self.logOutcome("Pi CLI 更新完成：\(plan.installedVersion) → \(newVersion)，耗时 \(Self.durationText(result.duration))。")
             let outcome = PiCLIUpdateRunOutcome.succeeded(
                 plan: plan,
@@ -933,6 +1016,22 @@ final class PiCLIUpdateCoordinator {
             )
             self.environment.deliver { completion(outcome) }
         }
+    }
+
+    /// 记录统一更新历史（GitHub #23）并写一条脱敏日志。
+    private func recordTransaction(
+        _ journal: UpdateTransactionJournal,
+        degradation: UpdateDegradationPlan?,
+        advice: UpdateManualAdvice,
+        resultingVersion: String?
+    ) {
+        let entry = journal.historyEntry(
+            degradation: degradation,
+            advice: advice,
+            resultingVersion: resultingVersion
+        )
+        environment.transaction.recordHistory(entry)
+        logOutcome("更新历史：\(UpdateHistoryPresenter.lines(for: entry).joined(separator: " "))")
     }
 
     private func logOutcome(_ message: String) {

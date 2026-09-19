@@ -227,7 +227,7 @@ SHA-256 必须从 workflow 产出的资产复制**，不要使用上表任何本
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`；该步骤由 CI 覆盖（本地复现命令见[开发说明](development.md#personal-data-与-secret-扫描能力)） |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；Issue 中记录 run 链接 |
 | C5 | Release 资产校验：ZIP/`.sha256`/证据 Markdown 上传、`sha256sum -c`、Release 说明渲染 | `release.yml` 的 `Package ZIP, checksum, signature evidence and identity checks`、`Render the release notes from the template`、`publish` job | 由 workflow 覆盖（tag push 时执行；`workflow_dispatch` 只产出 artifact，不建 Release） |
-| C6 | 草稿 prerelease 创建与发布前人工复核（assets 名称、checksum 与 Issue 一致、prerelease 勾选） | `release.yml` 的 `publish` job（`gh release create --prerelease --draft`） | 由 workflow + 维护者完成；草稿的 Release 正文可用 [v0.1.0-alpha.1 Release 说明](release-notes-v0.1.0-alpha.1.md)（需先填入实际 SHA-256） |
+| C6 | 草稿 prerelease 创建与发布前人工复核（assets 名称、checksum 与 Issue 一致、prerelease 勾选） | `release.yml` 的 `publish` job（`gh release create --prerelease --draft`） | 由 workflow + 维护者完成；workflow 渲染的是 [Release notes 模板](release-notes-template.md)，不读版本化的 [v0.1.0-alpha.1 Release 说明](release-notes-v0.1.0-alpha.1.md)；若要用后者作为草稿正文，需在草稿编辑页手工粘贴并填入实际 SHA-256 |
 | C7 | 真机 smoke 的机器与依赖版本写入 Release Issue | Release Issue 的“真机 smoke 记录” | `./Scripts/smoke.sh` 已在本机（Apple Silicon 真机）通过，版本值见 Release 说明的“本机实测环境与版本”一节；仍待填入 Issue |
 | C8 | 上一版资产的回退路径确认 | Release Issue 的“回退路径确认” | `v0.1.0-alpha.1` 是本项目第一个 alpha，没有上一版资产可回退；Issue 中记为“不适用（首个 alpha）” |
 

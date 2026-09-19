@@ -9,6 +9,11 @@ docs/release-notes-v0.1.0-alpha.1.md — v0.1.0-alpha.1 草稿 Release 的正文
 
 相关文档：[发布流程](releasing.md)、[Alpha 发布门槛清单](alpha-release-checklist.md)、
 [Release notes 模板](release-notes-template.md)、[alpha.1 安全与发布审查](security-review-alpha.1.md)。
+
+注意：当前 `.github/workflows/release.yml` 渲染的是 `docs/release-notes-template.md`，不会读本文件；
+本文件是 v0.1.0-alpha.1 的现成正文，要把实测值、已知问题与回退说明放进草稿 Release 时，在草稿
+编辑页粘贴本文件并把校验值换成草稿资产的实际 SHA-256（若要改成由 workflow 渲染版本化文件，
+需要单独修改 `.github/workflows/release.yml`，超出本文件的改动范围）。
 -->
 
 # Pi Web Desktop 0.1.0-alpha.1（build 1）— Apple Silicon alpha（未公证）

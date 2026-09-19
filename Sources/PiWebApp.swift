@@ -41,6 +41,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 手动检查完成后是否弹提示；自动检查是否提示由策略与忽略版本决定。
     private var pendingManualUpdateCheck = false
 
+    // MARK: - 受限自动更新（GitHub #20）
+
+    /// 最近一次失败的启动前自动更新的持久警告（从 UserDefaults 读入，跨启动保留）。
+    private var piWebUpdateWarning: PiWebUpdateWarning?
+    /// 启动前更新进行中：抑制同一版本的自动提示框（安装流程会自己给结果）。
+    private var preLaunchUpdateInProgress = false
+    /// 本次运行已经尝试过启动前自动更新（无论成败）：同一次运行内不再自动重试，
+    /// 失败后由用户显式点击“立即更新 Pi Web…”或下次启动再试。
+    private var preLaunchUpdateAttemptedInThisRun = false
+    /// 告警菜单项与“立即更新…”菜单项。
+    private var piWebUpdateWarningMenuItem: NSMenuItem?
+    private var piWebUpdateMenuItem: NSMenuItem?
+    /// 受限自动更新的编排器（安装器、重检测、启动/健康检查全部注入）。
+    private var piWebUpdateCoordinator: PiWebUpdateCoordinator?
+    /// 生产安装器：`Process` + 参数数组，不使用 shell、不调用 sudo。
+    private let piWebUpdateInstaller = ProcessPiWebUpdateInstaller()
+    /// 安装后的版本重检测输入（每次更新前在主线程写入）。
+    private var piWebUpdateRedetectionPath: String?
+
     /// 诊断页/设置窗口的状态时间格式。
     private static let updateTimestampFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -112,6 +131,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         updateChecker.onResultsChanged = { [weak self] summary in
             self?.handleUpdateCheckResults(summary)
         }
+        // 受限自动更新（GitHub #20）：日志与其它写入共用同一个 LogWriter/LogRedactor；
+        // 版本重检测复用 #16 识别器；服务启动与健康检查复用 ServiceManager 路径。
+        self.piWebUpdateWarning = appConfiguration.piWebUpdateWarning()
+        self.piWebUpdateCoordinator = PiWebUpdateCoordinator(environment: PiWebUpdateCoordinator.Environment(
+            installer: piWebUpdateInstaller,
+            detectInstallation: { [weak self] in
+                guard let self else { return nil }
+                return PiWebUpdateRedetection.detect(
+                    piWebPath: self.piWebUpdateRedetectionPath,
+                    commandRunner: self.commandRunner
+                )
+            },
+            startServiceAndCheckHealth: { [weak self] completion in
+                self?.startServiceAndCheckHealthForUpdate(completion: completion)
+            },
+            redactor: logRedactor,
+            log: { [logWriter] message in _ = logWriter.append(message) },
+            deliver: { work in DispatchQueue.main.async(execute: work) },
+            timeout: PiWebUpdateCoordinator.defaultTimeout
+        ))
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -219,6 +258,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func applicationWillTerminate(_ notification: Notification) {
         // 应用关闭时不检查：先取消周期计时器，此后的触发一律忽略。
         updateChecker?.stop()
+        // 进行中的受限自动安装也必须终止：取消按失败处理，不留孤儿进程。
+        piWebUpdateInstaller.cancel()
         serviceManager.stopHealthMonitor()
         try? FileManager.default.removeItem(at: appConfiguration.appPIDURL)
         serviceManager.closeLog()
@@ -578,18 +619,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         case .mainWindow:
             diagnosticsWindowController?.close()
             diagnosticsWindowController = nil
-            serviceManager.setState(.checking)
-            webViewController.showLoadingPage(message: "正在检查 Pi Web 服务…")
             // 首次设置刚完成时必须显式启动，正常启动仍尊重 autoStart（GitHub #7 复审）。
             let launchIntent = ServiceLaunchIntent.intent(firstLaunchSetupJustCompleted: justCompletedSetup)
-            serviceManager.startAtLaunch(forceStart: launchIntent.forcesStart)
-            if presentDiagnostics {
-                showDiagnostics(
-                    report: report,
-                    firstLaunchSetupIncomplete: firstLaunchSetupIncomplete,
-                    canContinueToService: report.canStartService && workspaceValidation.isUsable
-                )
-            }
+            beginMainWindowLaunch(
+                report: report,
+                launchIntent: launchIntent,
+                firstLaunchSetupIncomplete: firstLaunchSetupIncomplete,
+                presentDiagnostics: presentDiagnostics
+            )
         case .diagnostics(let reasons):
             // 诊断页不管理服务：停掉健康轮询并把状态置为 stopped，避免健康检查
             // 把状态改回 running、把诊断页覆盖回服务页。前置缺失、“首次设置
@@ -695,6 +732,345 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
               !appConfiguration.hasCompletedFirstLaunchSetup else { return }
         appConfiguration.markFirstLaunchSetupCompleted()
         applyDependencyReport(report, triggeredByUser: false, firstLaunchSetupJustCompleted: true)
+    }
+
+    // MARK: - 启动前受限自动更新（GitHub #20）
+
+    /// 主窗口路由的启动尾部：先处理待更新，再启动服务。
+    ///
+    /// 任何更新失败路径都不会让应用无法启动：WebView 停在带持久告警的诊断状态
+    /// 页、诊断窗口保留、服务不启动；也不会静默继续或声称回滚成功。
+    private func beginMainWindowLaunch(
+        report: DependencyReport,
+        launchIntent: ServiceLaunchIntent,
+        firstLaunchSetupIncomplete: Bool,
+        presentDiagnostics: Bool
+    ) {
+        serviceManager.setState(.checking)
+        webViewController.showLoadingPage(message: "正在检查 Pi Web 服务…")
+        let proceed = { [weak self] in
+            guard let self else { return }
+            if let warning = self.piWebUpdateWarning {
+                self.presentPiWebUpdateWarningBanner(warning)
+            }
+            self.webViewController.showLoadingPage(message: "正在检查 Pi Web 服务…")
+            self.serviceManager.startAtLaunch(forceStart: launchIntent.forcesStart)
+            if presentDiagnostics {
+                self.showDiagnostics(
+                    report: report,
+                    firstLaunchSetupIncomplete: firstLaunchSetupIncomplete,
+                    canContinueToService: report.canStartService && self.workspaceValidation.isUsable
+                )
+            }
+        }
+        // 服务正在运行（例如用户重新检测）：不弹确认、不安装，只记录决策行。
+        if serviceManager.managedServicePID() != nil {
+            logPiWebUpdateDecision(PiWebUpdatePlanner.decide(piWebUpdatePlanningInput(report: report)))
+            proceed()
+            return
+        }
+        guard let updateChecker else {
+            proceed()
+            return
+        }
+        let installation = report.components.first { $0.kind == .piWeb }
+        guard !preLaunchUpdateAttemptedInThisRun,
+              PiWebUpdatePlanner.needsTargetVersionBeforeLaunch(
+            preferences: updateChecker.preferences,
+            installation: installation
+        ) else {
+            // 设置关闭或来源不满足：记录一次决策行（为何不走启动前自动更新），
+            // 然后照常启动服务。
+            logPiWebUpdateDecision(PiWebUpdatePlanner.decide(piWebUpdatePlanningInput(report: report)))
+            proceed()
+            return
+        }
+        // 先等一次覆盖 Pi Web 的检查结果（仍然尊重每一类的开关），再根据
+        // “是否有已验证的可用版本”决定是否安装；检查失败也只会跳过自动更新，
+        // 不影响服务启动。
+        preLaunchUpdateInProgress = true
+        updateChecker.checkNow(
+            triggeredBy: .launch,
+            inventory: UpdateCheckInventory(components: report.components)
+        ) { [weak self] in
+            guard let self else { return }
+            self.attemptPreLaunchPiWebUpdate(report: report, proceed: proceed)
+        }
+    }
+
+    /// 根据已完成的检查结果执行或跳过启动前自动更新。
+    private func attemptPreLaunchPiWebUpdate(report: DependencyReport, proceed: @escaping () -> Void) {
+        let input = piWebUpdatePlanningInput(report: report)
+        let decision = PiWebUpdatePlanner.decide(input)
+        logPiWebUpdateDecision(decision)
+        guard case .automatic(let plan) = decision, let coordinator = piWebUpdateCoordinator else {
+            preLaunchUpdateInProgress = false
+            proceed()
+            return
+        }
+        piWebUpdateRedetectionPath = serviceManager.configuration.piWebPath
+        preLaunchUpdateAttemptedInThisRun = true
+        showPiWebUpdateProgressPage(plan: plan)
+        coordinator.run(input) { [weak self] outcome in
+            guard let self else { return }
+            self.preLaunchUpdateInProgress = false
+            switch outcome {
+            case .succeeded(_, let oldVersion, let newVersion):
+                self.clearPiWebUpdateWarning()
+                self.logPiWebUpdate(
+                    "启动前自动更新完成：\(oldVersion) → \(newVersion)。"
+                )
+                proceed()
+            default:
+                self.presentPiWebUpdateFailure(outcome)
+            }
+        }
+    }
+
+    /// 决策输入：全部来自 #16 识别结果、#17/#18 检查结果与当前服务状态。
+    /// npm 路径只由检测到的前缀与 PATH 解析，且必须通过可执行位确认。
+    private func piWebUpdatePlanningInput(
+        report: DependencyReport?,
+        serviceIsRunning: Bool? = nil
+    ) -> PiWebUpdatePlanningInput {
+        let installation = (report ?? dependencyReport)?.components.first { $0.kind == .piWeb }
+        let piWebTarget = UpdateCheckTarget(category: .piWeb, packageName: nil)
+        let result = updateChecker?.summary.result(for: piWebTarget.id)
+        let environment = ProcessInfo.processInfo.environment
+        let npmPath = PiWebUpdateNPMResolver(environment: environment).resolve(installation: installation)
+        return PiWebUpdatePlanningInput(
+            preferences: updateChecker?.preferences ?? appConfiguration.updateCheckPreferences(),
+            installation: installation,
+            targetVersion: result?.latestVersion,
+            targetStatus: result?.status ?? .unknown,
+            targetConfidence: result?.confidence ?? .unknown,
+            serviceIsRunning: serviceIsRunning ?? (serviceManager.managedServicePID() != nil),
+            npmExecutablePath: npmPath,
+            baseEnvironment: environment
+        )
+    }
+
+    private func logPiWebUpdateDecision(_ decision: PiWebUpdateDecision) {
+        logPiWebUpdate(decision.logLine(redactingWith: logRedactor))
+    }
+
+    private func logPiWebUpdate(_ message: String) {
+        _ = logWriter.append(logRedactor.redact(message))
+    }
+
+    /// 失败路径：记录持久告警、进入诊断状态、保留可用 UI；不启动服务、不声称回滚。
+    private func presentPiWebUpdateFailure(_ outcome: PiWebUpdateRunOutcome) {
+        guard let warning = outcome.warning else { return }
+        piWebUpdateWarning = warning
+        appConfiguration.savePiWebUpdateWarning(warning)
+        logPiWebUpdate(warning.text)
+        refreshUpdateMenuState()
+        diagnosticsWindowController?.refreshUpdateStatus()
+
+        serviceManager.stopHealthMonitor()
+        serviceManager.setState(.stopped)
+        let report = dependencyReport
+        let diagnosticsText = report.map {
+            DependencyReportPresenter.statusPageText(
+                for: $0,
+                setupIncomplete: !appConfiguration.hasCompletedFirstLaunchSetup
+            )
+        }
+        let message = [warning.text, diagnosticsText]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+        webViewController.showDependencyPage(title: "Pi Web 更新未完成", message: message)
+        if let report {
+            showDiagnostics(
+                report: report,
+                firstLaunchSetupIncomplete: !appConfiguration.hasCompletedFirstLaunchSetup,
+                canContinueToService: false
+            )
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Pi Web 更新未完成"
+        alert.informativeText = warning.text
+        alert.addButton(withTitle: "好")
+        alert.beginSheetModal(for: window)
+    }
+
+    private func presentPiWebUpdateWarningBanner(_ warning: PiWebUpdateWarning) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Pi Web 上次更新未完成"
+        alert.informativeText = warning.text
+        alert.addButton(withTitle: "好")
+        alert.addButton(withTitle: "清除警告")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            // 只清除这条持久警告；不会改变 Pi Web 的版本，也不会重试安装。
+            guard response == .alertSecondButtonReturn else { return }
+            self?.clearPiWebUpdateWarning()
+        }
+    }
+
+    /// 菜单里的持久警告项：展开完整告警文本，并提供“清除警告”。
+    @objc private func showPiWebUpdateWarning(_ sender: Any?) {
+        guard let warning = piWebUpdateWarning else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = warning.shortText
+        alert.informativeText = warning.text
+            + "\n\nPi Web 仍保持更新前的版本；可以手动更新，或修好环境后重试。"
+        alert.addButton(withTitle: "好")
+        alert.addButton(withTitle: "清除警告")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertSecondButtonReturn else { return }
+            self?.clearPiWebUpdateWarning()
+        }
+    }
+
+    private func clearPiWebUpdateWarning() {
+        guard piWebUpdateWarning != nil else { return }
+        piWebUpdateWarning = nil
+        appConfiguration.savePiWebUpdateWarning(nil)
+        refreshUpdateMenuState()
+        diagnosticsWindowController?.refreshUpdateStatus()
+    }
+
+    /// 启动服务并做健康检查（复用既有启动与探测路径）。回调 true 表示服务可用。
+    private func startServiceAndCheckHealthForUpdate(completion: @escaping (Bool) -> Void) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else {
+                completion(false)
+                return
+            }
+            guard self.dependencyGate == .ready else {
+                completion(false)
+                return
+            }
+            self.serviceManager.ensureServerIsRunning()
+            self.pollServiceHealth(attemptsRemaining: 25, completion: completion)
+        }
+    }
+
+    /// 有界的健康检查轮询（25 × 0.5 秒）。超时按“健康检查失败”处理，不无限等待。
+    private func pollServiceHealth(attemptsRemaining: Int, completion: @escaping (Bool) -> Void) {
+        serviceManager.checkServer { [weak self] ready in
+            DispatchQueue.main.async {
+                guard let self else {
+                    completion(ready)
+                    return
+                }
+                if ready {
+                    completion(true)
+                    return
+                }
+                guard attemptsRemaining > 0 else {
+                    completion(false)
+                    return
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    self?.pollServiceHealth(attemptsRemaining: attemptsRemaining - 1, completion: completion)
+                }
+            }
+        }
+    }
+
+    /// 手动“立即更新 Pi Web…”：必须先确认（说明需要停服），确认后先停服务
+    /// （走既有所有权验证的停止路径）再安装。运行期间发现的更新不会自动安装。
+    @objc private func updatePiWebNow(_ sender: Any?) {
+        guard dependencyGate == .ready, let report = dependencyReport else {
+            presentPiWebUpdateInfo("环境检查尚未完成", detail: "请等待依赖诊断完成后再试。")
+            return
+        }
+        let input = piWebUpdatePlanningInput(report: report)
+        let decision = PiWebUpdatePlanner.decide(input)
+        guard case .automatic(let plan) = decision else {
+            presentPiWebUpdateInfo("当前不能立即更新 Pi Web", detail: manualUpdateUnavailableText(decision))
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "立即更新 Pi Web"
+        alert.informativeText = plan.confirmationText(redactingWith: logRedactor)
+            + "\n\n更新前会先停止本应用启动的 Pi Web 服务（需要短暂停服）；外部启动的服务不会被停止，"
+            + "如果服务仍在运行，更新会被取消。应用不会调用 sudo。"
+        alert.addButton(withTitle: "停止服务并更新")
+        alert.addButton(withTitle: "取消")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.performManualPiWebUpdate(plan: plan)
+        }
+    }
+
+    private func performManualPiWebUpdate(plan: PiWebUpdateInstallPlan) {
+        logPiWebUpdate("手动立即更新 Pi Web：先停止托管服务，再执行安装（只使用参数数组）。")
+        serviceManager.stopService { [weak self] in
+            guard let self else { return }
+            self.serviceManager.checkServer { [weak self] ready in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    guard !ready else {
+                        self.presentPiWebUpdateInfo(
+                            "已取消更新",
+                            detail: "Pi Web 服务仍在响应（可能是外部启动的服务）。"
+                                + "为避免在服务运行期间替换文件，已取消本次更新；应用不会停止外部服务。"
+                        )
+                        return
+                    }
+                    self.runManualPiWebUpdate(plan: plan)
+                }
+            }
+        }
+    }
+
+    private func runManualPiWebUpdate(plan: PiWebUpdateInstallPlan) {
+        guard let coordinator = piWebUpdateCoordinator else { return }
+        piWebUpdateRedetectionPath = serviceManager.configuration.piWebPath
+        let input = piWebUpdatePlanningInput(report: dependencyReport, serviceIsRunning: false)
+        showPiWebUpdateProgressPage(plan: plan)
+        coordinator.run(input) { [weak self] outcome in
+            guard let self else { return }
+            switch outcome {
+            case .succeeded(_, let oldVersion, let newVersion):
+                self.clearPiWebUpdateWarning()
+                self.logPiWebUpdate("手动更新完成：\(oldVersion) → \(newVersion)。")
+                self.presentPiWebUpdateInfo(
+                    "Pi Web 已更新",
+                    detail: "已更新到 \(newVersion)，服务健康检查通过。"
+                )
+            default:
+                self.presentPiWebUpdateFailure(outcome)
+            }
+        }
+    }
+
+    /// 更新执行页：在真正执行前展示同一个计划（可执行文件路径已把 Home 段换成
+    /// `~`、参数数组逐项、当前/目标版本、来源与可信度、环境变量键名），保证用户
+    /// 在安装开始前能看到将要执行什么。
+    private func showPiWebUpdateProgressPage(plan: PiWebUpdateInstallPlan) {
+        var lines = plan.displayLines(redactingWith: logRedactor)
+        lines.append("")
+        lines.append("正在执行安装；更新期间请不要退出应用（安装有超时限制）。")
+        webViewController.showDependencyPage(
+            title: "正在更新 Pi Web",
+            message: lines.joined(separator: "\n")
+        )
+    }
+
+    private func presentPiWebUpdateInfo(_ title: String, detail: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = detail
+        alert.addButton(withTitle: "好")
+        alert.beginSheetModal(for: window)
+    }
+
+    private func manualUpdateUnavailableText(_ decision: PiWebUpdateDecision) -> String {
+        var text = "原因：\(decision.reason.text)。"
+        if let command = decision.commandText {
+            text += "\n\n可以手动执行以下命令（应用不会代为执行）：\n\(logRedactor.redact(command))"
+        } else {
+            text += "\n\n该来源没有适用的静态命令，请按来源文档更新。"
+        }
+        text += "\n\n自动更新只对已验证的 npm 全局安装生效；应用不承诺所有来源都能回滚。"
+        return text
     }
 
     // MARK: - Window and WebView
@@ -1328,6 +1704,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         status.isEnabled = false
         updateStatusMenuItem = status
         menu.addItem(status)
+        // 持久告警项：有告警时常显并可点开（无告警时隐藏）。
+        let warningItem = NSMenuItem(
+            title: "",
+            action: #selector(showPiWebUpdateWarning(_:)),
+            keyEquivalent: ""
+        )
+        warningItem.target = self
+        warningItem.isHidden = true
+        piWebUpdateWarningMenuItem = warningItem
+        menu.addItem(warningItem)
         menu.addItem(.separator())
         for category in UpdateCheckCategory.allCases {
             let toggle = NSMenuItem(
@@ -1349,6 +1735,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         )
         preferencesItem.target = self
         menu.addItem(preferencesItem)
+        // 手动“立即更新”：运行期间发现的更新不会自动安装，只能在这里显式确认后执行。
+        let manualUpdateItem = NSMenuItem(
+            title: "立即更新 Pi Web…",
+            action: #selector(updatePiWebNow(_:)),
+            keyEquivalent: ""
+        )
+        manualUpdateItem.target = self
+        piWebUpdateMenuItem = manualUpdateItem
+        menu.addItem(manualUpdateItem)
         menu.addItem(withTitle: "更新检查说明…", action: #selector(showUpdateCheckExplanation(_:)), keyEquivalent: "")
         item.submenu = menu
         updateSettingsMenu = menu
@@ -1362,6 +1757,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func refreshUpdateMenuState() {
         updateStatusMenuItem?.title = updateCheckStatusText()
+        if let piWebUpdateWarningMenuItem {
+            piWebUpdateWarningMenuItem.title = piWebUpdateWarning?.shortText ?? ""
+            piWebUpdateWarningMenuItem.isHidden = piWebUpdateWarning == nil
+        }
+        piWebUpdateMenuItem?.isEnabled = dependencyGate == .ready
         let preferences = updateChecker?.preferences ?? .factoryDefaults
         for (category, item) in updateCategoryMenuItems {
             item.state = preferences.isEnabled(category) ? .on : .off
@@ -1379,11 +1779,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 诊断页里的更新检查状态块（已脱敏：只有策略、时间、结果与版本）。
     private func updateCheckStatusBlockText() -> String {
         guard let updateChecker else { return "" }
-        return UpdateStatusPresenter.lines(
+        var lines = UpdateStatusPresenter.lines(
             statuses: statusSnapshot(for: updateChecker),
             preferences: updateChecker.preferences,
             format: { Self.updateTimestampFormatter.string(from: $0) }
-        ).joined(separator: "\n")
+        )
+        if let warning = piWebUpdateWarning {
+            lines.append("")
+            lines.append(warning.text)
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// 检查结果落地（主线程）：刷新菜单与窗口；手动检查弹完整结果，自动检查按
@@ -1404,7 +1809,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 自动检查（启动 / 周期）的通知：尊重策略与忽略版本，同一个版本在一次
     /// 运行里最多提示一次。提示内容是固定文案 + 组件名 + 版本，不含路径或凭据。
     private func notifyAboutAutomaticUpdates(_ summary: UpdateCheckSummary) {
-        guard let updateChecker else { return }
+        // 启动前更新进行中时不弹同版本的“可用更新”提示：安装流程会给出结果。
+        guard let updateChecker, !preLaunchUpdateInProgress else { return }
         let entries = UpdateNotificationPlanner.plan(
             results: summary.results,
             preferences: updateChecker.preferences,
@@ -1415,15 +1821,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         for entry in entries {
             notifiedVersions[entry.category] = entry.latestVersion
         }
-        presentUpdateNotifications(entries)
+        // 运行期间发现 Pi Web 更新时，如果启动前自动更新已开启，只会安排到下次
+        // 启动安装（本次运行不安装）。
+        var deferred: Set<UpdateCheckCategory> = []
+        if updateChecker.preferences.autoUpdatePiWebBeforeLaunch,
+           entries.contains(where: { $0.category == .piWeb }) {
+            deferred.insert(.piWeb)
+        }
+        presentUpdateNotifications(entries, autoInstallDeferredToNextLaunch: deferred)
     }
 
     /// 多个分类共用一个提示框：除了“好”，每个条目一个“忽略 <版本>”按钮。
     /// 提示框不执行任何安装，按钮只记录忽略版本。
-    private func presentUpdateNotifications(_ entries: [UpdateNotificationEntry]) {
+    private func presentUpdateNotifications(
+        _ entries: [UpdateNotificationEntry],
+        autoInstallDeferredToNextLaunch: Set<UpdateCheckCategory> = []
+    ) {
         let alert = NSAlert()
         alert.messageText = UpdateNotificationText.title(for: entries)
-        alert.informativeText = UpdateNotificationText.body(for: entries)
+        alert.informativeText = UpdateNotificationText.body(
+            for: entries,
+            autoInstallDeferredToNextLaunch: autoInstallDeferredToNextLaunch
+        )
         alert.addButton(withTitle: "好")
         for entry in entries {
             alert.addButton(withTitle: "忽略 \(entry.latestVersion)")

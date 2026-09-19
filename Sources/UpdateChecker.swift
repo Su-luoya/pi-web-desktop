@@ -121,23 +121,25 @@ enum UpdateCheckUpstream {
 }
 
 /// 用户可见的更新检查说明（菜单“更新检查说明…”与 `docs/privacy.md` 用同一
-/// 组事实：域名、请求内容、策略与默认值、提示方式、忽略语义、缓存位置）。
+/// 组事实：域名、请求内容、策略与默认值、提示方式、忽略语义、受限自动更新、
+/// 缓存位置）。
 ///
-/// 措辞约束：只描述版本查询，不把请求称作遥测；不安装、不下载任何东西；明确
-/// 写出 alpha.3 才会生效的预留设置位。
+/// 措辞约束：只描述版本查询，不把请求称作遥测；版本查询本身不下载、不安装；
+/// “启动前自动更新 Pi Web”只在打开且来源与可信度满足时执行一次受限安装，
+/// 并明确写出生效范围与不自动回滚。
 enum UpdateCheckDisclosure {
     static func text(cachePath: String) -> String {
         let desktopHours = Int(UpdateCheckIntervals.standard.daily / 3600)
         let packageDays = Int(UpdateCheckIntervals.standard.packageCheck / (24 * 3600))
         return """
-        更新检查只做只读的版本查询，不下载、不安装任何东西。
+        更新检查本身只做只读的版本查询，不下载、不安装任何东西；只有下面“启动前自动更新 Pi Web”打开且条件满足时才会执行一次受限安装。
 
         · 访问的域名：\(UpdateCheckUpstream.githubHost)（桌面应用发布）、\(UpdateCheckUpstream.npmRegistryHost)（Pi CLI、Pi Web 与扩展包）。
         · 请求内容：GET + JSON 解析；User-Agent 只含应用名、版本与 bundle identifier；不发送 cookies、账号凭据、会话内容或诊断信息。
         · 频率：应用启动后立即检查一次；之后桌面应用 / Pi CLI / Pi Web 默认每 \(desktopHours) 小时（每日）、Pi 扩展包默认每 \(packageDays) 天（检查并通知）复查。四类可分别设为关闭 / 每日 / 每周（扩展包为关闭 / 检查并通知 / 询问后更新）；关闭后不发起对应请求，也不安排复查。应用关闭后不检查（不安装 LaunchAgent）。
         · 提示方式：应用内提示框（不使用系统通知中心、不申请通知权限）；提示只含组件名与版本。发现可用更新时最多在本次运行里提示一次，忽略某个版本后不再提示它。
         · 忽略版本：可以逐类忽略当前提示的版本；忽略与安装来源无关，只抑制这一个版本，上游发布更高版本时会再次提示。不实现版本锁定或降级。
-        · alpha.3 预留：设置里的“启动前自动更新 Pi Web”尚未生效，默认关闭；当前版本只保存这个值，不产生任何安装或更新行为。
+        · 启动前自动更新 Pi Web：默认关闭。打开后只对“来源为已验证的 npm 全局安装”的 Pi Web 生效：应用启动时若有已验证的可用版本，会以参数数组执行 npm install -g <包名>@<版本>（不使用 shell、不调用 sudo、安装有超时），安装后重新检测版本并做健康检查。其它来源（pnpm、Homebrew、nvm/mise、git checkout、本地路径、未知）仍只显示更新命令，绝不自动安装；应用不承诺所有来源都能回滚。
         · 结果缓存：\(cachePath)（只含版本、时间戳与条件请求字段），删除该文件即可清空。
 
         版本查询不是遥测：请求只用于比较版本，不会上传使用数据、会话或诊断内容。
@@ -881,8 +883,8 @@ private final class TimerUpdateToken: UpdateTimerToken {
 /// 版本检查器（GitHub #17，设置与忽略版本见 GitHub #18）。
 ///
 /// 行为边界：
-/// - 只检查、不安装：本类型没有任何安装/下载/执行路径，也不读 alpha.3 的预留
-///   设置位；
+/// - 只检查：本类型没有任何安装/下载/执行路径，也不读启动前的自动更新设置位
+///   （安装与版本验证由 `PiWebUpdateAdapter` 负责，见 GitHub #20）；
 /// - 只 GET 固定白名单端点；请求头只有 `Accept` / `User-Agent` / 条件请求字段；
 /// - 失败（网络、超时、限流、5xx、解析失败、非预期主机）只改变检查结果状态，
 ///   不抛出、不重试轰炸、不触碰服务状态；

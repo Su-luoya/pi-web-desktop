@@ -6,7 +6,7 @@ import Cocoa
 /// 记录忽略版本、让调度器读取新值都由 `AppDelegate` 完成。窗口自身不联网、
 /// 不安装、不读写 UserDefaults、不读 Keychain，日期格式只影响显示。
 final class UpdateSettingsWindowController: NSWindowController {
-    /// 策略或 alpha.3 预留设置位发生变化；调用方负责持久化并让调度器读取。
+    /// 策略或启动前自动更新开关发生变化；调用方负责持久化并让调度器读取。
     var onPreferencesChanged: ((UpdateCheckPreferences) -> Void)?
     /// 忽略某个分类当前提示的版本；返回 false 表示没有可忽略的版本。
     var onIgnoreCurrentVersion: ((UpdateCheckCategory) -> Bool)?
@@ -21,11 +21,11 @@ final class UpdateSettingsWindowController: NSWindowController {
     private var statusLabels: [UpdateCheckCategory: NSTextField] = [:]
     private var ignoreButtons: [UpdateCheckCategory: NSButton] = [:]
     private let autoUpdateButton = NSButton(
-        checkboxWithTitle: "启动前自动更新 Pi Web（alpha.3 起生效）",
+        checkboxWithTitle: "启动前自动更新 Pi Web（仅限已验证的 npm 全局安装）",
         target: nil,
         action: nil
     )
-    private let autoUpdateHintLabel = NSTextField(labelWithString: UpdateAutomationBoundary.pendingExplanation)
+    private let autoUpdateHintLabel = NSTextField(labelWithString: UpdateAutomationBoundary.restrictedExplanation)
 
     private static let timestampFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -134,7 +134,7 @@ final class UpdateSettingsWindowController: NSWindowController {
         autoUpdateHintLabel.textColor = .secondaryLabelColor
         autoUpdateHintLabel.font = NSFont.systemFont(ofSize: 11)
 
-        let reservedHeader = NSTextField(labelWithString: "alpha.3 预留（尚未生效）")
+        let reservedHeader = NSTextField(labelWithString: "启动前自动更新（受限）")
         reservedHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
 
         let explanationButton = NSButton(title: "更新检查说明…", target: self, action: #selector(showExplanation(_:)))
@@ -199,7 +199,8 @@ final class UpdateSettingsWindowController: NSWindowController {
 
     @objc private func autoUpdateChanged(_ sender: NSButton) {
         var updated = preferences
-        // 只写入值：alpha.2 不会因为这里为 .on 而产生任何安装/更新行为。
+        // 只写入值；是否真的自动安装由 `PiWebUpdatePlanner` 的前置条件与来源
+        // 判定决定（只有已验证的 npm 全局安装才会执行）。
         updated.autoUpdatePiWebBeforeLaunch = sender.state == .on
         update(preferences: updated, statuses: statuses, ignorableVersions: ignorableVersions)
         onPreferencesChanged?(updated)

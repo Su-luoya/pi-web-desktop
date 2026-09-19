@@ -26,7 +26,7 @@ Pi Web Desktop is a macOS AppKit/WebKit shell that starts, monitors, and display
 | 公证 | 未公证。Gatekeeper 默认拒绝（`spctl --assess` 返回 rejected），需要用户在“系统设置 → 隐私与安全性”里手动批准 |
 | 发行状态 | 当前最新是早期 alpha `0.1.0-alpha.2`（build `2`），没有稳定发行版；`0.1.0-alpha.1` 仍然可以下载 |
 | 分发现状 | alpha 以 prerelease 形式发布在 [GitHub Releases](https://github.com/Su-luoya/pi-web-desktop/releases)：自 `v0.1.0-alpha.1` 起提供预编译 ZIP、`.sha256` 与签名/公证证据 Markdown；也可以按 [发布说明](docs/releasing.md) 从源码构建。所有资产都是 **ad-hoc 签名、未公证** |
-| 应用内更新 | 未实现（后续 issue）。当前 alpha 只做只读版本检查并按设置提示：四类可分别关闭 / 每日 / 每周（扩展包：关闭 / 检查并通知 / 询问后更新），可忽略某个具体版本；不下载、不安装、不降级。见 [隐私说明](docs/privacy.md) 的“版本检查、提示与忽略版本”与 [设置说明](docs/settings-and-workspace.md) |
+| 应用内更新 | 桌面应用自身更新的未实现（后续 issue）。当前 alpha 只做只读版本检查并按设置提示：四类可分别关闭 / 每日 / 每周（扩展包：关闭 / 检查并通知 / 询问后更新），可忽略某个具体版本；桌面应用自身不下载、不安装、不降级。GitHub #20 起，设置里的“启动前自动更新 Pi Web”开关可以在启动前自动更新 Pi Web 依赖，但仅限来源为已验证的 npm 全局安装（默认关闭，其它来源只显示命令）。见 [隐私说明](docs/privacy.md) 的“版本检查、提示与忽略版本”与 [设置说明](docs/settings-and-workspace.md) |
 | 支持承诺 | 无 SLA，无响应或修复时限。Issue 和 PR 按维护者可用时间处理 |
 | 远程访问 | 默认只监听 loopback；远程访问必须自备加密隧道或 HTTPS 反向代理，密码认证 ≠ 传输加密 |
 | 日志与诊断 | 日志写在 `~/Library/Logs/Pi Web Desktop/`，10 MB 轮转、保留 5 份；日志行、错误消息、环境变量/命令行展示与“复制诊断”导出共用同一个脱敏器。规则与字段见 [日志与诊断导出](docs/logging-and-diagnostics.md) |
@@ -96,7 +96,7 @@ open "$HOME/Applications/Pi-Web-Desktop.app"
 
 ## 安全与隐私边界
 
-- 不收集遥测。桌面应用 / Pi CLI / Pi Web / Pi 扩展包的四类版本检查只做只读查询，不下载、不安装，可以分别关闭；访问的域名、频率与关闭方式见 [隐私说明](docs/privacy.md)。
+- 不收集遥测。桌面应用 / Pi CLI / Pi Web / Pi 扩展包的四类版本检查只做只读查询，不下载、不安装，可以分别关闭；只有“启动前自动更新 Pi Web”（默认关闭、仅限已验证的 npm 全局安装）会在启动前执行一次受限安装。访问的域名、频率与关闭方式见 [隐私说明](docs/privacy.md)。
 - 默认只监听 `127.0.0.1`。远程访问需要用户先在 Keychain 保存非空密码，并且需要用户自备加密传输；**密码认证只验证访问者，不等于传输加密**。
 - 不要把 agent 服务暴露给不可信网络。
 - 不要在公开 Issue、PR 或讨论里粘贴密码、API key、token、代理凭据、私有主机名、包含主目录绝对路径（以 `/Users` 开头）的环境信息或未脱敏日志。

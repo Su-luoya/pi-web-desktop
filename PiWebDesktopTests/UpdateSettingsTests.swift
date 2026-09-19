@@ -89,9 +89,9 @@ final class UpdateSettingsTests: XCTestCase {
         XCTAssertEqual(UpdateCheckIntervals.standard.daily, 24 * 60 * 60)
         XCTAssertEqual(UpdateCheckIntervals.standard.weekly, 7 * 24 * 60 * 60)
         XCTAssertEqual(UpdateCheckIntervals.standard.packageCheck, 7 * 24 * 60 * 60)
-        // alpha.3 预留位在 alpha.2 不生效。
-        XCTAssertFalse(UpdateCheckPreferences.autoUpdateBeforeLaunchIsEffective)
-        XCTAssertFalse(UpdateAutomationBoundary.autoUpdateIsEffective)
+        // GitHub #20：设置位已生效，但只对来源为已验证的 npm 全局安装的 Pi Web 生效。
+        XCTAssertTrue(UpdateCheckPreferences.autoUpdateBeforeLaunchIsEffective)
+        XCTAssertTrue(UpdateAutomationBoundary.autoUpdateIsEffective)
     }
 
     func testPolicyTitlesAndAllowedSets() {
@@ -526,7 +526,7 @@ final class UpdateSettingsTests: XCTestCase {
         }
     }
 
-    func testDisclosureTextDocumentsPoliciesIgnoreAndReservedSetting() {
+    func testDisclosureTextDocumentsPoliciesIgnoreAndAutoUpdateScope() {
         let text = UpdateCheckDisclosure.text(cachePath: "~/Library/Application Support/Pi Web Desktop/update-check-cache.json")
 
         XCTAssertTrue(text.contains("每日"))
@@ -534,8 +534,10 @@ final class UpdateSettingsTests: XCTestCase {
         XCTAssertTrue(text.contains("检查并通知"))
         XCTAssertTrue(text.contains("询问后更新"))
         XCTAssertTrue(text.contains("忽略"))
-        XCTAssertTrue(text.contains("alpha.3"))
-        XCTAssertTrue(text.contains("尚未生效"))
+        XCTAssertTrue(text.contains("启动前自动更新"))
+        XCTAssertTrue(text.contains("npm 全局"))
+        XCTAssertTrue(text.contains("不调用 sudo"))
+        XCTAssertTrue(text.contains("不承诺所有来源都能回滚"))
         XCTAssertTrue(text.contains("系统通知中心"))
         XCTAssertTrue(text.contains("24 小时"))
         XCTAssertTrue(text.contains("7 天"))

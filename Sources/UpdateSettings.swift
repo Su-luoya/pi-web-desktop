@@ -66,8 +66,28 @@ enum UpdateCheckPolicy: String, CaseIterable, Equatable {
 /// `updateChecks.<组件>.ignoredVersion` / `.ignoredVersionAt`（忽略版本）。
 /// 这里不定义任何其它键：设置里不会出现路径、包名、来源或凭据。
 enum UpdateSettingKeys {
-    /// alpha.3 预留设置位。
+    /// 启动前自动更新 Pi Web（GitHub #20）。
     static let autoUpdatePiWebBeforeLaunch = "updateChecks.piWeb.autoUpdateBeforeLaunch"
+
+    /// 最近一次失败的受限自动更新的持久记录（GitHub #20）。只含类别、旧/新/目标
+    /// 版本、固定原因文案与时间戳；不含路径、环境变量值、凭据或子进程输出。
+    static let piWebUpdateWarningKind = "updateChecks.piWeb.lastUpdateWarning.kind"
+    static let piWebUpdateWarningOldVersion = "updateChecks.piWeb.lastUpdateWarning.oldVersion"
+    static let piWebUpdateWarningNewVersion = "updateChecks.piWeb.lastUpdateWarning.newVersion"
+    static let piWebUpdateWarningTargetVersion = "updateChecks.piWeb.lastUpdateWarning.targetVersion"
+    static let piWebUpdateWarningReason = "updateChecks.piWeb.lastUpdateWarning.reason"
+    static let piWebUpdateWarningRecordedAt = "updateChecks.piWeb.lastUpdateWarning.recordedAt"
+
+    static var allPiWebUpdateWarningKeys: [String] {
+        [
+            piWebUpdateWarningKind,
+            piWebUpdateWarningOldVersion,
+            piWebUpdateWarningNewVersion,
+            piWebUpdateWarningTargetVersion,
+            piWebUpdateWarningReason,
+            piWebUpdateWarningRecordedAt
+        ]
+    }
 
     static func stem(for category: UpdateCheckCategory) -> String {
         switch category {
@@ -88,7 +108,7 @@ enum UpdateSettingKeys {
         writtenPreferencesKeys + legacyPreferenceKeys
     }
 
-    /// `UpdateCheckPreferences.save` 实际写入的键（策略 + alpha.3 预留位）。
+    /// `UpdateCheckPreferences.save` 实际写入的键（策略 + 启动前自动更新开关）。
     static var writtenPreferencesKeys: [String] {
         UpdateCheckCategory.allCases.map { policy(for: $0) } + [autoUpdatePiWebBeforeLaunch]
     }
@@ -103,7 +123,8 @@ enum UpdateSettingKeys {
     }
 
     /// 更新检查会写入的全部键（测试用它断言 UserDefaults 里没有额外数据）。
-    static var allKeys: [String] { allPreferencesKeys + allIgnoredVersionKeys }
+    /// 警告键由 `PiWebUpdateWarningStore` 单独读写：保存策略不会清掉警告。
+    static var allKeys: [String] { allPreferencesKeys + allIgnoredVersionKeys + allPiWebUpdateWarningKeys }
 }
 
 // MARK: - 设置模型
@@ -111,12 +132,13 @@ enum UpdateSettingKeys {
 /// 四类组件的更新检查设置（GitHub #18）。
 ///
 /// 默认值与文档一致：桌面应用 / Pi CLI / Pi Web 每日，Pi 扩展包检查并通知；
-/// alpha.3 的“启动前自动更新”预留位默认关闭。该结构只包含策略与一个布尔值，
+/// 启动前自动更新 Pi Web 默认关闭（GitHub #20 起生效，但只对已验证的 npm
+/// 全局安装生效）。该结构只包含策略与一个布尔值，
 /// 不包含版本、路径、来源或任何凭据。
 struct UpdateCheckPreferences: Equatable {
-    /// alpha.2 的预留设置位恒为“不生效”：打开它只写入值，不产生任何安装/更新行为。
-    /// alpha.3 会按这里的值启用 Pi Web 范围内的受限自动安装。
-    static let autoUpdateBeforeLaunchIsEffective = false
+    /// 设置位已生效（GitHub #20）：打开它只对“来源为已验证的 npm 全局安装”的
+    /// Pi Web 启用启动前受限自动安装；其它来源仍只显示命令，绝不自动安装。
+    static let autoUpdateBeforeLaunchIsEffective = true
     static let defaultAutoUpdatePiWebBeforeLaunch = false
 
     /// 四类组件各自的策略。字典始终包含 `UpdateCheckCategory.allCases`，
@@ -648,32 +670,47 @@ enum UpdateNotificationText {
         return entries.count == 1 ? "发现 1 项可用更新" : "发现 \(entries.count) 项可用更新"
     }
 
-    static func body(for entries: [UpdateNotificationEntry]) -> String {
+    static func body(
+        for entries: [UpdateNotificationEntry],
+        autoInstallDeferredToNextLaunch: Set<UpdateCheckCategory> = []
+    ) -> String {
         var lines = entries.map { entry -> String in
             let installed = entry.installedVersion ?? "未知"
+            if autoInstallDeferredToNextLaunch.contains(entry.category) {
+                return "\(entry.target.displayName)：本机 \(installed)，上游 \(entry.latestVersion)。"
+                    + "“启动前自动更新 Pi Web”已开启：该更新只安排到下次启动应用时自动安装（本次运行不安装）。"
+            }
             if entry.policy == .askBeforeUpdate {
                 return "\(entry.target.displayName)：本机 \(installed)，上游 \(entry.latestVersion)。"
-                    + "是否更新由你决定；安装流程尚未实现（alpha.3 起提供），当前只提示、不下载、不安装。"
+                    + "是否更新由你决定；扩展包的自动安装尚未实现，当前只提示、不下载、不安装。"
             }
             return "\(entry.target.displayName)：本机 \(installed)，上游 \(entry.latestVersion)。"
         }
-        lines.append("应用只提示版本，不会自动下载或安装。忽略某个版本后不会再提示它，"
-            + "只有上游发布更高版本时才会再次提示。")
+        if autoInstallDeferredToNextLaunch.isEmpty {
+            lines.append("应用只提示版本，不会自动下载或安装。忽略某个版本后不会再提示它，"
+                + "只有上游发布更高版本时才会再次提示。")
+        } else {
+            lines.append("应用不会在本次运行中自动下载或安装；启动前自动更新只对已验证的 npm 全局安装生效。"
+                + "忽略某个版本后不会再提示它，只有上游发布更高版本时才会再次提示。")
+        }
         return lines.joined(separator: "\n")
     }
 }
 
-// MARK: - 预留设置位
+// MARK: - 受限自动更新的边界
 
-/// alpha.3 预留能力的边界说明。
+/// “启动前自动更新 Pi Web”能力的边界说明（GitHub #20 起生效）。
 ///
-/// alpha.2 只有“保存设置值”：`autoUpdatePiWebBeforeLaunch` 为 true 时不会产生
-/// 任何安装、下载、进程启动或配置迁移行为；`UpdateChecker` 与调度器都不读它。
+/// `autoUpdatePiWebBeforeLaunch` 为 true 时也只对“来源为已验证的 npm 全局安装”
+/// 的 Pi Web 产生安装行为；`UpdateChecker` 与调度器都不读它（开关不改变请求与
+/// 调度，是否执行由 `PiWebUpdatePlanner` 的前置条件决定）。
 enum UpdateAutomationBoundary {
-    /// alpha.2 恒为 false；alpha.3 会在 Pi Web 范围内启用受限自动安装。
+    /// 设置位已生效（GitHub #20）；实际是否安装还要看来源与前置条件。
     static var autoUpdateIsEffective: Bool { UpdateCheckPreferences.autoUpdateBeforeLaunchIsEffective }
 
-    /// 预留设置位在界面上的说明文案（设置窗口与文档共用同一组事实）。
-    static let pendingExplanation = "尚未生效：该设置位为 alpha.3 的受限自动安装预留。"
-        + "当前版本只保存这个开关的值，不会下载、安装或修改任何组件，打开它不改变任何运行行为。"
+    /// 受限自动更新的边界说明（GitHub #20）：设置窗口与文档共用同一组事实。
+    static let restrictedExplanation = "只对来源为已验证的 npm 全局安装的 Pi Web 生效：启动时发现已验证的可用版本时，"
+        + "用参数数组执行 npm install -g <包名>@<版本>（不使用 shell、不调用 sudo、安装有超时），安装后重新检测版本并做健康检查。"
+        + "其它来源（pnpm、Homebrew、nvm/mise、git checkout、本地路径、未知）只显示命令，绝不自动安装；"
+        + "应用不承诺所有来源都能回滚。"
 }

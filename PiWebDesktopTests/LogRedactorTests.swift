@@ -152,6 +152,119 @@ final class LogRedactorTests: XCTestCase {
         XCTAssertEqual(redactor.redact(once), once)
     }
 
+    // MARK: 引号值、带空白的键值分隔符与续行（GitHub #38 R-2）
+
+    /// 引号值（单/双引号）与含空格的值必须整段替换，而不是只替换到第一个空格或
+    /// 完全不替换；`=` / `:` 两侧的空白不影响匹配。
+    func testQuotedAndSpacedValuesAreRedactedCompletely() {
+        let cases: [(String, String)] = [
+            ("password=\"a b c\"", "password=\(LogRedactor.marker)"),
+            ("token='d e f'", "token=\(LogRedactor.marker)"),
+            ("secret = \"spaced-value\"", "secret = \(LogRedactor.marker)"),
+            ("api_key : 'spaced value'", "api_key : \(LogRedactor.marker)"),
+            ("password=AA BB CC DD", "password=\(LogRedactor.marker)"),
+            ("secret: value with spaces", "secret: \(LogRedactor.marker)"),
+            ("PI_WEB_PASSWORD=\"env value\"", "PI_WEB_PASSWORD=\(LogRedactor.marker)")
+        ]
+        for (input, expected) in cases {
+            XCTAssertEqual(redactor.redact(input), expected, input)
+        }
+    }
+
+    /// 等号/冒号两侧带空白的各种组合都要命中（R-2 的 `secret = "…"` 形态）。
+    func testSeparatorWhitespaceIsAcceptedOnBothSides() {
+        for input in ["secret=\"v\"", "secret =\"v\"", "secret= \"v\"",
+                      "secret = \"v\"", "secret : \"v\"", "secret:\"v\""] {
+            let expected = input.replacingOccurrences(of: "\"v\"", with: LogRedactor.marker)
+            XCTAssertEqual(redactor.redact(input), expected, input)
+        }
+    }
+
+    /// `key:` 后没有值时，紧随其后的续行整体按值处理；尾随的 `,` 等结构字符保留。
+    func testContinuationLineAfterAKeyIsRedacted() {
+        XCTAssertEqual(
+            redactor.redact("password:\n  next-line-value"),
+            "password:\n  \(LogRedactor.marker)"
+        )
+        XCTAssertEqual(
+            redactor.redact("password:\nnext-line-value"),
+            "password:\n\(LogRedactor.marker)"
+        )
+        XCTAssertEqual(
+            redactor.redact("\"password\":\n  \"a b\",\n  \"port\": 30141"),
+            "\"password\":\n  \(LogRedactor.marker),\n  \"port\": 30141"
+        )
+    }
+
+    /// 空行与下一条 `label:` 行不是值：续行规则不能把后续字段一并吞掉。
+    func testContinuationStopsAtBlankLinesAndTheNextLabel() {
+        XCTAssertEqual(redactor.redact("password:\n\n  value"), "password:\n\n  value")
+        XCTAssertEqual(redactor.redact("password:\nport: 30141"), "password:\nport: 30141")
+    }
+
+    /// 命令行形式的值可以是带引号的字符串，后续参数保持原样。
+    func testCommandLineQuotedValueIsRedactedWithoutEatingLaterArguments() {
+        XCTAssertEqual(
+            redactor.redact("--password \"cli secret\" --port 30141"),
+            "--password \(LogRedactor.marker) --port 30141"
+        )
+    }
+
+    // MARK: 幂等（GitHub #38 R-1）
+
+    /// R-1 回归：JSON 引号键脱敏后紧跟占位符的 `}` 不能被第二次处理吞掉。
+    func testJSONQuotedKeyRedactionIsIdempotent() {
+        let inputs = [
+            "{\"token\": \"json-secret\"} trailing-context",
+            "{\"token\": \"abc\", \"port\": 30141, \"nested\": {\"secret\": \"xyz\"}}",
+            "{\"password\": <redacted>}",
+            "{\"password\": <redacted>} trailing-context",
+            "{\"password\":\"a b\",\"token\":\"c d\"}"
+        ]
+        for input in inputs {
+            let once = redactor.redact(input)
+            XCTAssertEqual(redactor.redact(once), once, input)
+        }
+
+        let once = redactor.redact(inputs[0])
+        XCTAssertTrue(once.contains("}"), once)
+        XCTAssertTrue(once.contains("trailing-context"), once)
+        XCTAssertFalse(once.contains("json-secret"), once)
+    }
+
+    /// 值尾部的结构字符（`}`、`)` 等）与整段已脱敏文本都要逐字节稳定。
+    func testTrailingStructureAndAlreadyRedactedTextStayByteIdentical() {
+        XCTAssertEqual(redactor.redact("{\"token\": abc}"), "{\"token\": \(LogRedactor.marker)}")
+        XCTAssertEqual(redactor.redact("(token=abc)"), "(token=\(LogRedactor.marker))")
+
+        let alreadyRedacted = """
+        Authorization: \(LogRedactor.marker)
+        token=\(LogRedactor.marker)
+        {"password": \(LogRedactor.marker)}
+        {"secret": <redacted>} trailing-context
+        password:
+          <redacted>
+        """
+        XCTAssertEqual(redactor.redact(alreadyRedacted), alreadyRedacted)
+    }
+
+    /// 覆盖范围内所有形态连续两次脱敏都必须一致（含续行与 CLI 引号值）。
+    func testIdempotenceAcrossTheCoveredForms() {
+        let inputs = [
+            "password=\"a b c\"",
+            "secret = 'd e f'",
+            "password:\n  next-value",
+            "{\"token\": \"abc\", \"port\": 30141}",
+            "--password \"cli value\" --port 30141",
+            "HTTPS_PROXY=http://proxy-user:proxy-pass@proxy.example.invalid:8080",
+            "cwd \(fakeHome)/work"
+        ]
+        for input in inputs {
+            let once = redactor.redact(input)
+            XCTAssertEqual(redactor.redact(once), once, input)
+        }
+    }
+
     /// 诊断导出使用真实 Home；此时临时目录前缀不参与替换，但用户名形态的路径
     /// 仍然必须被脱敏（不能依赖“只有当前用户的 Home 才会出现”这个假设）。
     func testOtherUsersHomeIsRedactedEvenWhenItIsNotTheInjectedHome() {

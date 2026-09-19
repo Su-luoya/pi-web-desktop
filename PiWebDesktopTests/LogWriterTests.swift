@@ -87,6 +87,23 @@ final class LogWriterTests: XCTestCase {
         XCTAssertNil(writer.failureDescription)
     }
 
+    /// GitHub #38：写入路径同样要覆盖引号值、带空白的键值分隔符与 `key:` 续行。
+    func testAppendRedactsQuotedAndContinuationValues() {
+        let writer = makeWriter()
+        XCTAssertTrue(writer.append("""
+        password="a b c"
+        secret = "spaced value"
+        token:
+          continuation-value
+        """))
+        let log = text(at: logURL)
+        for secret in ["a b c", "spaced value", "continuation-value"] {
+            XCTAssertFalse(log.contains(secret), "leaked \(secret): \(log)")
+        }
+        XCTAssertEqual(log.components(separatedBy: "\n").filter { $0.contains(LogRedactor.marker) }.count, 3, log)
+        XCTAssertNil(writer.failureDescription)
+    }
+
     // MARK: 轮转
 
     func testDefaultPolicyMatchesTheDocumentedLimits() {
@@ -151,6 +168,21 @@ final class LogWriterTests: XCTestCase {
         XCTAssertFalse(log.contains("old-history-secret"))
         XCTAssertTrue(log.contains("plain history"))
         XCTAssertTrue(log.contains("child output"))
+    }
+
+    /// GitHub #38 R-1：就地脱敏必须幂等——第二次 scrub 不能吞掉第一次留下的 `}`。
+    func testScrubbingAnAlreadyRedactedLogIsByteStable() {
+        let writer = makeWriter()
+        XCTAssertTrue(writer.append("{\"token\": \"json-secret-value\"} trailing-context\n"))
+        XCTAssertTrue(writer.scrubExistingLog())
+        let once = text(at: logURL)
+        XCTAssertFalse(once.contains("json-secret-value"), once)
+        XCTAssertTrue(once.contains("}"), once)
+        XCTAssertTrue(once.contains("trailing-context"), once)
+
+        XCTAssertTrue(writer.scrubExistingLog())
+        XCTAssertEqual(text(at: logURL), once)
+        XCTAssertNil(writer.failureDescription)
     }
 
     func testOpenChildOutputRotatesAnOversizedLogAfterScrubbingIt() throws {

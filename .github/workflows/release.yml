@@ -1,0 +1,232 @@
+name: release
+
+# Tag-driven packaging for the Apple Silicon alpha channel.
+#
+#   * push a protected `v*` tag -> build, verify, package, then create a DRAFT
+#     prerelease with the ZIP, its SHA-256 and the signature/Gatekeeper evidence.
+#     A maintainer fills the real-machine versions from the Release Issue into the
+#     draft notes and publishes it (see docs/alpha-release-checklist.md).
+#   * workflow_dispatch -> rehearsal only: the same build, verification,
+#     packaging and release-notes rendering, but the result is a workflow
+#     artifact and no release is created, even when dispatched on a tag.
+#
+# The artifact is ad-hoc signed and never notarized: this repository has no
+# Apple Developer account, so neither this workflow nor its documentation may
+# describe the build as signed or notarized. Scripts/package-release.sh refuses
+# to package a bundle whose signature is not `adhoc`.
+#
+# Third-party actions are pinned to full commit SHAs. The release notes evidence
+# is produced by the same script that a local rehearsal runs.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'release tag to check (for example the v* tag being rehearsed); empty means the GitHub ref name, and a non-tag ref falls back to the tag derived from Configuration/AppIdentity.xcconfig'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build, verify and package the alpha artifact
+    runs-on: macos-14
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      release_tag: ${{ steps.tag.outputs.value }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve and check the release tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG}" ]; then
+            tag="${INPUT_TAG}"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="$(./Scripts/check-release-version.sh --print-tag)"
+            echo "::notice::workflow_dispatch rehearsal on ${GITHUB_REF_NAME}: comparing the version source against the derived tag ${tag}"
+          fi
+          ./Scripts/check-release-version.sh "${tag}"
+          echo "value=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check shell script syntax
+        run: |
+          set -euo pipefail
+          sh -n Scripts/build.sh Scripts/install.sh Scripts/check-identity.sh Scripts/check-release-version.sh Scripts/package-release.sh Scripts/smoke.sh
+
+      - name: Build the Xcode project (arm64)
+        env:
+          DERIVED_DATA_PATH: ${{ runner.temp }}/release-derived-data
+        run: |
+          set -euo pipefail
+          rm -rf "${DERIVED_DATA_PATH}"
+          xcodebuild \
+            -project PiWebDesktop.xcodeproj \
+            -scheme PiWebDesktop \
+            -sdk macosx \
+            -arch arm64 \
+            -derivedDataPath "${DERIVED_DATA_PATH}" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY=- \
+            build
+          xcode_app="${DERIVED_DATA_PATH}/Build/Products/Debug/PiWebDesktop.app"
+          test -d "${xcode_app}"
+          echo "xcodebuild product: ${xcode_app}"
+
+      - name: Build the release bundle with the packaging script
+        run: ./Scripts/build.sh
+
+      - name: Check identity of the Xcode and release bundles
+        env:
+          DERIVED_DATA_PATH: ${{ runner.temp }}/release-derived-data
+        run: |
+          set -euo pipefail
+          ./Scripts/check-identity.sh \
+            "${DERIVED_DATA_PATH}/Build/Products/Debug/PiWebDesktop.app" \
+            build/Pi-Web-Desktop.app
+
+      - name: Smoke launch
+        run: ./Scripts/smoke.sh
+
+      - name: Package ZIP, checksum, signature evidence and identity checks
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.value }}
+        run: ./Scripts/package-release.sh --app build/Pi-Web-Desktop.app --out dist --tag "${RELEASE_TAG}"
+
+      - name: Render the release notes from the template
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          . dist/release-metadata.env
+          awk -v version="${VERSION}" \
+              -v build="${BUILD}" \
+              -v zip_name="${ZIP_NAME}" \
+              -v sha256="${SHA256}" \
+              -v evidence="dist/${EVIDENCE_NAME}" '
+            BEGIN {
+              while ((getline line < evidence) > 0) { evidence_text = evidence_text line "\n" }
+              close(evidence)
+            }
+            {
+              # Everything before the first "# " heading is template
+              # instructions and is not part of the published release body.
+              if (!started) {
+                if ($0 ~ /^# /) { started = 1 } else { next }
+              }
+              gsub(/\{\{VERSION\}\}/, version)
+              gsub(/\{\{BUILD\}\}/, build)
+              gsub(/\{\{ZIP_NAME\}\}/, zip_name)
+              gsub(/\{\{SHA256\}\}/, sha256)
+              if ($0 ~ /<!-- RELEASE-EVIDENCE -->/) { printf "%s", evidence_text; next }
+              print
+            }
+          ' docs/release-notes-template.md > dist/release-body.md
+          if grep -q '{{' dist/release-body.md; then
+            echo "::error::the rendered release notes still contain template placeholders"
+            grep -n '{{' dist/release-body.md
+            exit 1
+          fi
+          if ! grep -qF "${SHA256}" dist/release-body.md; then
+            echo "::error::the rendered release notes do not contain the ZIP checksum"
+            exit 1
+          fi
+          unfilled="$(grep -c '<待填写>' dist/release-body.md || true)"
+          echo "::notice::${unfilled} field(s) still marked 待填写; they must be filled from the Release Issue before the draft release is published"
+
+      - name: Summarize the artifact and evidence
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          . dist/release-metadata.env
+          {
+            echo "## Pi Web Desktop ${VERSION} (build ${BUILD})"
+            echo
+            echo "- tag: \`${GITHUB_REF_NAME}\`"
+            echo "- ZIP: \`${ZIP_NAME}\`"
+            echo "- SHA-256: \`${SHA256}\`"
+            echo "- workflow artifact: \`pi-web-desktop-alpha\`"
+            echo
+            cat "dist/${EVIDENCE_NAME}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload the alpha artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pi-web-desktop-alpha
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Create the draft release with the alpha assets
+    needs: build
+    # Only a pushed tag creates a release. workflow_dispatch is a rehearsal and
+    # stops at the workflow artifact, even when it runs on a tag ref.
+    if: "${{ github.event_name == 'push' && github.ref_type == 'tag' }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download the packaged artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pi-web-desktop-alpha
+          path: dist
+
+      - name: Verify the checksum and create the draft prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          . dist/release-metadata.env
+          test -f "dist/${ZIP_NAME}"
+          test -f "dist/${ZIP_NAME}.sha256"
+          test -f "dist/${EVIDENCE_NAME}"
+          test -f dist/release-body.md
+          # The same command the release notes tell users to run.
+          ( cd dist && sha256sum -c "${ZIP_NAME}.sha256" )
+
+          # Replace a previous draft so a re-run can recreate it. A published
+          # release is never modified or deleted by this workflow.
+          if gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx 'true'; then
+            echo "Replacing the existing draft release for ${RELEASE_TAG}."
+            gh release delete "${RELEASE_TAG}" --yes
+          fi
+
+          gh release create "${RELEASE_TAG}" \
+            "dist/${ZIP_NAME}" \
+            "dist/${ZIP_NAME}.sha256" \
+            "dist/${EVIDENCE_NAME}" \
+            --title "Pi Web Desktop ${VERSION} (Apple Silicon alpha, ad-hoc, 未公证)" \
+            --notes-file dist/release-body.md \
+            --prerelease \
+            --draft
+
+          {
+            echo "### Draft prerelease created for ${RELEASE_TAG}"
+            echo
+            echo "Assets uploaded: \`${ZIP_NAME}\`, \`${ZIP_NAME}.sha256\`, \`${EVIDENCE_NAME}\`."
+            echo "Fill the real-machine versions from the Release Issue into the release notes, confirm the alpha checklist, then publish the draft as a prerelease."
+            echo "Draft: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
+          } >> "${GITHUB_STEP_SUMMARY}"

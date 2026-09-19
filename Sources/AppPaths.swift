@@ -37,6 +37,12 @@ struct AppPaths: Equatable {
     var appPIDURL: URL { supportDirectory.appendingPathComponent("app.pid") }
     var instanceLockURL: URL { supportDirectory.appendingPathComponent("instance.lock") }
 
+    /// 更新检查缓存（GitHub #17）：support 目录下的独立 JSON 文件。
+    ///
+    /// 只含检查结果、时间戳与 etag/条件请求字段；不含凭据、cookies、会话、
+    /// URL、响应体或诊断内容。删除该文件只会让下一次检查重新发起普通 GET。
+    var updateCheckCacheURL: URL { supportDirectory.appendingPathComponent("update-check-cache.json") }
+
     /// 真实用户目录：`~/Library/Application Support/Pi Web Desktop` 与
     /// `~/Library/Logs/Pi Web Desktop`。
     static func standard(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> AppPaths {

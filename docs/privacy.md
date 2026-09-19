@@ -4,11 +4,19 @@
 
 ## 无遥测
 
-Pi Web Desktop 不收集或上传遥测、使用统计、会话内容、认证信息或诊断报告。用户主动复制诊断信息或打开日志时，数据才离开本机，且用户负责在公开提交前脱敏。
+Pi Web Desktop 不收集或上传遥测、使用统计、会话内容、认证信息或诊断报告。除了下面的只读版本检查，应用不会主动向任何上游发送数据；用户主动复制诊断信息或打开日志时，数据才离开本机，且用户负责在公开提交前脱敏。
 
 ## 版本检查
 
-计划中的版本检查会访问相应上游服务，例如 GitHub Releases、npm registry 或 Pi 上游。请求会让这些服务看到网络请求的 IP 和 User-Agent。版本检查不是项目遥测，首版实现后会在首次启动说明中披露，并允许用户分别关闭。
+Pi Web Desktop 在应用运行期间做只读的版本查询，只提示、不下载、不安装任何东西。版本查询**不是项目遥测**：请求只用于比较“本机版本”与“上游最新版”，不携带使用数据、会话内容、认证信息或诊断报告。应用退出后不检查（不安装 LaunchAgent，也不在后台常驻）。
+
+- 访问的域名与请求内容：`api.github.com`（`GET /repos/Su-luoya/pi-web-desktop/releases?per_page=20`，桌面应用发布）与 `registry.npmjs.org`（`GET /<包名>/latest`，Pi CLI、Pi Web 与 `pi list` 得到的扩展包）。只有 GET + JSON 解析；`User-Agent` 固定为应用名 + 版本 + bundle identifier（来自应用自身的 Info.plist，不含用户名或主机名）。不发送 cookies、账号凭据、会话内容或诊断字段；`Cookie`、`Authorization` 这类头即使被误加也会在发出前丢弃；应用侧客户端不跟随重定向，因此请求不会落到这两个域名之外。响应只保留 `etag`、`last-modified` 与 `content-type`，`Set-Cookie` 等响应头不读取也不保存。
+- 频率：应用启动后立即检查一次；运行期间桌面应用 / Pi CLI / Pi Web 每 24 小时、扩展包每 7 天复查一次。
+- 关闭方式：菜单“服务 → 更新检查设置”里四类开关（桌面应用、Pi CLI、Pi Web、Pi 扩展包）各自独立，关闭后应用不再发起对应请求；同一菜单的状态行显示最近一次结论，“更新检查说明…”给出与本节一致的说明。
+- 结果缓存：`~/Library/Application Support/Pi Web Desktop/update-check-cache.json`（见下表），只含版本号、时间戳与 etag/条件请求字段；**不含**凭据、cookies、会话、URL、响应体或诊断内容。删除该文件只会让下一次检查重新发起普通 GET。
+- 可信度：只有响应来自预期域名且结构可解析时才将上游版本标为“已验证”；网络失败、超时、限流（HTTP 429）与 5xx 沿用 24 小时/7 天内上一次成功结果并标注为缓存结果；超过有效期、响应无法解析或来自非预期主机时显示“无法确定”。检查失败只影响提示文案，不影响正在运行的服务，也不改变服务状态。
+
+上游服务会看到请求的源 IP、`User-Agent` 与请求时间，并按各自隐私政策处理这些接入日志；这不属于本仓库能控制的范围。本仓库不代理、不中转这些请求，也不使用代理或镜像端点。
 
 ## 本地数据
 
@@ -31,6 +39,7 @@ Pi Web Desktop 不收集或上传遥测、使用统计、会话内容、认证�
 | 服务配置、首次设置状态、窗口位置 | UserDefaults（domain 为 bundle identifier `io.github.su-luoya.pi-web-desktop`） | 先 `defaults read io.github.su-luoya.pi-web-desktop` 确认内容，再 `defaults delete io.github.su-luoya.pi-web-desktop` |
 | 运行状态与所有权记录 | `~/Library/Application Support/Pi Web Desktop/` | 退出应用后删除该目录 |
 | 日志（含轮转文件） | `~/Library/Logs/Pi Web Desktop/`（`Pi Web Desktop.log` 与 `.1.log` … `.5.log`） | 退出应用后删除该目录 |
+| 更新检查缓存 | `~/Library/Application Support/Pi Web Desktop/update-check-cache.json` | 退出应用后删除该文件；菜单“服务 → 更新检查设置”里关闭四类开关可停止后续请求（已存缓存不会自动删除） |
 | 远程访问密码 | 登录 Keychain；service 为 bundle identifier，account 为 `remote-access-password` | 在应用里点“删除密码”，或 `security delete-generic-password -s io.github.su-luoya.pi-web-desktop -a remote-access-password` |
 | WebKit 持久化网站数据 | `~/Library/WebKit/io.github.su-luoya.pi-web-desktop/`、`~/Library/Caches/io.github.su-luoya.pi-web-desktop/` | 应用当前没有“清空网站数据”入口，只能退出应用后手动删除：`rm -rf "$HOME/Library/WebKit/io.github.su-luoya.pi-web-desktop" "$HOME/Library/Caches/io.github.su-luoya.pi-web-desktop"` |
 

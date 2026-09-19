@@ -7,8 +7,10 @@ import Foundation
 ///
 /// 不引第三方库，只实现 Issue #6 需要的子集：可选 `v` 前缀、1–4 段数字、
 /// `-prerelease` 与 `+build` 后缀。数字段逐段比较；数字段相同时带 prerelease
-/// 的版本低于正式版（SemVer 2.0.0 §11），prerelease 之间只区分有无，不做
-/// 逐段比较——“是否达到最低版本”的判定不受影响，结果因此是可预测的。
+/// 的版本低于正式版（SemVer 2.0.0 §11）。prerelease 之间按 §11 的标识符规则
+/// 比较：数字标识符按数值、字母数字标识符按 ASCII 顺序、数字标识符低于字母
+/// 数字标识符、前缀相同时标识符更少者更低。GitHub #17 的更新检查依赖这条
+/// 规则区分 `alpha.1` / `alpha.2` / `beta.1` / 正式版，结果因此是可预测的。
 struct SemanticVersion: Equatable, Comparable, CustomStringConvertible {
     let major: Int
     let minor: Int
@@ -81,8 +83,38 @@ struct SemanticVersion: Equatable, Comparable, CustomStringConvertible {
         case (nil, nil): return false
         case (nil, _): return false
         case (_, nil): return true
-        case let (left?, right?): return left < right
+        case let (left?, right?): return Self.prereleasePrecedes(left, right)
         }
+    }
+
+    /// SemVer 2.0.0 §11 的 prerelease 先后关系。
+    ///
+    /// `alpha.2` < `alpha.10`（数字标识符按数值比较），`alpha.2` < `beta.1`
+    /// （字母数字标识符按 ASCII 顺序），`alpha.1` < `alpha.1.1`（前缀相同、
+    /// 标识符更少者更低），`1.0.0-1` < `1.0.0-alpha`（数字标识符低于字母数字）。
+    /// 大小写按 ASCII 顺序处理，不做不区分大小写的回退（与 SemVer 一致）。
+    static func prereleasePrecedes(_ lhs: String, _ rhs: String) -> Bool {
+        let left = lhs.split(separator: ".", omittingEmptySubsequences: false)
+        let right = rhs.split(separator: ".", omittingEmptySubsequences: false)
+        for index in 0..<min(left.count, right.count) {
+            let leftPart = String(left[index])
+            let rightPart = String(right[index])
+            if leftPart == rightPart { continue }
+            let leftNumber = Int(leftPart)
+            let rightNumber = Int(rightPart)
+            switch (leftNumber, rightNumber) {
+            case let (leftValue?, rightValue?):
+                if leftValue != rightValue { return leftValue < rightValue }
+                continue
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            case (nil, nil):
+                return leftPart < rightPart
+            }
+        }
+        return left.count < right.count
     }
 
     /// 从命令输出里取第一个可解析的版本，例如 `v22.19.0`、`pi-web 1.2.3`、

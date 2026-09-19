@@ -1,6 +1,6 @@
 import Cocoa
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     private var window: NSWindow!
     private var webViewController: WebViewController!
     private var statusMenuItem: NSMenuItem?
@@ -23,6 +23,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// 工作目录校验结果（GitHub #9）。不可用时门控关闭、路由进入诊断页。
     private var workspaceValidation: WorkspaceDirectoryValidation = .usable(path: "")
 
+    // MARK: - 更新检查（GitHub #17）
+
+    /// 版本检查器：只检查、不安装。失败只改变检查结果状态，不影响服务状态。
+    private var updateChecker: UpdateChecker?
+    private var updateStatusMenuItem: NSMenuItem?
+    private var updateCategoryMenuItems: [UpdateCheckCategory: NSMenuItem] = [:]
+    private var updateSettingsMenu: NSMenu?
+    /// 主线程状态：是否有一次检查正在进行（用于菜单文案与重复点击防护）。
+    private var updateCheckInProgress = false
+    /// 手动检查完成后是否弹提示；自动检查只更新菜单文案，不打断用户。
+    private var pendingManualUpdateCheck = false
+
     private let appConfiguration: AppConfiguration
     private let commandRunner: CommandRunning
     private let processInspector: ProcessInspector
@@ -30,6 +42,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// 统一脱敏器（GitHub #10）：日志、诊断导出、错误消息、环境变量/命令行展示
     /// 都使用这一个实例。同一对象而不是“同一份规则”。
     private let logRedactor: LogRedactor
+    /// 应用日志写入器（服务子进程输出 + 更新检查状态行共用同一个脱敏器实例）。
+    private let logWriter: LogWriter
     /// 工作目录探针（存在/是目录/可写）；测试可注入假探针。
     private let workspaceProbe: WorkspaceDirectoryProbe
     /// 远程访问密码的唯一存储。AppDelegate 只把它注入 ServiceManager、设置界面
@@ -52,6 +66,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         self.keychain = keychain
         self.workspaceProbe = workspaceProbe
         self.logRedactor = logRedactor
+        let logWriter = LogWriter(logFileURL: appConfiguration.logURL, redactor: logRedactor)
+        self.logWriter = logWriter
         let processInspector = ProcessInspector(runner: commandRunner)
         self.processInspector = processInspector
         self.serviceManager = ServiceManager(
@@ -62,9 +78,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // 远程模式的门控与环境变量都读这一个闭包：读取失败即“无密码”。
             remoteAccessPassword: { RemoteAccessPassword.load(from: keychain) },
             // ServiceManager 的日志与错误消息共用 AppDelegate 的脱敏器实例。
-            logWriter: LogWriter(logFileURL: appConfiguration.logURL, redactor: logRedactor)
+            logWriter: logWriter
         )
+        let updateChecker = UpdateChecker(
+            httpClient: URLSessionUpdateHTTPClient(),
+            cacheStore: UpdateCheckCacheFileStore(fileURL: appConfiguration.paths.updateCheckCacheURL),
+            scheduler: DispatchUpdateCheckScheduler(),
+            identity: .current,
+            preferences: appConfiguration.updateCheckPreferences,
+            log: { [logWriter] message in _ = logWriter.append(message) }
+        )
+        self.updateChecker = updateChecker
         super.init()
+        updateChecker.onResultsChanged = { [weak self] summary in
+            self?.handleUpdateCheckResults(summary)
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -93,6 +121,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         serviceManager.setState(.checking)
         webViewController.showLoadingPage(message: "正在检查运行环境…")
         refreshWorkspaceState()
+        // 更新检查立即开始：先把应用自身版本发出去；依赖检测完成后补齐
+        // Pi / Pi Web / 扩展包版本（见 `startUpdateChecking`）。
+        startUpdateChecking(with: UpdateCheckInventory(desktopAppVersion: ApplicationInstallationProbe.current.version))
         runDependencyCheck()
     }
 
@@ -167,6 +198,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // 应用关闭时不检查：先取消周期计时器，此后的触发一律忽略。
+        updateChecker?.stop()
         serviceManager.stopHealthMonitor()
         try? FileManager.default.removeItem(at: appConfiguration.appPIDURL)
         serviceManager.closeLog()
@@ -372,6 +405,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         serviceMenu.addItem(withTitle: "打开日志文件夹", action: #selector(openLogsFolder(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "复制诊断", action: #selector(copyDiagnostics(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "依赖与环境诊断…", action: #selector(showDiagnosticsAction(_:)), keyEquivalent: "")
+        serviceMenu.addItem(.separator())
+        serviceMenu.addItem(withTitle: "检查更新…", action: #selector(checkForUpdatesNow(_:)), keyEquivalent: "")
+        serviceMenu.addItem(makeUpdateSettingsMenuItem())
         serviceMenuItem.submenu = serviceMenu
 
         let windowMenuItem = NSMenuItem()
@@ -487,6 +523,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         firstLaunchSetupJustCompleted: Bool = false
     ) {
         dependencyReport = report
+        // 本机版本清单（GitHub #17 的检查输入）来自同一份 #16 识别结果。
+        startUpdateChecking(with: UpdateCheckInventory(components: report.components))
         // 工作目录是独立的启动前置：每次报告落地前重新校验（首次使用会创建默认
         // 目录），使外部删除目录后重新检测就能得到可读提示。
         refreshWorkspaceState()
@@ -1129,6 +1167,129 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         serviceManager.stopManagedServiceOnQuit {
             NSApp.terminate(nil)
         }
+    }
+
+    // MARK: - 更新检查（GitHub #17）
+
+    /// 更新检查的生命周期入口：第一次调用启动（立即检查一次并安排周期复查），
+    /// 之后的调用只更新本机版本清单。检查只访问白名单内的上游，不安装任何东西。
+    private func startUpdateChecking(with inventory: UpdateCheckInventory) {
+        guard let updateChecker else { return }
+        var inventory = inventory
+        if inventory.desktopAppVersion == nil {
+            inventory.desktopAppVersion = ApplicationInstallationProbe.current.version
+        }
+        if updateChecker.isStarted {
+            updateChecker.updateInventory(inventory)
+        } else {
+            updateChecker.start(inventory: inventory)
+        }
+    }
+
+    /// “服务 → 检查更新…”：忽略 TTL 立即检查，完成后弹出提示。仍然尊重每一类
+    /// 的开关（关闭的分类不会因为手动点击而发起请求）。
+    @objc private func checkForUpdatesNow(_ sender: Any?) {
+        guard let updateChecker else { return }
+        pendingManualUpdateCheck = true
+        updateCheckInProgress = true
+        refreshUpdateMenuState()
+        updateChecker.checkNow(triggeredBy: .manual)
+    }
+
+    @objc private func toggleUpdateCategory(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String,
+              let category = UpdateCheckCategory(rawValue: rawValue),
+              let updateChecker else { return }
+        var preferences = updateChecker.preferences
+        preferences.setEnabled(sender.state != .on, for: category)
+        appConfiguration.save(preferences)
+        updateChecker.preferences = preferences
+        refreshUpdateMenuState()
+    }
+
+    @objc private func showUpdateCheckExplanation(_ sender: Any?) {
+        let alert = NSAlert()
+        alert.messageText = "关于更新检查"
+        alert.informativeText = UpdateCheckDisclosure.text(
+            cachePath: logRedactor.redact(appConfiguration.paths.updateCheckCacheURL.path)
+        )
+        alert.addButton(withTitle: "好")
+        alert.beginSheetModal(for: window)
+    }
+
+    /// “更新检查设置”子菜单：状态行 + 四类开关 + 说明。菜单打开时由
+    /// `menuNeedsUpdate` 刷新。
+    private func makeUpdateSettingsMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "更新检查设置", action: nil, keyEquivalent: "")
+        let menu = NSMenu(title: "更新检查设置")
+        menu.delegate = self
+        menu.autoenablesItems = false
+        let status = NSMenuItem(title: updateCheckStatusText(), action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        updateStatusMenuItem = status
+        menu.addItem(status)
+        menu.addItem(.separator())
+        for category in UpdateCheckCategory.allCases {
+            let toggle = NSMenuItem(
+                title: category.displayName,
+                action: #selector(toggleUpdateCategory(_:)),
+                keyEquivalent: ""
+            )
+            toggle.target = self
+            toggle.representedObject = category.rawValue
+            toggle.state = (updateChecker?.preferences.isEnabled(category) ?? true) ? .on : .off
+            updateCategoryMenuItems[category] = toggle
+            menu.addItem(toggle)
+        }
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "更新检查说明…", action: #selector(showUpdateCheckExplanation(_:)), keyEquivalent: "")
+        item.submenu = menu
+        updateSettingsMenu = menu
+        return item
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === updateSettingsMenu else { return }
+        refreshUpdateMenuState()
+    }
+
+    private func refreshUpdateMenuState() {
+        updateStatusMenuItem?.title = updateCheckStatusText()
+        for (category, item) in updateCategoryMenuItems {
+            item.state = (updateChecker?.preferences.isEnabled(category) ?? true) ? .on : .off
+        }
+    }
+
+    private func updateCheckStatusText() -> String {
+        guard let updateChecker else { return "更新检查：不可用" }
+        if updateCheckInProgress { return "更新检查：正在检查…" }
+        return updateChecker.summary.statusLine
+    }
+
+    /// 检查结果落地（主线程）：刷新菜单文案；只有手动检查才弹提示。
+    private func handleUpdateCheckResults(_ summary: UpdateCheckSummary) {
+        updateCheckInProgress = false
+        refreshUpdateMenuState()
+        guard pendingManualUpdateCheck else { return }
+        pendingManualUpdateCheck = false
+        presentUpdateCheckResults(summary)
+    }
+
+    /// 提示全文来自 `UpdateCheckSummary.detailText`；这里只定标题。
+    private func presentUpdateCheckResults(_ summary: UpdateCheckSummary) {
+        let alert = NSAlert()
+        if summary.allDisabled {
+            alert.messageText = "更新检查已全部关闭"
+        } else if summary.updateAvailableCount > 0 {
+            alert.messageText = "发现 \(summary.updateAvailableCount) 项可用更新"
+        } else if summary.unknownCount > 0 {
+            alert.messageText = "更新检查未全部完成"
+        } else {
+            alert.messageText = "全部已是最新"
+        }
+        alert.informativeText = summary.detailText
+        alert.addButton(withTitle: "好")
+        alert.beginSheetModal(for: window)
     }
 
     // MARK: - Error and utility

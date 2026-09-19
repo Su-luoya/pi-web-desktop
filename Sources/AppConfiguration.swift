@@ -143,6 +143,16 @@ struct AppConfiguration {
     /// loopback-only noProxy list.
     var serviceConfiguration: ServiceConfiguration { ServiceConfiguration.load(from: defaults) }
 
+    /// 更新检查的四类开关（GitHub #17）。默认全部开启；值存在同一个 UserDefaults
+    /// domain 里，键见 `UpdateCheckPreferences`。
+    var updateCheckPreferences: UpdateCheckPreferences {
+        UpdateCheckPreferences.load(from: defaults)
+    }
+
+    func save(_ preferences: UpdateCheckPreferences) {
+        preferences.save(to: defaults)
+    }
+
     /// Persists service settings through the same injected UserDefaults.
     func save(_ configuration: ServiceConfiguration) { configuration.save(to: defaults) }
 

@@ -90,6 +90,7 @@ swiftc "$ROOT/Sources/PiWebApp.swift" \
   "$ROOT/Sources/DiagnosticsCollector.swift" \
   "$ROOT/Sources/DiagnosticsClipboard.swift" \
   "$ROOT/Sources/ComponentInstallation.swift" \
+  "$ROOT/Sources/UpdateChecker.swift" \
   "$ROOT/Sources/DependencyChecker.swift" \
   "$ROOT/Sources/FirstLaunchDiagnostics.swift" \
   "$ROOT/Sources/InstallCommandManifest.swift" \

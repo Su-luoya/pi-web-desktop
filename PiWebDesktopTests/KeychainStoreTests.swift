@@ -342,17 +342,29 @@ final class KeychainStoreTests: XCTestCase {
     /// 诊断文本只报告密码状态，永远不包含密码值或长度。
     func testDiagnosticsTextReportsOnlyThePasswordState() {
         let input = DiagnosticsInput(
-            appVersion: "9.9.9 (42)",
+            appVersion: "9.9.9",
+            appBuild: "42",
             piWebVersion: "1.2.3",
+            piWebVersionConfidence: "verified",
+            piWebPath: "/opt/homebrew/bin/pi-web",
+            piWebPathConfidence: "verified",
+            piCLIVersion: "0.5.0",
+            piCLIVersionConfidence: "verified",
             nodeVersion: "v22.19.0",
+            nodeVersionConfidence: "verified",
             serviceAddress: "http://pi.example.invalid:30141/",
+            port: "30141",
             status: "正在运行（本应用管理）",
+            management: .managed(pid: "4321"),
             listenerPID: "4321",
             listenerProcess: "/opt/homebrew/bin/pi-web --hostname pi.example.invalid --port 30141 --no-open",
             managedPID: "4321",
-            piWebPath: "/opt/homebrew/bin/pi-web",
+            workspaceDirectory: "/tmp/PiWebDesktopTests/Workspace",
             configurationDirectory: "~/.pi/agent",
+            launchCommand: "/opt/homebrew/bin/pi-web --hostname pi.example.invalid --port 30141 --no-open",
+            launchEnvironment: "PI_WEB_NO_OPEN=1",
             logPath: "/tmp/PiWebDesktopTests/logs/Pi Web Desktop.log",
+            logWriteStatus: "正常",
             remoteAccessPasswordStatus: RemoteAccessPassword.statusText(isSet: true)
         )
 

@@ -27,6 +27,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let commandRunner: CommandRunning
     private let processInspector: ProcessInspector
     private let serviceManager: ServiceManager
+    /// 统一脱敏器（GitHub #10）：日志、诊断导出、错误消息、环境变量/命令行展示
+    /// 都使用这一个实例。同一对象而不是“同一份规则”。
+    private let logRedactor: LogRedactor
     /// 工作目录探针（存在/是目录/可写）；测试可注入假探针。
     private let workspaceProbe: WorkspaceDirectoryProbe
     /// 远程访问密码的唯一存储。AppDelegate 只把它注入 ServiceManager、设置界面
@@ -41,12 +44,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appConfiguration: AppConfiguration = AppConfiguration.forCurrentProcess(),
         commandRunner: CommandRunning = SystemCommandRunner(),
         keychain: KeychainStoring = KeychainStore(),
-        workspaceProbe: WorkspaceDirectoryProbe = .live()
+        workspaceProbe: WorkspaceDirectoryProbe = .live(),
+        logRedactor: LogRedactor = LogRedactor()
     ) {
         self.appConfiguration = appConfiguration
         self.commandRunner = commandRunner
         self.keychain = keychain
         self.workspaceProbe = workspaceProbe
+        self.logRedactor = logRedactor
         let processInspector = ProcessInspector(runner: commandRunner)
         self.processInspector = processInspector
         self.serviceManager = ServiceManager(
@@ -55,7 +60,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             processInspector: processInspector,
             commandRunner: commandRunner,
             // 远程模式的门控与环境变量都读这一个闭包：读取失败即“无密码”。
-            remoteAccessPassword: { RemoteAccessPassword.load(from: keychain) }
+            remoteAccessPassword: { RemoteAccessPassword.load(from: keychain) },
+            // ServiceManager 的日志与错误消息共用 AppDelegate 的脱敏器实例。
+            logWriter: LogWriter(logFileURL: appConfiguration.logURL, redactor: logRedactor)
         )
         super.init()
     }
@@ -362,7 +369,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         serviceMenu.addItem(withTitle: "在浏览器中打开", action: #selector(openInBrowser(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "复制本地地址", action: #selector(copyLocalAddress(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "打开日志", action: #selector(openLog(_:)), keyEquivalent: "")
-        serviceMenu.addItem(withTitle: "复制诊断信息", action: #selector(copyDiagnostics(_:)), keyEquivalent: "")
+        serviceMenu.addItem(withTitle: "打开日志文件夹", action: #selector(openLogsFolder(_:)), keyEquivalent: "")
+        serviceMenu.addItem(withTitle: "复制诊断", action: #selector(copyDiagnostics(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "依赖与环境诊断…", action: #selector(showDiagnosticsAction(_:)), keyEquivalent: "")
         serviceMenuItem.submenu = serviceMenu
 
@@ -586,6 +594,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             controller.onRecheck = { [weak self] in self?.runDependencyCheck(triggeredByUser: true) }
             controller.onContinue = { [weak self] in self?.completeFirstLaunchSetup() }
             controller.onSelectPiWebPath = { [weak self] path in self?.applySelectedPiWebPath(path) }
+            // 与菜单“复制诊断”完全同一条导出路径与同一份文本。
+            controller.diagnosticsTextProvider = { [weak self] in self?.diagnosticsExportText() ?? "" }
             diagnosticsWindowController = controller
             controller.showWindow(nil)
         }
@@ -977,11 +987,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func openLog(_ sender: Any?) {
         // 日志父目录可能还不存在（从未启动过服务，或关闭了自动启动）：先补齐目录，
         // 失败时给出可读提示，不静默失败也不崩溃（GitHub #9 复审）。
-        if let error = appConfiguration.prepareLogFileForOpening() {
+        if let error = appConfiguration.prepareLogFileForOpening(redactor: logRedactor) {
             presentLogOpenFailure(error)
             return
         }
         NSWorkspace.shared.open(appConfiguration.logURL)
+    }
+
+    /// “打开日志文件夹”只确保目录存在，不创建日志文件。
+    @objc private func openLogsFolder(_ sender: Any?) {
+        if let error = appConfiguration.prepareLogsDirectoryForOpening(redactor: logRedactor) {
+            presentLogOpenFailure(error)
+            return
+        }
+        NSWorkspace.shared.open(appConfiguration.logsDirectoryURL)
     }
 
     /// “打开日志”失败时的可读提示（只用于用户主动点开日志的场景）。
@@ -997,36 +1016,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // 版本信息只有一个来源：bundle 的 Info.plist（由 Configuration/AppIdentity.xcconfig 生成）。
     // Swift 侧不保存第二套版本常量；读取失败时明确标注为开发构建。
     private var appVersionDescription: String {
-        let info = Bundle.main.infoDictionary
-        guard let shortVersion = (info?["CFBundleShortVersionString"] as? String)?.nilIfEmpty,
-              let buildVersion = (info?["CFBundleVersion"] as? String)?.nilIfEmpty else {
-            return "开发构建（Info.plist 缺少 CFBundleShortVersionString 或 CFBundleVersion）"
-        }
-        return "\(shortVersion) (\(buildVersion))"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)?.nilIfEmpty
+            ?? "开发构建（Info.plist 缺少 CFBundleShortVersionString）"
     }
 
-    @objc private func copyDiagnostics(_ sender: Any?) {
+    private var appBuildDescription: String {
+        (Bundle.main.infoDictionary?["CFBundleVersion"] as? String)?.nilIfEmpty
+            ?? "开发构建（Info.plist 缺少 CFBundleVersion）"
+    }
+
+    /// 菜单“复制诊断”与诊断窗口共用的导出文本（GitHub #10）。所有字段——包括
+    /// 启动环境与 `ps` 命令行——统一交给 `logRedactor` 脱敏。
+    private func diagnosticsExportText() -> String {
         let piWebPath = serviceManager.resolvePiWebPath() ?? "未找到"
         let piWebVersion = shell([piWebPath, "--version"])?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "未知"
-        let nodeVersion = shell(["/usr/bin/env", "node", "--version"])?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "未知"
-        let diagnostics = DiagnosticsCollector.text(for: DiagnosticsInput(
-            appVersion: appVersionDescription,
-            piWebVersion: piWebVersion,
-            nodeVersion: nodeVersion,
-            serviceAddress: startURL.absoluteString,
-            status: statusDescription(),
-            listenerPID: processInspector.listenerPIDDescription(port: serviceManager.configuration.port),
-            listenerProcess: processInspector.listenerProcessDescription(port: serviceManager.configuration.port),
-            managedPID: serviceManager.managedServicePID().map(String.init) ?? "无（外部服务或未运行）",
-            piWebPath: piWebPath,
-            configurationDirectory: "~/.pi/agent",
-            logPath: appConfiguration.logURL.path,
-            remoteAccessPasswordStatus: RemoteAccessPassword.statusText(
-                isSet: RemoteAccessPassword.isSet(in: keychain)
-            )
-        ))
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(diagnostics, forType: .string)
+        let nodeFinding = dependencyReport?.finding(for: .node)
+        let nodeVersion = nodeFinding?.version
+            ?? shell(["/usr/bin/env", "node", "--version"])?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? "未知"
+        let piWebFinding = dependencyReport?.finding(for: .piWeb)
+        let piCLIFinding = dependencyReport?.finding(for: .piCLI)
+        let managedPID = serviceManager.managedServicePID()
+
+        // 启动环境只展示应用显式设置的子进程变量；远程密码只以占位符进入展示路径，
+        // 真实值不经过诊断代码。脱敏器仍会再检查一遍。
+        let hasRemotePassword = RemoteAccessPassword.isSet(in: keychain)
+        let launchEnvironment = ServiceLaunchSpecification.environmentDescription(
+            ServiceLaunchSpecification.make(
+                configuration: serviceManager.configuration,
+                piWebPath: piWebPath,
+                appConfiguration: appConfiguration,
+                baseEnvironment: [:],
+                remoteAccessPassword: hasRemotePassword ? LogRedactor.marker : nil
+            ).environment
+        )
+
+        return DiagnosticsCollector.text(
+            for: DiagnosticsInput(
+                appVersion: appVersionDescription,
+                appBuild: appBuildDescription,
+                piWebVersion: piWebVersion,
+                piWebVersionConfidence: piWebFinding?.confidence.rawValue ?? "unknown",
+                piWebPath: piWebFinding?.path ?? piWebPath,
+                piWebPathConfidence: piWebFinding?.confidence.rawValue ?? "unknown",
+                piCLIVersion: piCLIFinding?.version ?? "未知",
+                piCLIVersionConfidence: piCLIFinding?.confidence.rawValue ?? "unknown",
+                nodeVersion: nodeVersion,
+                nodeVersionConfidence: nodeFinding?.confidence.rawValue ?? "unknown",
+                serviceAddress: startURL.absoluteString,
+                port: String(serviceManager.configuration.port),
+                status: statusDescription(),
+                management: managedPID.map { DiagnosticsManagement.managed(pid: String($0)) } ?? .external,
+                listenerPID: processInspector.listenerPIDDescription(port: serviceManager.configuration.port),
+                listenerProcess: processInspector.listenerProcessDescription(port: serviceManager.configuration.port),
+                managedPID: managedPID.map(String.init) ?? "无（外部服务或未运行）",
+                workspaceDirectory: appConfiguration.workspaceDirectory(for: serviceManager.configuration).path,
+                configurationDirectory: "~/.pi/agent",
+                launchCommand: ([piWebPath] + ServiceLaunchSpecification.arguments(configuration: serviceManager.configuration))
+                    .joined(separator: " "),
+                launchEnvironment: launchEnvironment,
+                logPath: appConfiguration.logURL.path,
+                logWriteStatus: serviceManager.logWriter.writeStatusDescription,
+                remoteAccessPasswordStatus: RemoteAccessPassword.statusText(
+                    isSet: RemoteAccessPassword.isSet(in: keychain)
+                )
+            ),
+            redactor: logRedactor
+        )
+    }
+
+    /// 复制前先弹脱敏提醒（GitHub #10）：文本已按规则脱敏，但公开粘贴前仍需自查。
+    @objc private func copyDiagnostics(_ sender: Any?) {
+        DiagnosticsClipboard.copyAfterConfirmation(diagnosticsExportText(), presentingIn: window)
     }
 
     private func statusDescription() -> String {

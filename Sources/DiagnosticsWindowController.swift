@@ -46,12 +46,16 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
     /// 用户选择 pi-web 可执行文件后的回调；返回可读错误（nil 表示已写入配置
     /// 并触发了重新检测）。窗口不写配置、不校验可执行性。
     var onSelectPiWebPath: ((String) -> String?)?
+    /// 由 `AppDelegate` 注入：与菜单“复制诊断”完全相同的已脱敏导出文本
+    /// （GitHub #10）。窗口自己不组装诊断字段。
+    var diagnosticsTextProvider: (() -> String)?
 
     private let tableView = NSTableView()
     private let detailLabel = NSTextField(labelWithString: "")
     private let hintLabel = NSTextField(labelWithString: "")
     private let commandsTextView = NSTextView()
     private let copyButton = NSButton(title: "复制安装命令", target: nil, action: nil)
+    private let copyDiagnosticsButton = NSButton(title: "复制诊断", target: nil, action: nil)
     private let continueButton = NSButton(title: "开始使用 Pi Web", target: nil, action: nil)
     private var report: DependencyReport
     private var firstLaunchSetupIncomplete: Bool
@@ -175,6 +179,8 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
 
         copyButton.target = self
         copyButton.action = #selector(copyInstallCommands(_:))
+        copyDiagnosticsButton.target = self
+        copyDiagnosticsButton.action = #selector(copyDiagnostics(_:))
         continueButton.target = self
         continueButton.action = #selector(continueToService(_:))
         let selectButton = NSButton(title: "选择 pi-web 路径…", target: self, action: #selector(selectPiWebPath(_:)))
@@ -182,7 +188,7 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         let closeButton = NSButton(title: "关闭", target: self, action: #selector(closeWindow(_:)))
         closeButton.keyEquivalent = "\u{1b}"
 
-        let buttons = NSStackView(views: [selectButton, recheckButton, copyButton, continueButton, NSView(), closeButton])
+        let buttons = NSStackView(views: [selectButton, recheckButton, copyButton, copyDiagnosticsButton, continueButton, NSView(), closeButton])
         buttons.orientation = .horizontal
         buttons.alignment = .centerY
         buttons.spacing = 8
@@ -303,6 +309,12 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         guard !commands.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(commands, forType: .string)
+    }
+
+    /// 与菜单“复制诊断”同一份已脱敏文本，复制前同样弹出脱敏提醒。
+    @objc private func copyDiagnostics(_ sender: Any?) {
+        guard let text = diagnosticsTextProvider?(), !text.isEmpty else { return }
+        DiagnosticsClipboard.copyAfterConfirmation(text, presentingIn: window)
     }
 
     @objc private func closeWindow(_ sender: Any?) {

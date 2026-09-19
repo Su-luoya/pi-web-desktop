@@ -25,8 +25,14 @@ private final class ManagerFakeProcess: ServiceProcessHandle {
 
 private enum ManagerFakeLaunchError: LocalizedError {
     case failed
+    case failedWithMessage(String)
 
-    var errorDescription: String? { "fake launch failure" }
+    var errorDescription: String? {
+        switch self {
+        case .failed: return "fake launch failure"
+        case .failedWithMessage(let message): return message
+        }
+    }
 }
 
 private final class ManagerFakeLauncher: ServiceLaunching {
@@ -342,7 +348,8 @@ private final class ServiceManagerHarness {
         baseEnvironment: [String: String],
         ownershipStore: ServiceOwnershipStoring? = nil,
         remoteAccessPassword: @escaping () -> String? = { nil },
-        workspaceProbe: WorkspaceDirectoryProbe? = nil
+        workspaceProbe: WorkspaceDirectoryProbe? = nil,
+        redactor: LogRedactor? = nil
     ) throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("PiWebDesktopTests-\(UUID().uuidString)", isDirectory: true)
@@ -351,7 +358,8 @@ private final class ServiceManagerHarness {
         let supportURL = root.appendingPathComponent("support", isDirectory: true)
         let logsRootURL = root.appendingPathComponent("logs", isDirectory: true)
         let defaults = UserDefaults(suiteName: "ServiceManagerTests.\(UUID().uuidString)") ?? .standard
-        appConfiguration = AppConfiguration(supportURL: supportURL, logsRootURL: logsRootURL, defaults: defaults)
+        let resolvedAppConfiguration = AppConfiguration(supportURL: supportURL, logsRootURL: logsRootURL, defaults: defaults)
+        appConfiguration = resolvedAppConfiguration
 
         runner = ManagerFakeRunner()
         runner.handler = processOutput
@@ -380,7 +388,9 @@ private final class ServiceManagerHarness {
             signaler: signaler,
             remoteAccessPassword: remoteAccessPassword,
             workspaceProbe: workspaceProbe,
-            instanceID: Self.instanceID
+            instanceID: Self.instanceID,
+            // 注入脱敏器时，日志写入器也用它，保证“同一实例”而不是“同一份规则”。
+            logWriter: redactor.map { LogWriter(logFileURL: resolvedAppConfiguration.logURL, redactor: $0) }
         )
         // 既有测试覆盖的是依赖门控打开后的行为；门控本身的测试会显式关闭它。
         manager.isDependencyGateOpen = true
@@ -477,7 +487,8 @@ private func makeHarness(
     baseEnvironment: [String: String] = fakeBaseEnvironment,
     ownershipStore: ServiceOwnershipStoring? = nil,
     remoteAccessPassword: @escaping () -> String? = { nil },
-    workspaceProbe: WorkspaceDirectoryProbe? = nil
+    workspaceProbe: WorkspaceDirectoryProbe? = nil,
+    redactor: LogRedactor? = nil
 ) throws -> ServiceManagerHarness {
     try ServiceManagerHarness(
         configuration: configuration,
@@ -488,7 +499,8 @@ private func makeHarness(
         baseEnvironment: baseEnvironment,
         ownershipStore: ownershipStore,
         remoteAccessPassword: remoteAccessPassword,
-        workspaceProbe: workspaceProbe
+        workspaceProbe: workspaceProbe,
+        redactor: redactor
     )
 }
 
@@ -1748,6 +1760,46 @@ final class ServiceManagerTests: XCTestCase {
         let logText = (try? String(contentsOf: harness.logURL, encoding: .utf8)) ?? ""
         XCTAssertFalse(logText.contains(Self.remoteSecret))
         XCTAssertEqual(harness.manager.currentState, .starting)
+    }
+
+    /// 启动失败消息在进入状态机、回调与日志之前先脱敏（GitHub #10）：错误描述
+    /// 里的 Home 路径与 `token=` 形式的秘密都不能漏出，而修复上下文要保留。
+    func testStartupFailureMessagesAreRedactedBeforeTheyReachStatusCallbackAndLog() throws {
+        let fakeHome = "/tmp/PiWebDesktopTests/home"
+        let secret = "launch-error-secret"
+        let harness = try makeHarness(
+            alive: { $0 == 5150 },
+            processOutput: processOutput(for: 5150),
+            redactor: LogRedactor(homeDirectory: fakeHome)
+        )
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .failure(ManagerFakeLaunchError.failedWithMessage(
+            "无法启动 pi-web：日志目录 \(fakeHome)/Library/Logs 不可用（token=\(secret)）"
+        ))
+
+        harness.manager.startManagedService()
+
+        let message = try XCTUnwrap(harness.startupFailures.first)
+        XCTAssertFalse(message.contains(fakeHome))
+        XCTAssertFalse(message.contains(secret))
+        XCTAssertTrue(message.contains("~/Library/Logs"), message)
+        XCTAssertEqual(harness.manager.currentState, .failed(message))
+        let log = (try? String(contentsOf: harness.logURL, encoding: .utf8)) ?? ""
+        XCTAssertTrue(log.contains("启动失败"), log)
+        XCTAssertFalse(log.contains(secret))
+        XCTAssertFalse(log.contains(fakeHome))
+    }
+
+    /// 诊断展示用的环境行按键排序，值原样给出；脱敏由共享的 `LogRedactor` 负责
+    /// （GitHub #10）。
+    func testEnvironmentDescriptionIsSortedAndRedactable() {
+        var environment = ServiceLaunchSpecification.environmentDescription(["PATH": "/usr/bin:/bin", "PI_WEB_NO_OPEN": "1"])
+        XCTAssertEqual(environment, "PATH=/usr/bin:/bin\nPI_WEB_NO_OPEN=1")
+
+        environment = ServiceLaunchSpecification.environmentDescription(["PI_WEB_PASSWORD": "secret-password-value"])
+        XCTAssertEqual(environment, "PI_WEB_PASSWORD=secret-password-value")
+        XCTAssertFalse(LogRedactor().redact(environment).contains("secret-password-value"))
     }
 
     /// loopback 模式即使 Keychain 里有密码也不注入，并清掉继承来的同名变量。

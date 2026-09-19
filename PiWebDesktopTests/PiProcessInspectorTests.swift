@@ -1,12 +1,17 @@
 import Foundation
 import XCTest
 
-// GitHub #21 的 unhosted 测试（运行进程保护部分）。
+// GitHub #21 的 unhosted 测试（运行进程保护部分）；GitHub #61 在此补充候选筛选
+// （argv 读取面）与遮罩边界的断言。
 //
 // 全部进程事实都是注入的假进程表（`PiProcessProbing.fixture`）：测试**绝不枚举
 // 真实进程、绝不向任何进程发送信号**。接口 `PiProcessProbing` 也没有任何发送
 // 信号、终止或修改进程的方法。磁盘探针同样是内存替身，因此测试不读真实 Home、
 // 不写任何文件、不启动任何子进程。
+//
+// “哪个 PID 被读过 argv”同样靠注入：`PiProcessProbing.arguments` 是独立闭包，
+// `makeRecordingInspector` 用它记录每次读取，所以“非候选进程不触发 argv 读取”
+// 是一个可断言的事实，不需要任何真实进程。
 //
 // 唯一触碰真实磁盘的是最后一组“源码负向断言”：它只读取本仓库的两个源文件文本，
 // 断言里面没有信号/终止 API 与 shell/sudo 路径。
@@ -66,6 +71,45 @@ final class PiProcessInspectorTests: XCTestCase {
             formatStartTime: { _ in "夹具时间" }
         )
         return (inspector, fileSystem)
+    }
+
+    /// 记录 argv 读取的假探针：`arguments` 每被调用一次就记下一个 PID。
+    private final class ArgumentReadRecorder {
+        private(set) var pids: [pid_t] = []
+
+        func record(_ pid: pid_t) {
+            pids.append(pid)
+        }
+    }
+
+    /// 与 `makeInspector` 相同，但 `arguments` 经由记录器委托给固定进程表，因此
+    /// 测试可以断言“哪些 PID 被读过 argv”。判定逻辑与生产实现一致（同一份
+    /// `PiProcessInspector.inspect`），只是探针换成了可观测的替身。
+    private func makeRecordingInspector(
+        snapshots: [PiProcessSnapshot],
+        executables: Set<String> = [],
+        symlinks: Set<String> = []
+    ) -> (inspector: PiProcessInspector, fileSystem: MemoryFileSystemProbe, argvReads: () -> [pid_t]) {
+        let fileSystem = MemoryFileSystemProbe(homeDirectory: fixtureHome)
+        fileSystem.executables = executables
+        fileSystem.symlinks = symlinks
+        let fixture = PiProcessProbing.fixture(snapshots)
+        let recorder = ArgumentReadRecorder()
+        let probe = PiProcessProbing(
+            listProcessIdentifiers: fixture.listProcessIdentifiers,
+            snapshot: fixture.snapshot,
+            arguments: { pid in
+                recorder.record(pid)
+                return fixture.arguments(pid)
+            }
+        )
+        let inspector = PiProcessInspector(
+            probe: probe,
+            fileSystem: fileSystem,
+            redactor: LogRedactor(homeDirectory: fixtureHome),
+            formatStartTime: { _ in "夹具时间" }
+        )
+        return (inspector, fileSystem, { recorder.pids })
     }
 
     private func snapshot(
@@ -150,7 +194,120 @@ final class PiProcessInspectorTests: XCTestCase {
         XCTAssertTrue(fileSystem.probedPaths.isEmpty, "数据参数不应触发磁盘探针")
     }
 
-    // MARK: - 2. 命中路径与证据
+    // MARK: - 2. 候选筛选（GitHub #61：只对候选进程读 argv）
+
+    /// 非候选进程（系统守护进程、编译器、编辑器、ssh 与 `pi-web` / `pip` /
+    /// `pi-helper`）不触发 argv 读取：读取次数为 0，结论仍是“没有 Pi 进程”。
+    func testNonCandidateProcessesDoNotReadArguments() {
+        let (inspector, _, argvReads) = makeRecordingInspector(snapshots: [
+            snapshot(pid: 100, imagePath: "/sbin/launchd", executableName: "launchd", arguments: ["/sbin/launchd"]),
+            snapshot(pid: 200, imagePath: "/usr/bin/cc", executableName: "cc", arguments: ["cc", "-c", "main.c"]),
+            snapshot(pid: 300, imagePath: "/usr/bin/vim", executableName: "vim", arguments: ["vim", "/tmp/notes/pi"]),
+            snapshot(pid: 400, imagePath: "/usr/bin/ssh", executableName: "ssh", arguments: ["ssh", "host"]),
+            snapshot(pid: 500, imagePath: "/opt/homebrew/bin/pi-web", executableName: "pi-web", arguments: ["pi-web"]),
+            snapshot(pid: 600, imagePath: "/opt/homebrew/bin/pip", executableName: "pip", arguments: ["pip", "list"]),
+            snapshot(pid: 700, imagePath: "/opt/homebrew/bin/pi-helper", executableName: "pi-helper", arguments: ["pi-helper"])
+        ])
+        XCTAssertEqual(inspector.inspect(), .noProcesses)
+        XCTAssertEqual(argvReads(), [], "非候选进程不得触发 argv 读取")
+    }
+
+    /// 候选进程（`pi`、JS 运行时、内核进程名是 `pi`）正常读取 argv，每个候选 PID
+    /// 恰好读一次；记录仍带命令摘要，判定依据与既有语义一致。
+    func testCandidateProcessesReadArgumentsOnceAndKeepRecords() {
+        let scriptPath = "/opt/homebrew/lib/node_modules/@agegr/pi-cli/bin/pi"
+        let (inspector, _, argvReads) = makeRecordingInspector(
+            snapshots: [
+                piSnapshot(pid: 100, parentPID: 1),
+                nodeSnapshot(pid: 200, arguments: [nodePath, scriptPath, "--verbose"]),
+                snapshot(pid: 300, imagePath: nil, executableName: "pi", arguments: ["pi", "update", "--self"])
+            ],
+            executables: [scriptPath]
+        )
+        guard case .runningProcesses(let records) = inspector.inspect() else {
+            return XCTFail("候选进程应当产出记录")
+        }
+        XCTAssertEqual(records.map(\.pid), [100, 200, 300])
+        XCTAssertEqual(argvReads().sorted(), [100, 200, 300], "每个候选进程恰好读一次 argv")
+        // 既有信息不回退：父进程、启动时间、解析后的镜像路径与命令摘要都在。
+        XCTAssertEqual(records[0].parentPID, 1)
+        XCTAssertEqual(records[0].startedAtText, "夹具时间")
+        XCTAssertEqual(records[0].executablePath, "/opt/homebrew/bin/pi")
+        XCTAssertEqual(records[0].commandSummary, "/opt/homebrew/bin/pi")
+        XCTAssertEqual(records[1].commandSummary, "\(nodePath) \(scriptPath) --verbose")
+        XCTAssertEqual(records[2].commandSummary, "pi update --self")
+        XCTAssertEqual(records.map(\.matchSource), [.imagePath, .interpreterScript, .executableName])
+    }
+
+    /// 真实 Pi 布局都必须被候选判定覆盖：`pi` 二进制、内核进程名、npm/pnpm 全局
+    /// 前缀下由 `node` 承载的入口脚本、`#!/usr/bin/env node` 形态。同时确认误报
+    /// 防护对象（`pi-web` / `pip` / `pi-helper`）与普通系统进程不是候选。
+    func testCandidateCoversRealPiLayouts() {
+        let candidates: [(imagePath: String?, executableName: String?)] = [
+            ("/opt/homebrew/bin/pi", "pi"),
+            (nil, "pi"),
+            ("/opt/homebrew/Cellar/node@24/24.21.0/bin/node", "node"),
+            (nil, "node"),
+            ("/opt/homebrew/bin/npm", "npm"),
+            ("/opt/homebrew/bin/node24", "node24"),
+            ("/usr/local/bin/bun", "bun")
+        ]
+        for layout in candidates {
+            XCTAssertTrue(
+                PiProcessInspector.isCandidate(imagePath: layout.imagePath, executableName: layout.executableName),
+                "\(layout.imagePath ?? "nil") / \(layout.executableName ?? "nil") 必须是候选进程"
+            )
+        }
+
+        let nonCandidates: [(imagePath: String?, executableName: String?)] = [
+            ("/opt/homebrew/bin/pi-web", "pi-web"),
+            ("/opt/homebrew/bin/pip", "pip"),
+            ("/opt/homebrew/bin/pi-helper", "pi-helper"),
+            ("/usr/bin/cc", "cc"),
+            ("/usr/bin/vim", "vim"),
+            ("/System/Library/CoreServices/launchd", "launchd"),
+            ("/usr/bin/ssh", nil),
+            (nil, nil)
+        ]
+        for layout in nonCandidates {
+            XCTAssertFalse(
+                PiProcessInspector.isCandidate(imagePath: layout.imagePath, executableName: layout.executableName),
+                "\(layout.imagePath ?? "nil") / \(layout.executableName ?? "nil") 不应是候选进程"
+            )
+        }
+    }
+
+    /// 筛选只是读取优化：非候选进程的结论不依赖 argv（配上任意 argv 也不变），
+    /// 而且两个可执行身份都读不到时仍然是 `unknown`（“不确定按不安全处理”
+    /// 不因为不读 argv 而降级）。
+    func testNonCandidateClassificationDoesNotDependOnArguments() {
+        let (inspector, _) = makeInspector(snapshots: [])
+        let argv = ["pi", "/opt/homebrew/bin/pi", "--token=<x>"]
+        let cases: [(identity: PiProcessSnapshot, expected: PiProcessClassification)] = [
+            (snapshot(pid: 100, imagePath: "/sbin/launchd", executableName: "launchd"), .notPi),
+            (snapshot(pid: 200, imagePath: "/usr/bin/cc", executableName: "cc"), .notPi),
+            (snapshot(pid: 300, imagePath: "/usr/bin/vim", executableName: "vim"), .notPi),
+            (snapshot(pid: 400, imagePath: "/usr/bin/python3", executableName: "python3"), .notPi),
+            (snapshot(pid: 500, imagePath: "/opt/homebrew/bin/pi-web", executableName: "pi-web"), .notPi),
+            (
+                snapshot(pid: 600, readFailure: .permissionDenied),
+                .unknown(.identityUnavailable(pid: 600, failure: .permissionDenied))
+            )
+        ]
+        for (identity, expected) in cases {
+            XCTAssertFalse(PiProcessInspector.isCandidate(identity), "PID \(identity.pid) 不应是候选进程")
+            XCTAssertEqual(inspector.classify(identity), expected)
+            var withArguments = identity
+            withArguments.arguments = argv
+            XCTAssertEqual(
+                inspector.classify(withArguments),
+                expected,
+                "PID \(identity.pid) 是非候选，结论不得因为 argv 改变"
+            )
+        }
+    }
+
+    // MARK: - 3. 命中路径与证据
 
     func testImagePathExactNameMatchesPi() {
         let (inspector, _) = makeInspector(snapshots: [piSnapshot(pid: 4242, parentPID: 4000)])
@@ -227,11 +384,15 @@ final class PiProcessInspectorTests: XCTestCase {
         XCTAssertEqual(records[0].commandSummary, "pi")
     }
 
-    // MARK: - 3. 不确定（全部按不安全处理）
+    // MARK: - 4. 不确定（全部按不安全处理）
 
     func testEnumerationFailureIsUnknown() {
         let inspector = PiProcessInspector(
-            probe: PiProcessProbing(listProcessIdentifiers: { .failed }, snapshot: { _ in .processGone }),
+            probe: PiProcessProbing(
+                listProcessIdentifiers: { .failed },
+                snapshot: { _ in .processGone },
+                arguments: { _ in [] }
+            ),
             fileSystem: MemoryFileSystemProbe(homeDirectory: fixtureHome),
             redactor: LogRedactor(homeDirectory: fixtureHome),
             formatStartTime: { _ in "夹具时间" }
@@ -298,7 +459,8 @@ final class PiProcessInspectorTests: XCTestCase {
                 executableName: "ssh",
                 arguments: [],
                 readFailure: nil
-            )) }
+            )) },
+            arguments: { _ in [] }
         )
         let inspector = PiProcessInspector(
             probe: probe,
@@ -321,7 +483,8 @@ final class PiProcessInspectorTests: XCTestCase {
                 executableName: "pi",
                 arguments: [],
                 readFailure: nil
-            )) }
+            )) },
+            arguments: { _ in ["/opt/homebrew/bin/pi"] }
         )
         let inspector = PiProcessInspector(
             probe: probe,
@@ -335,7 +498,7 @@ final class PiProcessInspectorTests: XCTestCase {
         XCTAssertEqual(records.count, 1)
     }
 
-    // MARK: - 4. 脱敏（记录可以安全地写进日志与确认框）
+    // MARK: - 5. 脱敏（记录可以安全地写进日志与确认框）
 
     func testCommandSummaryRedactsHomeCredentialsAndEnvironment() {
         let secret = "sk-live-abcdefghijklmnop"
@@ -397,8 +560,80 @@ final class PiProcessInspectorTests: XCTestCase {
         XCTAssertTrue(queryForm.contains("https://x.test/a?<redacted>"))
     }
 
+    /// 非键值形状的遮罩（GitHub #61）：`-p<值>`（短开关紧跟值）、`--token=<值>`、
+    /// 位置参数形式的已知凭据前缀、长 base64/十六进制位置参数、URL 查询串里的
+    /// `?token=`。逐条断言，避免“整段字符串里没找到秘密就算过”。
+    func testCommandSummaryMasksNonKeyValueSecretShapes() {
+        let redactor = LogRedactor(homeDirectory: fixtureHome)
+        let secret = "s3cr3t-" + "value"
+
+        func summary(_ arguments: [String]) -> String {
+            PiProcessInspector.commandSummary(arguments: arguments, redactor: redactor)
+        }
+
+        // 1. `--token=<值>`：键值形态，保留键。
+        XCTAssertEqual(summary(["pi", "--token=\(secret)"]), "pi --token=<redacted>")
+
+        // 2. `-p<值>`：短开关紧跟值，保留开关本身。
+        XCTAssertEqual(summary(["pi", "-p\(secret)"]), "pi -p<redacted>")
+        XCTAssertEqual(summary(["pi", "-t\(secret)"]), "pi -t<redacted>")
+        XCTAssertEqual(summary(["pi", "-s\(secret)"]), "pi -s<redacted>")
+
+        // 3. 位置参数形式的已知凭据前缀：整段换成占位符（前缀也不保留）。
+        for prefix in ["sk-", "ghp_", "xoxb-"] {
+            let token = prefix + secret
+            let maskedSummary = summary(["pi", token])
+            XCTAssertEqual(maskedSummary, "pi <redacted>", "\(prefix) 开头的 token 必须整段遮罩")
+            XCTAssertFalse(maskedSummary.contains(secret))
+            XCTAssertFalse(maskedSummary.contains(prefix), "前缀本身也不保留（整段替换）")
+        }
+
+        // 4. 长 base64/十六进制位置参数（长度达到阈值）。
+        let hexToken = String(repeating: "a1b2c3d4", count: 8)
+        let base64Token = String(repeating: "Ab3_-", count: 9)
+        XCTAssertEqual(summary(["pi", hexToken]), "pi <redacted>")
+        XCTAssertEqual(summary(["pi", base64Token]), "pi <redacted>")
+
+        // 5. URL 查询串里的 `?token=`：交给 `LogRedactor` 整体替换。
+        let url = "https://api.example.test/callback?token=\(secret)"
+        let urlSummary = summary(["pi", url])
+        XCTAssertFalse(urlSummary.contains(secret))
+        XCTAssertTrue(urlSummary.contains("callback?<redacted>"), "查询串应整体替换，实际是 \(urlSummary)")
+
+        // 6. 组合：遮罩后整段摘要里不再出现秘密原文，且五处凭据各留一个占位符。
+        let combined = summary([
+            "pi",
+            "--token=\(secret)",
+            "-p\(secret)",
+            "sk-\(secret)",
+            hexToken,
+            url
+        ])
+        XCTAssertFalse(combined.contains(secret))
+        XCTAssertEqual(combined.components(separatedBy: LogRedactor.marker).count - 1, 5)
+    }
+
+    /// 已知边界（明确断言的保留行为）：遮罩是模式化的，不是“凡秘密必被遮”。
+    /// 短于阈值、又没有已知前缀或敏感键名的自由文本会**原样保留**；这里把保留
+    /// 行为写成断言（而不是含糊的“可能保留”），`docs/privacy.md` 同步如实说明。
+    func testCommandSummaryRetainsUnrecognizedFreeText() {
+        let redactor = LogRedactor(homeDirectory: fixtureHome)
+        let freeText = "open sesame please"
+        let shortOpaque = "shortvalue"
+        let summary = PiProcessInspector.commandSummary(
+            arguments: ["pi", freeText, shortOpaque, "--verbose", "/opt/homebrew/bin/pi"],
+            redactor: redactor
+        )
+        XCTAssertEqual(
+            summary,
+            "pi \(freeText) \(shortOpaque) --verbose /opt/homebrew/bin/pi",
+            "不符合已知形状的自由文本按已知边界原样保留"
+        )
+    }
+
     func testCommandSummaryIsBounded() {
-        let longArgument = String(repeating: "a", count: 400)
+        // 长参数用普通路径形状（不是秘密形状）：这里断言的是截断，不是遮罩。
+        let longArgument = String(repeating: "some/path/segment/", count: 20) + "notes.txt"
         let summary = PiProcessInspector.commandSummary(
             arguments: ["/opt/homebrew/bin/pi", longArgument],
             redactor: LogRedactor(homeDirectory: fixtureHome)
@@ -436,7 +671,7 @@ final class PiProcessInspectorTests: XCTestCase {
         XCTAssertTrue(text.contains("启动时间：未知"))
     }
 
-    // MARK: - 5. 状态文案（诊断页/设置页）
+    // MARK: - 6. 状态文案（诊断页/设置页）
 
     func testStatusTextDescribesEachState() {
         let records = [PiProcessRecord(
@@ -463,7 +698,7 @@ final class PiProcessInspectorTests: XCTestCase {
         )
     }
 
-    // MARK: - 6. 源码负向断言（没有信号、没有 shell、没有 sudo）
+    // MARK: - 7. 源码负向断言（没有信号、没有 shell、没有 sudo）
 
     /// 仓库根目录（测试文件位于 `<root>/PiWebDesktopTests/`）。
     private func repositoryRoot() -> URL {

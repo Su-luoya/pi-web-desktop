@@ -20,6 +20,41 @@
 
 当前脚本生成 `build/Pi-Web-Desktop.app`，使用 Apple Silicon、macOS 14 目标和 ad-hoc 签名。源码目录中的图标可能携带 macOS 扩展属性；构建脚本会避免把不适合签名的 Finder 元数据复制进 app bundle。
 
+### Finder / iCloud 扩展属性与签名校验
+
+`codesign --verify --deep --strict` 会拒绝任何携带额外“detritus”的 bundle，典型输出：
+
+```text
+build/Pi-Web-Desktop.app: resource fork, Finder information, or similar detritus not allowed
+file with invalid attached data: Disallowed xattr com.apple.FinderInfo found on /…/build/Pi-Web-Desktop.app
+```
+
+当工作区位于 iCloud Drive / File Provider 同步的目录（例如被“桌面与文稿”同步的 `~/Documents`）时，
+Finder 或 File Provider 会在构建过程中给 app bundle 本身或 `Contents/MacOS/PiWebDesktop` 写上
+`com.apple.FinderInfo`、`com.apple.fileprovider.fpfs#P` 这类扩展属性，因此会出现“刚构建完就校验
+失败”。本机实测（macOS 27.0）：
+
+- 把 `com.apple.FinderInfo` 写到 bundle 根目录或 `Contents/MacOS/PiWebDesktop` 上，
+  `codesign --verify --deep --strict --verbose=2` 立即以退出码 1 报上面的 detritus 错误；
+  写到 `Contents/Info.plist` 上则仍然通过（校验只看 bundle 与 Mach-O 可执行文件）。
+- `xattr -cr <app>` 清除后同一 bundle 立即校验通过，不需要重新签名。
+
+脚本已经处理这个坑：`Scripts/build.sh` 在 ad-hoc 签名前与签名后各清一次扩展属性（`xattr -cr`），
+签名后用 `codesign --verify --deep --strict` 复验，失败时清属性重试最多 3 次；仍失败则以可读错误
+停下并提示 `xattr -l` / `xattr -cr`，不会静默忽略签名错误。`Scripts/package-release.sh` 在签名校验与
+打包前也会防御性清理，所以“构建成功、打包时校验失败”不会再出现。清除扩展属性不会破坏已签名的封条，
+不需要重新签名。CI 在干净的 runner 目录里 checkout，不受影响；这个坑只在把仓库放在同步目录的本地
+环境出现。手工排查：
+
+```bash
+xattr -l build/Pi-Web-Desktop.app
+xattr -l build/Pi-Web-Desktop.app/Contents/MacOS/PiWebDesktop
+xattr -cr build/Pi-Web-Desktop.app
+codesign --verify --deep --strict build/Pi-Web-Desktop.app
+```
+
+不要用 `sudo`、关闭 SIP 或关闭 Gatekeeper 的方式绕过这个报错。
+
 ## Xcode 工程构建与测试
 
 标准 Xcode 工程使用 Apple Silicon、macOS 14 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让测试在没有 host app 的情况下仍可编译，target 会把被测源码直接加入测试源：`Sources/ServiceConfiguration.swift`、`Sources/AppConfiguration.swift`、`Sources/AppPaths.swift`、`Sources/ProcessInspector.swift`、`Sources/DiagnosticsCollector.swift`、`Sources/DependencyChecker.swift`、`Sources/FirstLaunchDiagnostics.swift`、`Sources/InstallCommandManifest.swift`、`Sources/ServiceManager.swift`、`Sources/ServiceOwnership.swift`、`Sources/WebViewNavigationPolicy.swift`、`Sources/KeychainStore.swift`、`Sources/WorkspaceDirectory.swift`、`Sources/QuitPolicy.swift`；因此测试文件直接使用该 target 内编译的这些类型，不通过 `@testable import PiWebDesktop` 引入 app target。`Sources/WebViewController.swift` 与 `Sources/DiagnosticsWindowController.swift` 依赖 AppKit/WebKit 且需要真实窗口，只进 app target；依赖诊断的纯文本呈现（`DependencyReportPresenter`）与首次启动路由、控件映射、路径选择因此分别放在 `DependencyChecker.swift` 和 `FirstLaunchDiagnostics.swift` 里，可以在 unhosted 目标里测试。这些测试使用假的 `ps`/`lsof` 输出、注入的存活判定、假的进程启动器、即时执行的调度器、假依赖探针和临时目录，不访问真实进程、网络、Keychain、真实端口或 `~/.pi`。

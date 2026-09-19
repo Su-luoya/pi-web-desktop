@@ -52,6 +52,33 @@ fail() {
   exit 1
 }
 
+# Finder and the iCloud/File Provider stack attach extended attributes
+# (com.apple.FinderInfo, com.apple.fileprovider.fpfs#P, ...) to files inside
+# synced directories such as ~/Documents. codesign --verify --deep --strict
+# rejects that "detritus" on the bundle or on its Mach-O executable, even when
+# it was attached after signing; CI checks out into a clean directory, so this
+# defensive cleanup matters for local work trees. Cleanup failures are warnings:
+# the signature verification below stays the gate and is never skipped.
+clear_extended_attributes() {
+  [ -n "$1" ] || return 0
+  if ! command -v xattr >/dev/null 2>&1; then
+    printf 'warning: xattr is not available; skipping extended-attribute cleanup for %s\n' "$1" >&2
+    printf 'warning: if signature verification fails with "resource fork, Finder information, or similar detritus not allowed", clear the attributes by hand (docs/releasing.md)\n' >&2
+    return 0
+  fi
+
+  set +e
+  xattr_output=$(xattr -cr "$1" 2>&1)
+  xattr_status=$?
+  set -e
+
+  if [ "$xattr_status" -ne 0 ]; then
+    printf 'warning: xattr -cr %s failed with status %s: %s\n' "$1" "$xattr_status" "$xattr_output" >&2
+    printf 'warning: signature verification below reports any metadata that still breaks it\n' >&2
+  fi
+  return 0
+}
+
 APP=''
 OUT=''
 TAG=''
@@ -142,14 +169,29 @@ printf '\n== bundle identity ==\n'
 "$ROOT/Scripts/check-identity.sh" "$APP"
 
 printf '\n== ad-hoc signature verification ==\n'
-set +e
-VERIFY_OUTPUT=$(codesign --verify --deep --strict --verbose=2 "$APP" 2>&1)
-VERIFY_STATUS=$?
-set -e
+# Finder/iCloud metadata is cleared first so a stale work tree cannot fail the
+# gate with "resource fork, Finder information, or similar detritus not allowed".
+clear_extended_attributes "$APP"
+VERIFY_ATTEMPT=0
+while :; do
+  VERIFY_ATTEMPT=$((VERIFY_ATTEMPT + 1))
+  set +e
+  VERIFY_OUTPUT=$(codesign --verify --deep --strict --verbose=2 "$APP" 2>&1)
+  VERIFY_STATUS=$?
+  set -e
+  if [ "$VERIFY_STATUS" -eq 0 ] || [ "$VERIFY_ATTEMPT" -ge 2 ]; then
+    break
+  fi
+  printf 'warning: codesign --verify --deep --strict failed (attempt %s/2, status %s); clearing extended attributes and retrying\n' "$VERIFY_ATTEMPT" "$VERIFY_STATUS" >&2
+  [ -z "$VERIFY_OUTPUT" ] || printf '%s\n' "$VERIFY_OUTPUT" >&2
+  clear_extended_attributes "$APP"
+  sleep 1
+done
 if [ -n "$VERIFY_OUTPUT" ]; then
   printf '%s\n' "$VERIFY_OUTPUT"
 fi
 if [ "$VERIFY_STATUS" -ne 0 ]; then
+  printf 'package-release: hint: the bundle or its executable still carries metadata that ad-hoc verification rejects. Inspect it with "xattr -l %s" and clear it with "xattr -cr %s"; Finder and iCloud/File Provider attach com.apple.FinderInfo in synced directories such as ~/Documents. See docs/releasing.md.\n' "$APP" "$APP" >&2
   fail "codesign --verify --deep --strict failed with status $VERIFY_STATUS for $APP"
 fi
 printf 'ok   codesign --verify --deep --strict passed\n'
@@ -187,6 +229,11 @@ fi
 printf 'info %s\n' "$SPCTL_NOTE"
 
 printf '\n== packaging ==\n'
+# Keep Finder/File Provider metadata out of the ZIP too: ditto would otherwise
+# store it in __MACOSX/ AppleDouble entries and restore it on the user's
+# machine. The bundle was already verified above and cleaning xattrs does not
+# touch the code signature.
+clear_extended_attributes "$APP"
 ( cd "$APP_PARENT" && ditto -c -k --sequesterRsrc --keepParent "$APP_BASENAME" "$OUT/$ZIP_NAME" )
 ( cd "$OUT" && shasum -a 256 "$ZIP_NAME" > "$ZIP_NAME.sha256" )
 SHA256=$(awk '{print $1}' "$OUT/$ZIP_NAME.sha256")

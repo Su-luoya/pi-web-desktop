@@ -116,25 +116,64 @@ if [ -f "$ICON" ]; then
   ditto --norsrc --noextattr "$ICON" "$APP/Contents/Resources/$APP_ICON_NAME.icns"
 fi
 
-clear_metadata() {
+# Finder and the iCloud/File Provider stack attach extended attributes
+# (com.apple.FinderInfo, com.apple.fileprovider.fpfs#P, ...) to files inside
+# synced directories such as ~/Documents. codesign --verify --deep --strict
+# rejects that "detritus" on the bundle or on the Mach-O executable, even when
+# it was attached after signing. CI checks out into a clean directory, so only
+# synced local work trees hit this.
+clear_extended_attributes() {
   if ! command -v xattr >/dev/null 2>&1; then
-    return
+    printf 'warning: xattr is not available; skipping extended-attribute cleanup for %s\n' "$APP" >&2
+    printf 'warning: if the signature check fails with "resource fork, Finder information, or similar detritus not allowed", clear the attributes by hand (docs/development.md, section 构建)\n' >&2
+    return 0
   fi
 
-  xattr -cr "$APP" 2>/dev/null || true
-  find "$APP" -print0 | while IFS= read -r -d '' item; do
-    xattr -d com.apple.provenance "$item" 2>/dev/null || true
-    xattr -d com.apple.FinderInfo "$item" 2>/dev/null || true
-    xattr -d 'com.apple.fileprovider.fpfs#P' "$item" 2>/dev/null || true
+  set +e
+  xattr_output=$(xattr -cr "$APP" 2>&1)
+  xattr_status=$?
+  set -e
+
+  if [ "$xattr_status" -ne 0 ]; then
+    printf 'warning: xattr -cr %s failed with status %s: %s\n' "$APP" "$xattr_status" "$xattr_output" >&2
+    printf 'warning: the signature check below reports any metadata that still breaks verification\n' >&2
+  fi
+  return 0
+}
+
+verify_ad_hoc_signature() {
+  attempt=0
+  while [ "$attempt" -lt 3 ]; do
+    attempt=$((attempt + 1))
+    set +e
+    verify_output=$(codesign --verify --deep --strict --verbose=2 "$APP" 2>&1)
+    verify_status=$?
+    set -e
+
+    if [ "$verify_status" -eq 0 ]; then
+      if [ "$attempt" -gt 1 ]; then
+        printf 'info: codesign --verify --deep --strict passed on attempt %s (Finder/File Provider metadata was reattached after signing)\n' "$attempt"
+      fi
+      return 0
+    fi
+
+    if [ "$attempt" -lt 3 ]; then
+      printf 'warning: codesign --verify --deep --strict failed (attempt %s/3, status %s); clearing extended attributes and retrying\n' "$attempt" "$verify_status" >&2
+      [ -z "$verify_output" ] || printf '%s\n' "$verify_output" >&2
+      clear_extended_attributes
+      sleep 1
+    fi
   done
-  # The bundle directory itself may receive Finder/File Provider metadata
-  # from the parent directory after the recursive cleanup above.
-  xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true
-  xattr -d 'com.apple.fileprovider.fpfs#P' "$APP" 2>/dev/null || true
+
+  printf 'error: codesign --verify --deep --strict failed for %s (status %s)\n' "$APP" "$verify_status" >&2
+  [ -z "$verify_output" ] || printf '%s\n' "$verify_output" >&2
+  printf 'error: the bundle or its executable carries metadata that ad-hoc verification rejects.\n' >&2
+  printf 'error: inspect with "xattr -l %s" and clear with "xattr -cr %s", then rebuild; see docs/development.md (section 构建).\n' "$APP" "$APP" >&2
+  exit 1
 }
 
 # Finder/resource-fork metadata copied from user files can invalidate ad-hoc signing.
-clear_metadata
+clear_extended_attributes
 
 # Identity and version come from Configuration/AppIdentity.xcconfig only.
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -176,13 +215,16 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --deep --sign - "$APP" >/dev/null
-# The enclosing synced directory can reattach Finder metadata after signing.
-if command -v xattr >/dev/null 2>&1; then
-  xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true
-  xattr -d 'com.apple.fileprovider.fpfs#P' "$APP" 2>/dev/null || true
+if ! codesign --force --deep --sign - "$APP" >/dev/null; then
+  printf 'error: codesign --force --deep --sign - failed for %s\n' "$APP" >&2
+  printf 'error: if the message mentions "resource fork, Finder information, or similar detritus not allowed", clear the attributes with "xattr -cr %s" and retry (see docs/development.md, section 构建).\n' "$APP" >&2
+  exit 1
 fi
-codesign --verify --deep --strict "$APP" >/dev/null
+# The enclosing synced directory can reattach Finder metadata after signing
+# (for example com.apple.FinderInfo on the bundle or its executable), so clean
+# again and verify with retries before declaring the build good.
+clear_extended_attributes
+verify_ad_hoc_signature
 
 printf 'Built: %s\n' "$APP"
 file "$BIN"

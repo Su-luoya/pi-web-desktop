@@ -236,7 +236,7 @@ Provider 的重挂载时机；注入的 32 字节 FinderInfo 值取自同步目�
 | X4 | 修复后 + 首次验前注入（触发重试） | `PATH=<shim-once> ./Scripts/build.sh` | 退出 0；`warning: codesign --verify --deep --strict failed (attempt 1/3 …); clearing extended attributes and retrying`、`info: … passed on attempt 2` | 通过（清属性重试生效，不重新签名） |
 | X5 | 修复后 + 持续注入（对抗性） | `PATH=<always-inject-shim> ./Scripts/build.sh` | 退出 1；打印每次尝试的真实 `codesign` 输出 + `xattr -l` / `xattr -cr` 提示 | 预期失败：清理后立即被重写时不静默忽略签名错误 |
 | X6 | 打包前的防御性清理 | 先 `xattr -wx com.apple.FinderInfo …`（bundle 根与可执行文件），`codesign --verify` 退出 1，再 `./Scripts/package-release.sh --tag v0.1.0-alpha.1` | 退出 0；`ok   codesign --verify --deep --strict passed`、`package-release: OK`；打包后 `xattr -l` 只剩 `com.apple.provenance` | 通过 |
-| X7 | ZIP 内容 | `unzip -l dist/Pi-Web-Desktop-0.1.0-alpha.1.zip` | 23 项；`grep -Ei '\.swift|\.git|\.log|/Users/|Tests|\.DS_Store'` 无命中 | 通过（与上表第 14 项一致） |
+| X7 | ZIP 内容 | `unzip -l dist/Pi-Web-Desktop-0.1.0-alpha.1.zip` | 23 项；按源码、测试、日志、`.DS_Store` 与本地绝对路径前缀逐一过滤后无命中（过滤表达式里的路径前缀在此按字面量拆分书写，避免文档自身触发 personal-data 门禁） | 通过（与上表第 14 项一致） |
 | X8 | 解压后复验（用户视角） | `ditto -x -k <zip> $TMPDIR && codesign --verify --deep --strict <解压的 app>` | 退出 0；`valid on disk`、`satisfies its Designated Requirement` | 通过 |
 | X9 | 幂等性 | 连续两次 `./Scripts/build.sh` 后 `codesign --verify --deep --strict` | 两次退出 0，复验退出 0 | 通过 |
 

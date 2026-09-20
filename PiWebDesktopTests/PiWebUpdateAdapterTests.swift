@@ -426,7 +426,7 @@ final class PiWebUpdateAdapterTests: XCTestCase {
             "HOME": fixtureHome,
             "LANG": "en_US.UTF-8",
             "TMPDIR": "/tmp/pi-web-update-tests",
-            "PI_WEB_PASSWORD": "super-secret-value",
+            "PI_WEB_PASSWORD": "super-secret-value",  // scan-secrets: allow(reason=test fixture environment)
             "AWS_SECRET_ACCESS_KEY": "aws-secret",
             "NODE_OPTIONS": "--require /tmp/evil.js",
             "NODE_PATH": "/tmp/evil-modules",
@@ -860,7 +860,7 @@ final class PiWebUpdateAdapterTests: XCTestCase {
             baseEnvironment: [
                 "PATH": "/usr/bin:/bin",
                 "HOME": directory.path,
-                "PI_WEB_PASSWORD": "super-secret-value",
+                "PI_WEB_PASSWORD": "super-secret-value",  // scan-secrets: allow(reason=test fixture environment)
                 "NODE_OPTIONS": "--require /tmp/evil.js",
                 "npm_config_registry": "https://example.invalid"
             ]

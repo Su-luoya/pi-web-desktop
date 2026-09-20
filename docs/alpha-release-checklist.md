@@ -22,7 +22,7 @@
 - [ ] main CI（build workflow）在 main 上为绿：<run 链接>
 - [ ] #14 安全审查完成，无阻断项（结论：[alpha.1 安全与发布审查](security-review-alpha.1.md)，含日期与被执行命令的提交）：<日期 / 链接>
 - [ ] 安全门槛逐项核对（见下文“安全门槛”一节的 8 项）：结果写入本 Issue
-- [ ] `./Scripts/scan-secrets.sh` 与 `./Scripts/scan-secrets.sh --self-test` 均退出 0（记录结尾的 `scan-secrets: suppressed N lines` 并与本次 diff 新增的内联标记数对照）
+- [ ] `./Scripts/scan-secrets.sh` 与 `./Scripts/scan-secrets.sh --self-test` 均退出 0（记录结尾的 `scan-secrets: suppressed N lines` 并与本次 diff 仍在命中的内联标记数对照；确认没有 `scan-secrets: rejected` 行）
 - [ ] tag 与 bundle 版本一致：`./Scripts/check-identity.sh` 与 `./Scripts/check-release-version.sh <tag>` 退出 0
 - [ ] 真机 smoke 记录（见下表）
 - [ ] checksum 记录（见下表，与 Release 资产一致）

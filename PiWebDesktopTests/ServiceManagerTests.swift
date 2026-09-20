@@ -1828,7 +1828,7 @@ final class ServiceManagerTests: XCTestCase {
         let harness = try makeHarness(
             alive: { $0 == 5150 },
             processOutput: processOutput(for: 5150),
-            baseEnvironment: ["BASE": "1", "PI_WEB_PASSWORD": "inherited-secret"],
+            baseEnvironment: ["BASE": "1", "PI_WEB_PASSWORD": "inherited-secret"],  // scan-secrets: allow(reason=test fixture environment)
             remoteAccessPassword: { Self.remoteSecret }
         )
         defer { harness.cleanUp() }

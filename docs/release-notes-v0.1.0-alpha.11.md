@@ -187,16 +187,22 @@ Command Line Tools）；完整的 `xcodebuild test`（由 PR #143 上的 CI 承�
 
 ## 校验值
 
-本节的值来自 `release.yml` 在 tag `v0.1.0-alpha.11` 上生成的发布产物（发布后回填，与
-`v0.1.0-alpha.10` 的做法一致）。
+本节的值来自 `release.yml` 在 tag `v0.1.0-alpha.11` 上生成的发布产物（run
+[35521984282](https://github.com/Su-luoya/pi-web-desktop/actions/runs/35521984282)，发布提交
+`ce00aee`），已在发布后从 Release 页面重新下载复验。
 
 | 项 | 值 |
 | --- | --- |
 | 发布资产 | `Pi-Web-Desktop-0.1.0-alpha.11+build.11.zip` |
-| 大小 | （发布后回填） |
-| SHA-256 | （发布后回填） |
-| 发布提交 | （发布后回填） |
-| 校验 | `shasum -a 256 -c Pi-Web-Desktop-0.1.0-alpha.11+build.11.zip.sha256` 与 Release 上的 `.zip.sha256` 一致 |
+| 大小 | `1602879` 字节 |
+| SHA-256 | `9b29a6eb6cbc16ba4de38e0ce400dbf367e7b88beefdc83a20f935342efd1788` |
+| 发布提交 | `ce00aee9f7613e5e79da0c99621096015411f639`（工作区 clean；tag `v0.1.0-alpha.11` 指向该提交） |
+| 校验 | `shasum -a 256 -c Pi-Web-Desktop-0.1.0-alpha.11+build.11.zip.sha256` → OK（用下载到的发布资产与 Release 上的 `.zip.sha256` 复验）；解包后 `CFBundleShortVersionString=0.1.0-alpha.11`、`CFBundleVersion=11`，`codesign --verify --deep --strict` 通过 |
+
+发布提交（`ce00aee`，与候选提交 `3f1704a` 同一棵树）上还重跑过一次本机门槛链：构建、身份（45 项）、
+密钥扫描（`suppressed 15 lines`）、冒烟（两种模式，`items=6` / `blockers=3`）、打包器自检、打包、
+签名复核全部退出 0，XCTest 全量 **758 passed / 0 failed（of 758 discovered）**；`main` 上该提交的
+CI 为绿（run [35521749652](https://github.com/Su-luoya/pi-web-desktop/actions/runs/35521749652)）。
 
 发布页：<https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.11>（prerelease）。
 

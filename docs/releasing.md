@@ -31,14 +31,39 @@
 - Release 说明里同时写明 `CFBundleShortVersionString`（即 `MARKETING_VERSION`）与
   `CFBundleVersion`（即 `CURRENT_PROJECT_VERSION`），便于用户核对下载的 ZIP。
 
+### tag 与 build 号的对应规则
+
+`CURRENT_PROJECT_VERSION` 是 `CFBundleVersion` 的来源，Sparkle 与系统用它判断“哪个更新”，
+所以它必须与 `MARKETING_VERSION` 对得上。`Scripts/check-release-version.sh` 不论 tag 形态都会校这一项，
+连不带 tag 的本地演练也会校；规则如下：
+
+| `MARKETING_VERSION` 形态 | 例子 | 对应的 `CURRENT_PROJECT_VERSION` |
+| --- | --- | --- |
+| 预发布，末尾带数字计数 | `1.2.3-alpha.4` | 末尾数字，即 `4` |
+| 预发布，整个预发布段就是数字 | `1.2.3-4` | `4` |
+| 正式版，三段数字 | `1.2.3` | `major * 1000000 + minor * 1000 + patch`，即 `1002003` |
+| 其它（预发布但没有数字计数、两段或四段版本） | `1.2.3-beta`、`1.2` | 不接受，脚本退出 1 |
+
+- 正式版的 build 号由版本号推导，所以仍然单调（`1.2.3` → `1002003`，`1.2.4` → `1002004`），
+  始终高于同版本的预发布计数；它不是“第几次构建”，不要手填。
+- 推导要求 `X.Y.Z` 每段最多三位数字，三段合计不超过 `999999999`；预发布计数保持在三位以内
+  （≤ 999），这样正式版的推导值（最小 `1000`）总会高于同版本的预发布计数。
+- `CURRENT_PROJECT_VERSION` 必须是不带前导零的十进制整数。
+- 这条规则就是代码评审 W4 / M5 的修复：不打算号的正式版 tag 过去会把 build 号完全跳过，
+  `CURRENT_PROJECT_VERSION` 可以任意漂移（例如 `0.1.0` 配 `999`），现在会直接失败。
+- 同样的 build 号规则会出现在资产名里（见下文“产物名带 build 号”），方便在 Release 页面直接核对。
+
 ### `Scripts/check-release-version.sh`
 
 - `./Scripts/check-release-version.sh v<MARKETING_VERSION>`：完整比较。tag 必须等于
-  `v<MARKETING_VERSION>`；当 tag 带数字预发布计数（`v0.1.0-alpha.2` 里的 `2`）时，
-  该计数还必须等于 `CURRENT_PROJECT_VERSION`。不一致时退出 1 并给出修正提示。
-- 不带参数且环境里没有 `GITHUB_REF_NAME`：打印期望的 tag，跳过比较，退出 0。
-  这是本地 checkout 的默认情况，演练不需要先打 tag。
+  `v<MARKETING_VERSION>`，`CURRENT_PROJECT_VERSION` 必须等于上表推导出的值（正式版也不例外）。
+  不一致时退出 1 并给出修正提示。
+- 不带参数且环境里没有 `GITHUB_REF_NAME`：打印期望的 tag，跳过 tag 比较，退出 0。
+  这是本地 checkout 的默认情况，演练不需要先打 tag；但 `CURRENT_PROJECT_VERSION` 与
+  `MARKETING_VERSION` 的对应关系仍然会被校验。
 - `--print-tag`：只输出 `v<MARKETING_VERSION>`；workflow 在非 tag ref 的演练里用它。
+- `--self-test`：在仓库外的临时目录里跑固定用例（正式版配错 build 号、预发布计数漂移、
+  无计数预发布、两段版本、tag/版本不一致等），不需要 bundle，也不改工作树。
 - 版本值只从 xcconfig 读取，脚本里不写版本字面值。
 
 ## 发布前门槛
@@ -61,12 +86,18 @@ git diff --check
 ```
 
 - 只有 `xcodebuild` 需要完整 Xcode；CI 之外不要求本机安装完整 Xcode。
+- `Scripts/build.sh` 默认构建的是用户下载的那一份发布产物：`-O -wmo`（优化 + 全模块优化）。
+  需要调试时用 `./Scripts/build.sh --debug-build`（等价于 `PI_WEB_DESKTOP_BUILD_MODE=debug`），
+  它用 `-Onone -g` 写同一个 bundle。调试构建会覆盖发布产物，调试完必须重新跑默认构建再打包，
+  否则 `package-release.sh` 打包的就是未优化产物；`build.sh` 也会在调试构建结束时打印这条警告。
+- `./Scripts/check-release-version.sh --self-test` 与 `./Scripts/package-release.sh --self-test` 都是离线
+  自检，不需要 bundle 或 tag，可以先跑。
 - `Scripts/package-release.sh` 只打包已经构建好的 bundle（默认 `build/Pi-Web-Desktop.app`）；
   bundle 不存在时加 `--build`，它会先运行 `./Scripts/build.sh`。
-- 产物写入 `dist/`（已被 `.gitignore` 忽略）：`Pi-Web-Desktop-<版本>.zip`、
+- 产物写入 `dist/`（已被 `.gitignore` 忽略）：`Pi-Web-Desktop-<版本>+build.<build>.zip`、
   `<...>.zip.sha256`、`<...>.evidence.md` 与 `release-metadata.env`。
 - 证据文件包含运行机器的路径与 macOS 版本，不要把它提交到仓库，也不要把 `dist/` 加进版本控制。
-- `./Scripts/package-release.sh --self-test` 在仓库外的临时目录里自检白名单与拒绝路径（见下节），
+- `./Scripts/package-release.sh --self-test` 在仓库外的临时目录里自检包名/包内容白名单与拒绝路径（见下节），
   不需要 bundle，也不会在仓库里留下 `dist/`。
 
 ### 本地演练与 Finder / iCloud 扩展属性
@@ -94,9 +125,45 @@ xattr -cr build/Pi-Web-Desktop.app
 ./Scripts/package-release.sh --tag v<MARKETING_VERSION>
 ```
 
-清除扩展属性不会破坏封条，不需要重新签名；ZIP 流程不变（`ditto -c -k --sequesterRsrc` 只把剩余元数据
-写进 `__MACOSX/` AppleDouble 条目，打包前已经清理过一次）。CI 在干净目录 checkout，不受影响。
+清除扩展属性不会破坏封条，不需要重新签名；ZIP 流程也不受它影响：打包前已经清过一次，
+并且 `ditto -c -k --norsrc --noextattr` 本身也不会写入 `__MACOSX/` AppleDouble 条目或扩展属性。
+CI 在干净目录 checkout，不受影响。
 更详细的机制与实测见[开发说明的“Finder / iCloud 扩展属性与签名校验”](development.md#finder--icloud-扩展属性与签名校验)。
+
+## 产物名带 build 号
+
+`Scripts/package-release.sh` 产出的资产名是 `<App>-<MARKETING_VERSION>+build.<BUILD>.zip`，
+例如 `Pi-Web-Desktop-<版本>+build.<build>.zip`；`.sha256` 与 `.evidence.md` 用同一个前缀。
+`+build.N` 是 semver 的 build metadata 写法，`N` 就是 `CFBundleVersion`：
+
+- 下载页与证据文件里能直接看到 build 号，不用解包 `Info.plist` 就能发现 build 号与 tag 不一致；
+- 兼容性：`.github/workflows/release.yml` 从 `release-metadata.env` 读 `ZIP_NAME`/`EVIDENCE_NAME`，
+  不拼名字；`docs/release-notes-template.md` 用 `{{ZIP_NAME}}` 占位符；README 的校验命令用
+  `Pi-Web-Desktop-*.zip.sha256` 通配，都不受影响。历史 Release 与历史清单/记录里的旧名字
+  （不含 `+build.N`）只是存档，不要回写。
+- `CFBundleVersion` 必须是十进制整数（与上一节的 tag/build 规则一致）；否则打包直接失败，
+  不允许出现一个无法对回到 tag 的资产名。
+
+## 包内容白名单
+
+打包前 `Scripts/package-release.sh` 会列出 bundle 里的每一条目（`find` + `LC_ALL=C` 排序），
+只允许下列位置，其它一律失败并逐条列出（列出时字节会按 `\xNN` 转义）：
+
+| 允许的位置 | 说明 |
+| --- | --- |
+| `Contents/MacOS/**` | 可执行文件 |
+| `Contents/Info.plist` | 唯一的 `Info.plist` |
+| `Contents/Resources/**` | 图标等资源（允许子目录） |
+| `Contents/_CodeSignature/**` | 签名封条 |
+
+- 目录本身（`Contents` 与上面四个目录）一并允许；`.DS_Store`、`._*` AppleDouble 条目与
+  包含 `..` 的路径即使在允许目录下也被拒绝；包含换行的条目名会被当作无法可靠列出的清单直接失败。
+- 检查在创建 `--out` 之前，所以被拒绝的 bundle 不会留下半个 `dist/`。
+- 打包后还会用 `unzip -Z1` 把 ZIP 条目与同一份清单逐一比对（方向双向：ZIP 多的、清单多的都失败），
+  因此 `ditto` 不可能静默添上或漏掉内容；`--norsrc --noextattr` 下不应该出现 `__MACOSX/` 条目。
+- 列出的文件清单与每个文件的 SHA-256 会写进证据 Markdown 的折叠段落，存进 Release 资产便于事后核对。
+- 要加新内容时：先改 `Scripts/package-release.sh` 里的白名单（并同步本表），再在
+  `--self-test` 里加一条接受用例与一条拒绝用例；不要用“先放进去再说”的方式绕过。
 
 ## 发布元数据的字符集白名单
 
@@ -108,7 +175,7 @@ publish job 里复验与上传前一处）。所以脚本对写入该文件的�
 | 写入的变量 | 取值来源 | 允许的字符集 | 失败行为 |
 | --- | --- | --- | --- |
 | `VERSION`（`CFBundleShortVersionString`） | bundle 的 `Info.plist` | `0-9A-Za-z._+-` | 退出 1，不打包 |
-| `BUILD`（`CFBundleVersion`） | bundle 的 `Info.plist` | `0-9A-Za-z._+-` | 退出 1，不打包 |
+| `BUILD`（`CFBundleVersion`） | bundle 的 `Info.plist` | 恰好十进制整数 `0-9`（tag/build 规则要求） | 退出 1，不打包 |
 | `APP_STEM`，进而 `APP_NAME`、`ZIP_NAME`、`EVIDENCE_NAME` | `--app` 路径的 basename 去掉 `.app` | `0-9A-Za-z_-` | 退出 1，且不创建 `--out` 目录 |
 | `SHA256` | `shasum -a 256` 的输出 | 恰好 64 位小写十六进制 `0-9a-f` | 退出 1 |
 | `COMMIT` | `git rev-parse HEAD` | 小写十六进制，或缺省值 `unknown` | 退出 1 |
@@ -209,9 +276,16 @@ Release 说明由 `docs/release-notes-template.md` 渲染；每个版本还会�
 ## 可复现性与诚实的边界
 
 - 流程是脚本化的：本地演练与 CI 运行同一批脚本，tag、版本与 checksum 都能核对。
-- 但本项目**不承诺 bit-for-bit 可复现**：ad-hoc 签名、CDHash 与编译器版本都会影响二进制字节，
-  同一提交在不同机器上构建出的 ZIP 不一定相同。可复现的是步骤与校验值；ZIP 的 SHA-256
-  记录的是“这一个具体产物”。
+- 容器层面尽量可复现：`Scripts/package-release.sh` 在打包前把所有条目的 mtime 固定为同一个值
+  （默认 `200101010000.00`，可用 `SOURCE_DATE_EPOCH` 覆盖），再用
+  `ditto -c -k --norsrc --noextattr --keepParent` 打包：不再是 `--sequesterRsrc` 的
+  `__MACOSX/` AppleDouble 形式，也没有高精度时间戳，同一个 bundle 重复打包会得到相同的字节。
+- 但本项目**不承诺 bit-for-bit 可复现**，下面的字节仍然每次不同：
+  - `Contents/MacOS/PiWebDesktop`：编译器/链接器版本、构建路径等进入 Mach-O；
+  - `Contents/_CodeSignature/CodeResources` 与签名 blob：ad-hoc CDHash 随内容与每次签名调用变化；
+  - `Info.plist` 与资源本身（图标）在同一版本下是固定的，但任何工具链差异会连带改变它们的摘要。
+  因此同一提交在不同机器上构建出的 ZIP 不一定相同；可复现的是步骤与校验值，
+  ZIP 的 SHA-256 记录的是“这一个具体产物”，证据文件里的包内容清单与 SHA-256 也是针对这一份。
 - 不要为了对齐 checksum 而替换已发布的资产；版本内容有变化就发布新的 alpha。
 - 发布记录（Release Issue、Release 说明、证据文件）必须与实际产物一致；宁可延迟发布，
   也不要补写没有实际运行过的验证结果。

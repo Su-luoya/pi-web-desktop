@@ -1,6 +1,66 @@
 #!/bin/sh
 set -eu
 
+# Build the release artifact (build/Pi-Web-Desktop.app) from Sources/, using
+# Configuration/AppIdentity.xcconfig as the only identity and version source.
+#
+# Usage:
+#   ./Scripts/build.sh [--debug-build]
+#
+# The artifact this script produces is what users download, so the default is
+# an optimized release build (-O -wmo). --debug-build (or
+# PI_WEB_DESKTOP_BUILD_MODE=debug) keeps -Onone -g instead, for lldb and
+# fatalError investigations. A debug build overwrites the same bundle, so run
+# the default build again before ./Scripts/package-release.sh.
+#
+# Exit status: 0 built, 1 build/signature failure, 2 usage error.
+
+usage() {
+  printf 'usage: ./Scripts/build.sh [--debug-build]\n'
+}
+
+BUILD_MODE=${PI_WEB_DESKTOP_BUILD_MODE:-release}
+while [ "$#" -gt 0 ]; do
+  case $1 in
+    --debug-build)
+      BUILD_MODE=debug
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'error: unknown argument %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+case $BUILD_MODE in
+  release)
+    # -O enables the optimizer; -wmo is passed explicitly because one swiftc
+    # invocation does NOT imply whole-module optimization: without -wmo the
+    # compiler still emits per-file primary-file code and the optimizer cannot
+    # see across files. Measured on the alpha.4 sources (arm64, Swift 6.4):
+    # 4,665,936 bytes with -Onone, 2,984,448 with -O, 2,299,184 with -O -wmo,
+    # 2,142,016 with -Osize -wmo. -O -wmo is the default: -Osize -wmo builds
+    # 157 KB smaller but trades runtime speed for size, which nothing here
+    # needs, so this project keeps one release policy instead of two.
+    OPTIMIZATION_FLAGS='-O -wmo'
+    ;;
+  debug)
+    # Debug path: no optimization, debug info kept. Assertions and precondition
+    # failures keep their source locations, which -O would fold into the caller.
+    OPTIMIZATION_FLAGS='-Onone -g'
+    ;;
+  *)
+    printf 'error: PI_WEB_DESKTOP_BUILD_MODE must be release or debug, got "%s"\n' "$BUILD_MODE" >&2
+    exit 2
+    ;;
+esac
+
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 XCCONFIG_REL="Configuration/AppIdentity.xcconfig"
 XCCONFIG="$ROOT/$XCCONFIG_REL"
@@ -81,10 +141,14 @@ require_value CURRENT_PROJECT_VERSION "$APP_BUILD"
 BIN="$APP/Contents/MacOS/$APP_EXECUTABLE_NAME"
 ICON="$ROOT/Resources/$APP_ICON_NAME.icns"
 
+printf 'build: %s build with %s\n' "$BUILD_MODE" "$OPTIMIZATION_FLAGS"
+
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-swiftc "$ROOT/Sources/PiWebApp.swift" \
+# $OPTIMIZATION_FLAGS is intentionally unquoted: it is a list of compiler
+# flags, never a single value, and it never contains shell metacharacters.
+swiftc $OPTIMIZATION_FLAGS "$ROOT/Sources/PiWebApp.swift" \
   "$ROOT/Sources/AppConfiguration.swift" \
   "$ROOT/Sources/AppPaths.swift" \
   "$ROOT/Sources/DiagnosticsCollector.swift" \
@@ -239,4 +303,7 @@ clear_extended_attributes
 verify_ad_hoc_signature
 
 printf 'Built: %s\n' "$APP"
+if [ "$BUILD_MODE" = debug ]; then
+  printf 'warning: this is an unoptimized debug build (%s); rebuild without --debug-build before ./Scripts/package-release.sh\n' "$OPTIMIZATION_FLAGS" >&2
+fi
 file "$BIN"

@@ -897,8 +897,17 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
 本节记录 `v0.1.0-alpha.7` 候选提交上**实际执行过**的本地门槛与输出摘要，供 Release Issue 与草稿
 Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不要把它们写成已实测。
 
+**发布结果（回填于 2026-09-20）**：发布提交经 PR [#122](https://github.com/Su-luoya/pi-web-desktop/pull/122)
+squash 合入 main → `fba1f12`（CI run `35499346342`，`build` success）；tag `v0.1.0-alpha.7` push 后
+`release.yml` run `35499610608` success，草稿 Release 填入真机表后发布为 prerelease：
+<https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.7>（`2026-09-20T08:30:20Z`）。
+发布资产 `Pi-Web-Desktop-0.1.0-alpha.7+build.7.zip` 1,590,986 字节、SHA-256
+`782f97ef755c596b1e458964cdc1eb4fd47a588db3e867559dccb8dc2da38c1f`，下载后 `shasum -a 256 -c` 通过、
+`unzip -l` 9 个条目且无 `__MACOSX`、包内 `0.1.0-alpha.7`/`7`、`codesign --verify --deep --strict` 退出 0、
+`spctl` 拒绝（未公证的预期结果）。
+
 - 被测候选提交：本记录所在的发布提交（`chore(release): v0.1.0-alpha.7 版本 bump、发布说明、安全
-  评审与门槛执行记录 (#<PR>)`）；功能/加固代码的最后一个提交是 `4e6e332`（#108），此前依次是
+  评审与门槛执行记录 (#122)`）；功能/加固代码的最后一个提交是 `4e6e332`（#108），此前依次是
   `fbae499`（#107）、`0c1610c`（#106）、`be13c88`（#109）、`9ede020`（#113）、`af47866`（#105），
   基线是 `b162544`（`v0.1.0-alpha.6` 发布提交）。
 - 执行环境：Apple M4（`Mac16,10`）、macOS 27.0（`26A428`）、arm64；Node.js v24.21.0、
@@ -976,20 +985,19 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
 
 ### 还需 CI / 发布 workflow 完成
 
-| # | 门槛 | 覆盖位置 | 本机状态 |
+| # | 门槛 | 覆盖位置 | 本机状态与回填结果 |
 | --- | --- | --- | --- |
 | C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-14` job 覆盖。本版新增/改动的测试集中在 `PiWebDesktopTests/UpdateTransactionTests.swift`（#105 / #106）、`PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`（#107）、`PiWebDesktopTests/PiCLIUpdateAdapterTests.swift` 与 `PiWebDesktopTests/PiWebUpdateAdapterTests.swift`（#108） |
 | C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds`（`check-identity.sh --test-bundle …`） | 本机只检查了脚本产物（`check-identity: PASSED (45 checks)`），Xcode 产物与 `.xctest` 由 CI 覆盖 |
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`（自检 + 仓库扫描）；该步骤由 CI 覆盖 |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；本版六个提交的 main run 均为 **success**：`af47866`（#112）run `35496917660`、`9ede020`（#113）run `35497135814`、`be13c88`（#114）run `35497336171`、`0c1610c`（#115）run `35497649990`、`fbae499`（#117）run `35497954810`、`4e6e332`（#116）run `35498186531` |
-| C5 | Release 资产校验：ZIP/`.sha256`/`.evidence.md` 上传、`sha256sum -c`、Release 说明渲染 | `release.yml` 的 `Package ZIP, checksum, signature evidence and identity checks`、`Render the release notes from the template`、`publish` job | 由 workflow 覆盖（tag push 时执行；`workflow_dispatch` 只产出 artifact）。本机演练产物在 `dist/`，不是发布资产 |
-| C6 | 草稿 prerelease 创建与发布前人工复核（assets 名称、checksum 与 Issue 一致、prerelease 勾选） | `release.yml` 的 `publish` job（`gh release create --prerelease --draft`） | 由 workflow + 维护者完成；workflow 渲染的是 [Release notes 模板](release-notes-template.md)，不读版本化的 [v0.1.0-alpha.7 Release 说明](release-notes-v0.1.0-alpha.7.md)。发布前需把该说明的正文、以及 workflow 产物的 ZIP 名/SHA-256/字节数填进草稿 |
-| C7 | 真机 smoke 的机器与依赖版本写入 Release Issue | 本版 Release Issue 的“真机 smoke 记录” | 机器与依赖版本同“执行环境”一条（Apple M4 / macOS 27.0 `26A428` / arm64 / Node.js v24.21.0 / npm 11.19.0 / Pi CLI 0.86.0 / `@agegr/pi-web` 0.9.1）；本机 `smoke.sh` 两种模式均已通过（见第 1 张表第 9、10 项），需写进 Release Issue #118 |
-| C8 | 上一版资产的回退路径确认 | Release Issue 的“回退路径确认” | 上一版是 `v0.1.0-alpha.6`；它是否仍作为 prerelease 公开可下载需由维护者确认后写进 Release Issue（不能写成本机已验证） |
-| C9 | tag 只能创建一次、且必须指向本发布提交 | 维护者操作 + `Scripts/check-release-version.sh`（CI 里由 `release.yml` 调用） | 由协调者执行；本机只验证了脚本在 `v0.1.0-alpha.7` 上退出 0（**未创建 tag、未 push**） |
+| C5 | Release 资产校验：ZIP/`.sha256`/`.evidence.md` 上传、`sha256sum -c`、Release 说明渲染 | `release.yml` 的 `Package ZIP, checksum, signature evidence and identity checks`、`Render the release notes from the template`、`publish` job | 由 workflow 覆盖（tag push 时执行；`workflow_dispatch` 只产出 artifact）。本机演练产物在 `dist/`，不是发布资产；结果见本节开头的「发布结果」（run `35499610608`） |
+| C6 | 草稿 prerelease 创建与发布前人工复核（assets 名称、checksum 与 Issue 一致、prerelease 勾选） | `release.yml` 的 `publish` job（`gh release create --prerelease --draft`） | 由 workflow + 维护者完成；workflow 渲染的是 [Release notes 模板](release-notes-template.md)，不读版本化的 [v0.1.0-alpha.7 Release 说明](release-notes-v0.1.0-alpha.7.md)。发布前需把该说明的正文、以及 workflow 产物的 ZIP 名/SHA-256/字节数填进草稿；结果：草稿由 `publish` job 创建，协调者把版本化说明正文与真机表填进草稿后 `gh release edit --draft=false`，于 `2026-09-20T08:30:20Z` 发布为 prerelease（<https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.7>） |
+| C7 | 真机 smoke 的机器与依赖版本写入 Release Issue | 本版 Release Issue 的“真机 smoke 记录” | 机器与依赖版本同“执行环境”一条（Apple M4 / macOS 27.0 `26A428` / arm64 / Node.js v24.21.0 / npm 11.19.0 / Pi CLI 0.86.0 / `@agegr/pi-web` 0.9.1）；本机 `smoke.sh` 两种模式均已通过（见第 1 张表第 9、10 项）；已写入 Release 说明的「实测版本」表与 Release Issue #118 的发布评论（`2026-09-20`） |
+| C8 | 上一版资产的回退路径确认 | Release Issue 的“回退路径确认” | 上一版是 `v0.1.0-alpha.6`；确认结果（`2026-09-20`，`gh release list` / `gh release view v0.1.0-alpha.6`）：它仍是已发布的 prerelease（`2026-09-20T07:25:04Z`），ZIP / `.sha256` / `.evidence.md` 三个资产都在，回退路径成立 |
+| C9 | tag 只能创建一次、且必须指向本发布提交 | 维护者操作 + `Scripts/check-release-version.sh`（CI 里由 `release.yml` 调用） | 由协调者执行：tag `v0.1.0-alpha.7` 已创建一次（注释 tag，指向合并提交 `fba1f12`）并 push；`release.yml` 在 tag 上调用 `check-release-version.sh` 通过；本机另外单独验证过该脚本在 `v0.1.0-alpha.7` 上退出 0 |
 
-本节的边界：C1–C6 与 C9 只在 CI / workflow / 维护者操作里完成，本机没有对应的实测输出，
-不要写成已在本机验证。
+本节的边界：C1–C6 与 C9 的检查在 CI / workflow / 维护者操作里完成，本机没有对应的实测输出；表格里 `2026-09-20` 的回填结果来自 workflow 产物与维护者操作，不要写成已在本机验证。
 
 ### 本版同时做的文档一致性改动
 

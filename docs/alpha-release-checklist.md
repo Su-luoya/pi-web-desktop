@@ -1260,3 +1260,97 @@ bump 与四份文档（发布说明、安全评审、本次执行记录、`docs/
   托管进程停止路径、外部服务不被停止或重启）与评审引用。
 - `docs/alpha-release-checklist.md`（本文件）：新增本节（alpha.10 执行记录、覆盖方式、安全审查结论、
   C 项与文档一致性清单）。
+
+## 本次发布执行记录（v0.1.0-alpha.11）
+
+本版候选：PR #143（已合并为 `main` 上的 `03e06f5`，纯整理重构——`Sources/` 从 36 个扁平文件重排为 5 个领域目录下的 83 个
+文件，功能实现完全不变，关闭 [#142](https://github.com/Su-luoya/pi-web-desktop/issues/142)）之后的
+main，加上本版发布提交的版本 bump 与三份文档（发布说明、安全评审、本次执行记录）。本节的脚本输出在
+**非同步目录**的候选副本里采集：`/tmp/piweb-alpha11`（`ditto --norsrc --noextattr` 的干净副本，
+`HEAD = 5bd520e`，工作区含未提交的重构改动——内容等价于 PR #143 的提交——与未提交的版本 bump
+`Configuration/AppIdentity.xcconfig`；发布文档写于这次演练之后，没有进入该副本），原因与 alpha.1 的
+`#15`、alpha.10 记录相同：iCloud 同步目录会在打包后把 `com.apple.FinderInfo` /
+`com.apple.fileprovider.fpfs#P` 贴回临时包，导致 `codesign --verify` 与
+`package-release.sh --self-test` 失败。
+
+### 已在候选提交上实测
+
+| # | 门槛 | 命令 | 实测输出摘要 | 判定 |
+| --- | --- | --- | --- | --- |
+| 1 | 脚本语法 | `sh -n Scripts/*.sh` | 无输出 | 退出 0，通过 |
+| 2 | 空白与补丁格式 | `git diff --check` | 无输出 | 退出 0，通过 |
+| 3 | 构建 | `./Scripts/build.sh` | `build: release build with -O -wmo`；`Built: build/Pi-Web-Desktop.app`；`Contents/MacOS/PiWebDesktop: Mach-O 64-bit executable arm64` | 退出 0，通过（源集合现在是 `Sources/**/*.swift` 的 83 个文件） |
+| 4 | 身份与版本一致性 | `./Scripts/check-identity.sh` | `check-identity: PASSED (45 checks)`；bundle `CFBundleShortVersionString=0.1.0-alpha.11`、`CFBundleVersion=11`、`LSMinimumSystemVersion=14.0`、`CFBundleIdentifier=io.github.su-luoya.pi-web-desktop`、`CFBundleIconFile=ApplicationIcon` | 退出 0，通过（该副本无未跟踪文件，文本扫描覆盖完整） |
+| 5 | tag 与 bundle 版本一致 | `sh Scripts/check-release-version.sh v0.1.0-alpha.11` | `check-release-version: PASSED (tag v0.1.0-alpha.11, MARKETING_VERSION 0.1.0-alpha.11, CURRENT_PROJECT_VERSION 11)` | 退出 0，通过（脚本只做字符串比对，**不检查 tag 是否存在**；本次 tag 尚未创建） |
+| 6 | 签名校验 | `codesign --verify --deep --strict build/Pi-Web-Desktop.app` | 无输出（`valid on disk` / `satisfies its Designated Requirement`） | 退出 0，通过（非同步目录里执行；在 `~/Documents` 下同一 bundle 会因 iCloud 扩展属性报错，`xattr -cr` 后恢复） |
+| 7 | 签名身份与公证状态 | `codesign -dv --verbose=4 build/Pi-Web-Desktop.app` | `Identifier=io.github.su-luoya.pi-web-desktop`、`Format=app bundle with Mach-O thin (arm64)`、`flags=0x2(adhoc)`、`TeamIdentifier=not set`、`Sealed Resources version=2 rules=13 files=1`、`hashes=152+3` | 预期结果：ad-hoc、未公证 |
+| 8 | Gatekeeper 行为 | `spctl -a -vv build/Pi-Web-Desktop.app` | 输出 `rejected`（退出 3）：未公证 ad-hoc 产物的预期结果 | 退出 3，预期 |
+| 9 | smoke 启动模式 | `./Scripts/smoke.sh`（脚本内含两种模式） | 标记 `smoke: ready`（app 退出 0） | 通过 |
+| 10 | smoke 诊断模式 | `./Scripts/smoke.sh --diagnostics` | 标记 `smoke: diagnostics items=6 blockers=3` 与 `smoke: diagnostics ready`（app 退出 0）；日志里仍有 `/tmp` 路径下的 `sandbox_extension_issue_file_to_process` 提示（与 alpha.10 相同） | 通过（脚本整体退出 0，两种模式都断言） |
+| 11 | 扫描器自检 | `./Scripts/scan-secrets.sh --self-test` | `self-test: PASS (…)` | 退出 0，通过 |
+| 12 | 仓库 secret 扫描 | `./Scripts/scan-secrets.sh` | `scan-secrets: suppressed 15 lines`、`scan-secrets: PASS (no matches in tracked files; no untracked files)` | 退出 0，通过；N=15 与 alpha.5 … alpha.10 记录一致（本版没有新增抑制标记） |
+| 13 | 本地打包与证据 | `./Scripts/package-release.sh --tag v0.1.0-alpha.11` | `package-release: OK`，产出 `Pi-Web-Desktop-0.1.0-alpha.11+build.11.zip`（`1528627` 字节，SHA-256 `bac764ca85c3b29ce95a7d6ede11763b9888f6aec7504dcc8554141979c31a8a`）、`.zip.sha256`、`.evidence.md`、`release-metadata.env`（`VERSION=0.1.0-alpha.11`、`BUILD=11`、`COMMIT=5bd520ec56c657d61f0e29f7cee8161b7c437b9f`，工作区 dirty）；脚本同时复验“包内条目固定修改时间（`200101010000`）”“归一化时间后签名仍通过”“白名单条目集合一致（8 条，无 `__MACOSX/`）” | 通过（演练值；发布产物由 workflow 在 tag 上生成） |
+| 14 | ZIP 内容清单 | `unzip -l dist/Pi-Web-Desktop-0.1.0-alpha.11+build.11.zip` | 9 项：`Pi-Web-Desktop.app/` 与 `Contents/{,_CodeSignature,MacOS,Resources}` 四个目录，加 `Contents/Info.plist`、`Contents/MacOS/PiWebDesktop`、`Contents/Resources/ApplicationIcon.icns`、`Contents/_CodeSignature/CodeResources`；无 `__MACOSX/` | 通过 |
+| 15 | checksum 复验 | `shasum -a 256 -c Pi-Web-Desktop-0.1.0-alpha.11+build.11.zip.sha256`（在 `dist/` 内执行） | `Pi-Web-Desktop-0.1.0-alpha.11+build.11.zip: OK` | 退出 0，通过 |
+| 16 | 包内版本与签名复验 | `ditto -x -k <zip> <mktemp -d>` + `plutil -p .../Info.plist` + `codesign --verify --deep --strict .../Pi-Web-Desktop.app` | `CFBundleShortVersionString=0.1.0-alpha.11`、`CFBundleVersion=11`、`LSMinimumSystemVersion=14.0`、`CFBundleIdentifier=io.github.su-luoya.pi-web-desktop`；解压出的 bundle 签名校验退出 0 | 通过（临时目录已删除） |
+| 17 | 版本字面值门禁（回归） | `./Scripts/check-identity.sh` 第 6 节 | `ok   no hardcoded MARKETING_VERSION outside Configuration/AppIdentity.xcconfig` | 通过 |
+| 18 | 全量用例（本机 shim） | `sh /tmp/refactor/run-all-tests.sh` | **758 passed、0 failed（of 758 discovered）**；重构前的基线树（`main` `5bd520e`，36 个扁平文件）为 746 passed + `ServiceConfigurationTests` 单独重跑 12 passed（旧工程文件把该文件的 BuildFile 注记写成 `in Sources`，本机收集脚本按注记判定而漏收集） | 通过（本机没有完整 Xcode：用 `/tmp/piweb-testkit` 的 XCTest shim 逐文件串行运行；权威结果是 CI 的 `xcodebuild build` / `xcodebuild test`） |
+
+### 行为不变性的机械证据（本版特有）
+
+| 核对 | 命令/脚本 | 结果 |
+| --- | --- | --- |
+| 归一化行多重集合恒等式 | `python3 /tmp/refactor/multiset.py`（对比 `git archive 5bd520e Sources` 与本版 `Sources/`，归一化可见性修饰符与 `*Adapter`→`*Coordinator` 改名） | 旧 36 文件 23975 非空行 / 新 83 文件 24136 非空行；只在旧树 1 处（`private(set) var currentState: ServiceState = .checking`）；只在新树 162 处 = 81 行文件头注释 + 62 行新增 import（38 Foundation / 13 Darwin / 9 Cocoa / 1 CryptoKit / 1 CoreFoundation）+ 9 个 `extension AppDelegate {` + 9 个 `}` + 1 处镜像 |
+| 安全相关模式计数 | 固定字符串统计（`let process = Process()` 4/4、`executableURL` 4/4、`.arguments =` 6/6、`URLSession` 14/14、`SecItem` 7/7、`NSAlert` 27/27、`LogRedactor` 79/79、`try!`/`as!` 0/0、`chmod`/`setenv` 0/0 …） | 30 组里 29 组完全一致；`UserDefaults` 76/77 的唯一差异是新增文件的一行文档注释，逐行多重集合比较确认没有新增读写点 |
+| 工程目标成员关系 | `PiWebDesktop.xcodeproj/project.pbxproj` 阶段条目解析 | app Sources 83 条；Test Sources 96 条 = 67 个共享生产源文件 + 29 个测试文件；app-only 16 个，与 `main` 的 app-only 属于同一类（`main.swift`、`AppDelegate*`、窗口/设置控制器、`Diagnostics*` 控制器） |
+
+### 发布说明中 #142 的覆盖方式
+
+| 项 | 本版改的内容 | 发布说明里的位置 | 证据 |
+| --- | --- | --- | --- |
+| [#142](https://github.com/Su-luoya/pi-web-desktop/issues/142) | 目录重排：`Sources/{App,Services,Diagnostics,Updates,Support}/` 共 83 个文件；大文件按职责拆分（`AppDelegate` 的九个功能面、`ServiceManager` 的生命周期/配置/依赖/诊断、三条更新路径的 `Model → Planner → Command → Coordinator → Status`）；工程文件与 `Scripts/build.sh` 改为按目录收集源码 | 摘要、第 1–3 节 | `git show --stat 03e06f5`（105 个文件，`+16365` / `-15970`；`git` 识别出的重命名/切分） |
+| [#142](https://github.com/Su-luoya/pi-web-desktop/issues/142) 的文档同步 | `docs/architecture.md` 新增「源码布局」一节并把组件清单改到新路径；`docs/development.md`、`docs/logging-and-diagnostics.md`、`docs/privacy.md`、`docs/security-ownership.md`、`docs/settings-and-workspace.md` 的活文档引用改写到新路径（历史发布记录不回改） | 第 4 节 | 同一提交内的文档改动（`git show --stat 03e06f5 -- docs/`） |
+| 行为不变性 | 三重核对（归一化行多重集合、安全模式计数、758 条用例） | 「行为不变性的证据」一节 | 上一小节的机械证据 + 第 18 行的用例结果 |
+
+### 本版本的安全审查结论（alpha.10 → alpha.11 delta）
+
+- 范围：PR #143 的实际改动（`main` `5bd520e` → `03e06f5`），性质是纯文件级重组。
+- 报告：`docs/security-review-alpha.11.md`（本版新增，只读评审）。
+- 结论：阻断项 **0 条**，非阻断项 **2 条**——`R1`（`ServiceManager.currentState` 的
+  `private(set)` setter 放宽为 `internal`，没有新增写入点，不构成安全边界）与 `R2`（三个测试文件与部分
+  活文档仍以旧名 `*Adapter*` 引用已改名为 `*Coordinator` 的生产类型，本轮有意保留，避免 `-only-testing`
+  过滤器与历史引用失效）。
+- 评审方法：机械核对（模式计数、行多重集合、工程目标成员关系）+ 定点走查（4 个进程启动点、Keychain
+  入口、`NSAlert` 确认面、构建与门禁脚本）。本版不新增域名、读取面、写入面、权限或确认流程。
+- 沿用：[alpha.1 审查](security-review-alpha.1.md)（服务/密钥/脱敏/CSP/供应链）、
+  [alpha.3 审查](security-review-alpha.3.md)（更新流水线）与 [alpha.9 审查](security-review-alpha.9.md)
+  （措辞与句柄级类型复核）、[alpha.10 审查](security-review-alpha.10.md)（最近工作目录）；这些路径本版
+  未改动，没有重新审计。
+
+### 还需 CI / 发布 workflow 完成
+
+| # | 检查 | 实测输出摘要 | 判定 |
+| --- | --- | --- | --- |
+| C1 | PR #143 的 CI（`03e06f5`） | （发布后回填） | （发布后回填） |
+| C2 | 发布提交（PR #144）的 CI | （发布后回填） | （发布后回填） |
+| C3 | `git tag -a v0.1.0-alpha.11` 指向发布提交 | （发布后回填） | （发布后回填） |
+| C4 | `release.yml`（tag push 触发） | （发布后回填） | （发布后回填） |
+| C5 | 草稿 prerelease 的正文与真机表 | （发布后回填） | （发布后回填） |
+| C6 | 真机 macOS 与 Node / pi / pi-web 版本 | Apple M4（`Mac16,10`）/ macOS 27.0（`26A428`）arm64 / Node v24.21.0 / npm 11.19.0 / pi 0.86.1 / `@agegr/pi-web` 0.9.1；`smoke.sh` 双模式通过（`items=6 blockers=3`） | 已实测（与 alpha.10 记录逐项相同） |
+| C7 | `gh release edit --draft=false`（prerelease） | （发布后回填） | （发布后回填） |
+| C8 | 回退路径（上一版资产仍在 Releases） | `v0.1.0-alpha.10`（ZIP / `.sha256` / `.evidence.md`） | 已核实 |
+| C9 | 回填 Release issue 的 run 链接与 SHA-256、关闭 issue | （发布后回填） | （发布后回填） |
+
+本节的边界：C1–C5、C7 与 C9 的输出来自 CI / workflow / 维护者操作，不是本机脚本的直接输出；这些行
+在发布与回填提交里补齐（与 alpha.9 / alpha.10 的回填同一流程）。C6 来自本机实测，已写入 Release 正文。
+
+### 本版同时做的文档一致性改动
+
+- `Configuration/AppIdentity.xcconfig`（本版唯一版本来源）：`MARKETING_VERSION` → `0.1.0-alpha.11`、
+  `CURRENT_PROJECT_VERSION` → `11`。
+- `docs/release-notes-v0.1.0-alpha.11.md`（本版新增）：逐条记录重构内容（目录表、拆分边界、两类可见性
+  差异、文档同步）与三重行为不变性证据；“更新检查与自动更新的边界”一节写明本版只是文件位置变化；
+  “校验值”一节区分演练值与 `release.yml` 的发布值（发布后回填）。
+- `docs/security-review-alpha.11.md`（本版新增）：alpha.10 → alpha.11 的只读 delta 安全评审。
+- `docs/alpha-release-checklist.md`（本文件）：新增本节（alpha.11 执行记录、行为不变性机械证据、
+  `#142` 覆盖方式、安全审查结论、C 项与文档一致性清单）。

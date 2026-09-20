@@ -26,6 +26,7 @@ final class PiCLIUpdateAdapterTests: XCTestCase {
 
     private final class RecordingRunner: PiCLIUpdateRunning {
         private(set) var plans: [PiCLIUpdatePlan] = []
+        var isRunning = false
         private(set) var timeouts: [TimeInterval] = []
         private(set) var abandonCount = 0
         var result: (PiCLIUpdatePlan) -> PiCLIUpdateCommandResult = { _ in
@@ -892,5 +893,55 @@ final class PiCLIUpdateAdapterTests: XCTestCase {
         let result = try XCTUnwrap(waitForValue(box, timeout: 10))
         XCTAssertEqual(result.failure, .abandoned)
         XCTAssertTrue(waitForFile(marker.path, timeout: 10), "放弃等待不得向子进程发送信号")
+    }
+
+    /// 放弃等待后保持读端打开：子进程继续写 stdout 不会死于 SIGPIPE / EPIPE（W2A A-3）。
+    func testRealExecutorAbandonKeepsStdoutWritable() throws {
+        let directory = try tempDirectory()
+        let marker = directory.appendingPathComponent("pipe-marker")
+        // 先写 stdout、再写 marker：读端被关时 echo 会死于 SIGPIPE，marker 就不会出现。
+        let script = try makeFakePi(
+            in: directory,
+            body: "sleep 1\necho still-alive\nprintf 'x' >> \"\(marker.path)\"\nexit 0"
+        )
+        let command = ProcessPiCLIUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
+        let box = Locked<PiCLIUpdateCommandResult>()
+        command.run(try plan(forScript: script), timeout: 0.3) { box.value = $0 }
+        let result = try XCTUnwrap(waitForValue(box, timeout: 10))
+        XCTAssertEqual(result.failure, .timedOut)
+        XCTAssertTrue(
+            waitForFile(marker.path, timeout: 10),
+            "放弃等待后子进程写 stdout 不能被杀（读端必须保持打开，W2A A-3）"
+        )
+    }
+
+    /// 非 UTF-8 分块 lossy 保留，而不是整块丢弃（W2A A-6）。
+    func testRealExecutorKeepsNonUTF8OutputChunk() throws {
+        let directory = try tempDirectory()
+        let script = try makeFakePi(in: directory, body: "printf '\\377\\376'\nsleep 0.5\nexit 0")
+        let command = ProcessPiCLIUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
+        let box = Locked<PiCLIUpdateCommandResult>()
+        command.run(try plan(forScript: script), timeout: 30) { box.value = $0 }
+        let result = try XCTUnwrap(waitForValue(box, timeout: 20))
+        XCTAssertEqual(result.failure, nil)
+        XCTAssertNotNil(result.stdoutTail, "非 UTF-8 分块必须 lossy 保留，而不是整块丢弃（W2A A-6）")
+    }
+
+    /// 同一执行器上的第二次调用不再静默丢弃：必须拿到一个终态结果（W2A A-1 同型）。
+    func testRealExecutorReportsSecondRunInsteadOfDroppingIt() throws {
+        let directory = try tempDirectory()
+        let script = try makeFakePi(in: directory, body: "exit 0")
+        let command = ProcessPiCLIUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
+        let plan = try plan(forScript: script)
+
+        let first = Locked<PiCLIUpdateCommandResult>()
+        command.run(plan, timeout: 30) { first.value = $0 }
+        XCTAssertNil(try XCTUnwrap(waitForValue(first, timeout: 20)).failure)
+        XCTAssertFalse(command.isRunning)
+
+        let second = Locked<PiCLIUpdateCommandResult>()
+        command.run(plan, timeout: 30) { second.value = $0 }
+        let secondResult = try XCTUnwrap(waitForValue(second, timeout: 10))
+        XCTAssertEqual(secondResult.failure, .alreadyRunning, "第二次调用必须有终态回调，不能静默丢弃（W2A A-1）")
     }
 }

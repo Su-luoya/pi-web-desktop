@@ -63,6 +63,7 @@ final class UpdateTransactionTests: XCTestCase {
 
     private final class RecordingInstaller: PiWebUpdateInstalling {
         private(set) var plans: [PiWebUpdateInstallPlan] = []
+        var isRunning = false
         var result: (PiWebUpdateInstallPlan) -> PiWebUpdateInstallResult = { plan in
             PiWebUpdateInstallResult(
                 exitCode: 0,
@@ -88,6 +89,7 @@ final class UpdateTransactionTests: XCTestCase {
 
     private final class RecordingCLIRunner: PiCLIUpdateRunning {
         private(set) var plans: [PiCLIUpdatePlan] = []
+        var isRunning = false
         var result: (PiCLIUpdatePlan) -> PiCLIUpdateCommandResult = { _ in
             PiCLIUpdateCommandResult(
                 exitCode: 0,

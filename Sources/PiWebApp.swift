@@ -1380,6 +1380,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 手动“立即更新 Pi Web…”：必须先确认（说明需要停服），确认后先停服务
     /// （走既有所有权验证的停止路径）再安装。运行期间发现的更新不会自动安装。
     @objc private func updatePiWebNow(_ sender: Any?) {
+        // 更新进行中门控（W2A A-4）：这是 A-1/A-2 的真实用户可达入口，必须
+        // 拒绝重叠更新并给出可见反馈，而不是再开一次安装。
+        guard !piWebUpdateInstaller.isRunning else {
+            presentPiWebUpdateInfo("更新正在进行", detail: "上一次 Pi Web 更新尚未结束，请等它完成后再试。")
+            return
+        }
         guard dependencyGate == .ready, let report = dependencyReport else {
             presentPiWebUpdateInfo("环境检查尚未完成", detail: "请等待依赖诊断完成后再试。")
             return
@@ -1412,6 +1418,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func performManualPiWebUpdate(plan: PiWebUpdateInstallPlan) {
+        // 确认框是异步的：用户确认时上一次更新可能已经在跑（例如启动前自动更新），
+        // 这里再检一次，避免重叠安装（W2A A-4）。
+        guard !piWebUpdateInstaller.isRunning else {
+            presentPiWebUpdateInfo("更新正在进行", detail: "上一次 Pi Web 更新尚未结束，请等它完成后再试。")
+            return
+        }
         logPiWebUpdate("手动立即更新 Pi Web：先停止托管服务，再执行安装（只使用参数数组）。")
         serviceManager.stopService { [weak self] in
             guard let self else { return }
@@ -1447,6 +1459,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     "Pi Web 已更新",
                     detail: "已更新到 \(newVersion)，服务健康检查通过。"
                 )
+            case .skipped(let reason, _):
+                // 手动路径的拒绝必须看得见（W2A A-4）：确认框到真正执行之间可能已经
+                // 有一次更新在跑，编排层的这一层拒绝不能只是记日志。
+                self.logPiWebUpdate("手动更新未执行：\(reason.text)")
+                self.presentPiWebUpdateInfo("Pi Web 更新未执行", detail: "原因：\(reason.text)")
             default:
                 self.presentPiWebUpdateFailure(outcome)
             }
@@ -1566,6 +1583,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 手动“立即更新 Pi CLI…”：先展示计划、运行中的 Pi 进程与风险说明，用户
     /// 显式确认后才执行。执行内容只有 `pi update --self`，不操作任何进程。
     @objc private func updatePiCLINow(_ sender: Any?) {
+        // 与 Pi Web 同一道门控（W2A A-4）：同一时间只允许一个更新在执行。
+        guard !piCLIUpdateRunner.isRunning else {
+            presentPiCLIUpdateInfo("更新正在进行", detail: "上一次 Pi CLI 更新尚未结束，请等它完成后再试。")
+            return
+        }
         guard dependencyGate == .ready, let report = dependencyReport else {
             presentPiCLIUpdateInfo("环境检查尚未完成", detail: "请等待依赖诊断完成后再试。")
             return
@@ -1615,6 +1637,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func performPiCLIManualUpdate(plan: PiCLIUpdatePlan) {
+        guard !piCLIUpdateRunner.isRunning else {
+            presentPiCLIUpdateInfo("更新正在进行", detail: "上一次 Pi CLI 更新尚未结束，请等它完成后再试。")
+            return
+        }
         guard let coordinator = piCLIUpdateCoordinator else { return }
         piCLIUpdateRedetectionPath = plan.executablePath
         logPiCLIUpdate("手动更新 Pi CLI：用户已确认（参数数组 \(plan.arguments.joined(separator: " "))）。")
@@ -2849,12 +2875,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             piWebUpdateWarningMenuItem.title = piWebUpdateWarning?.shortText ?? ""
             piWebUpdateWarningMenuItem.isHidden = piWebUpdateWarning == nil
         }
-        piWebUpdateMenuItem?.isEnabled = dependencyGate == .ready
+        // 更新进行中时两个手动入口都不可用（W2A A-4）：菜单项与入口同一条判据。
+        let updateInProgress = piWebUpdateInstaller.isRunning || piCLIUpdateRunner.isRunning
+        piWebUpdateMenuItem?.isEnabled = dependencyGate == .ready && !updateInProgress
         if let piCLIUpdateWarningMenuItem {
             piCLIUpdateWarningMenuItem.title = piCLIUpdateWarning?.shortText ?? ""
             piCLIUpdateWarningMenuItem.isHidden = piCLIUpdateWarning == nil
         }
-        piCLIUpdateMenuItem?.isEnabled = dependencyGate == .ready
+        piCLIUpdateMenuItem?.isEnabled = dependencyGate == .ready && !updateInProgress
         if let piPackageUpdateWarningMenuItem {
             piPackageUpdateWarningMenuItem.title = piPackageUpdateWarning?.shortText ?? ""
             piPackageUpdateWarningMenuItem.isHidden = piPackageUpdateWarning == nil

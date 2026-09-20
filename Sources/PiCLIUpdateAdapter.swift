@@ -408,6 +408,8 @@ enum PiCLIUpdateCommandFailure: String, Equatable {
     case timedOut
     case abandoned
     case nonZeroExit
+    /// 同一个执行器上已有命令在跑：本次调用被拒绝，没有启动第二个子进程。
+    case alreadyRunning
 
     var text: String {
         switch self {
@@ -415,6 +417,7 @@ enum PiCLIUpdateCommandFailure: String, Equatable {
         case .timedOut: return "更新命令超时（已放弃等待，没有向任何进程发送信号）"
         case .abandoned: return "更新命令被放弃等待（没有向任何进程发送信号）"
         case .nonZeroExit: return "更新命令以非零退出码结束"
+        case .alreadyRunning: return "已有更新命令正在运行"
         }
     }
 }
@@ -426,6 +429,9 @@ struct PiCLIUpdateCommandResult: Equatable {
     var launchFailed: Bool
     var timedOut: Bool
     var abandoned: Bool
+    /// 本次调用被拒绝：同一个执行器上的上一轮还没结束（或还没结束过），没有启动
+    /// 第二个子进程。
+    var alreadyRunning: Bool
     var startedAt: Date
     var finishedAt: Date
     var stdoutTail: String?
@@ -436,6 +442,7 @@ struct PiCLIUpdateCommandResult: Equatable {
         launchFailed: Bool = false,
         timedOut: Bool = false,
         abandoned: Bool = false,
+        alreadyRunning: Bool = false,
         startedAt: Date,
         finishedAt: Date,
         stdoutTail: String? = nil,
@@ -445,6 +452,7 @@ struct PiCLIUpdateCommandResult: Equatable {
         self.launchFailed = launchFailed
         self.timedOut = timedOut
         self.abandoned = abandoned
+        self.alreadyRunning = alreadyRunning
         self.startedAt = startedAt
         self.finishedAt = finishedAt
         self.stdoutTail = stdoutTail
@@ -453,6 +461,7 @@ struct PiCLIUpdateCommandResult: Equatable {
 
     /// nil 表示执行成功（退出码 0 且未超时/放弃/启动失败）。
     var failure: PiCLIUpdateCommandFailure? {
+        if alreadyRunning { return .alreadyRunning }
         if abandoned { return .abandoned }
         if timedOut { return .timedOut }
         if launchFailed { return .launchFailed }
@@ -476,6 +485,8 @@ protocol PiCLIUpdateRunning: AnyObject {
     )
     /// 放弃等待进行中的命令。**不发送任何信号**，也不终止子进程。
     func abandon()
+    /// 是否有命令正在运行（供 UI 门控）。
+    var isRunning: Bool { get }
 }
 
 /// 生产执行器：`Process` + 固定参数数组，没有 shell、没有 `sudo`、没有信号。
@@ -518,6 +529,13 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
     private var didRecordAbandonedAttempt = false
     /// 进程已经结束、但还在等管道读完时的暂存结果。
     private var pendingFinish: (exitCode: Int32?, launchFailed: Bool)?
+    /// 已放弃等待、但仍在排空管道的 Pipe：读端保持打开直到子进程退出，子进程
+    /// 后续写 stdout/stderr 不会收到 SIGPIPE / EPIPE（W2A A-3）。只在 stateQueue
+    /// 上访问。保留 `Pipe` 本身是为了不让它的析构提前关掉读端。
+    private var drainingPipes: [ObjectIdentifier: Pipe] = [:]
+    /// 结果投递队列：`completion` 不在 `stateQueue` 上执行（与 installer 同一处理，
+    /// 见 W2A A-5）：否则回调里的长耗时工作会把 `abandon()` 排在后面。
+    private let deliveryQueue = DispatchQueue.global(qos: .userInitiated)
 
     init(
         clock: @escaping () -> Date = { Date() },
@@ -550,6 +568,11 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
         }
     }
 
+    /// 是否有命令正在运行（供 UI 门控）。
+    var isRunning: Bool {
+        stateQueue.sync { !finished && startedAt != nil }
+    }
+
     // MARK: - 内部（全部在 stateQueue 上执行）
 
     private func startLocked(
@@ -557,7 +580,17 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
         timeout: TimeInterval,
         completion: @escaping (PiCLIUpdateCommandResult) -> Void
     ) {
-        guard !finished else { return }
+        // 同一个执行器一次只跑一个命令（本类型不覆盖上一轮状态）。已经跑过一轮
+        // 就拒绝本次调用，并用一个终态结果回调：绝不静默丢弃调用方（W2A A-1/A-2
+        // 同型缺陷），也绝不覆盖正在跑的进程/管道/回调。
+        guard !finished, process == nil else {
+            let now = clock()
+            deliver(
+                PiCLIUpdateCommandResult(exitCode: nil, alreadyRunning: true, startedAt: now, finishedAt: now),
+                to: completion
+            )
+            return
+        }
         self.completion = completion
         self.plan = plan
         self.timeout = timeout
@@ -651,7 +684,9 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
                 self.completePendingLocked()
                 return
             }
-            guard let text = String(data: data, encoding: .utf8), !text.isEmpty else { return }
+            // lossy 解码：一个分块不是完整 UTF-8 时不再整块丢弃（W2A A-6）。
+            let text = String(decoding: data, as: UTF8.self)
+            guard !text.isEmpty else { return }
             if toStdout {
                 self.stdoutTail = Self.bounded(self.stdoutTail + text)
             } else {
@@ -705,11 +740,16 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
         timer = nil
         drainTimer?.cancel()
         drainTimer = nil
-        if let handle = (process?.standardOutput as? Pipe)?.fileHandleForReading {
-            handle.readabilityHandler = nil
-        }
-        if let handle = (process?.standardError as? Pipe)?.fileHandleForReading {
-            handle.readabilityHandler = nil
+        // 不关闭管道读端：超时/放弃等待后子进程可能还在跑，读端一关它下一次写
+        // stdout/stderr 就会死于 SIGPIPE / EPIPE（W2A A-3）。这里只把两条流交给
+        // 排空逻辑读到 EOF（流已经读到 EOF 的不需要再管）。
+        if let process {
+            if let pipe = process.standardOutput as? Pipe, !stdoutDrained {
+                drainOutput(pipe)
+            }
+            if let pipe = process.standardError as? Pipe, !stderrDrained {
+                drainOutput(pipe)
+            }
         }
         let finishedAt = clock()
         let result = PiCLIUpdateCommandResult(
@@ -726,7 +766,32 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
         self.completion = nil
         self.process = nil
         self.pendingFinish = nil
-        completion?(result)
+        if let completion {
+            deliver(result, to: completion)
+        }
+    }
+
+    /// 在 stateQueue 之外投递结果（callback 里可能有长耗时工作；见 W2A A-5）。
+    private func deliver(
+        _ result: PiCLIUpdateCommandResult,
+        to completion: @escaping (PiCLIUpdateCommandResult) -> Void
+    ) {
+        deliveryQueue.async { completion(result) }
+    }
+
+    /// 保持读端打开，把剩余输出读到 EOF 再释放：被放弃等待的子进程不会因为读端
+    /// 已关而死亡（W2A A-3）。
+    private func drainOutput(_ pipe: Pipe) {
+        let handle = pipe.fileHandleForReading
+        let key = ObjectIdentifier(pipe)
+        drainingPipes[key] = pipe
+        handle.readabilityHandler = { [weak self] fileHandle in
+            guard fileHandle.availableData.isEmpty else { return }
+            fileHandle.readabilityHandler = nil
+            self?.stateQueue.async { [weak self] in
+                self?.drainingPipes[key] = nil
+            }
+        }
     }
 }
 

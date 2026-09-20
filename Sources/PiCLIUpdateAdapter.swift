@@ -1347,7 +1347,8 @@ final class PiCLIUpdateCoordinator {
                 self.logOutcome(
                     "Pi CLI 更新未通过版本验证：命令退出码 0，但重新检测到的版本是 "
                         + "\(detectedVersion ?? "未知")，目标版本 \(targetText)。"
-                        + "旧版本语义保持不变；应用不会自动重试无上限，也不声称更新成功。"
+                        + UpdateWarningText.oldVersionClaimText(detectedVersion: detectedVersion)
+                        + "应用不会自动重试无上限，也不声称更新成功。"
                 )
                 let outcome = PiCLIUpdateRunOutcome.versionUnchanged(
                     plan: plan,

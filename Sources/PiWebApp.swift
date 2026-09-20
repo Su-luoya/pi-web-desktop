@@ -1681,7 +1681,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // 应用退出时的“放弃等待”不算更新失败：命令可能仍在后台自己完成，下次
             // 启动的检查会给出结论，因此只记日志，不写持久告警也不弹框。
             if failure == .abandoned {
-                logPiCLIUpdate("Pi CLI 更新已放弃等待（应用退出）：\(oldVersion) 保持不变，下次启动重新检测。")
+                // L-5（GitHub #127）：这里不能断言「旧版本保持不变」——放弃等待时命令可能
+                // 已经改完文件、也可能还在跑，日志只记「没有确认」这一事实。
+                logPiCLIUpdate(
+                    "Pi CLI 更新已放弃等待（应用退出）：命令可能仍在后台自己完成；"
+                        + "没有确认更新前的版本 \(oldVersion) 是否仍在原位，下次启动重新检测。"
+                )
                 break
             }
             recordPiCLIUpdateWarning(outcome.warning)

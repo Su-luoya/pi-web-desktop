@@ -751,6 +751,15 @@ enum UpdateWarningText {
             + "应用不声称更新成功，也未核对更新前的文件是否被改动。"
     }
 
+    /// L-1（GitHub #127）：日志行与持久警告共用同一套三态措辞——只有重新检测拿到版本证据时
+    /// 才写「仍在使用更新前的版本」，拿不到版本时不得断言旧文件仍在原位。
+    static func oldVersionClaimText(detectedVersion: String?) -> String {
+        if let detectedVersion {
+            return "仍在使用更新前的版本 \(detectedVersion)；"
+        }
+        return "重新检测没有给出可用的版本结果，无法判断更新前的文件是否仍在原位；"
+    }
+
     static func verificationFailed(
         component: UpdateTransactionComponent,
         previousVersion: String?,

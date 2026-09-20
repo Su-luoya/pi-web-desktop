@@ -1976,4 +1976,16 @@ final class UpdateTransactionTests: XCTestCase {
         XCTAssertFalse(rollbackDescription.contains("仍在使用旧版本"))
         XCTAssertFalse(rollbackDescription.contains("已降级"))
     }
+
+    /// L-1（GitHub #127）：日志行与持久警告共用同一套措辞——拿不到重新检测的版本时，
+    /// 同一句里不得既写「未知」又断言旧文件仍在原位。
+    func testOldVersionClaimFollowsTheDetectedVersionEvidence() {
+        let withEvidence = UpdateWarningText.oldVersionClaimText(detectedVersion: "0.9.1")
+        XCTAssertTrue(withEvidence.contains("仍在使用更新前的版本 0.9.1"))
+
+        let withoutEvidence = UpdateWarningText.oldVersionClaimText(detectedVersion: nil)
+        XCTAssertFalse(withoutEvidence.contains("仍在使用更新前的版本"), "没有版本证据不得断言仍在用旧版本")
+        XCTAssertFalse(withoutEvidence.contains("保持不变"), "没有版本证据不得断言旧文件没被改动")
+        XCTAssertTrue(withoutEvidence.contains("无法判断更新前的文件是否仍在原位"))
+    }
 }

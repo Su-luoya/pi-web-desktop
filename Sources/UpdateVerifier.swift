@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 // MARK: - 更新验证（GitHub #23）
@@ -168,10 +169,20 @@ struct UpdateArtifactProbe {
     /// 只打开常规文件（F4，GitHub #121）：FIFO / 设备 / socket 的 `open` 可能无超时阻塞，
     /// 而 `attributesOfItem` 对 FIFO 报出的大小是 `0`，能通过大小上限检查。
     /// 末级符号链接先解析到目标，再要求目标是常规文件（不跟随链接就无法判断真实类型）。
+    /// L-3（GitHub #127）：上面的解析/类型判断与 `open` 之间存在窗口，路径可能在两步之间
+    /// 被换掉；因此类型闸门对**已打开的句柄**再确认一次（`fstat`），只有句柄本身是常规
+    /// 文件才交出去。判定不再依赖两次路径查询之间的一致性，也不改变可读文件的范围。
     static func openRegularFile(atPath path: String) -> FileHandle? {
         let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
         guard fileType(atPath: resolved) == .typeRegular else { return nil }
-        return FileHandle(forReadingAtPath: resolved)
+        guard let handle = FileHandle(forReadingAtPath: resolved) else { return nil }
+        var fileStatus = stat()
+        guard fstat(handle.fileDescriptor, &fileStatus) == 0,
+              (UInt32(fileStatus.st_mode) & UInt32(S_IFMT)) == UInt32(S_IFREG) else {
+            try? handle.close()
+            return nil
+        }
+        return handle
     }
 
     /// 先检查文件属性，再通过句柄做有界读取；超限文件不会打开，读取期间增长也不会越界。

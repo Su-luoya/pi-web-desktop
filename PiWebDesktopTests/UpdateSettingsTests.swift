@@ -61,6 +61,7 @@ final class UpdateSettingsTests: XCTestCase {
         packageName: String? = nil,
         latestVersion: String,
         status: UpdateCheckStatus,
+        installedVersion: String? = nil,
         lastAttemptAt: Date,
         lastSuccessAt: Date?
     ) -> UpdateCacheEntry {
@@ -71,6 +72,7 @@ final class UpdateSettingsTests: XCTestCase {
             lastAttemptAt: lastAttemptAt,
             lastSuccessAt: lastSuccessAt,
             latestVersion: latestVersion,
+            installedVersion: installedVersion,
             status: status.rawValue,
             confidence: DetectionConfidence.verified.rawValue
         )
@@ -334,6 +336,7 @@ final class UpdateSettingsTests: XCTestCase {
             category: .desktopApp,
             latestVersion: "2.4.1-alpha.2",
             status: .updateAvailable,
+            installedVersion: "2.4.0",
             lastAttemptAt: lastAttempt,
             lastSuccessAt: lastAttempt
         ))
@@ -368,6 +371,52 @@ final class UpdateSettingsTests: XCTestCase {
         XCTAssertTrue(line.contains("最近检查：尚未检查"))
         XCTAssertTrue(line.contains("被忽略版本：无"))
         XCTAssertTrue(line.contains("下次检查：—"))
+    }
+
+    /// 没有本次结果时也不能沿用缓存里的旧结论（GitHub #74）：用条目记录的
+    /// 本机版本现算；缺 `installedVersion` 时降级为“尚未判定”，不猜。
+    func testCategoryStatusBuilderRecomputesCachedStatusForRecordedInstalledVersion() {
+        var cache = UpdateCheckCacheFile()
+        cache.upsert(cacheEntry(
+            category: .desktopApp,
+            latestVersion: "2.4.1-alpha.2",
+            status: .upToDate,
+            installedVersion: "2.4.0",
+            lastAttemptAt: referenceDate,
+            lastSuccessAt: referenceDate
+        ))
+
+        let statuses = UpdateCategoryStatusBuilder.statuses(
+            preferences: .factoryDefaults,
+            intervals: .standard,
+            cache: cache,
+            ignoredVersions: .empty
+        )
+
+        let desktop = statuses.first { $0.category == .desktopApp }
+        XCTAssertEqual(desktop?.status, .updateAvailable)
+        XCTAssertEqual(desktop?.latestVersion, "2.4.1-alpha.2")
+        XCTAssertEqual(desktop?.resultTitle, "可更新 2.4.1-alpha.2")
+        XCTAssertEqual(desktop?.origin, .cachedFallback)
+
+        var legacy = UpdateCheckCacheFile()
+        legacy.upsert(cacheEntry(
+            category: .desktopApp,
+            latestVersion: "2.4.1-alpha.2",
+            status: .updateAvailable,
+            lastAttemptAt: referenceDate,
+            lastSuccessAt: referenceDate
+        ))
+        let legacyStatuses = UpdateCategoryStatusBuilder.statuses(
+            preferences: .factoryDefaults,
+            intervals: .standard,
+            cache: legacy,
+            ignoredVersions: .empty
+        )
+        let legacyDesktop = legacyStatuses.first { $0.category == .desktopApp }
+        XCTAssertEqual(legacyDesktop?.status, .unknown)
+        XCTAssertEqual(legacyDesktop?.resultTitle, "未知")
+        XCTAssertFalse(legacyDesktop?.resultTitle.contains("可更新") ?? true)
     }
 
     func testCategoryStatusShowsFailureAndOffPolicy() {

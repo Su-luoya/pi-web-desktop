@@ -112,6 +112,8 @@ final class UpdateTransactionTests: XCTestCase {
 
     private final class RecordingPackageRunner: PiPackageUpdateRunning {
         private(set) var plans: [PiPackageUpdatePlan] = []
+        var isRunning = false
+        var abandonedChildrenUnconfirmed = false
         var result: (PiPackageUpdatePlan) -> PiPackageUpdateCommandResult = { _ in
             PiPackageUpdateCommandResult(
                 exitCode: 0,

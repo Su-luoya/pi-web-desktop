@@ -34,6 +34,7 @@ final class PiWebUpdateAdapterTests: XCTestCase {
         private(set) var plans: [PiWebUpdateInstallPlan] = []
         private(set) var timeouts: [TimeInterval] = []
         private(set) var cancelCount = 0
+        var isRunning = false
         var result: (PiWebUpdateInstallPlan) -> PiWebUpdateInstallResult = { _ in
             PiWebUpdateInstallResult(
                 exitCode: 0,
@@ -70,6 +71,16 @@ final class PiWebUpdateAdapterTests: XCTestCase {
         var healthResults: [Bool] = []
         private(set) var startCallCount = 0
         private(set) var healthCheckCallCount = 0
+        /// W3B F2：为 true 时健康检查不立即回调（模拟“安装已结束、事务还在尾段”），
+        /// 由测试显式放行。
+        var parksHealthCheck = false
+        private var parkedHealthCompletion: ((Bool) -> Void)?
+
+        func releaseParkedHealthCheck(_ ready: Bool = true) {
+            let completion = parkedHealthCompletion
+            parkedHealthCompletion = nil
+            completion?(ready)
+        }
 
         init(homeDirectory: String) {
             self.homeDirectory = homeDirectory
@@ -85,6 +96,10 @@ final class PiWebUpdateAdapterTests: XCTestCase {
                 startServiceAndCheckHealth: { completion in
                     self.startCallCount += 1
                     self.healthCheckCallCount += 1
+                    if self.parksHealthCheck {
+                        self.parkedHealthCompletion = completion
+                        return
+                    }
                     let ready = self.healthResults.isEmpty ? true : self.healthResults.removeFirst()
                     completion(ready)
                 },
@@ -878,6 +893,276 @@ final class PiWebUpdateAdapterTests: XCTestCase {
         for forbidden in ["PI_WEB_PASSWORD", "NODE_OPTIONS", "npm_config_registry", "super-secret-value", "--require"] {
             XCTAssertFalse(environmentText.contains(forbidden), "子进程环境不应包含 \(forbidden)")
         }
+    }
+
+    // MARK: - W2A 回归（A-1/A-2/A-3/A-5/A-6/A-7）
+
+    func testProcessInstallerSupportsSequentialInstalls() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = try makeScript(in: directory, body: "exit 0")
+        let plan = try makePlan(npmExecutablePath: script, baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": directory.path])
+
+        let installer = ProcessPiWebUpdateInstaller()
+        let first = ResultBox()
+        let firstFinished = expectation(description: "第一次安装结束")
+        installer.install(plan, timeout: 30) { result in
+            first.value = result
+            firstFinished.fulfill()
+        }
+        wait(for: [firstFinished], timeout: 30)
+        XCTAssertEqual(first.value?.failure, nil)
+        XCTAssertFalse(installer.isRunning)
+
+        // 同一个安装器必须能再跑一次：对象级“终态”会把第二次调用静默丢弃（W2A A-1）。
+        let second = ResultBox()
+        let secondFinished = expectation(description: "第二次安装结束")
+        installer.install(plan, timeout: 30) { result in
+            second.value = result
+            secondFinished.fulfill()
+        }
+        wait(for: [secondFinished], timeout: 30)
+        withExtendedLifetime(installer) {}
+
+        XCTAssertEqual(second.value?.failure, nil, "第二次安装必须真的执行并回调（W2A A-1）")
+        XCTAssertEqual(second.value?.alreadyRunning, false)
+        XCTAssertFalse(installer.isRunning)
+    }
+
+    func testProcessInstallerRejectsOverlappingInstallWithoutStartingSecondChild() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let marker = directory.appendingPathComponent("spawns.txt")
+        let script = try makeScript(in: directory, body: """
+        printf 'spawn\n' >> '\(marker.path)'
+        sleep 1
+        """)
+        let plan = try makePlan(npmExecutablePath: script, baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": directory.path])
+
+        let installer = ProcessPiWebUpdateInstaller()
+        let firstFinished = expectation(description: "第一次安装结束")
+        installer.install(plan, timeout: 30) { _ in firstFinished.fulfill() }
+
+        let rejection = ResultBox()
+        let rejected = expectation(description: "重叠调用被明确拒绝")
+        installer.install(plan, timeout: 30) { result in
+            rejection.value = result
+            rejected.fulfill()
+        }
+        wait(for: [rejected, firstFinished], timeout: 30)
+        withExtendedLifetime(installer) {}
+
+        XCTAssertEqual(rejection.value?.failure, .alreadyRunning, "重叠 install 必须明确失败，不能静默丢弃")
+        XCTAssertEqual(rejection.value?.alreadyRunning, true)
+        let spawns = try String(contentsOf: marker, encoding: .utf8)
+            .split(separator: "\n")
+            .filter { !$0.isEmpty }
+        XCTAssertEqual(spawns.count, 1, "重叠 install 不能启动第二个子进程（W2A A-2）")
+    }
+
+    func testProcessInstallerAbandoningWaitDoesNotCloseChildStdout() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let marker = directory.appendingPathComponent("late.txt")
+        // 先写 stdout、再写 marker：如果放弃等待时读端被关闭，echo 会死于 SIGPIPE，
+        // marker 就不会出现（W2A A-3）。trap 掉 TERM，模拟“超时后仍活着的子进程”。
+        let script = try makeScript(in: directory, body: """
+        trap '' TERM
+        sleep 2
+        echo late-output
+        printf 'late' >> '\(marker.path)'
+        """)
+        let plan = try makePlan(npmExecutablePath: script, baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": directory.path])
+
+        let box = ResultBox()
+        let finished = expectation(description: "installer timed out")
+        let installer = ProcessPiWebUpdateInstaller()
+        installer.install(plan, timeout: 0.3) { result in
+            box.value = result
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 10)
+
+        // 放弃等待 ≠ 子进程已经退出：在退出确认之前必须仍视为「进行中」，否则下一次
+        // 点击会真的再启动一个 npm（W2A A-2）。子进程此时还在 sleep（trap 掉了 TERM）。
+        XCTAssertTrue(installer.isRunning, "放弃等待后、退出确认前仍须视为进行中（W2A A-2）")
+        let rejected = expectation(description: "第二次 install 在退出确认前被拒绝")
+        let rejectedBox = ResultBox()
+        installer.install(plan, timeout: 30) { result in
+            rejectedBox.value = result
+            rejected.fulfill()
+        }
+        wait(for: [rejected], timeout: 10)
+        XCTAssertEqual(rejectedBox.value?.failure, .alreadyRunning, "放弃等待期间不得启动第二次安装（W2A A-2）")
+
+        var waited = 0.0
+        while !FileManager.default.fileExists(atPath: marker.path), waited < 8 {
+            Thread.sleep(forTimeInterval: 0.1)
+            waited += 0.1
+        }
+        withExtendedLifetime(installer) {}
+        XCTAssertEqual(box.value?.failure, .timedOut)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: marker.path),
+            "放弃等待后子进程必须还能写 stdout（读端不能被关闭，W2A A-3）"
+        )
+    }
+
+    func testInstallerCompletionDoesNotOccupyTheInstallerQueue() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = try makeScript(in: directory, body: "exit 0")
+        let plan = try makePlan(npmExecutablePath: script, baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": directory.path])
+
+        let installer = ProcessPiWebUpdateInstaller()
+        let entered = expectation(description: "回调已开始")
+        let finished = expectation(description: "installer finished")
+        installer.install(plan, timeout: 30) { _ in
+            entered.fulfill()
+            Thread.sleep(forTimeInterval: 1)
+            finished.fulfill()
+        }
+        wait(for: [entered], timeout: 30)
+
+        // 回调（含内部的重新检测等长耗时工作）不能占住 installer 的串行队列：
+        // 应用退出时的 cancel()/isRunning 必须能排到它前面（W2A A-5）。
+        let started = Date()
+        _ = installer.isRunning
+        installer.cancel()
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertLessThan(elapsed, 0.5, "回调执行期间 installer 队列必须仍可访问（W2A A-5）")
+
+        wait(for: [finished], timeout: 30)
+        withExtendedLifetime(installer) {}
+    }
+
+    func testProcessInstallerKeepsNonUTF8OutputChunk() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // 0xFF/0xFE 不是合法 UTF-8：修复前整块被丢弃，outputTail 为空（W2A A-6）。
+        let script = try makeScript(in: directory, body: """
+        printf '\\377\\376'
+        sleep 0.5
+        """)
+        let plan = try makePlan(npmExecutablePath: script, baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": directory.path])
+
+        let box = ResultBox()
+        let finished = expectation(description: "installer finished")
+        let installer = ProcessPiWebUpdateInstaller()
+        installer.install(plan, timeout: 30) { result in
+            box.value = result
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 30)
+        withExtendedLifetime(installer) {}
+
+        XCTAssertNotNil(box.value?.outputTail, "非 UTF-8 分块必须 lossy 保留，而不是整块丢弃（W2A A-6）")
+    }
+
+    func testPlanRejectsNPMExecutablePathThatIsNotAbsolute() {
+        XCTAssertNil(
+            PiWebUpdateInstallPlan.make(
+                packageName: InstallCommandManifest.piWebPackageName,
+                installedVersion: "0.9.0",
+                targetVersion: "0.9.2",
+                npmExecutablePath: "npm",
+                baseEnvironment: baseEnvironment,
+                source: .npmGlobal,
+                confidence: .verified
+            ),
+            "相对路径的 npm 不能通过计划构造（W2A A-7）"
+        )
+    }
+
+    func testCoordinatorSkipsManualInstallWhenInstallAlreadyRunning() throws {
+        let world = CoordinatorWorld(homeDirectory: fixtureHome)
+        world.installer.isRunning = true
+        let coordinator = world.makeCoordinator()
+        let plan = try makePlan()
+        var outcome: PiWebUpdateRunOutcome?
+        coordinator.runManual(plan) { outcome = $0 }
+        XCTAssertEqual(outcome, .skipped(reason: .updateAlreadyInProgress, commandText: nil))
+        XCTAssertTrue(world.installer.plans.isEmpty, "已有安装在跑时不能再调用安装器（W2A A-4）")
+    }
+
+    // MARK: - W3B F2/F3：事务级门控与组件隔离
+
+    /// 安装子进程已经结束、事务还在尾段（重新检测版本 / 启动服务 / 健康检查）时，
+    /// 手动入口必须被拒绝且不调用安装器；尾段走完后必须能再次更新（W3B F2）。
+    func testCoordinatorRejectsManualInstallDuringTransactionTail() throws {
+        let world = CoordinatorWorld(homeDirectory: fixtureHome)
+        world.detectedInstallation = installation(version: "0.9.2")
+        world.parksHealthCheck = true
+        let coordinator = world.makeCoordinator()
+        let plan = try makePlan()
+
+        var firstOutcome: PiWebUpdateRunOutcome?
+        coordinator.runManual(plan) { firstOutcome = $0 }
+        XCTAssertEqual(world.installer.plans.count, 1)
+        XCTAssertNil(firstOutcome, "事务尾段还没走完，结果尚未投递")
+        XCTAssertTrue(coordinator.isRunning, "事务尾段仍须算「更新进行中」（W3B F2）")
+        XCTAssertTrue(coordinator.isUpdateInProgress)
+
+        // 尾段里的第二次手动入口：必须被拒绝，且不能再调用安装器。
+        var rejectedOutcome: PiWebUpdateRunOutcome?
+        coordinator.runManual(plan) { rejectedOutcome = $0 }
+        XCTAssertEqual(
+            rejectedOutcome,
+            .skipped(reason: .updateAlreadyInProgress, commandText: nil),
+            "事务尾段里的第二次手动更新必须被拒绝（W3B F2）"
+        )
+        XCTAssertEqual(world.installer.plans.count, 1, "被拒绝的那一次不能调用安装器")
+
+        world.releaseParkedHealthCheck(true)
+        XCTAssertEqual(firstOutcome, .succeeded(plan: plan, oldVersion: "0.9.0", newVersion: "0.9.2"))
+        XCTAssertFalse(coordinator.isUpdateInProgress, "尾段结束后事务门控必须解除")
+
+        // 事务结束之后必须能再次更新：门控不能变成一发式状态。
+        world.parksHealthCheck = false
+        world.healthResults = [true]
+        var secondOutcome: PiWebUpdateRunOutcome?
+        coordinator.runManual(plan) { secondOutcome = $0 }
+        XCTAssertEqual(secondOutcome, .succeeded(plan: plan, oldVersion: "0.9.0", newVersion: "0.9.2"))
+        XCTAssertEqual(world.installer.plans.count, 2)
+    }
+
+    /// W3B F3：被挡住时必须有可见原因；「子进程退出未确认」窗口必须给出重启恢复路径；
+    /// 入口闸控只由本组件自己的状态合成，构建时看不到另一个组件。
+    func testUpdateEntryStateExposesReasonAndRecoveryPath() {
+        XCTAssertFalse(UpdateEntryState.free.isBlocked)
+        XCTAssertNil(UpdateEntryState.free.menuTitleSuffix)
+
+        let installing = UpdateEntryState.component(
+            transactionInProgress: false, childInFlight: true, abandonedChildrenUnconfirmed: false
+        )
+        XCTAssertTrue(installing.isBlocked)
+        XCTAssertEqual(installing.menuTitleSuffix, "（正在更新）", "位住时必须给出可见原因（W3B F3 (b)）")
+
+        let tail = UpdateEntryState.component(
+            transactionInProgress: true, childInFlight: false, abandonedChildrenUnconfirmed: false
+        )
+        XCTAssertTrue(tail.isBlocked, "事务尾段（没有子进程在飞）也必须挡住入口（W3B F2）")
+
+        let awaiting = UpdateEntryState.component(
+            transactionInProgress: false, childInFlight: true, abandonedChildrenUnconfirmed: true
+        )
+        XCTAssertTrue(awaiting.isBlocked)
+        XCTAssertEqual(awaiting.menuTitleSuffix, "（上一次更新未确认退出，重启应用可恢复）")
+        XCTAssertTrue(
+            awaiting.rejectionDetail.contains("重启应用即可恢复"),
+            "卡住的子进程窗口必须给出可恢复路径（W3B F3 (c)）"
+        )
+
+        // 组件隔离（W3B F3 (a)）：Pi Web 的子进程永不退出时，Pi CLI 的状态仍然
+        // 只由 Pi CLI 自己的输入合成，不会被跨组件输入影响。
+        let webStuck = UpdateEntryState.component(
+            transactionInProgress: false, childInFlight: true, abandonedChildrenUnconfirmed: false
+        )
+        let cliIdle = UpdateEntryState.component(
+            transactionInProgress: false, childInFlight: false, abandonedChildrenUnconfirmed: false
+        )
+        XCTAssertTrue(webStuck.isBlocked)
+        XCTAssertFalse(cliIdle.isBlocked, "Pi Web 卡住不得挡住 Pi CLI 入口（W3B F3 (a)）")
     }
 
     // MARK: - 持久警告存储

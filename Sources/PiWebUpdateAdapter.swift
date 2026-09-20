@@ -17,6 +17,59 @@ import Foundation
 // - 安装后重新检测版本并复用既有健康检查；验证失败或健康检查失败时保留旧版本
 //   语义并记录失败原因，不静默继续、也不声称回滚成功（完整回滚框架属于 #23）。
 
+// MARK: - 更新入口闸控状态（W3B F2/F3）
+
+/// 一个组件更新入口（菜单项与手动更新动作）的闸控状态（W3B F2/F3）。每个组件
+/// 一份，互不影响：Pi Web 的卡住的子进程不得禁用 Pi CLI 的入口，反之亦然；
+/// 被挡住时带可见原因，不能静默置灰。
+///
+/// 定在这里而不是 `Sources/PiWebApp.swift` 的原因：本文件同时属于
+/// PiWebDesktop 与 PiWebDesktopTests 两个 target；`PiWebApp.swift` 不在测试
+/// target 的源文件清单里，放在那里会让测试 target 编译时报
+/// “cannot find 'UpdateEntryState' in scope”。
+struct UpdateEntryState: Equatable {
+    /// 一次更新事务正在进行中：安装/命令执行、版本重检测、服务启动与健康检查
+    /// 都算（不再只看安装子进程，W3B F2）。
+    var transactionInProgress: Bool
+    /// 上一次更新的子进程已经放弃等待，但退出尚未确认：保守起见先不启动第二次
+    /// 更新（这种窗口只能靠重启应用可靠恢复，W3B F3）。
+    var awaitingAbandonedChildExit: Bool
+
+    static let free = UpdateEntryState(transactionInProgress: false, awaitingAbandonedChildExit: false)
+
+    /// 由一个组件**自己**的三个状态合成入口闸控（W3B F3：构建时不会看到另一个
+    /// 组件的状态，因此不可能跨组件误伤）。
+    static func component(
+        transactionInProgress: Bool,
+        childInFlight: Bool,
+        abandonedChildrenUnconfirmed: Bool
+    ) -> UpdateEntryState {
+        UpdateEntryState(
+            transactionInProgress: transactionInProgress || (childInFlight && !abandonedChildrenUnconfirmed),
+            awaitingAbandonedChildExit: abandonedChildrenUnconfirmed
+        )
+    }
+
+    var isBlocked: Bool { transactionInProgress || awaitingAbandonedChildExit }
+
+    /// 菜单标题后缀：被挡住时给出可见原因（W3B F3：不得静默置灰）。
+    var menuTitleSuffix: String? {
+        guard isBlocked else { return nil }
+        return awaitingAbandonedChildExit
+            ? "（上一次更新未确认退出，重启应用可恢复）"
+            : "（正在更新）"
+    }
+
+    /// 入口被拒时的可见说明（含可恢复路径，W3B F3）。
+    var rejectionDetail: String {
+        if awaitingAbandonedChildExit {
+            return "上一次更新命令已放弃等待，但还不能确认它已经退出，因此不会启动第二次更新。"
+                + "如果长时间没有变化，重启应用即可恢复（重启后这个未确认窗口不会保留）。"
+        }
+        return "上一次更新尚未结束（可能正在重新检测版本、启动服务或做健康检查），请等它完成后再试。"
+    }
+}
+
 // MARK: - 拒绝 / 授权原因
 
 /// 不自动安装的原因，或自动安装被拒绝的原因。全部是固定文案：不含路径、包名
@@ -47,6 +100,8 @@ enum PiWebUpdateRefusal: Equatable {
     case invalidPackageName
     /// 构造出的命令未通过参数安全校验（含 shell 元字符或 `sudo`/shell 包装）。
     case unsafeCommand
+    /// 同一时间只允许一次安装：已经有一次安装在进行（W2A A-2）。
+    case updateAlreadyInProgress
     /// 同一组件存在未清除的「已放弃」记录（GitHub #62）：不允许自动执行，推迟到
     /// 下次启动；手动入口不受影响，但必须先看到这条记录。
     case abandonedAttemptPending(UpdateAbandonedAttempt)
@@ -77,6 +132,8 @@ enum PiWebUpdateRefusal: Equatable {
             return "包名不是预期的 Pi Web 包名"
         case .unsafeCommand:
             return "构造出的安装命令未通过参数安全校验"
+        case .updateAlreadyInProgress:
+            return "已有更新正在进行"
         case .abandonedAttemptPending(let attempt):
             return UpdateAbandonedAttemptPresenter.automaticRefusalText(attempt)
         }
@@ -85,12 +142,15 @@ enum PiWebUpdateRefusal: Equatable {
 
 // MARK: - 参数与环境策略（纯函数）
 
-/// 安装命令的参数与安全校验。
+/// 安装命令的参数形状校验。**它不是 flag 注入防线**：`-g`、`--registry=…`、
+/// `--prefix=…` 这类以 `-` 开头的 token 全部满足下面的字符集，会被放行（W2A A-7）。
 ///
-/// 只接受“字面量参数”形态：ASCII 字母、数字与 `@ / . _ - + ~ = :`。因此参数
-/// 里不可能出现空白、引号、`;`、`|`、`&`、`$`、反引号、`(`、`)`、`>`、`<`、
-/// `*`、`?`、`!`、换行等 shell 元字符。`sudo` 与 shell 解释器名也被显式拒绝，
-/// 即使未来有人把参数来源换成别的输入。
+/// 真正拦住 flag 注入的是 `PiWebUpdateInstallPlan.make`：它不采纳任何外部参数，
+/// 只把固定的三元素 argv（`install`、`-g`、`包名@版本`）交给 `Process.arguments`，
+/// 全程没有 shell 字符串。这里的校验只保证“参数是字面量形态”——ASCII 字母、
+/// 数字与 `@ / . _ - + ~ = :`，因此不可能出现空白、引号、`;`、`|`、`&`、`$`、
+/// 反引号、`(`、`)`、`>`、`<`、`*`、`?`、`!`、换行等 shell 元字符；`sudo` 与
+/// shell 解释器名也被显式拒绝。名字保留 `Policy`，但语义就是“形状白名单”。
 enum PiWebUpdateArgumentPolicy {
     /// 允许的参数字符集（包名与语义化版本都落在其中）。
     static let allowedCharacters = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@/._-+~=:")
@@ -215,7 +275,9 @@ struct PiWebUpdateInstallPlan: Equatable {
         guard ComponentInstallationDetector.isPackageName(packageName),
               packageName == InstallCommandManifest.piWebPackageName else { return nil }
         guard let target = SemanticVersion(targetVersion), target.description == targetVersion else { return nil }
-        guard !npmExecutablePath.isEmpty else { return nil }
+        // npm 必须是绝对路径（与 CLI 更新计划同一套校验）：相对路径会依赖子进程的
+        // 工作目录，既不可复现也无法在日志里定位（W2A A-7）。
+        guard PiCLIUpdatePlan.isSafeExecutablePath(npmExecutablePath) else { return nil }
         // 刻意不传 `--ignore-scripts`：上游包声明了安装期脚本，而 npm 的该开关会连依赖的
         // `install` 脚本一起跳过，可能留下不可用的原生模块。静态评估与只读证据见
         // `PiWebUpdateLifecycleScriptPolicy`。
@@ -537,6 +599,8 @@ enum PiWebUpdateInstallFailure: String, Equatable {
     case timedOut
     case cancelled
     case nonZeroExit
+    /// 本次调用被整体拒绝：已经有一次安装正在进行，未启动第二个子进程（W2A A-2）。
+    case alreadyRunning
 
     var text: String {
         switch self {
@@ -544,6 +608,7 @@ enum PiWebUpdateInstallFailure: String, Equatable {
         case .timedOut: return "安装超时"
         case .cancelled: return "安装被取消"
         case .nonZeroExit: return "安装命令以非零退出码结束"
+        case .alreadyRunning: return "已有安装正在进行"
         }
     }
 }
@@ -555,6 +620,8 @@ struct PiWebUpdateInstallResult: Equatable {
     var timedOut: Bool
     var cancelled: Bool
     var launchFailed: Bool
+    /// 本次调用因为已有安装正在进行而被拒绝：没有启动任何子进程（W2A A-2）。
+    var alreadyRunning: Bool
     var startedAt: Date
     var finishedAt: Date
     var outputTail: String?
@@ -567,6 +634,7 @@ struct PiWebUpdateInstallResult: Equatable {
         timedOut: Bool = false,
         cancelled: Bool = false,
         launchFailed: Bool = false,
+        alreadyRunning: Bool = false,
         startedAt: Date,
         finishedAt: Date,
         outputTail: String? = nil,
@@ -576,6 +644,7 @@ struct PiWebUpdateInstallResult: Equatable {
         self.timedOut = timedOut
         self.cancelled = cancelled
         self.launchFailed = launchFailed
+        self.alreadyRunning = alreadyRunning
         self.startedAt = startedAt
         self.finishedAt = finishedAt
         self.outputTail = outputTail
@@ -584,6 +653,7 @@ struct PiWebUpdateInstallResult: Equatable {
 
     /// nil 表示执行成功（退出码 0 且未超时/取消）。超时与取消优先于退出码。
     var failure: PiWebUpdateInstallFailure? {
+        if alreadyRunning { return .alreadyRunning }
         if cancelled { return .cancelled }
         if timedOut { return .timedOut }
         if launchFailed { return .launchFailed }
@@ -607,6 +677,9 @@ protocol PiWebUpdateInstalling: AnyObject {
     /// 取消进行中的安装（若还有）。取消按失败处理：只终止**本次启动的**子进程组
     /// （至多一次，尽力而为），绝不触碰任何 Pi 进程。
     func cancel()
+    /// 是否有安装正在进行（供 UI 门控）。同一实现同一时间最多执行一次安装；
+    /// 重叠调用会被拒绝并回调 `PiWebUpdateInstallFailure.alreadyRunning`。
+    var isRunning: Bool { get }
 }
 
 // MARK: - 子进程启动（独立进程组）
@@ -890,20 +963,66 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
     private let redact: (String) -> String
     private let recordAbandonedAttempt: (UpdateAbandonedAttempt) -> Void
 
-    private var handle: PiWebChildProcessHandle?
-    private var outputHandle: FileHandle?
-    private var plan: PiWebUpdateInstallPlan?
-    private var timeout: TimeInterval = 0
-    private var timer: DispatchSourceTimer?
-    private var completion: ((PiWebUpdateInstallResult) -> Void)?
-    private var finished = false
-    private var timedOut = false
-    private var cancelled = false
-    private var startedAt: Date?
-    private var outputTail = ""
-    /// 本次子进程是否已经发送过终止信号（至多一次）。
-    private var didSignalOwnProcessGroup = false
-    private var childProcessAction: UpdateAbandonedAttempt.ChildProcessAction?
+    /// 结果投递队列：`completion` 不在 `stateQueue` 上执行，回调里的长耗时工作
+    /// （例如重新检测版本）就不会把 `cancel()` 排在后面（W2A A-5）。
+    private let deliveryQueue = DispatchQueue.global(qos: .userInitiated)
+
+    /// 当前正在执行的安装；nil 表示空闲。每次 install 新建一份，后来者不能
+    /// 覆盖它（W2A A-1/A-2）。只在 stateQueue 上访问。
+    private var attempt: Attempt?
+    /// 已放弃等待、但仍在排空管道的读端：保持打开直到子进程退出，子进程后续
+    /// 写 stdout/stderr 不会收到 SIGPIPE / EPIPE（W2A A-3）。只在 stateQueue
+    /// 上访问。
+    private var drainingHandles: [ObjectIdentifier: FileHandle] = [:]
+
+    /// 已放弃等待、但还不能确认已经退出的子进程数量：放弃等待时只对**自己的**
+    /// 进程组尽力终止一次，降级路径不发送任何信号；只要它大于 0 就不允许开始
+    /// 新的安装（上一次的 npm 可能还在跑，W2A A-2）。只在 stateQueue 上访问。
+    private var abandonedChildrenInFlight = 0
+
+    /// 一次 install 调用的全部可变状态。每次调用独立一份：重叠调用不会再覆盖
+    /// 上一次的 handle / 回调 / 定时器（W2A A-1/A-2）。
+    private final class Attempt {
+        let plan: PiWebUpdateInstallPlan
+        let timeout: TimeInterval
+        let completion: (PiWebUpdateInstallResult) -> Void
+        let startedAt: Date
+        var handle: PiWebChildProcessHandle?
+        var outputHandle: FileHandle?
+        var timer: DispatchSourceTimer?
+        var timedOut = false
+        var cancelled = false
+        var outputTail = ""
+        /// 本次子进程是否已经发送过终止信号（至多一次）。
+        var didSignalOwnProcessGroup = false
+        var childProcessAction: UpdateAbandonedAttempt.ChildProcessAction?
+        /// 已经放弃等待、但退出尚未确认（计入 `abandonedChildrenInFlight`）。
+        var abandonedUnconfirmed = false
+
+        init(
+            plan: PiWebUpdateInstallPlan,
+            timeout: TimeInterval,
+            completion: @escaping (PiWebUpdateInstallResult) -> Void,
+            startedAt: Date
+        ) {
+            self.plan = plan
+            self.timeout = timeout
+            self.completion = completion
+            self.startedAt = startedAt
+        }
+    }
+
+    /// 是否有安装正在进行（供 UI 门控）。已经放弃等待、但子进程退出还没确认时
+    /// 也算「进行中」：这段时间里不会再启动第二次安装。
+    var isRunning: Bool {
+        stateQueue.sync { attempt != nil || abandonedChildrenInFlight > 0 }
+    }
+
+    /// 已经放弃等待、但子进程退出还没确认（W3B F3）：这种窗口下的拒绝必须给出
+    /// 「重启应用即可恢复」的可见提示，而不是一句「正在运行」之后静默置灰。
+    var abandonedChildrenUnconfirmed: Bool {
+        stateQueue.sync { abandonedChildrenInFlight > 0 }
+    }
 
     init(
         clock: @escaping () -> Date = { Date() },
@@ -929,10 +1048,10 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
 
     func cancel() {
         stateQueue.async { [weak self] in
-            guard let self, !self.finished else { return }
-            self.cancelled = true
-            self.stopWaitingLocked(reason: .abandonedWaiting)
-            self.finishLocked(exitCode: nil)
+            guard let self, let attempt = self.attempt else { return }
+            attempt.cancelled = true
+            self.stopWaitingLocked(attempt, reason: .abandonedWaiting)
+            self.finishLocked(attempt, exitCode: nil)
         }
     }
 
@@ -943,11 +1062,30 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
         timeout: TimeInterval,
         completion: @escaping (PiWebUpdateInstallResult) -> Void
     ) {
-        guard !finished else { return }
-        self.completion = completion
-        self.plan = plan
-        self.timeout = timeout
-        self.startedAt = clock()
+        let startedAt = clock()
+        // 重叠 install：整体拒绝这一次调用——不启动第二个子进程，也不覆盖正在跑
+        // 的那份状态（W2A A-2）；拒绝同样要有终态回调，否则调用方永远等不到结果
+        // （W2A A-1）。上一次安装彻底结束（子进程退出已确认）后可以再次安装。
+        guard attempt == nil, abandonedChildrenInFlight == 0 else {
+            deliver(
+                PiWebUpdateInstallResult(
+                    exitCode: nil,
+                    alreadyRunning: true,
+                    startedAt: startedAt,
+                    finishedAt: startedAt
+                ),
+                to: completion
+            )
+            return
+        }
+
+        let attempt = Attempt(
+            plan: plan,
+            timeout: timeout,
+            completion: completion,
+            startedAt: startedAt
+        )
+        self.attempt = attempt
 
         let specification = PiWebChildProcessSpecification(
             executablePath: plan.npmExecutablePath,
@@ -958,65 +1096,74 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
         do {
             handle = try spawner.spawn(specification)
         } catch {
-            finishLocked(exitCode: nil, launchFailed: true)
+            finishLocked(attempt, exitCode: nil, launchFailed: true)
             return
         }
-        self.handle = handle
+        attempt.handle = handle
 
         if handle.outputDescriptor > STDERR_FILENO {
             let outputHandle = FileHandle(fileDescriptor: handle.outputDescriptor, closeOnDealloc: true)
-            outputHandle.readabilityHandler = { [weak self] fileHandle in
+            outputHandle.readabilityHandler = { [weak self, weak attempt] fileHandle in
                 let data = fileHandle.availableData
                 if data.isEmpty {
                     fileHandle.readabilityHandler = nil
                     return
                 }
-                self?.appendOutput(data)
+                guard let attempt else { return }
+                self?.appendOutput(data, to: attempt)
             }
-            self.outputHandle = outputHandle
+            attempt.outputHandle = outputHandle
         }
 
         waitQueue.async { [weak self] in
             let exitCode = self?.spawner.waitForExit(handle) ?? -1
             self?.stateQueue.async {
-                self?.childExitedLocked(exitCode: exitCode)
+                self?.childExitedLocked(attempt, exitCode: exitCode)
             }
         }
-        scheduleTimeoutLocked(timeout)
+        scheduleTimeoutLocked(attempt)
     }
 
-    private func scheduleTimeoutLocked(_ timeout: TimeInterval) {
+    private func scheduleTimeoutLocked(_ attempt: Attempt) {
         let timer = DispatchSource.makeTimerSource(queue: stateQueue)
-        timer.schedule(deadline: .now() + max(0.05, timeout))
-        timer.setEventHandler { [weak self] in
-            guard let self, !self.finished else { return }
-            self.timedOut = true
-            self.stopWaitingLocked(reason: .timedOut)
-            self.finishLocked(exitCode: nil)
+        timer.schedule(deadline: .now() + max(0.05, attempt.timeout))
+        timer.setEventHandler { [weak self, weak attempt] in
+            // 只有这一次尝试仍是当前尝试时才收尾：已结束或已被后来调用替换的旧
+            // 定时器不会再去动别人的子进程组（W2A A-2）。
+            guard let self, let attempt, self.attempt === attempt else { return }
+            attempt.timedOut = true
+            self.stopWaitingLocked(attempt, reason: .timedOut)
+            self.finishLocked(attempt, exitCode: nil)
         }
         timer.resume()
-        self.timer = timer
+        attempt.timer = timer
     }
 
     /// 停止等待：只对本次启动的子进程组发送**一次**终止信号（尽力而为），并记录
     /// “已终止子进程组 / 未确认派生进程是否结束”（降级时记录“没有发送任何信号”）。
-    private func stopWaitingLocked(reason: UpdateAbandonedAttempt.Reason) {
-        let action = terminateOwnProcessGroupLocked()
-        childProcessAction = action
-        recordAbandonedAttemptLocked(reason: reason, action: action)
+    private func stopWaitingLocked(_ attempt: Attempt, reason: UpdateAbandonedAttempt.Reason) {
+        // 放弃等待不等于子进程已经退出（信号是尽力而为、降级路径一个信号也不发）：
+        // 在它的退出通知到达之前把这次尝试记为「不确定」，期间拒绝新的安装。
+        if !attempt.abandonedUnconfirmed {
+            attempt.abandonedUnconfirmed = true
+            abandonedChildrenInFlight += 1
+        }
+        let action = terminateOwnProcessGroupLocked(attempt)
+        attempt.childProcessAction = action
+        recordAbandonedAttemptLocked(attempt, reason: reason, action: action)
     }
 
-    private func terminateOwnProcessGroupLocked() -> UpdateAbandonedAttempt.ChildProcessAction {
-        guard let handle else { return .processGroupUnavailable }
+    private func terminateOwnProcessGroupLocked(_ attempt: Attempt) -> UpdateAbandonedAttempt.ChildProcessAction {
+        guard let handle = attempt.handle else { return .processGroupUnavailable }
         // 只发送一次：取消之后又触发超时、或反过来，都不会出现第二次信号。
-        guard !didSignalOwnProcessGroup else { return .terminatedOwnProcessGroup }
+        guard !attempt.didSignalOwnProcessGroup else { return .terminatedOwnProcessGroup }
         guard handle.usesOwnProcessGroup,
               handle.processGroupIdentifier == handle.processIdentifier,
               handle.processIdentifier > 1 else {
             // 降级路径：子进程在共享进程组里，发信号会波及别人，因此不发送。
             return .processGroupUnavailable
         }
-        didSignalOwnProcessGroup = true
+        attempt.didSignalOwnProcessGroup = true
         return spawner.terminateOwnProcessGroup(handle)
             ? .terminatedOwnProcessGroup
             : .processGroupUnavailable
@@ -1025,12 +1172,13 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
     /// 写一条「已放弃」记录：组件、脱敏命令摘要、开始时间、超时值、结束时间未知
     /// （`finishedAt == nil`）、来源与本次实际动作。
     private func recordAbandonedAttemptLocked(
+        _ attempt: Attempt,
         reason: UpdateAbandonedAttempt.Reason,
         action: UpdateAbandonedAttempt.ChildProcessAction
     ) {
-        guard let plan else { return }
+        let plan = attempt.plan
         let finishedAt = clock()
-        let attempt = UpdateAbandonedAttempt(
+        let record = UpdateAbandonedAttempt(
             componentKind: .piWeb,
             packageName: nil,
             reason: reason,
@@ -1039,57 +1187,92 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
                 arguments: plan.arguments,
                 redactingWith: redact
             ),
-            startedAt: startedAt ?? finishedAt,
-            timeout: timeout,
+            startedAt: attempt.startedAt,
+            timeout: attempt.timeout,
             finishedAt: nil,
             source: plan.source,
             recordedAt: finishedAt,
             childProcessAction: action,
             derivedProcessesConfirmedEnded: nil
         )
-        recordAbandonedAttempt(attempt)
+        recordAbandonedAttempt(record)
     }
 
-    private func childExitedLocked(exitCode: Int32) {
-        guard !finished else { return }
-        finishLocked(exitCode: exitCode)
+    private func childExitedLocked(_ attempt: Attempt, exitCode: Int32) {
+        // 退出确认要结清「不确定」计数：晚到的退出通知同样要清账。
+        settleAbandonedChildLocked(attempt)
+        guard self.attempt === attempt else { return }
+        finishLocked(attempt, exitCode: exitCode)
     }
 
-    private func appendOutput(_ data: Data) {
-        guard let text = String(data: data, encoding: .utf8), !text.isEmpty else { return }
-        stateQueue.async { [weak self] in
-            guard let self, !self.finished else { return }
-            self.outputTail += text
-            if self.outputTail.count > Self.outputTailLimit {
-                self.outputTail = String(self.outputTail.suffix(Self.outputTailLimit))
+    /// 子进程退出已确认：从「不确定」集合里摘掉（若它曾被放弃等待）。
+    private func settleAbandonedChildLocked(_ attempt: Attempt) {
+        guard attempt.abandonedUnconfirmed else { return }
+        attempt.abandonedUnconfirmed = false
+        abandonedChildrenInFlight = max(0, abandonedChildrenInFlight - 1)
+    }
+
+    private func appendOutput(_ data: Data, to attempt: Attempt) {
+        // lossy 解码：不再因为一个分块不是完整 UTF-8 就整块丢弃（W2A A-6）。
+        let text = String(decoding: data, as: UTF8.self)
+        guard !text.isEmpty else { return }
+        stateQueue.async { [weak self, weak attempt] in
+            guard let self, let attempt, self.attempt === attempt else { return }
+            attempt.outputTail += text
+            if attempt.outputTail.count > Self.outputTailLimit {
+                attempt.outputTail = String(attempt.outputTail.suffix(Self.outputTailLimit))
             }
         }
     }
 
-    private func finishLocked(exitCode: Int32?, launchFailed: Bool = false) {
-        guard !finished else { return }
-        finished = true
-        timer?.cancel()
-        timer = nil
-        // 摘掉读取回调并释放读端（FileHandle 持有 fd 并在释放时关闭它）。
-        outputHandle?.readabilityHandler = nil
-        outputHandle = nil
+    private func finishLocked(_ attempt: Attempt, exitCode: Int32?, launchFailed: Bool = false) {
+        // 只有当前这次尝试能收尾：已经被拒绝、已经被后来调用替换的尝试不会写结果。
+        guard self.attempt === attempt else { return }
+        attempt.timer?.cancel()
+        attempt.timer = nil
+        self.attempt = nil
+        // 放弃等待不关闭读端：把管道交给排空逻辑读到 EOF，子进程继续跑时写
+        // stdout/stderr 不会收到 SIGPIPE / EPIPE（W2A A-3）。
+        if let outputHandle = attempt.outputHandle {
+            attempt.outputHandle = nil
+            drainOutput(outputHandle)
+        }
         let finishedAt = clock()
         let result = PiWebUpdateInstallResult(
             exitCode: exitCode,
-            timedOut: timedOut,
-            cancelled: cancelled,
+            timedOut: attempt.timedOut,
+            cancelled: attempt.cancelled,
             launchFailed: launchFailed,
-            startedAt: startedAt ?? finishedAt,
+            startedAt: attempt.startedAt,
             finishedAt: finishedAt,
-            outputTail: outputTail.isEmpty ? nil : outputTail,
-            childProcessAction: childProcessAction
+            outputTail: attempt.outputTail.isEmpty ? nil : attempt.outputTail,
+            childProcessAction: attempt.childProcessAction
         )
-        let completion = self.completion
-        self.completion = nil
-        self.handle = nil
-        self.plan = nil
-        completion?(result)
+        deliver(result, to: attempt.completion)
+    }
+
+    /// 在 stateQueue 之外投递结果：回调里的长耗时工作（例如重新检测版本）不能
+    /// 占住 installer 的串行队列，否则应用退出时的 `cancel()` 会被排在它后面
+    /// （W2A A-5）。
+    private func deliver(
+        _ result: PiWebUpdateInstallResult,
+        to completion: @escaping (PiWebUpdateInstallResult) -> Void
+    ) {
+        deliveryQueue.async { completion(result) }
+    }
+
+    /// 摘掉业务回调后**保持读端打开**，把剩余输出一路读到 EOF 再释放。这样被放弃
+    /// 等待的子进程在下一次写 stdout/stderr 时不会因为读端已关而死亡（W2A A-3）。
+    private func drainOutput(_ outputHandle: FileHandle) {
+        let key = ObjectIdentifier(outputHandle)
+        drainingHandles[key] = outputHandle
+        outputHandle.readabilityHandler = { [weak self] fileHandle in
+            guard fileHandle.availableData.isEmpty else { return }
+            fileHandle.readabilityHandler = nil
+            self?.stateQueue.async { [weak self] in
+                self?.drainingHandles[key] = nil
+            }
+        }
     }
 }
 
@@ -1201,6 +1384,36 @@ final class PiWebUpdateCoordinator {
     /// 默认安装超时：5 分钟。有界，应用启动不会因为安装无上限地卡住。
     static let defaultTimeout: TimeInterval = 300
 
+    /// 整轮更新事务是否在进行中：安装、重新检测版本、启动服务与健康检查都算
+    /// （W3B F2：安装子进程一结束就放行，事务尾段的几秒到几十秒里还能再叠加一次
+    /// 安装）。标志由协调器自己持有，组件之间互不影响（W3B F3）。
+    private let transactionLock = NSLock()
+    private var transactionInFlight = false
+
+    /// 事务级「更新进行中」：只在 `runInstall` 的事务期间为真。
+    var isRunning: Bool {
+        transactionLock.lock()
+        defer { transactionLock.unlock() }
+        return transactionInFlight
+    }
+
+    /// 是否有一次更新正在进行（供 UI 门控：手动入口与菜单项）。既覆盖整轮事务
+    /// （安装 + 重检测 + 服务启动 + 健康检查，W3B F2），也覆盖安装器自己的
+    /// 「已放弃等待、子进程退出未确认」窗口。
+    var isUpdateInProgress: Bool { isRunning || environment.installer.isRunning }
+
+    private func beginTransaction() {
+        transactionLock.lock()
+        transactionInFlight = true
+        transactionLock.unlock()
+    }
+
+    private func endTransaction() {
+        transactionLock.lock()
+        transactionInFlight = false
+        transactionLock.unlock()
+    }
+
     private let environment: Environment
 
     init(environment: Environment) {
@@ -1239,8 +1452,26 @@ final class PiWebUpdateCoordinator {
     private func runInstall(
         plan: PiWebUpdateInstallPlan,
         installation: ComponentInstallation?,
-        completion: @escaping (PiWebUpdateRunOutcome) -> Void
+        completion originalCompletion: @escaping (PiWebUpdateRunOutcome) -> Void
     ) {
+        // 同一时间只允许一次更新事务（W2A A-2/A-4 + W3B F2）：不只安装子进程在跑
+        // 时算，安装之后的重新检测/服务启动/健康检查还在跑时同样按「跳过」返回，
+        // 给出可见文案，而不是排队等第二次回调。
+        guard !isUpdateInProgress else {
+            environment.log("Pi Web 更新跳过：\(PiWebUpdateRefusal.updateAlreadyInProgress.text)")
+            environment.deliver {
+                originalCompletion(.skipped(reason: .updateAlreadyInProgress, commandText: nil))
+            }
+            return
+        }
+        // 事务级门控（W3B F2）：从第二次触发直到结果真正投递给调用方为止，
+        // 整个事务（安装 + 重检测 + 服务启动 + 健康检查）都算「更新进行中」。
+        // 包装一次完成回调，事务里的每个结束分支都会先解除门控再投递。
+        beginTransaction()
+        let completion: (PiWebUpdateRunOutcome) -> Void = { [weak self] outcome in
+            self?.endTransaction()
+            originalCompletion(outcome)
+        }
         // 共享事务（GitHub #23）：准备阶段记录更新前指纹，安装/验证/提交/降级
         // 四个阶段的结果都进入同一份更新历史。
         let component = UpdateTransactionComponent.piWeb
@@ -1261,6 +1492,14 @@ final class PiWebUpdateCoordinator {
         journal.recordPreflight()
         environment.installer.install(plan, timeout: environment.timeout) { [weak self] result in
             guard let self else { return }
+            // 与安装器的门控竞争失败：这一次没有启动子进程，不写失败历史。
+            if result.failure == .alreadyRunning {
+                self.logOutcome("Pi Web 更新跳过（\(PiWebUpdateRefusal.updateAlreadyInProgress.text)）。")
+                self.environment.deliver {
+                    completion(.skipped(reason: .updateAlreadyInProgress, commandText: nil))
+                }
+                return
+            }
             if let failure = result.failure {
                 let degradation = UpdateDegradationPlanner.installFailure(
                     component: component,

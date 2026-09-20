@@ -80,7 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var piProcessInspector = PiProcessInspector()
     /// Pi CLI 更新命令执行器：`Process` + 参数数组（`update --self`），不使用
     /// shell、不调用 sudo、不发送信号；超时只放弃等待（见 `PiCLIUpdateAdapter`）。
-    private let piCLIUpdateRunner: PiCLIUpdateRunning
+    private let piCLIUpdateRunner: ProcessPiCLIUpdateCommand
     /// Pi CLI 更新编排器（进程检查、命令执行、版本重检测、日志、投递队列注入）。
     private var piCLIUpdateCoordinator: PiCLIUpdateCoordinator?
     /// 最近一次 Pi 进程检查结果；nil = 本次运行还没有检查过（smoke 启动不检查）。
@@ -1380,6 +1380,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 手动“立即更新 Pi Web…”：必须先确认（说明需要停服），确认后先停服务
     /// （走既有所有权验证的停止路径）再安装。运行期间发现的更新不会自动安装。
     @objc private func updatePiWebNow(_ sender: Any?) {
+        // 更新进行中闸控（W2A A-4 + W3B F2/F3）：这是 A-1/A-2 的真实用户可达入口，
+        // 必须拒绝重叠更新并给出可见反馈；闸控覆盖整轮事务（含安装之后的版本
+        // 重检测与服务启动/健康检查），不再只看安装子进程；只看 Pi Web 自己。
+        let webEntry = piWebUpdateEntryState
+        guard !webEntry.isBlocked else {
+            presentPiWebUpdateInfo("更新正在进行", detail: webEntry.rejectionDetail)
+            return
+        }
         guard dependencyGate == .ready, let report = dependencyReport else {
             presentPiWebUpdateInfo("环境检查尚未完成", detail: "请等待依赖诊断完成后再试。")
             return
@@ -1412,6 +1420,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func performManualPiWebUpdate(plan: PiWebUpdateInstallPlan) {
+        // 确认框是异步的：用户确认时上一次更新可能已经在跑（例如启动前自动更新，
+        // 或已经进入重检测/启动/健康检查的尾段），这里再检一次，避免重叠安装
+        // （W2A A-4 + W3B F2）。
+        let webEntry = piWebUpdateEntryState
+        guard !webEntry.isBlocked else {
+            presentPiWebUpdateInfo("更新正在进行", detail: webEntry.rejectionDetail)
+            return
+        }
         logPiWebUpdate("手动立即更新 Pi Web：先停止托管服务，再执行安装（只使用参数数组）。")
         serviceManager.stopService { [weak self] in
             guard let self else { return }
@@ -1447,6 +1463,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     "Pi Web 已更新",
                     detail: "已更新到 \(newVersion)，服务健康检查通过。"
                 )
+            case .skipped(let reason, _):
+                // 手动路径的拒绝必须看得见（W2A A-4）：确认框到真正执行之间可能已经
+                // 有一次更新在跑，编排层的这一层拒绝不能只是记日志。
+                self.logPiWebUpdate("手动更新未执行：\(reason.text)")
+                self.presentPiWebUpdateInfo("Pi Web 更新未执行", detail: "原因：\(reason.text)")
             default:
                 self.presentPiWebUpdateFailure(outcome)
             }
@@ -1566,6 +1587,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 手动“立即更新 Pi CLI…”：先展示计划、运行中的 Pi 进程与风险说明，用户
     /// 显式确认后才执行。执行内容只有 `pi update --self`，不操作任何进程。
     @objc private func updatePiCLINow(_ sender: Any?) {
+        // 与 Pi Web 同一道闸控（W2A A-4 + W3B F2/F3）：同一时间只允许一个更新在
+        // 执行，闸控覆盖事务尾段与「退出未确认」窗口；只看 Pi CLI 自己的状态，
+        // Pi Web 的子进程不在这里造成阻碍。
+        let cliEntry = piCLIUpdateEntryState
+        guard !cliEntry.isBlocked else {
+            presentPiCLIUpdateInfo("更新正在进行", detail: cliEntry.rejectionDetail)
+            return
+        }
         guard dependencyGate == .ready, let report = dependencyReport else {
             presentPiCLIUpdateInfo("环境检查尚未完成", detail: "请等待依赖诊断完成后再试。")
             return
@@ -1615,6 +1644,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func performPiCLIManualUpdate(plan: PiCLIUpdatePlan) {
+        let cliEntry = piCLIUpdateEntryState
+        guard !cliEntry.isBlocked else {
+            presentPiCLIUpdateInfo("更新正在进行", detail: cliEntry.rejectionDetail)
+            return
+        }
         guard let coordinator = piCLIUpdateCoordinator else { return }
         piCLIUpdateRedetectionPath = plan.executablePath
         logPiCLIUpdate("手动更新 Pi CLI：用户已确认（参数数组 \(plan.arguments.joined(separator: " "))）。")
@@ -2843,18 +2877,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         refreshUpdateMenuState()
     }
 
+    /// Pi Web 的更新入口状态（W3B F3）：只看 Pi Web 自己，不看另一个组件；
+    /// 「事务进行中」与「已放弃等待但退出未确认」分开：后者要给出重启恢复路径。
+    private var piWebUpdateEntryState: UpdateEntryState {
+        UpdateEntryState.component(
+            transactionInProgress: piWebUpdateCoordinator?.isRunning == true,
+            childInFlight: piWebUpdateInstaller.isRunning,
+            abandonedChildrenUnconfirmed: piWebUpdateInstaller.abandonedChildrenUnconfirmed
+        )
+    }
+
+    /// Pi CLI 的更新入口状态（W3B F3）：只看 Pi CLI 自己，不看另一个组件。
+    private var piCLIUpdateEntryState: UpdateEntryState {
+        UpdateEntryState.component(
+            transactionInProgress: piCLIUpdateCoordinator?.isRunning == true,
+            childInFlight: piCLIUpdateRunner.isRunning,
+            abandonedChildrenUnconfirmed: piCLIUpdateRunner.abandonedChildrenUnconfirmed
+        )
+    }
+
     private func refreshUpdateMenuState() {
         updateStatusMenuItem?.title = updateCheckStatusText()
         if let piWebUpdateWarningMenuItem {
             piWebUpdateWarningMenuItem.title = piWebUpdateWarning?.shortText ?? ""
             piWebUpdateWarningMenuItem.isHidden = piWebUpdateWarning == nil
         }
-        piWebUpdateMenuItem?.isEnabled = dependencyGate == .ready
+        // 更新进行中时对应入口不可用（W2A A-4 + W3B F2/F3）：菜单项与入口同一条
+        // 判据，但按组件分开——一个组件的卡住的子进程不会禁用另一个组件的入口；
+        // 被禁用时标题里带可见原因（不静默置灰），「退出未确认」窗口给出重启恢复。
+        let webEntry = piWebUpdateEntryState
+        piWebUpdateMenuItem?.title = "立即更新 Pi Web…" + (webEntry.menuTitleSuffix ?? "")
+        piWebUpdateMenuItem?.isEnabled = dependencyGate == .ready && !webEntry.isBlocked
         if let piCLIUpdateWarningMenuItem {
             piCLIUpdateWarningMenuItem.title = piCLIUpdateWarning?.shortText ?? ""
             piCLIUpdateWarningMenuItem.isHidden = piCLIUpdateWarning == nil
         }
-        piCLIUpdateMenuItem?.isEnabled = dependencyGate == .ready
+        let cliEntry = piCLIUpdateEntryState
+        piCLIUpdateMenuItem?.title = "立即更新 Pi CLI…" + (cliEntry.menuTitleSuffix ?? "")
+        piCLIUpdateMenuItem?.isEnabled = dependencyGate == .ready && !cliEntry.isBlocked
         if let piPackageUpdateWarningMenuItem {
             piPackageUpdateWarningMenuItem.title = piPackageUpdateWarning?.shortText ?? ""
             piPackageUpdateWarningMenuItem.isHidden = piPackageUpdateWarning == nil

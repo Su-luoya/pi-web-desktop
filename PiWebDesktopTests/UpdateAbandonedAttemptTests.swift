@@ -261,6 +261,7 @@ final class UpdateAbandonedAttemptTests: XCTestCase {
 
     private final class RecordingInstaller: PiWebUpdateInstalling {
         private(set) var plans: [PiWebUpdateInstallPlan] = []
+        var isRunning = false
         var result: PiWebUpdateInstallResult
 
         init(result: PiWebUpdateInstallResult) {
@@ -281,6 +282,7 @@ final class UpdateAbandonedAttemptTests: XCTestCase {
 
     private final class RecordingPiCLIRunner: PiCLIUpdateRunning {
         private(set) var plans: [PiCLIUpdatePlan] = []
+        var isRunning = false
         private(set) var abandonCallCount = 0
         var result: PiCLIUpdateCommandResult
 

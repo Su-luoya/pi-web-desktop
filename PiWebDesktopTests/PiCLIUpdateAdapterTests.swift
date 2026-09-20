@@ -26,6 +26,7 @@ final class PiCLIUpdateAdapterTests: XCTestCase {
 
     private final class RecordingRunner: PiCLIUpdateRunning {
         private(set) var plans: [PiCLIUpdatePlan] = []
+        var isRunning = false
         private(set) var timeouts: [TimeInterval] = []
         private(set) var abandonCount = 0
         var result: (PiCLIUpdatePlan) -> PiCLIUpdateCommandResult = { _ in
@@ -57,6 +58,8 @@ final class PiCLIUpdateAdapterTests: XCTestCase {
         private(set) var inspectCount = 0
         var detectedVersion: String? = "0.4.2"
         private(set) var detectCount = 0
+        /// 重新检测版本时的钩子（W3B F2）：用来在“事务尾段”里再触发一次入口。
+        var detectHook: (() -> Void)?
 
         func makeCoordinator(timeout: TimeInterval = PiCLIUpdateCoordinator.defaultTimeout) -> PiCLIUpdateCoordinator {
             PiCLIUpdateCoordinator(environment: PiCLIUpdateCoordinator.Environment(
@@ -67,6 +70,7 @@ final class PiCLIUpdateAdapterTests: XCTestCase {
                 runner: runner,
                 detectInstallation: {
                     self.detectCount += 1
+                    self.detectHook?()
                     return self.detectedVersion.map { version in self.installation(version: version) }
                 },
                 redactor: LogRedactor(homeDirectory: self.fixtureHome),
@@ -892,5 +896,172 @@ final class PiCLIUpdateAdapterTests: XCTestCase {
         let result = try XCTUnwrap(waitForValue(box, timeout: 10))
         XCTAssertEqual(result.failure, .abandoned)
         XCTAssertTrue(waitForFile(marker.path, timeout: 10), "放弃等待不得向子进程发送信号")
+    }
+
+    /// 放弃等待后保持读端打开：子进程继续写 stdout 不会死于 SIGPIPE / EPIPE（W2A A-3）。
+    func testRealExecutorAbandonKeepsStdoutWritable() throws {
+        let directory = try tempDirectory()
+        let marker = directory.appendingPathComponent("pipe-marker")
+        // 先写 stdout、再写 marker：读端被关时 echo 会死于 SIGPIPE，marker 就不会出现。
+        let script = try makeFakePi(
+            in: directory,
+            body: "sleep 1\necho still-alive\nprintf 'x' >> \"\(marker.path)\"\nexit 0"
+        )
+        let command = ProcessPiCLIUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
+        let box = Locked<PiCLIUpdateCommandResult>()
+        command.run(try plan(forScript: script), timeout: 0.3) { box.value = $0 }
+        let result = try XCTUnwrap(waitForValue(box, timeout: 10))
+        XCTAssertEqual(result.failure, .timedOut)
+        XCTAssertTrue(
+            waitForFile(marker.path, timeout: 10),
+            "放弃等待后子进程写 stdout 不能被杀（读端必须保持打开，W2A A-3）"
+        )
+    }
+
+    /// 非 UTF-8 分块 lossy 保留，而不是整块丢弃（W2A A-6）。
+    func testRealExecutorKeepsNonUTF8OutputChunk() throws {
+        let directory = try tempDirectory()
+        let script = try makeFakePi(in: directory, body: "printf '\\377\\376'\nsleep 0.5\nexit 0")
+        let command = ProcessPiCLIUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
+        let box = Locked<PiCLIUpdateCommandResult>()
+        command.run(try plan(forScript: script), timeout: 30) { box.value = $0 }
+        let result = try XCTUnwrap(waitForValue(box, timeout: 20))
+        XCTAssertEqual(result.failure, nil)
+        XCTAssertNotNil(result.stdoutTail, "非 UTF-8 分块必须 lossy 保留，而不是整块丢弃（W2A A-6）")
+    }
+
+    /// 同一执行器上的第二次调用不再静默丢弃、也不再被永久误拒：两轮都真的执行，
+    /// 各自拿到真实（非 alreadyRunning）的成功回调（W3B F1：生产里执行器是单例，
+    /// 一轮结束后必须能再跑一轮）。
+    func testRealExecutorReportsSecondRunInsteadOfDroppingIt() throws {
+        let directory = try tempDirectory()
+        let marker = directory.appendingPathComponent("runs.txt")
+        // 每次执行都留一行记录：用它证明第二次调用真的启动了子进程，而不是只拿到
+        // 一个“看起来成功”的回调。
+        let script = try makeFakePi(
+            in: directory,
+            body: "printf 'run\\n' >> \"\(marker.path)\"\nexit 0"
+        )
+        let command = ProcessPiCLIUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
+        let plan = try plan(forScript: script)
+
+        let first = Locked<PiCLIUpdateCommandResult>()
+        command.run(plan, timeout: 30) { first.value = $0 }
+        XCTAssertNil(try XCTUnwrap(waitForValue(first, timeout: 20)).failure)
+        XCTAssertFalse(command.isRunning)
+
+        let second = Locked<PiCLIUpdateCommandResult>()
+        command.run(plan, timeout: 30) { second.value = $0 }
+        let secondResult = try XCTUnwrap(waitForValue(second, timeout: 20))
+        XCTAssertEqual(secondResult.failure, nil, "第二次调用必须真的执行，不能被一发式状态误拒（W3B F1）")
+        XCTAssertFalse(secondResult.alreadyRunning, "第二次调用不是“已有命令在跑”")
+        XCTAssertFalse(command.isRunning)
+        let runs = try String(contentsOf: marker, encoding: .utf8)
+            .split(separator: "\n")
+            .filter { !$0.isEmpty }
+        XCTAssertEqual(runs.count, 2, "第二次调用必须真的启动子进程（W3B F1）")
+    }
+
+    /// 真正重叠时仍然拒绝：给出终态回调、不启动第二个子进程（W2A A-1/A-2 保留）。
+    func testRealExecutorRejectsOverlappingRunWithoutStartingSecondChild() throws {
+        let directory = try tempDirectory()
+        let marker = directory.appendingPathComponent("spawns.txt")
+        let script = try makeFakePi(
+            in: directory,
+            body: "printf 'spawn\\n' >> \"\(marker.path)\"\nsleep 1\nexit 0"
+        )
+        let command = ProcessPiCLIUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
+        let plan = try plan(forScript: script)
+
+        let first = Locked<PiCLIUpdateCommandResult>()
+        command.run(plan, timeout: 30) { first.value = $0 }
+        // 立刻发第二次调用：第一次的子进程还在 sleep。
+        let second = Locked<PiCLIUpdateCommandResult>()
+        command.run(plan, timeout: 30) { second.value = $0 }
+
+        let secondResult = try XCTUnwrap(waitForValue(second, timeout: 10))
+        XCTAssertEqual(secondResult.failure, .alreadyRunning, "重叠调用必须被明确拒绝（W2A A-1）")
+        XCTAssertTrue(secondResult.alreadyRunning)
+        XCTAssertNil(try XCTUnwrap(waitForValue(first, timeout: 20)).failure)
+
+        let spawns = try String(contentsOf: marker, encoding: .utf8)
+            .split(separator: "\n")
+            .filter { !$0.isEmpty }
+        XCTAssertEqual(spawns.count, 1, "重叠调用不能启动第二个子进程（W2A A-2）")
+    }
+
+    /// 放弃等待后、退出确认前一直拒绝新的一轮；子进程退出确认之后必须恢复可用，
+    /// 不能永久锁死（W3B F1：'永久误拒' 的另一种形态）。
+    func testRealExecutorRecoversAfterAbandonedChildExits() throws {
+        let directory = try tempDirectory()
+        let marker = directory.appendingPathComponent("runs.txt")
+        // 忽略 TERM 的 disposition 会继承给子进程：它模拟“超时后仍在跑”的那一轮，
+        // 并在 1.5 秒后自己退出。
+        let script = try makeFakePi(
+            in: directory,
+            body: "printf 'run\\n' >> \"\(marker.path)\"\ntrap '' TERM\nsleep 1.5\nexit 0"
+        )
+        let command = ProcessPiCLIUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
+        let plan = try plan(forScript: script)
+
+        let first = Locked<PiCLIUpdateCommandResult>()
+        command.run(plan, timeout: 0.3) { first.value = $0 }
+        XCTAssertEqual(try XCTUnwrap(waitForValue(first, timeout: 10)).failure, .timedOut)
+        XCTAssertTrue(command.isRunning, "放弃等待后、退出确认前仍须视为进行中（W3B F1）")
+
+        let rejected = Locked<PiCLIUpdateCommandResult>()
+        command.run(plan, timeout: 30) { rejected.value = $0 }
+        XCTAssertEqual(try XCTUnwrap(waitForValue(rejected, timeout: 10)).failure, .alreadyRunning)
+
+        // 子进程自己退出后，“进行中”必须结清（否则 abandonedChildrenInFlight 泄漏，
+        // 执行器就永久拒绝后续所有更新）。
+        let deadline = Date().addingTimeInterval(10)
+        while command.isRunning, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertFalse(command.isRunning, "子进程退出确认后必须结清「进行中」状态（W3B F1）")
+
+        let third = Locked<PiCLIUpdateCommandResult>()
+        command.run(plan, timeout: 30) { third.value = $0 }
+        XCTAssertNil(try XCTUnwrap(waitForValue(third, timeout: 20)).failure, "退出确认后必须能再次执行")
+        let runs = try String(contentsOf: marker, encoding: .utf8)
+            .split(separator: "\n")
+            .filter { !$0.isEmpty }
+        XCTAssertEqual(runs.count, 2, "被拒绝的那一次不能启动子进程")
+    }
+
+    /// 命令子进程已经结束、但更新事务还在尾段（重新检测版本、记录历史）时，
+    /// 手动入口必须被拒绝；事务结束之后必须能再次执行（W3B F2）。
+    ///
+    /// 重检测钩子里调用的这一次就是“尾段里的第二次入口”：此时 `runner.isRunning`
+    /// 已经是 false，只有事务门控能挡住它。
+    func testCoordinatorRejectsManualUpdateDuringTransactionTail() throws {
+        let world = World(fixtureHome: fixtureHome)
+        let coordinator = world.makeCoordinator()
+        let plan = try plan(forScript: "/opt/homebrew/bin/pi")
+        let reentrant = Locked<PiCLIUpdateRunOutcome>()
+        world.detectHook = {
+            XCTAssertFalse(world.runner.isRunning, "尾段里命令子进程应当已经结束")
+            coordinator.runManual(plan) { reentrant.value = $0 }
+        }
+
+        let first = Locked<PiCLIUpdateRunOutcome>()
+        coordinator.runManual(plan) { first.value = $0 }
+        XCTAssertEqual(world.runner.plans.count, 1)
+        XCTAssertTrue(try XCTUnwrap(first.value).isSucceeded, "第一轮必须真的执行并成功")
+        XCTAssertEqual(
+            reentrant.value,
+            .notAttempted(reason: .updateAlreadyInProgress, commandText: nil),
+            "事务尾段里的第二次手动更新必须被拒绝，而不是叠加执行（W3B F2）"
+        )
+        XCTAssertEqual(world.runner.plans.count, 1, "被拒绝的那一次不能执行命令")
+        XCTAssertFalse(coordinator.isUpdateInProgress, "事务结束后门控必须解除")
+
+        // 事务结束之后必须能再次执行：F2 的门控不能变成新的一发式状态。
+        world.detectHook = nil
+        let second = Locked<PiCLIUpdateRunOutcome>()
+        coordinator.runManual(plan) { second.value = $0 }
+        XCTAssertTrue(try XCTUnwrap(second.value).isSucceeded, "事务结束后必须能再次执行")
+        XCTAssertEqual(world.runner.plans.count, 2)
     }
 }

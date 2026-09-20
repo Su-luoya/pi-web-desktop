@@ -208,6 +208,9 @@ struct DependencyFinding: Equatable {
     /// pi-web 的 package.json 证据；其他类型为 nil。
     var packageName: String?
     var packageVersion: String?
+    /// 状态不是 `ok` 时的可读补充原因（例如“依赖探测超时”）。默认 nil，因此旧调用点
+    /// 与旧断言不受影响。
+    var detail: String? = nil
 }
 
 /// 整体诊断结果。
@@ -438,6 +441,58 @@ struct DependencyPathRedactor {
 
 // MARK: - 诊断检查器
 
+/// 给依赖探针加统一超时上限的包装器。
+///
+/// `DependencyChecker` 的每条命令（`--version`、`npm prefix -g`、登录 shell 的
+/// `command -v`）都经这里执行：超过上限按“不可用”（nil）返回，并记下是哪条探针
+/// 超时了，诊断文本因此能写出可读原因（“依赖探测超时”），而不是让服务门控
+/// 永远停在检查中。同一个包装器会作为 `commandRunner` 交给组件安装识别，因此
+/// 那条路径也受同一上限约束。
+///
+/// 并发说明：一次依赖检查在同一个后台队列上串行执行，包装器不需要额外加锁。
+private final class TimedProbeCommandRunner: CommandRunning {
+    private let base: CommandRunning
+    private let timeout: TimeInterval
+    private(set) var timedOutArguments: [[String]] = []
+
+    init(base: CommandRunning, timeout: TimeInterval) {
+        self.base = base
+        self.timeout = timeout
+    }
+
+    func run(_ arguments: [String]) -> String? {
+        let result = base.run(arguments, timeout: timeout)
+        if result.timedOut { timedOutArguments.append(arguments) }
+        return result.output
+    }
+
+    func run(_ arguments: [String], timeout: TimeInterval) -> CommandRunResult {
+        let result = base.run(arguments, timeout: timeout)
+        if result.timedOut { timedOutArguments.append(arguments) }
+        return result
+    }
+
+    func cancelRunningProbe() {
+        base.cancelRunningProbe()
+    }
+
+    /// 清空本次检查的累计状态（`DependencyChecker.run()` 入口调用）。
+    func reset() {
+        timedOutArguments.removeAll()
+    }
+
+    /// 是否有超时探针的参数**完全等于** `expected`（登录 shell 探测用）。
+    func didTimeOut(arguments expected: [String]) -> Bool {
+        timedOutArguments.contains { $0 == expected }
+    }
+
+    /// 是否有超时探针的某个参数**恰好等于** `argument`（`npm`、
+    /// `process.execPath` 这类固定参数用）。
+    func didTimeOut(argument: String) -> Bool {
+        timedOutArguments.contains { $0.contains(argument) }
+    }
+}
+
 /// 依赖与环境诊断（GitHub #6）。
 ///
 /// 只做只读探测：版本查询、本地 `npm prefix -g` 查询和文件系统读取。它不安装、
@@ -456,7 +511,8 @@ struct DependencyChecker {
     /// package.json 向上查找的最大层数。
     static let packageSearchDepth = 6
 
-    private let commandRunner: CommandRunning
+    private let commandRunner: TimedProbeCommandRunner
+    private let probeTimeout: TimeInterval
     private let fileSystem: DependencyFileSystemProbing
     private let system: DependencySystemProbe
     private let configuredPiWebPath: String
@@ -475,9 +531,12 @@ struct DependencyChecker {
         servicePort: Int = ServiceConfiguration.defaultPort,
         portProbe: DependencyPortProbing = SystemDependencyPortProbe(),
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        applicationInstallation: ApplicationInstallationProbe = .none
+        applicationInstallation: ApplicationInstallationProbe = .none,
+        probeTimeout: TimeInterval = SystemCommandRunner.defaultTimeout
     ) {
-        self.commandRunner = commandRunner
+        let probeRunner = TimedProbeCommandRunner(base: commandRunner, timeout: probeTimeout)
+        self.commandRunner = probeRunner
+        self.probeTimeout = probeTimeout
         self.fileSystem = fileSystem
         self.system = system
         self.configuredPiWebPath = configuredPiWebPath
@@ -491,6 +550,8 @@ struct DependencyChecker {
     /// 运行全部检查。顺序固定：系统、Node.js、Pi CLI、Pi Web、默认端口、Pi 配置目录，
     /// 最后附上组件安装识别（GitHub #16；复用同一组探针与已解析的版本）。
     func run() -> DependencyReport {
+        // 每次检查都重新累计超时探针，避免上一次检查的结论影响这一次。
+        commandRunner.reset()
         let redactor = DependencyPathRedactor(homeDirectory: fileSystem.homeDirectoryPath())
         let npmPrefix = localNPMPrefix()
         let piPath = resolvePiExecutable()
@@ -575,9 +636,29 @@ struct DependencyChecker {
         for candidate in candidates where fileSystem.isExecutableFile(atPath: candidate) {
             return candidate
         }
-        let shellResult = trimmed(commandRunner.run([Self.shellPath, "-lc", "command -v \(name) 2>/dev/null"]))
+        let shellResult = trimmed(commandRunner.run(Self.shellLookupArguments(named: name)))
         guard let path = shellResult, fileSystem.isExecutableFile(atPath: path) else { return nil }
         return path
+    }
+
+    /// 登录 shell 的 `command -v` 探测参数。`resolveExecutable` 与超时归因共用
+    /// 同一个形状，两处因此不会漂移。
+    private static func shellLookupArguments(named name: String) -> [String] {
+        [shellPath, "-lc", "command -v \(name) 2>/dev/null"]
+    }
+
+    /// 解析该组件时用到的探针里是否有超时的：登录 shell 的 `command -v <name>`、
+    /// 候选路径自己的 `--version`，以及 node 特有的“按进程 PATH 回退”探测
+    /// （`process.execPath`）。
+    private func didTimeOut(named name: String, paths: [String?], includesNodePathProbe: Bool = false) -> Bool {
+        if commandRunner.didTimeOut(arguments: Self.shellLookupArguments(named: name)) { return true }
+        if includesNodePathProbe, commandRunner.didTimeOut(argument: "process.execPath") { return true }
+        return paths.compactMap { $0 }.contains { commandRunner.didTimeOut(arguments: [$0, "--version"]) }
+    }
+
+    /// 探针超时的统一可读原因；写进诊断项的 `detail` 与“下一步”。
+    private var probeTimeoutDetail: String {
+        "依赖探测超时：命令在 \(Int(probeTimeout)) 秒上限内没有返回"
     }
 
     /// 符号链接目标与完整真实路径。`resolvedPath` 与 `path` 相同表示没有符号链接。
@@ -755,7 +836,11 @@ struct DependencyChecker {
             confidence: .weakest([statusEvidence, sourceEvidence]),
             remediationID: remediationID,
             packageName: nil,
-            packageVersion: nil
+            packageVersion: nil,
+            // 只有“确实发生了超时”才写原因；否则保持 nil，不制造噪声。
+            detail: status != .ok && didTimeOut(named: "node", paths: [path], includesNodePathProbe: true)
+                ? probeTimeoutDetail
+                : nil
         )
     }
 
@@ -787,7 +872,13 @@ struct DependencyChecker {
         redactor: DependencyPathRedactor
     ) -> DependencyFinding {
         guard let path else {
-            return missingFinding(kind: .piCLI, remediationID: InstallCommandManifest.piCLI.id)
+            // 路径没解析出来也可能是登录 shell 探测超时；把可读原因写进该项，
+            // 否则用户只会看到“缺失”并被建议安装，而实际上是探测没返回。
+            return missingFinding(
+                kind: .piCLI,
+                remediationID: InstallCommandManifest.piCLI.id,
+                detail: didTimeOut(named: "pi", paths: []) ? probeTimeoutDetail : nil
+            )
         }
         let evidence = executableEvidence(at: path)
         let version = trimmed(commandRunner.run([path, "--version"]))
@@ -811,7 +902,8 @@ struct DependencyChecker {
             confidence: .weakest([version == nil ? .inferred : .verified, sourceEvidence]),
             remediationID: version == nil ? InstallCommandManifest.piCLI.id : nil,
             packageName: nil,
-            packageVersion: nil
+            packageVersion: nil,
+            detail: version == nil && didTimeOut(named: "pi", paths: [path]) ? probeTimeoutDetail : nil
         )
     }
 
@@ -821,7 +913,11 @@ struct DependencyChecker {
         redactor: DependencyPathRedactor
     ) -> DependencyFinding {
         guard let path else {
-            return missingFinding(kind: .piWeb, remediationID: InstallCommandManifest.piWeb.id)
+            return missingFinding(
+                kind: .piWeb,
+                remediationID: InstallCommandManifest.piWeb.id,
+                detail: didTimeOut(named: "pi-web", paths: []) ? probeTimeoutDetail : nil
+            )
         }
 
         let evidence = executableEvidence(at: path)
@@ -854,7 +950,8 @@ struct DependencyChecker {
             confidence: .weakest(evidences),
             remediationID: version == nil ? InstallCommandManifest.piWeb.id : nil,
             packageName: metadata.name,
-            packageVersion: metadata.version
+            packageVersion: metadata.version,
+            detail: version == nil && didTimeOut(named: "pi-web", paths: [path]) ? probeTimeoutDetail : nil
         )
     }
 
@@ -987,7 +1084,11 @@ struct DependencyChecker {
         return finding(status: readable ? .ok : .unreadable, confidence: .verified)
     }
 
-    private func missingFinding(kind: DependencyFinding.Kind, remediationID: String? = nil) -> DependencyFinding {
+    private func missingFinding(
+        kind: DependencyFinding.Kind,
+        remediationID: String? = nil,
+        detail: String? = nil
+    ) -> DependencyFinding {
         DependencyFinding(
             kind: kind,
             status: .missing,
@@ -999,7 +1100,8 @@ struct DependencyChecker {
             confidence: .unknown,
             remediationID: remediationID,
             packageName: nil,
-            packageVersion: nil
+            packageVersion: nil,
+            detail: detail
         )
     }
 
@@ -1159,6 +1261,9 @@ enum DependencyReportPresenter {
             lines.append("  版本：\(versionText(for: finding))")
             lines.append("  安装来源：\(sourceText(for: finding.installSource))")
             lines.append("  可信度：\(confidenceText(for: finding.confidence))")
+            if let detail = finding.detail {
+                lines.append("  原因：\(detail)")
+            }
             if finding.kind == .piWeb {
                 if let name = finding.packageName {
                     let version = finding.packageVersion.map { "@\($0)" } ?? ""
@@ -1183,6 +1288,11 @@ enum DependencyReportPresenter {
     /// 端口与 Pi 配置目录永远返回 nil 到“修复命令”路径：它们不阻塞启动，
     /// 文本里只给可读说明，不会让应用去安装、创建或读取任何东西。
     static func nextStepText(for finding: DependencyFinding) -> String? {
+        // 探针超时是可读原因，优先于“缺失/版本无法解析”的常规建议：先让用户知道
+        // 是探测没有返回，而不是环境真的缺件。
+        if finding.status != .ok, let detail = finding.detail {
+            return "\(detail)。请检查登录 shell（~/.zprofile 等）是否会阻塞命令，然后点击“重新检测”。"
+        }
         switch finding.kind {
         case .system:
             return finding.status == .ok ? nil : "系统项只做提示，不阻塞启动。"
@@ -1243,13 +1353,17 @@ enum DependencyReportPresenter {
         lines.append("诊断结果：")
         for finding in report.findings {
             // 每一项都输出完整的五个字段，缺值用占位符，不因 nil 省略整行。
-            let fields = [
+            var fields = [
                 "· \(title(for: finding.kind))：\(statusText(for: finding.status))",
                 "路径：\(pathText(for: finding))",
                 "版本：\(versionText(for: finding))",
                 "来源：\(sourceText(for: finding.installSource))",
                 "可信度：\(confidenceText(for: finding.confidence))"
             ]
+            // 探测超时是阻塞门控的直接原因，附在行尾（缺省时不输出这一列）。
+            if let detail = finding.detail {
+                fields.append("原因：\(detail)")
+            }
             lines.append(fields.joined(separator: "  "))
         }
 

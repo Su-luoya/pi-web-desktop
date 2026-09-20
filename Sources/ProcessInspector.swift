@@ -1,32 +1,250 @@
+import Darwin
 import Foundation
+
+/// 单次命令探测的结果。
+///
+/// `timedOut` / `cancelled` 存在的意义是：探针“没有返回”不等于“命令缺失或退出码
+/// 非零”，诊断文本可以把前者写成可读原因（“依赖探测超时”），而不是静默把它当成
+/// 普通的不可用。
+struct CommandRunResult: Equatable {
+    /// 命令在超时前退出（退出码 0）时的标准输出；否则 nil。空字符串也是输出。
+    var output: String?
+    /// 命令超过超时上限仍未退出；本次启动的子进程已尽力终止。
+    var timedOut: Bool = false
+    /// 调用方在命令结束前取消；本次启动的子进程已尽力终止。
+    var cancelled: Bool = false
+}
 
 /// Runs a command line tool for the app. The protocol exists so process checks
 /// can be exercised with canned `ps`/`lsof` output instead of real processes.
+///
+/// `run(_:timeout:)` 与 `cancelRunningProbe()` 都有默认实现，因此既有的假 runner
+/// （测试替身）不需要改动就能继续编译；需要断言超时/取消路径的替身再实现它们。
 protocol CommandRunning {
     /// Returns standard output when the command exits 0; nil when it cannot be
     /// launched or exits with a non-zero status.
     func run(_ arguments: [String]) -> String?
+    /// 带超时上限的探测。默认实现退回 `run(_:)`（不提供超时能力），因此不会
+    /// 把“没有超时”伪装成“有超时保证”。
+    func run(_ arguments: [String], timeout: TimeInterval) -> CommandRunResult
+    /// 取消正在进行的探测（若还有）：只终止**本次启动的**子进程，不阻塞等待。
+    func cancelRunningProbe()
 }
 
-/// Production runner. Same semantics as the previous AppDelegate helper: stdout
-/// is captured, stderr is discarded and a non-zero exit status yields nil.
-struct SystemCommandRunner: CommandRunning {
-    func run(_ arguments: [String]) -> String? {
-        guard let executable = arguments.first else { return nil }
+extension CommandRunning {
+    func run(_ arguments: [String], timeout: TimeInterval) -> CommandRunResult {
+        CommandRunResult(output: run(arguments))
+    }
+
+    func cancelRunningProbe() {}
+}
+
+/// 探针的线程约定：命令探针（`--version`、`command -v`、`ps`/`lsof`）是同步阻塞
+/// 调用，不得在 UI 线程执行。任何由 UI 触发的探测都经过这里移到后台队列，完成
+/// 后再回到主队列更新界面。
+///
+/// `queue` 与 `deliverOnMain` 可注入：测试用可控替身即可断言“工作不在调用线程
+/// 执行、结果只经交付点送达”，不需要真实命令、窗口或真实主队列。
+///
+/// 取消不属于这层的职责：需要取消时调用方直接对同一个 runner 调
+/// `cancelRunningProbe()`（它只终止本次启动的子进程）。
+enum CommandProbeDispatch {
+    static func runOffMain<Value>(
+        queue: DispatchQueue = .global(qos: .userInitiated),
+        deliverOnMain: @escaping (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) },
+        work: @escaping () -> Value,
+        completion: @escaping (Value) -> Void
+    ) {
+        queue.async {
+            let value = work()
+            deliverOnMain { completion(value) }
+        }
+    }
+}
+
+/// 一次探针子进程的生命周期。
+///
+/// 生产实现是 `ProcessProbeProcess`；测试注入替身，因此“超时后终止本次子进程”
+/// “取消路径”“不会因为输出超过管道缓冲而死锁”都能在不启动真实命令的前提下断言。
+protocol ProbeProcess: AnyObject {
+    /// 命令是否仍在运行。
+    var isRunning: Bool { get }
+    /// 退出码；只在进程结束后有意义。
+    var terminationStatus: Int32 { get }
+    /// 阻塞等待退出，最多 `timeout` 秒；返回是否在超时前退出。
+    func waitForExit(timeout: TimeInterval) -> Bool
+    /// 读走已收集的标准输出；绝不在子进程仍运行时阻塞。
+    func readStandardOutput() -> Data
+    /// 只对本次启动的子进程发 SIGTERM；返回是否真的发出。不阻塞等待。
+    @discardableResult func terminate() -> Bool
+    /// 宽限后仍未退出时只对本次启动的子进程发 SIGKILL；返回是否真的发出。
+    @discardableResult func forceTerminate() -> Bool
+}
+
+/// 启动探针子进程时的固定错误（参数为空）。
+enum ProbeProcessError: Error, Equatable {
+    case missingExecutable
+}
+
+/// `Process` 包装：标准输出用非阻塞读排空（子进程写出超过管道缓冲也不会把双方
+/// 锁死），等待有超时上限；超时后的信号只发给这个子进程自己的 pid，不按名字、
+/// 进程组或“所有子进程”发信号。
+final class ProcessProbeProcess: ProbeProcess {
+    private let process: Process
+    private let readHandle: FileHandle
+    private var collected = Data()
+
+    init(arguments: [String]) throws {
+        guard let executable = arguments.first, !executable.isEmpty else {
+            throw ProbeProcessError.missingExecutable
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = Array(arguments.dropFirst())
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return nil
+        self.process = process
+        self.readHandle = pipe.fileHandleForReading
+        try process.run()
+        // 非阻塞：等待循环里主动排空管道，不让 64 KiB 的管道缓冲把子进程卡住。
+        let descriptor = readHandle.fileDescriptor
+        let flags = fcntl(descriptor, F_GETFL, 0)
+        if flags >= 0 { _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) }
+    }
+
+    var isRunning: Bool { process.isRunning }
+    var terminationStatus: Int32 { process.terminationStatus }
+
+    func waitForExit(timeout: TimeInterval) -> Bool {
+        let bounded = max(0, timeout)
+        let deadline = Date().addingTimeInterval(bounded)
+        while true {
+            drainOutput()
+            if !process.isRunning { return true }
+            if Date() >= deadline { return false }
+            Thread.sleep(forTimeInterval: 0.01)
         }
-        guard process.terminationStatus == 0 else { return nil }
-        return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+    }
+
+    func readStandardOutput() -> Data {
+        drainOutput()
+        return collected
+    }
+
+    @discardableResult
+    func terminate() -> Bool {
+        guard process.isRunning else { return false }
+        process.terminate()
+        return true
+    }
+
+    @discardableResult
+    func forceTerminate() -> Bool {
+        let pid = process.processIdentifier
+        guard pid > 1, process.isRunning else { return false }
+        return kill(pid, SIGKILL) == 0
+    }
+
+    /// 排空当前可读的标准输出；EOF 或 EAGAIN 都结束本轮，不阻塞。
+    private func drainOutput() {
+        var buffer = [UInt8](repeating: 0, count: 16384)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { raw -> Int in
+                read(readHandle.fileDescriptor, raw.baseAddress, raw.count)
+            }
+            guard count > 0 else { return }
+            collected.append(contentsOf: buffer[0..<count])
+        }
+    }
+}
+
+/// 生产命令执行器。
+///
+/// 每条命令都在**有界时间**内返回：超过上限时只终止本次启动的子进程（SIGTERM，
+/// 宽限后 SIGKILL），结果标记为 `timedOut`，绝不把“探针挂住”变成调用方的永久
+/// 等待（依赖门控因此不会永久停在“正在检查”）。
+///
+/// 兼容旧行为：`run(_:)` 仍然只在退出码为 0 时返回标准输出，否则返回 nil；差异是
+/// 现在多了超时上限，并且超时/取消可以从 `run(_:timeout:)` 的结果里区分出来。
+/// `timeout`、宽限时间与子进程启动/等待（`spawn`）都可注入，因此超时与取消路径
+/// 的测试不需要启动真实命令。
+final class SystemCommandRunner: CommandRunning {
+    /// 探针命令的默认超时上限。诊断探针都是毫秒级命令（`pi-web --version` 实测
+    /// 约 55 ms，`ps`/`lsof` 约 20–50 ms），10 秒留出足够余量，同时保证一个挂住
+    /// 的登录 shell 不会让依赖门控永久关闭且 UI 无提示。
+    static let defaultTimeout: TimeInterval = 10
+    /// 超时后等待 SIGTERM 生效的宽限时间；仍未退出才补一次 SIGKILL。
+    static let terminationGrace: TimeInterval = 0.5
+
+    private let timeout: TimeInterval
+    private let terminationGrace: TimeInterval
+    private let spawn: ([String]) throws -> ProbeProcess
+    private let lock = NSLock()
+    /// 最近一次正在进行的探针与它的取消标记；取消只针对这一次子进程。
+    private var activeProcess: ProbeProcess?
+    private var activeIsCancelled = false
+
+    init(
+        timeout: TimeInterval = SystemCommandRunner.defaultTimeout,
+        terminationGrace: TimeInterval = SystemCommandRunner.terminationGrace,
+        spawn: (([String]) throws -> ProbeProcess)? = nil
+    ) {
+        self.timeout = timeout
+        self.terminationGrace = terminationGrace
+        self.spawn = spawn ?? { arguments in try ProcessProbeProcess(arguments: arguments) }
+    }
+
+    func run(_ arguments: [String]) -> String? {
+        run(arguments, timeout: timeout).output
+    }
+
+    func run(_ arguments: [String], timeout: TimeInterval) -> CommandRunResult {
+        let process: ProbeProcess
+        do {
+            process = try spawn(arguments)
+        } catch {
+            return CommandRunResult(output: nil)
+        }
+        lock.lock()
+        activeProcess = process
+        activeIsCancelled = false
+        lock.unlock()
+        defer {
+            lock.lock()
+            if activeProcess === process {
+                activeProcess = nil
+                activeIsCancelled = false
+            }
+            lock.unlock()
+        }
+
+        let exited = process.waitForExit(timeout: timeout)
+        lock.lock()
+        let wasCancelled = activeIsCancelled
+        lock.unlock()
+        if wasCancelled {
+            // 取消只表示“不再等”；不再等宽限、不再补 SIGKILL，退出由子进程自己决定。
+            return CommandRunResult(output: nil, cancelled: true)
+        }
+        if !exited {
+            process.terminate()
+            if !process.waitForExit(timeout: terminationGrace) {
+                process.forceTerminate()
+            }
+            return CommandRunResult(output: nil, timedOut: true)
+        }
+        guard process.terminationStatus == 0 else { return CommandRunResult(output: nil) }
+        return CommandRunResult(output: String(data: process.readStandardOutput(), encoding: .utf8))
+    }
+
+    func cancelRunningProbe() {
+        lock.lock()
+        let process = activeProcess
+        if process != nil { activeIsCancelled = true }
+        lock.unlock()
+        // 只对本次启动的子进程发 SIGTERM；不按名字或进程组发信号。
+        _ = process?.terminate()
     }
 }
 

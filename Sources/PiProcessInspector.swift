@@ -356,7 +356,8 @@ enum PiProcessInspectionUnknown: Equatable {
     case identityUnavailable(pid: pid_t, failure: PiProcessReadFailure?)
     /// 进程确实由 JS 运行时承载，但 argv 不可读，因此无法排除它是 Pi。
     case argumentsUnavailable(pid: pid_t, interpreter: String)
-    /// argv 里出现了名为 `pi` 的脚本路径，但无法确认它是可执行文件（可能是普通文件）。
+    /// argv 里出现了名为 `pi` 的脚本路径，但无法确认它是可执行文件（可能是普通
+    /// 文件、相对路径，或符号链接断裂无法解析）。
     case scriptPathUnconfirmed(pid: pid_t, path: String)
 
     var text: String {
@@ -369,7 +370,7 @@ enum PiProcessInspectionUnknown: Equatable {
         case .argumentsUnavailable(let pid, let interpreter):
             return "PID \(pid) 由 \(interpreter) 承载，但无法读取它的参数，不能排除它是 Pi"
         case .scriptPathUnconfirmed(let pid, let path):
-            return "PID \(pid) 的参数里出现了名为 pi 的脚本路径 \(path)，但无法确认它是可执行文件"
+            return "PID \(pid) 的参数里出现了名为 pi 的脚本路径 \(path)，但无法确认它是可执行文件（普通文件、相对路径或无法解析的符号链接）"
         }
     }
 }
@@ -550,12 +551,15 @@ struct PiProcessInspector {
     ///
     /// - `argv[0]` 恰好是 `pi` 时按进程标题命中：Pi CLI 会把进程标题改写成
     ///   `pi`，此时原始脚本路径已经不可见；普通 JS 应用的 `argv[0]` 是运行时
-    ///   自己的名字（例如 `node`），不会命中；
-    /// - 其它位置的参数必须既是绝对路径、文件名又恰好是 `pi`，并且通过可执行位
-    ///   探针；`node /tmp/notes/pi` 这类普通文件因此不会命中（返回 `unknown`，
-    ///   由调用方按不安全处理）；
+    ///   自己的名字（例如 `node`），不会命中；这是**唯一**接受的非绝对路径形态；
+    /// - 其它位置的参数必须既是**绝对路径**、文件名又恰好是 `pi`，并且能解析出
+    ///   可执行文件（可执行位，或符号链接能解析到存在的目标）；`node /tmp/notes/pi`
+    ///   这类普通文件、符号链接断裂与相对路径因此不会命中；
+    /// - 相对路径（`./pi`、`../bin/pi`、解释器的第一个位置参数 `pi`）一律按
+    ///   `unknown` 处理：无法确认它相对哪个工作目录解析，不确定即按不安全处理
+    ///   （返回 `notPi` 会是漏判方向）；
     /// - 数据参数里的 `pi`（例如 `node app.js pi`、`vim pi`）不会命中：既不是
-    ///   `argv[0]`，也不是绝对路径。
+    ///   `argv[0]`，也不是脚本路径位置。
     private func classifyInterpreterProcess(
         _ snapshot: PiProcessSnapshot,
         interpreter: String
@@ -564,25 +568,44 @@ struct PiProcessInspector {
             return .unknown(.argumentsUnavailable(pid: snapshot.pid, interpreter: interpreter))
         }
         var unconfirmed: PiProcessInspectionUnknown?
+        func recordUnconfirmed(_ path: String) {
+            guard unconfirmed == nil else { return }
+            unconfirmed = .scriptPathUnconfirmed(pid: snapshot.pid, path: redactor.redact(path))
+        }
         for (index, argument) in snapshot.arguments.enumerated() where !argument.isEmpty {
             guard Self.baseName(argument) == Self.piExecutableName else { continue }
             if argument.hasPrefix("-") { continue }
             if index == 0, !argument.contains("/") {
                 return .pi(makeRecord(snapshot, matchSource: .processTitle, scriptPath: nil))
             }
-            guard argument.hasPrefix("/") else { continue }
-            let executable = fileSystem.isExecutableFile(atPath: argument)
-            let isSymlink = fileSystem.symlinkDestination(atPath: argument) != nil
-            if executable || isSymlink {
+            // 脚本路径候选：含路径分隔符的参数，或解释器的第一个位置参数（index 1
+            // 的裸名）。其余位置的裸 `pi` 是数据参数，不读磁盘也不改变判定。
+            let looksLikePath = argument.contains("/")
+            let isInterpreterScriptPosition = index == 1 && !looksLikePath
+            guard looksLikePath || isInterpreterScriptPosition else { continue }
+            guard argument.hasPrefix("/") else {
+                // 相对路径：无法确认它相对哪个工作目录解析，按不确定处理。
+                recordUnconfirmed(argument)
+                continue
+            }
+            if fileSystem.isExecutableFile(atPath: argument) {
                 return .pi(makeRecord(
                     snapshot,
                     matchSource: .interpreterScript,
                     scriptPath: redactor.redact(argument)
                 ))
             }
-            if unconfirmed == nil {
-                unconfirmed = .scriptPathUnconfirmed(pid: snapshot.pid, path: redactor.redact(argument))
+            // 符号链接要能解析到存在的目标才算命中；断裂的符号链接按不确定处理
+            // （它既不能证明脚本存在，也不能证明它不存在）。
+            if fileSystem.symlinkDestination(atPath: argument) != nil,
+               fileSystem.resolvedPath(atPath: argument) != nil {
+                return .pi(makeRecord(
+                    snapshot,
+                    matchSource: .interpreterScript,
+                    scriptPath: redactor.redact(argument)
+                ))
             }
+            recordUnconfirmed(argument)
         }
         if let unconfirmed { return .unknown(unconfirmed) }
         return .notPi
@@ -716,7 +739,44 @@ struct PiProcessInspector {
 
     /// 敏感短开关字母：`-p<值>` / `-t<值>` / `-s<值>` 这类单字母短开关紧贴值
     /// （或后面跟一个 token）时按凭据处理。只覆盖凭证习惯用法，不做任意字母猜测。
+    /// 匹配大小写不敏感：`-P<值>` / `-T<值>` / `-S<值>` 同样命中。
     static let sensitiveShortSwitchLetters: Set<Character> = ["p", "t", "s"]
+
+    /// 敏感短开关名（不含前导 `-`）：`p`/`t`/`s` 是单字母习惯用法，`pw` 是常见的
+    /// 多字母简写。匹配大小写不敏感，并且取**最长**命中（`-pw` 必须识别为 `pw`，
+    /// 不能切成 `p` + 值 `w`，否则 `-pw <值>` 会把值留在摘要里）。
+    static let sensitiveShortSwitchNames = ["p", "t", "s", "pw"]
+
+    /// 单横线 token 的敏感短开关切分结果。
+    struct SensitiveShortSwitchSplit: Equatable {
+        /// 命中的开关名，保留原大小写。
+        var switchName: String
+        /// 开关名之后的剩余文本；可能是空串、以 `=` 开头，或紧贴的值。
+        var remainder: String
+        /// 剩余文本是否只由敏感短开关字母组成（`-pt`、`-tsp` 这类开关组：每个
+        /// 字母都是裸开关，取值同样在下一个 token）。
+        var remainderIsSwitchGroup: Bool
+    }
+
+    /// 单横线 token 的开关体（已去掉前导 `-`）是否以已知敏感短开关名开头。
+    /// 取最长命中，因此 `-pw` 是 `pw` 而不是 `p` + 值 `w`。
+    static func splitSensitiveShortSwitch(_ body: String) -> SensitiveShortSwitchSplit? {
+        guard !body.isEmpty else { return nil }
+        let lowered = body.lowercased()
+        guard let match = sensitiveShortSwitchNames
+            .filter({ lowered.hasPrefix($0) })
+            .max(by: { $0.count < $1.count }) else { return nil }
+        let remainder = String(body.dropFirst(match.count))
+        let remainderIsSwitchGroup = !remainder.isEmpty && remainder.allSatisfy { character in
+            guard let lowered = character.lowercased().first else { return false }
+            return sensitiveShortSwitchLetters.contains(lowered)
+        }
+        return SensitiveShortSwitchSplit(
+            switchName: String(body.prefix(match.count)),
+            remainder: remainder,
+            remainderIsSwitchGroup: remainderIsSwitchGroup
+        )
+    }
 
     /// 已知凭据前缀：命中即把整个 token 换成占位符（不保留任何可见片段）。
     /// 与仓库 secret 扫描的高信号形状对齐，但不依赖它。
@@ -756,9 +816,14 @@ struct PiProcessInspector {
     }
 
     /// Token 级预处理：把 `--token=值`、`token:值` 形态的值换成占位符，
-    /// 把 `--password 值` 的下一个 token 换成占位符，把 `-p值` 这类短开关紧跟
-    /// 值的形态换成 `-p<占位符>`，并把已知凭据前缀与长不透明串（疑似 base64/
-    /// 十六进制）整段换成占位符。
+    /// 把 `--password 值` 的下一个 token 换成占位符，把短开关（`-p值`、`-p=值`、
+    /// `-p 值`；大小写不敏感，支持 `-pw` 这类多字母名字）的值换成占位符，并把
+    /// 已知凭据前缀与长不透明串（疑似 base64/十六进制）整段换成占位符。
+    ///
+    /// 取值形态的取舍（`docs/privacy.md` 同步说明）：裸开关（`--password`、`-p`）
+    /// 后面的 token 不以 `-` 开头时只遮那一个 token（值）；以 `-` 开头时无法可靠
+    /// 区分“值”与“下一个开关”，因此连尾巴一起隐藏。代价是 `-p 8080` 这类非秘密
+    /// 数值也会被遮成 `-p <占位符>`——宁可少展示，不少脱敏。
     ///
     /// 这一步不能省：`LogRedactor` 的键值规则在同一行里匹配时，未加引号的值会
     /// 贪婪吐掉后面的所有内容（`[^\n,;&]+` 允许空格）。一旦后面的内容里已经出现
@@ -784,45 +849,59 @@ struct PiProcessInspector {
                 index += 1
                 continue
             }
-            if token.hasPrefix("-"), !token.contains("=") {
+            if token.hasPrefix("-") {
                 let name = strippingLeadingDashes(token)
-                // 2. 裸开关 `--token` / `--password`：值在下一个 token，但无法可靠
-                //    区分“值”与“下一个开关”，而把开关当成值又会漏掉真正的值；
-                //    因此这里连尾巴一起不展示（宁可少展示，不少脱敏）。
-                if endsWithSensitiveKeyFragment(name) {
-                    masked.append(token)
-                    masked.append(marker)
-                    break
-                }
-                // 3. 键名里夹着值（`--api-key<值>`，没有分隔符）：整段换成占位符。
-                if containsSensitiveKeyFragment(name) {
-                    masked.append(marker)
-                    index += 1
-                    continue
-                }
-                // 4. 短开关紧跟值（`-p<值>`）：保留开关本身，值换成占位符。
-                //    单横线长开关（`-password`）已在第 2 步处理，不会走到这里。
-                if !token.hasPrefix("--"),
-                   let first = name.first,
-                   sensitiveShortSwitchLetters.contains(first) {
-                    if name.count == 1 {
-                        // 裸短开关：值在下一个 token，按第 2 步同样的策略连尾巴隐藏。
-                        masked.append(token)
-                        masked.append(marker)
-                        break
+                // 2. 敏感键名（长开关与单横线长开关，大小写不敏感）。不含 `=` 的
+                //    形态里，`--token` / `--password` 这类裸开关的取值在下一个
+                //    token；`--api-key<值>` 这种键名夹值整段替换。
+                if !token.contains("=") {
+                    if endsWithSensitiveKeyFragment(name) {
+                        index = appendSensitiveSwitchValue(
+                            switchText: token,
+                            tokens: tokens,
+                            index: index,
+                            masked: &masked,
+                            marker: marker
+                        )
+                        continue
                     }
-                    masked.append(String(token.prefix(2)) + marker)
+                    if containsSensitiveKeyFragment(name) {
+                        masked.append(marker)
+                        index += 1
+                        continue
+                    }
+                }
+                // 3. 短开关（大小写不敏感，支持 `-p` / `-t` / `-s` / `-pw`）：
+                //    `-p<值>`、`-p=<值>`、`-p <值>` 三种形态都要遮值。单横线
+                //    长开关（`-password`）已在第 2 步处理，不会走到这里。
+                if !token.hasPrefix("--"), let split = splitSensitiveShortSwitch(name) {
+                    if split.remainder.isEmpty || split.remainderIsSwitchGroup {
+                        // 裸短开关（或纯短开关字母组成的开关组）：取值在下一个 token。
+                        index = appendSensitiveSwitchValue(
+                            switchText: token,
+                            tokens: tokens,
+                            index: index,
+                            masked: &masked,
+                            marker: marker
+                        )
+                        continue
+                    }
+                    if split.remainder.hasPrefix("=") {
+                        masked.append("-" + split.switchName + "=" + marker)
+                    } else {
+                        masked.append("-" + split.switchName + marker)
+                    }
                     index += 1
                     continue
                 }
             }
-            // 5. 位置参数形式的已知凭据前缀（`sk-` / `ghp_` / `xoxb-` …）。
+            // 4. 位置参数形式的已知凭据前缀（`sk-` / `ghp_` / `xoxb-` …）。
             if hasKnownSecretPrefix(token) {
                 masked.append(marker)
                 index += 1
                 continue
             }
-            // 6. 位置参数形式的长不透明串（疑似 base64/十六进制秘密）。
+            // 5. 位置参数形式的长不透明串（疑似 base64/十六进制秘密）。
             if isOpaqueSecretToken(token) {
                 masked.append(marker)
                 index += 1
@@ -832,6 +911,23 @@ struct PiProcessInspector {
             index += 1
         }
         return masked
+    }
+
+    /// 裸敏感开关（`--password` / `-p` / `-pw`）的取值处理：下一个 token 不以
+    /// `-` 开头时只遮那一个 token（值）；否则无法可靠区分“值”与“下一个开关”，
+    /// 连尾巴一起隐藏（宁可少展示，不少脱敏）。返回新的下标。
+    private static func appendSensitiveSwitchValue(
+        switchText: String,
+        tokens: [String],
+        index: Int,
+        masked: inout [String],
+        marker: String
+    ) -> Int {
+        masked.append(switchText)
+        masked.append(marker)
+        let next = index + 1
+        guard next < tokens.count, !tokens[next].hasPrefix("-") else { return tokens.count }
+        return next + 1
     }
 
     /// 命令摘要：丢掉空参数与环境片段，token 级凭据脱敏，`LogRedactor` 整体脱敏，

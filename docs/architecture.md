@@ -21,7 +21,7 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 - `WebViewNavigationPolicy`（`Sources/WebViewNavigationPolicy.swift`）：本地/外链 URL 判定（`127.0.0.1`/`localhost`/`::1` 加配置端口；`about`/`blob`/`data` 视为内联），不依赖 Cocoa/WebKit，可在 unhosted 测试目标里直接测试。
 - `AppConfiguration`（`Sources/AppConfiguration.swift`）与 `AppPaths`（`Sources/AppPaths.swift`）：设置分层与路径的唯一提供者——普通设置经 UserDefaults 读写，运行状态（`service-owner.json`、旧 `service.pid`、app PID、实例锁）在 `~/Library/Application Support/Pi Web Desktop/`，日志在 `~/Library/Logs/Pi Web Desktop/`，默认工作目录为其中的 `Workspace/`。两个根目录都可注入（support/log），因此测试与 smoke 运行不会写入真实目录。
 - `WorkspaceDirectory`（`Sources/WorkspaceDirectory.swift`）：工作目录的解析与校验（存在、是目录、可写）与可读修复提示；默认目录首次使用时创建，自选目录必须已存在且可写，不可用时阻止启动（见 [docs/settings-and-workspace.md](settings-and-workspace.md)）。
-- `QuitPlan`（`Sources/QuitPolicy.swift`）：退出行为的纯决策（询问 / 保持运行 / 停止服务），可 unhosted 测试；外部服务在任何退出行为下都不会被停止。
+- `QuitPlan`（`Sources/QuitPolicy.swift`）与 `QuitCoordinator`（`Sources/QuitCoordinator.swift`）：退出行为的纯决策（询问 / 保持运行 / 停止服务）与退出状态机（GitHub #72，见下文“退出状态机”），都可 unhosted 测试；外部服务在任何退出行为下都不会被停止。
 - `ProcessInspector`：`ps`/`lsof` 命令、监听端口 PID、进程存活判断、`pgid`/`lstart`/`comm`/`args` 事实读取和进程描述；命令执行通过 `CommandRunning` 注入，可执行标识读取（`proc_pidpath`）也可注入，解析规则是不访问进程的纯函数。它只报告事实，不做所有权判定。
 - `LogWriter`（`Sources/LogWriter.swift`）与 `LogRedactor`（`Sources/LogRedactor.swift`）：统一日志写入与统一脱敏（GitHub #10）。`LogWriter` 按大小轮转（`LogRotationPolicy`，默认 10 MB / 保留 5 份；阈值、份数、`FileManager`、时间源都可注入），打开子进程日志句柄前先就地脱敏历史日志，任何写入/轮转失败只记录在 `failureDescription`（诊断导出的“日志写入”一行）而不抛出也不崩溃。`LogRedactor` 的同一个实例用于日志行、诊断导出、错误消息、环境变量与命令行展示；规则覆盖 URL 查询串、`Authorization`/`Bearer`、敏感键值（含 `PI_WEB_PASSWORD`）、JWT、代理凭据、Home 路径、私钥块，多行输入逐行处理且幂等。
 - `DiagnosticsCollector`（`Sources/DiagnosticsCollector.swift`）与 `DiagnosticsClipboard`（`Sources/DiagnosticsClipboard.swift`）：把调用方已收集的版本/构建号、Node/pi/pi-web 版本与路径可信度、服务地址与端口、状态、托管关系、监听/托管 PID、有效工作目录、配置目录、启动命令与启动环境、日志位置与写入状态、密码状态组装为诊断文本，自身不执行命令、不读磁盘；整段文本在导出前交给注入的 `LogRedactor`。菜单“复制诊断”与诊断窗口的复制按钮共用同一导出文本与同一条提醒/写剪贴板路径。字段与规则见 [日志与诊断导出](logging-and-diagnostics.md)。
@@ -127,11 +127,24 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 
 ### 停止与重启
 
-只有验证通过的记录才会收到信号：先向记录的进程组发送 `SIGTERM`，在 `stopPollAttempts`（40 × 0.1 秒）内等待进程组消失，仍存活才对同一进程组发送 `SIGKILL`。`ServiceSignaling` 接口只暴露进程组形式（`kill(-pgid, ...)`），因此不存在向单个 PID 发送信号的路径。外部服务或验证失败时不发送任何信号：`stopService()` 只在验证通过后才会把状态更新为已停止，找不到可验证记录时直接完成回调、保持当前状态（例如仍显示“正在运行（外部服务）”）并删除不匹配的记录；菜单的停止/重启动作仍然先显示原有的“这是外部启动的 Pi Web 服务”警告。`stopManagedServiceOnQuit`（“退出并停止服务”，由 `QuitPlan` 决定是否调用）也只停止已验证的托管子进程，不再清理端口上的其他监听进程；外部服务在任何退出行为下都不发信号。
+只有验证通过的记录才会收到信号：先向记录的进程组发送 `SIGTERM`，在 `stopPollAttempts`（40 × 0.1 秒）内等待进程组消失，仍存活才对同一进程组发送 `SIGKILL`。`ServiceSignaling` 接口只暴露进程组形式（`kill(-pgid, ...)`），因此不存在向单个 PID 发送信号的路径。外部服务或验证失败时不发送任何信号：`stopService()` 只在验证通过后才会把状态更新为已停止，找不到可验证记录时直接完成回调、保持当前状态（例如仍显示“正在运行（外部服务）”）并删除不匹配的记录；菜单的停止/重启动作仍然先显示原有的“这是外部启动的 Pi Web 服务”警告。`stopManagedServiceOnQuit`（“退出并停止服务”，由 `QuitPlan`/`QuitCoordinator` 决定是否调用）也只停止已验证的托管子进程，不再清理端口上的其他监听进程；外部服务在任何退出行为下都不发信号。
 
 ### 过期记录与应用重启
 
 启动时（`startAtLaunch()` → `reconcileOwnershipRecord()`）会重新验证磁盘上的记录：进程已不存在、或记录来自上一次应用运行（`instanceID` 不同）时，只删除记录文件，绝不向对应 PID 发送信号；“退出但保持服务运行”留下的服务在下次启动时因此按外部服务处理。删除规则由 `ServiceOwnershipVerdict.shouldRemoveRecord` 决定：唯一保留记录的情况是 `ps` 事实暂时不可读，此时仍然不会发送信号，留待下次再验证。
+
+## 退出状态机
+
+退出流程的决策与副作用顺序由纯值类型 `QuitCoordinator`（`Sources/QuitCoordinator.swift`，GitHub #72）描述：输入是事件（⌘Q 与菜单“退出 Pi Web Desktop”及其设置的退出行为、显式“保持服务运行/停止服务”菜单项、AppKit 终止请求、用户选择、超时、停止完成，加上当时看到的服务状态），输出是 `Phase` 与需要执行的 `QuitEffect`（弹确认框 / 停止托管服务 / 退出应用）。它不 import AppKit、不做嵌套 RunLoop、不读时钟、不起进程，因此三条路径、取消、重复触发、超时兜底与外部服务都能在 unhosted 测试里断言（`PiWebDesktopTests/QuitCoordinatorTests.swift`）。`QuitPlan`（`Sources/QuitPolicy.swift`）仍是“设置或用户选择 → 计划”的映射表，被状态机复用。
+
+状态机只有四个阶段：`idle`、`waitingForUserDecision(deadline:service:)`、`stoppingManagedService`、`terminating`。
+
+- **决策在 AppKit 终止序列之外**。⌘Q 与菜单动作直接把事件交给状态机：需要询问时先弹普通 alert，用户选择后再由 `terminateApplication` 重新发起退出。`applicationShouldTerminate` 只在被 AppKit（Dock 退出、注销/关机、其他进程调用 `terminate:`）调用时询问状态机，且只回答两种立即回复：`.terminateNow`（已决策、服务处置已落地）或 `.terminateCancel`（需要询问用户或先停止托管服务，异步流程完成后重新发起 `NSApp.terminate(nil)`）。**从不返回 `.terminateLater`**，因此没有“等待回复期间主队列不排水”、也没有“漏掉 `reply(toApplicationShouldTerminate:)`”而让应用无法退出的路径（GitHub #72 / 代码审查 W4 G1）。
+- **不重入 AppKit 终止序列**。`terminateApplication` 只在 `DispatchQueue.main.async` 里调用 `NSApp.terminate(nil)`（GitHub #72 / W4 M4）：确认框的 sheet 回调与 `stopManagedServiceOnQuit` 的完成回调都不是 AppKit 终止序列的重入点。
+- **等待停止服务用异步回调**。`.stopManagedService` → `ServiceManager.stopManagedServiceOnQuit(completion:)` → 完成回调回报 `managedServiceStopFinished` → 状态机进入 `terminating` 并产生 `terminateApplication`。全程不嵌套 RunLoop，主队列在等待期间照常排水。
+- **超时兜底**。`waitingForUserDecision` 带 `deadline = 请求时间 + decisionTimeout`（默认 300 秒，可注入）；超时后无论用户是否响应，都按最安全行为处理：保持服务运行并退出（`decisionTimedOutKeepingServiceRunning` 写入日志），避免注销/关机被无限挂起。
+- **取消与重复触发**。取消回到 `idle` 且不停止任何服务；等待期间的重复请求不叠加第二个确认框，停止期间的重复请求不重复停服务；迟到的按钮回调或停止回调（已 `idle` 或已 `terminating`）一律忽略。AppKit 终止请求在已有流程进行中时只返回 `.terminateCancel`。
+- **外部服务**。只有当服务状态是 `managedRunning`（`ServiceManager.managedServicePID() != nil`，即通过 `ServiceOwnershipVerifier` 校验的记录）且处置为 `stopManagedService` 时，状态机才产生 `.stopManagedService`；外部服务或没有服务时“停止服务”等同于保持运行，只产生 `terminateApplication`。
 
 ## 远程访问与密码
 

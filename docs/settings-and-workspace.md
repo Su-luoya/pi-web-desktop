@@ -85,8 +85,11 @@
 | 退出但保持服务运行 | 直接退出 | 否 |
 | 退出并停止服务 | 直接退出并停止托管服务 | 是（仅托管服务） |
 
-决策逻辑是纯值类型 `QuitPlan`（`Sources/QuitPolicy.swift`）：`QuitPlan.plan(for:)` 把配置取值映射成 `NextStep` + `ServiceDisposition`，`AppDelegate.applicationShouldTerminate` 只负责执行计划（弹框、退出、按处置调用 `keepRunningOnQuit()` 或 `stopManagedServiceOnQuit(completion:)`）。因此三种行为、三种确认选择，以及“取消不停止任何服务”都可以在 unhosted 测试里直接断言。
+决策逻辑是两层纯值类型（GitHub #72）：`QuitPlan`（`Sources/QuitPolicy.swift`）把配置取值映射成 `NextStep` + `ServiceDisposition`；`QuitCoordinator`（`Sources/QuitCoordinator.swift`）是退出状态机，把请求、用户选择、超时与服务状态变成需要执行的副作用（弹确认框 / 停止托管服务 / 退出应用）。`AppDelegate` 只负责执行副作用（`presentQuitDecisionAlert()` / `stopManagedServiceOnQuit(completion:)` / 异步重新发起 `NSApp.terminate(nil)`）。因此三种行为、三种确认选择、“取消不停止任何服务”、重复触发与超时兜底都可以在 unhosted 测试里直接断言。
 
+- 退出决策在 AppKit 终止序列之外完成：菜单/⌘Q 先弹普通确认框，决策完成后才重新发起退出（`DispatchQueue.main.async` 里的 `NSApp.terminate(nil)`）。`applicationShouldTerminate` 只返回 `.terminateNow`（已决策）或 `.terminateCancel`（未决策/正在停止服务），**从不返回 `.terminateLater`**，因此不需要也不存在漏掉的 `reply(toApplicationShouldTerminate:)`（GitHub #72 / W4 G1），也不在 sheet 回调里重入退出序列（W4 M4）。
+- 等待用户选择有上限：默认 5 分钟（`QuitCoordinator.defaultDecisionTimeout`，可注入）。超时后按最安全行为处理：保持服务运行并退出，并写入日志（不发信号、不删 `service-owner.json`），避免注销/关机被无限挂起。
+- 取消后应用继续正常运行，下一次 ⌘Q/菜单退出重新走完整决策；等待期间的重复触发不叠加确认框、不重复停服务，迟到的回调被忽略。
 - ⌘Q 与菜单“退出 Pi Web Desktop”走配置的退出行为（默认询问）；菜单里另有“退出 Pi Web Desktop（保持服务运行）”和“退出 Pi Web Desktop（停止服务）”两个显式入口，不受配置影响。
 - “保持服务运行”不调用 `stopService()`，不删除 `service-owner.json`，只关闭日志句柄并停止健康轮询；应用关闭后不再有任何后台轮询。
 - 外部服务（用户手动启动的 pi-web、上一次运行留下的服务、任何所有权校验失败的进程）在任何退出行为下都不会收到 `TERM`/`KILL`，也不会被改写成“已停止”。
@@ -108,6 +111,7 @@ unhosted 测试（注入临时目录、假探针与假 Keychain，不触碰真�
 - `PiWebDesktopTests/KeychainStoreTests.swift`：地址判定与保存流程共用同一规则（通配地址即使有密码也被拒绝，且先于密码写入），加载与启动诊断包含非法值与允许范围，非 loopback 缺密码仍走 #8 的缺密码提示。
 - `PiWebDesktopTests/WorkspaceDirectoryTests.swift`：默认目录首次使用时创建、自选目录不被静默重建、不存在/不是目录/不可写三种原因的校验与可读修复提示、状态页文本、设置窗口选择（相对路径、缺失、不可写被拒绝且配置不变，留空回到默认目录）。
 - `PiWebDesktopTests/QuitPolicyTests.swift`：三种退出行为与三种确认选择的决策表、取消不停止服务、只有显式“退出并停止服务”才请求停止托管服务、任何行为都不停止外部服务。
+- `PiWebDesktopTests/QuitCoordinatorTests.swift`（GitHub #72）：三条退出路径（询问后保持运行 / 询问后停服务 / 设置直接退出）、显式菜单项不受设置影响、取消后回到 idle 且可再次正常退出、等待与停止期间的重复触发不叠加、迟到的按钮/停止回调被忽略、超时前继续等待与超时后保持服务并退出（超时可注入，默认 5 分钟）、服务未运行与外部服务不产生停止副作用、AppKit 终止请求只得到 `terminateNow` / `cancelPendingDecision` 且 `terminateNow` 不带退出副作用。
 - `PiWebDesktopTests/ServiceManagerTests.swift`：工作目录不可用时所有启动入口零启动零加载并给出可读提示、恢复后门控重新打开、启动前重新校验（自选目录被删后不重建且阻止启动；存在且可写的自选目录不被创建；默认目录缺失时仍创建；健康监控期间自选目录消失时受托管重启被拒绝）、三种退出行为（保持运行零信号、停止只对已验证进程组、外部服务零信号且状态不变）、关闭期间无后台轮询、校验失败的记录不被认领也不被发信号；非法监听地址（通配、空值、空白、非法字符）在所有启动入口零进程零探测并给出可读诊断，loopback 与“具体地址 + 密码”仍可启动，`0.0.0.0` 写入 UserDefaults 后无法进入启动流程。
 - `PiWebDesktopTests/UpdateSettingsTests.swift`（GitHub #18）：四类策略的允许集合与默认值、菜单快捷开关映射、迁移（缺键 / 旧布尔键 / 未知与非法值 / 开关非布尔）、UserDefaults 往返只写策略、开关、警告与忽略版本且值里无路径或凭据、忽略版本只存版本与时间戳（非法版本丢弃、非法时间戳保留版本）、策略 → 间隔映射（`off` → nil）、每类状态快照与文案、通知判定（忽略 / 去重 / 关闭分类 / 非可更新状态）、提示文案与说明文本不含路径或凭据；以及 `AppConfiguration` 用注入 defaults 的设置往返。
 - `PiWebDesktopTests/UpdateCheckerTests.swift`（GitHub #17 / #18）：在上面列出的注入式检查器测试之外，新增逐类关闭后请求数为 0 且无该类计时器、每日 / 每周 / 扩展包 7 天用假时钟推进后的请求次数、迁移后的旧布尔键直接决定调度、`stop()` 后假时钟推进 30 天零请求、忽略当前版本后不再提示且上游更高版本重新提示、每类状态快照带下次检查时间、启动前自动更新开关打开与关闭时请求 / 结果 / 调度完全一致。

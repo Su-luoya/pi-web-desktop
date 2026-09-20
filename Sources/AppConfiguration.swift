@@ -143,6 +143,9 @@ struct AppConfiguration {
     /// loopback-only noProxy list.
     var serviceConfiguration: ServiceConfiguration { ServiceConfiguration.load(from: defaults) }
 
+    /// 最近使用的工作目录（最近在前，自动去重并限制为 10 个）。
+    var recentWorkspaceStore: RecentWorkspaceStore { RecentWorkspaceStore(defaults: defaults) }
+
     /// 更新检查策略（GitHub #18）。默认值与 `docs/privacy.md` 一致；旧版
     /// （GitHub #17）的布尔键、未知值与非法值都经迁移函数回退到默认，并通过
     /// `diagnostics` 报告一行日志（不包含原始值）。

@@ -21,6 +21,7 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 - `WebViewNavigationPolicy`（`Sources/WebViewNavigationPolicy.swift`）：本地/外链 URL 判定（`127.0.0.1`/`localhost`/`::1` 加配置端口；`about`/`blob`/`data` 视为内联），不依赖 Cocoa/WebKit，可在 unhosted 测试目标里直接测试。
 - `AppConfiguration`（`Sources/AppConfiguration.swift`）与 `AppPaths`（`Sources/AppPaths.swift`）：设置分层与路径的唯一提供者——普通设置经 UserDefaults 读写，运行状态（`service-owner.json`、旧 `service.pid`、app PID、实例锁）在 `~/Library/Application Support/Pi Web Desktop/`，日志在 `~/Library/Logs/Pi Web Desktop/`，默认工作目录为其中的 `Workspace/`。两个根目录都可注入（support/log），因此测试与 smoke 运行不会写入真实目录。
 - `WorkspaceDirectory`（`Sources/WorkspaceDirectory.swift`）：工作目录的解析与校验（存在、是目录、可写）与可读修复提示；默认目录首次使用时创建，自选目录必须已存在且可写，不可用时阻止启动（见 [docs/settings-and-workspace.md](settings-and-workspace.md)）。
+- `RecentWorkspaceStore`（`Sources/RecentWorkspace.swift`）：最近工作目录的持久化与去重（UserDefaults 单键 `workspace.recentPaths`，最多 10 条绝对路径）与切换决策的纯逻辑 `WorkspaceSwitchDecision`（绝对路径校验 + `WorkspaceDirectory.validate` + 是否与当前目录相同）。它不接触 AppKit：菜单、确认框、重启与 `NSWorkspace.open` 都在 `AppDelegate` 里（见 [docs/settings-and-workspace.md](settings-and-workspace.md)）。
 - `QuitPlan`（`Sources/QuitPolicy.swift`）与 `QuitCoordinator`（`Sources/QuitCoordinator.swift`）：退出行为的纯决策（询问 / 保持运行 / 停止服务）与退出状态机（GitHub #72，见下文“退出状态机”），都可 unhosted 测试；外部服务在任何退出行为下都不会被停止。
 - `ProcessInspector`：`ps`/`lsof` 命令、监听端口 PID、进程存活判断、`pgid`/`lstart`/`comm`/`args` 事实读取和进程描述；命令执行通过 `CommandRunning` 注入，可执行标识读取（`proc_pidpath`）也可注入，解析规则是不访问进程的纯函数。它只报告事实，不做所有权判定。
 - `LogWriter`（`Sources/LogWriter.swift`）与 `LogRedactor`（`Sources/LogRedactor.swift`）：统一日志写入与统一脱敏（GitHub #10）。`LogWriter` 按大小轮转（`LogRotationPolicy`，默认 10 MB / 保留 5 份；阈值、份数、`FileManager`、时间源都可注入），打开子进程日志句柄前先就地脱敏历史日志，任何写入/轮转失败只记录在 `failureDescription`（诊断导出的“日志写入”一行）而不抛出也不崩溃。`LogRedactor` 的同一个实例用于日志行、诊断导出、错误消息、环境变量与命令行展示；规则覆盖 URL 查询串、`Authorization`/`Bearer`、敏感键值（含 `PI_WEB_PASSWORD`）、JWT、代理凭据、Home 路径、私钥块，多行输入逐行处理且幂等。
@@ -253,7 +254,7 @@ GitHub #17 的版本检查在应用运行期间只做只读查询，不下载、
 - 远程访问密码：macOS Keychain（service = bundle identifier，account = `remote-access-password`，仅本文一处存储）。
 - 运行状态和 PID：`~/Library/Application Support/Pi Web Desktop/`。
 - 日志：`~/Library/Logs/Pi Web Desktop/`（`Pi Web Desktop.log` 与 `.1.log` … `.5.log`），应用执行按大小轮转，详见 [日志与诊断导出](logging-and-diagnostics.md)。
-- 更新检查缓存（GitHub #17）：`~/Library/Application Support/Pi Web Desktop/update-check-cache.json`（只含版本、时间戳与条件请求字段，不含凭据、会话或诊断内容）；更新检查的策略、忽略版本、启动前自动更新开关、最近的更新失败警告、统一更新历史（GitHub #23，`updateChecks.updateHistory`，单键 JSON，只含固定枚举、已校验版本/包名与固定原因文案）与超时/放弃等待的「已放弃」记录（GitHub #62，`updateChecks.piWeb.abandonedAttempt` / `updateChecks.pi.abandonedAttempt` / `updateChecks.piPackages.abandonedAttempts`，只含固定枚举、已校验组件/包名、已脱敏命令摘要与时间）在 UserDefaults（`updateChecks.*`，见 [设置、工作目录与退出行为](settings-and-workspace.md)）。
+- 更新检查缓存（GitHub #17）：`~/Library/Application Support/Pi Web Desktop/update-check-cache.json`（只含版本、时间戳与条件请求字段，不含凭据、会话或诊断内容）；更新检查的策略、忽略版本、启动前自动更新开关、最近的更新失败警告、统一更新历史（GitHub #23，`updateChecks.updateHistory`，单键 JSON，只含固定枚举、已校验版本/包名与固定原因文案）与超时/放弃等待的「已放弃」记录（GitHub #62，`updateChecks.piWeb.abandonedAttempt` / `updateChecks.pi.abandonedAttempt` / `updateChecks.piPackages.abandonedAttempts`，只含固定枚举、已校验组件/包名、已脱敏命令摘要与时间）在 UserDefaults（`updateChecks.*`，见 [设置、工作目录与退出行为](settings-and-workspace.md)）。最近工作目录也在 UserDefaults（`workspace.recentPaths`，最多 10 条用户选过的绝对路径）。
 
 设置分层、默认工作目录、退出行为与不可写目录的处理见 [docs/settings-and-workspace.md](settings-and-workspace.md)。
 

@@ -192,12 +192,11 @@ does not compare package contents**.
 
 发布产物由 `.github/workflows/release.yml` 在 tag 上打包时生成，**发布值以 Release 草稿与 assets
 为准**（同一提交反复打包会得到不同的 SHA-256，原因见 [发布流程](releasing.md#可复现性与诚实的边界)）。
-本节在发布前由协调者填入 workflow 产物的实际值；本机演练值只用于追溯，**不用于发布核对**。
+本节已由协调者填入 workflow 产物的实际值；本机演练值只用于追溯，**不用于发布核对**。
 
-- 资产：`{{ZIP_NAME}}`（按命名规则预期为 `Pi-Web-Desktop-0.1.0-alpha.6+build.6.zip`；以及同前缀的
-  `.sha256`、证据 Markdown，名称以 Release assets 为准）
-- 字节数：`<发布后由协调者填写>`（本机演练值为 1,510,257 字节，仅供追溯）
-- SHA-256：`<发布后由协调者填写>`（本机演练值为 `febf404bfe907b9ea676c782cab0dfedca17938e09c5e163c7f3f6f2880ccb89`，仅供追溯）
+- 资产：`Pi-Web-Desktop-0.1.0-alpha.6+build.6.zip`（以及同前缀的 `.sha256` 与证据 Markdown）
+- 字节数：`1,583,982`（本机演练值为 1,510,257 字节，仅供追溯）
+- SHA-256：`393acc462aedb1d9083d72efe2317823f43ec8cde1a12ef8967412b52c38227d`（本机演练值为 `febf404bfe907b9ea676c782cab0dfedca17938e09c5e163c7f3f6f2880ccb89`，仅供追溯）
 - 校验命令（下载目录执行）：
 
   ```bash
@@ -332,14 +331,3 @@ workflow 产物为准。
 - 安全漏洞：**不要**开公开 Issue、不要粘贴到 PR 或 Release 评论。请使用
   [私密漏洞报告](https://github.com/Su-luoya/pi-web-desktop/security/advisories/new)，
   范围、处理流程与“不承诺 SLA”的说明见 [SECURITY.md](../SECURITY.md)。
-
-## 发布时需要补全的值清单（协调者，发布前删除本节）
-
-1. `{{ZIP_NAME}}`（出现于“校验值”一节）→ 按命名规则预期为
-   `Pi-Web-Desktop-0.1.0-alpha.6+build.6.zip`，以 Release assets 为准。
-2. 发布产物的字节数与 SHA-256 → 取 workflow 产物 `dist/release-metadata.env` 的 `ZIP_NAME` /
-   `SHA256`，替换“校验值”一节的 `<发布后由协调者填写>` 两行；本文件里的
-   `1,510,257` 与 `febf404b…` 是**本机演练值，不要当作发布值**。
-3. 证据 Markdown 的文件名与其中的 `codesign` / `spctl` 摘要 → 与 workflow 产物核对，以 workflow
-   产物为准。
-4. 发布完成后，把 Release 页面上的实际 SHA-256 与字节数回填到“校验值”一节，并删除本节。

@@ -1174,3 +1174,88 @@ squash 合入 main → `fba1f12`（CI run `35499346342`，`build` success）；t
   的类型复核（`L-3`）、排水宽限到期同样冲刷解码器（`L-4`）。
 - `docs/alpha-release-checklist.md`（本文件）：新增本节（alpha.9 执行记录、覆盖方式、安全审查结论、
   C 项与文档一致性清单）。
+
+## 本次发布执行记录（v0.1.0-alpha.10）
+
+本版候选：PR #136（`09f1264`，功能「最近工作目录与快速切换」，关闭
+[#134](https://github.com/Su-luoya/pi-web-desktop/issues/134)）之后的 main，加上本版发布提交的版本
+bump 与三份文档。本节的脚本输出在**非同步目录**的候选副本里采集：
+`/tmp/piweb-alpha10-rehearsal2`（`ditto --norsrc --noextattr` 的干净副本，`HEAD = 09f1264`，工作区含本版
+版本 bump 与发布文档、尚未提交），原因是 iCloud 同步目录会在打包后把 `com.apple.FinderInfo` /
+`com.apple.fileprovider.fpfs#P` 贴回临时包，导致 `codesign --verify` 与
+`package-release.sh --self-test` 失败（alpha.1 记录的 `#15` 现象）。
+
+### 已在候选提交上实测
+
+| # | 门槛 | 命令 | 实测输出摘要 | 判定 |
+| --- | --- | --- | --- | --- |
+| 1 | 脚本语法 | `sh -n Scripts/*.sh` | 无输出 | 退出 0，通过 |
+| 2 | 空白与补丁格式 | `git diff --check` | 无输出 | 退出 0，通过 |
+| 3 | 构建 | `./Scripts/build.sh` | `Built: build/Pi-Web-Desktop.app`；`Contents/MacOS/PiWebDesktop: Mach-O 64-bit executable arm64` | 退出 0，通过 |
+| 4 | 身份与版本一致性 | `./Scripts/check-identity.sh` | `check-identity: PASSED (45 checks)`；bundle `CFBundleShortVersionString=0.1.0-alpha.10`、`CFBundleVersion=10`、`LSMinimumSystemVersion=14.0`、`CFBundleIdentifier=io.github.su-luoya.pi-web-desktop`、`CFBundleIconFile=ApplicationIcon` | 退出 0，通过（本版新增的发布文档已 `git add` 后再跑，避免未跟踪文件不进文本扫描造成假失败） |
+| 5 | tag 与 bundle 版本一致 | `sh Scripts/check-release-version.sh v0.1.0-alpha.10` | `check-release-version: PASSED (tag v0.1.0-alpha.10, MARKETING_VERSION 0.1.0-alpha.10, CURRENT_PROJECT_VERSION 10)` | 退出 0，通过（脚本只做字符串比对，**不检查 tag 是否存在**；本次 tag 尚未创建） |
+| 6 | 签名校验 | `codesign --verify --deep --strict build/Pi-Web-Desktop.app` | 无输出（`valid on disk` / `satisfies its Designated Requirement`） | 退出 0，通过 |
+| 7 | 签名身份与公证状态 | `codesign -dv --verbose=4 build/Pi-Web-Desktop.app` | `Identifier=io.github.su-luoya.pi-web-desktop`、`Format=app bundle with Mach-O thin (arm64)`、`flags=0x2(adhoc)`、`Signature=adhoc`、`TeamIdentifier=not set`、`Sealed Resources version=2 rules=13 files=1` | 预期结果：ad-hoc、未公证 |
+| 8 | Gatekeeper 行为 | `spctl -a -vv build/Pi-Web-Desktop.app` | 输出 `rejected`（退出 3）：未公证 ad-hoc 产物的预期结果 | 退出 3，预期 |
+| 9 | smoke 启动模式 | `./Scripts/smoke.sh`（脚本内含两种模式） | 标记 `smoke: ready`（app 退出 0） | 通过 |
+| 10 | smoke 诊断模式 | `./Scripts/smoke.sh` | 标记 `smoke: diagnostics items=6 blockers=3` 与 `smoke: diagnostics ready`（app 退出 0） | 通过（脚本整体退出 0，两种模式都断言） |
+| 11 | 扫描器自检 | `./Scripts/scan-secrets.sh --self-test` | `self-test: PASS (all rules fired, look-alikes stayed clean, suppression and rejection verified, untracked-file gate verified, samples cleaned up)` | 退出 0，通过 |
+| 12 | 仓库 secret 扫描 | `./Scripts/scan-secrets.sh` | `scan-secrets: suppressed 15 lines`、`scan-secrets: PASS (no matches in tracked files; no untracked files)` | 退出 0，通过；N=15 与 alpha.5 … alpha.9 记录一致（本版没有新增抑制标记） |
+| 13 | 本地打包与证据 | `./Scripts/package-release.sh --tag v0.1.0-alpha.10` | `package-release: OK`，产出 `Pi-Web-Desktop-0.1.0-alpha.10+build.10.zip`（`1526455` 字节，SHA-256 `ff47675c…`）、`.zip.sha256`、`.evidence.md`、`release-metadata.env`（`VERSION=0.1.0-alpha.10`、`BUILD=10`、`COMMIT=09f12646a0129fe355bbd4ab6d84159076dc594d`，工作区 dirty）；脚本同时复验“包内条目固定修改时间（`200101010000`）”“归一化时间后签名仍通过”“白名单条目集合一致（8 条，无 `__MACOSX/`）”，并打印 `signature: adhoc (TeamIdentifier=not set), not notarized` | 通过（演练值；发布产物由 workflow 在 tag 上生成） |
+| 14 | ZIP 内容清单 | `unzip -l dist/Pi-Web-Desktop-0.1.0-alpha.10+build.10.zip` | 9 项：`Pi-Web-Desktop.app/` 与 `Contents/{,_CodeSignature,MacOS,Resources}` 四个目录，加 `Contents/Info.plist`、`Contents/MacOS/PiWebDesktop`、`Contents/Resources/ApplicationIcon.icns`、`Contents/_CodeSignature/CodeResources`；无 `__MACOSX/`、无源码/测试/日志/个人路径 | 通过 |
+| 15 | checksum 复验 | `shasum -a 256 -c Pi-Web-Desktop-0.1.0-alpha.10+build.10.zip.sha256`（在 `dist/` 内执行） | `Pi-Web-Desktop-0.1.0-alpha.10+build.10.zip: OK` | 退出 0，通过 |
+| 16 | 包内版本与签名复验 | `ditto -x -k <zip> <mktemp -d>` + `plutil -p .../Info.plist` + `codesign --verify --deep --strict .../Pi-Web-Desktop.app` | `CFBundleShortVersionString=0.1.0-alpha.10`、`CFBundleVersion=10`、`LSMinimumSystemVersion=14.0`、`CFBundleIdentifier=io.github.su-luoya.pi-web-desktop`、`CFBundleIconFile=ApplicationIcon`；解压出的 bundle 签名校验退出 0 | 通过（临时目录已删除） |
+| 17 | 版本字面值门禁（回归） | `./Scripts/check-identity.sh` 第 6 节 | `ok   no hardcoded MARKETING_VERSION outside Configuration/AppIdentity.xcconfig` | 通过 |
+| 18 | 新增功能的用例 | `REPO=$PWD sh /private/tmp/piweb-testkit/run.sh RecentWorkspaceTests.swift` | `RecentWorkspaceTests` **5 passed、0 failed** | 通过（本机没有完整 Xcode：用 `/private/tmp/piweb-testkit` 的 XCTest shim 运行新增文件；本版没有改动更新流水线，因此其它测试文件未重跑，权威结果是 CI 的 `xcodebuild test`） |
+
+### 发布说明中 #134 的覆盖方式
+
+| 项 | 本版改的内容 | 发布说明里的位置 | 证据 |
+| --- | --- | --- | --- |
+| [#134](https://github.com/Su-luoya/pi-web-desktop/issues/134) | 新增「最近工作目录与快速切换」：`RecentWorkspaceStore`（UserDefaults 单键 `workspace.recentPaths`，最多 10 条、标准化路径去重、最近优先）与纯逻辑 `WorkspaceSwitchDecision`（绝对路径 + 存在/目录/可写校验）；服务菜单子菜单（含「在 Finder 中打开当前工作目录」与「清除历史记录」）；`application(_:open:)` 统一处理拖放 / `open -a` / 「打开方式」入口；切换写 `service.workspacePath` 并重启托管服务，外部进程服务不停止不重启；`CFBundleDocumentTypes`（`public.folder`、`Editor`）使拖放可用 | 摘要第 1–3 条、第 1–3 节 | `Sources/RecentWorkspace.swift`、`Sources/PiWebApp.swift`、`Sources/AppConfiguration.swift`、`Scripts/build.sh`、`PiWebDesktopTests/RecentWorkspaceTests.swift`（5 个用例） |
+| [#134](https://github.com/Su-luoya/pi-web-desktop/issues/134) 的文档同步 | `docs/settings-and-workspace.md` 新增功能节与 `CFBundleDocumentTypes` 代价；`docs/privacy.md` 补 `workspace.recentPaths`；`docs/architecture.md` 补组件与 UserDefaults 键；`README.md` 补菜单入口与拖放 | 第 4 节 | 同一提交内的四份文档改动（`git diff 21ce459..09f1264 -- docs/ README.md`） |
+| [#135](https://github.com/Su-luoya/pi-web-desktop/issues/135) | 评审的 `F1`–`F4`（重叠切换竞态、外部服务文案、open 事件处理、路径接受面加固）**不在本版修**，登记为后续迭代 | 「已知问题」第 1 小节 | `docs/security-review-alpha.10.md` 第 6 节；issue #135 |
+
+### 本版本的安全审查结论（alpha.9 → alpha.10 delta）
+
+- 范围：`git diff 21ce459..09f1264`（本版的代码提交 PR #136，加上一个纯文档提交 PR #133）。
+- 报告：`docs/security-review-alpha.10.md`（本版新增，只读评审）。
+- 结论：阻断项 **0 条**，非阻断项 **4 条**（`F1` / `F2` / `F3` / `F4`，已登记
+  [#135](https://github.com/Su-luoya/pi-web-desktop/issues/135)，其中文案与加固类不构成安全边界）；
+  同轮提出的文档缺口 `F5` 已在同一提交内修掉；另记录一条既往文案观察 `O-1`（早于本版 delta，未改）。
+- 本版 delta 的性质：新增一条**本地、无网络**的用户输入路径（只接受已存在且可写的绝对目录，任何分支都
+  不创建目录）、为接收文件夹声明 `public.folder`（带来 Finder「打开方式」的可见代价，但不新增能力面）。
+  不改变更新流水线、信号语义、网络边界、权限与 Keychain 语义。
+- 沿用：[alpha.1 审查](security-review-alpha.1.md)（服务/密钥/脱敏/CSP/供应链）、
+  [alpha.3 审查](security-review-alpha.3.md)（更新流水线）与 [alpha.9 审查](security-review-alpha.9.md)
+  （措辞与句柄级类型复核）；这些路径本版未改动，没有重新审计。
+
+### 还需 CI / 发布 workflow 完成
+
+| # | 检查 | 实测输出摘要 | 判定 |
+| --- | --- | --- | --- |
+| C1 | PR CI（候选提交 `09f1264` 的 PR head `f441cd6`） | `build.yml` run `35514128406`，job `build` | **success** |
+| C2 | 发布提交的 CI | 〈待发布后回填〉 | 〈待回填〉 |
+| C3 | `git tag -a v0.1.0-alpha.10` 指向发布提交 | 〈待发布后回填〉 | 〈待回填〉 |
+| C4 | `release.yml`（tag push 触发） | 〈待发布后回填：run 链接、ZIP 字节数、草稿 prerelease 创建时间〉 | 〈待回填〉 |
+| C5 | 草稿 prerelease 的正文与真机表 | 〈待发布后回填：正文行数、发布 SHA-256、已知问题列表〉 | 〈待回填〉 |
+| C6 | 真机 macOS 与 Node / pi / pi-web 版本 | Apple M4（`Mac16,10`）/ macOS 27.0（`26A428`）arm64 / Node v24.21.0 / pi 0.86.1 / `@agegr/pi-web` 0.9.1；`smoke.sh` 双模式通过（`items=6 blockers=3`） | 已实测（本版记录到 `pi` 从 0.86.0 升到 0.86.1） |
+| C7 | `gh release edit --draft=false`（prerelease） | 〈待发布后回填〉 | 〈待回填〉 |
+| C8 | 回退路径（上一版资产仍在 Releases） | `v0.1.0-alpha.9`（3 个资产：ZIP / `.sha256` / `.evidence.md`） | 已核实 |
+| C9 | 回填 Release issue 的 run 链接与 SHA-256、关闭 issue | issue [#137](https://github.com/Su-luoya/pi-web-desktop/issues/137)：〈待回填评论链接与关闭时间〉 | 〈待回填〉 |
+
+本节的边界：C2–C5、C7 与 C9 的输出来自 CI / workflow / 维护者操作，不是本机脚本的直接输出；这些行
+在发布与回填提交里补齐（与 alpha.9 的 #133 回填同一流程）。C6 来自本机实测，已写入 Release 正文。
+
+### 本版同时做的文档一致性改动
+
+- `Configuration/AppIdentity.xcconfig`（本版唯一版本来源）：`MARKETING_VERSION` → `0.1.0-alpha.10`、
+  `CURRENT_PROJECT_VERSION` → `10`。
+- `docs/release-notes-v0.1.0-alpha.10.md`（本版新增）：功能逐条成节；“更新检查与自动更新的边界”一节
+  沿写本版没有改动域名、频率、开关与自动更新前置条件；“校验值”一节区分演练值与 `release.yml` 的发布值
+  （发布后回填）；“已知问题”把功能评审的 `F1`–`F4` 列为待办并给出真机验证清单。
+- `docs/security-review-alpha.10.md`（本版新增）：alpha.9 → alpha.10 的只读 delta 安全评审。
+- `docs/architecture.md`：`RecentWorkspaceStore` 条目补注切换边界（只写 `service.workspacePath`、复用既有
+  托管进程停止路径、外部服务不被停止或重启）与评审引用。
+- `docs/alpha-release-checklist.md`（本文件）：新增本节（alpha.10 执行记录、覆盖方式、安全审查结论、
+  C 项与文档一致性清单）。

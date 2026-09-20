@@ -8,7 +8,7 @@
 
 一份可处理的报告应包含：
 
-- 受影响版本（本仓库的版本只有 `Configuration/AppIdentity.xcconfig` 一个来源，例如 `0.1.0-alpha.1` / build `1`）与安装方式（源码构建或 ZIP）。
+- 受影响版本（见 `Configuration/AppIdentity.xcconfig` 的 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION`，或菜单「帮助 → 关于」）与安装方式（源码构建或 ZIP）。
 - macOS 版本、Mac 芯片类型，以及 Node.js、Pi、`@agegr/pi-web` 的版本。
 - 最小复现步骤、实际影响和假设的攻击者能力。
 - 是否已有修复建议或 PoC。PoC 只能验证问题，不要携带真实凭据、真实主机名或私人数据。
@@ -25,7 +25,7 @@
 
 ## 支持的版本
 
-- 项目只承诺评估最新 alpha 或最新稳定发行版。当前只有 alpha 基线（`0.1.0-alpha.1`），没有稳定发行版。
+- 项目只承诺评估最新 alpha 或最新稳定发行版。当前只有 alpha 基线（见 [最新 Release](https://github.com/Su-luoya/pi-web-desktop/releases/latest)），没有稳定发行版。
 - 旧 alpha 版本不承诺修复；修复通常只落在 `main` 和后续版本。
 - 项目**不承诺**响应时限或修复 SLA。维护者按可用时间处理，修复完成后根据影响决定是否发布 GitHub Security Advisory 或 CVE。
 

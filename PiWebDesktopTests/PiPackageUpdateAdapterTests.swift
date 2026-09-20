@@ -29,6 +29,9 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
         private(set) var plans: [PiPackageUpdatePlan] = []
         private(set) var timeouts: [TimeInterval] = []
         private(set) var abandonCount = 0
+        /// 非阻塞读状态（GitHub #107）：默认空闲，用例按需要打开。
+        var isRunning = false
+        var abandonedChildrenUnconfirmed = false
         var result: (PiPackageUpdatePlan) -> PiPackageUpdateCommandResult = { _ in
             PiPackageUpdateCommandResult(
                 exitCode: 0,
@@ -58,6 +61,8 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
         private(set) var inspectCount = 0
         var detectedVersions: [String: String] = [:]
         private(set) var detectCount = 0
+        /// 事务替身（GitHub #107）：只记录 `applyDegradation` 的调用，不碰文件系统。
+        var degradations: [UpdateDegradationPlan] = []
         let fixtureHome: String
 
         init(fixtureHome: String) { self.fixtureHome = fixtureHome }
@@ -77,7 +82,13 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
                 redactor: LogRedactor(homeDirectory: self.fixtureHome),
                 log: { message in self.log.append(message) },
                 deliver: { work in work() },
-                timeout: timeout
+                timeout: timeout,
+                transaction: UpdateTransactionEnvironment(
+                    probe: .disabled,
+                    recordHistory: { _ in },
+                    applyDegradation: { plan in self.degradations.append(plan) },
+                    now: Date.init
+                )
             ))
         }
     }
@@ -123,14 +134,16 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
         packages: [PiPackageCandidate]? = nil,
         checks: [PiPackageCheckOutcome]? = nil,
         processes: PiProcessInspection = .noProcesses,
-        piPath: String? = "/opt/homebrew/bin/pi"
+        piPath: String? = "/opt/homebrew/bin/pi",
+        abandonedAttempts: [UpdateAbandonedAttempt] = []
     ) -> PiPackageUpdatePlanningInput {
         PiPackageUpdatePlanningInput(
             policy: policy,
             packages: packages ?? [candidate()],
             checks: checks ?? [check()],
             processes: processes,
-            piExecutablePath: piPath
+            piExecutablePath: piPath,
+            abandonedAttempts: abandonedAttempts
         )
     }
 
@@ -172,6 +185,23 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
     private func blockedPids(_ reason: PiPackageUpdateRefusal) -> [pid_t]? {
         guard case .piRunning(let records) = reason else { return nil }
         return records.map(\.pid)
+    }
+
+    /// 「已放弃」记录夹具（GitHub #62）：扩展包组件、超时原因、只放弃等待。
+    private func abandonedAttempt(
+        reason: UpdateAbandonedAttempt.Reason = .timedOut
+    ) -> UpdateAbandonedAttempt {
+        UpdateAbandonedAttempt(
+            componentKind: .piPackage,
+            packageName: packageName,
+            reason: reason,
+            commandSummary: "~/.local/bin/pi update \\(packageName)",
+            startedAt: referenceDate,
+            timeout: 600,
+            source: .npmGlobal,
+            recordedAt: referenceDate,
+            childProcessAction: .waitedWithoutSignals
+        )
     }
 
     private func plan(
@@ -1541,5 +1571,159 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
         XCTAssertTrue(text.contains("static let forbiddenTokens: Set<String> = [\"sudo\", \"sh\""))
         XCTAssertFalse(text.contains("shellPath"))
         XCTAssertFalse(text.contains("NSAppleScript"))
+    }
+
+    // MARK: - 9. GitHub #107（W2B B-12 / B-13、非阻塞读状态接口）
+
+    /// B-12：判定顺序是「进程保护 → 已放弃记录」。检测到运行中的 Pi 进程（或进程
+    /// 状态不确定）时直接拒绝执行，不再先要求用户确认一条注定执行不下去的记录；
+    /// 进程状态恢复后，同一条记录仍然会要求确认（记录没有被跳过）。
+    func testProcessRefusalOutranksAbandonedAttemptConfirmation() {
+        let attempt = abandonedAttempt()
+
+        let blocked = PiPackageUpdatePlanner.decide(input(
+            processes: .runningProcesses([processRecord(pid: 4242)]),
+            abandonedAttempts: [attempt]
+        ))
+        XCTAssertTrue(blocked.abandonedConfirmationPlans.isEmpty, "进程保护先判：不得要求确认「已放弃」记录")
+        XCTAssertFalse(blocked.executionAvailable)
+        guard case .executeBlocked(_, let reason) = blocked.decisions[0] else {
+            return XCTFail("有运行中的 Pi 进程时必须拒绝执行，实际是 \(blocked.decisions)")
+        }
+        XCTAssertEqual(blockedPids(reason), [4242])
+        XCTAssertEqual(blocked.allPlans.count, 1, "计划本身仍然可见（用于展示与诊断）")
+
+        let unknown = PiPackageUpdatePlanner.decide(input(
+            processes: .unknown(.enumerationFailed),
+            abandonedAttempts: [attempt]
+        ))
+        XCTAssertTrue(unknown.abandonedConfirmationPlans.isEmpty, "状态不确定同样先拒绝，不引导确认记录")
+        guard case .executeBlocked(_, let unknownReason) = unknown.decisions[0] else {
+            return XCTFail("进程状态不确定时必须拒绝执行，实际是 \(unknown.decisions)")
+        }
+        XCTAssertEqual(unknownReason, .processStateUnknown(.enumerationFailed))
+
+        let confirmation = PiPackageUpdatePlanner.decide(input(
+            processes: .noProcesses,
+            abandonedAttempts: [attempt]
+        ))
+        guard case .awaitingAbandonedConfirmation(_, let confirmed) = confirmation.decisions[0] else {
+            return XCTFail("进程消失后必须要求确认「已放弃」记录，实际是 \(confirmation.decisions)")
+        }
+        XCTAssertEqual(confirmed, attempt)
+        XCTAssertEqual(confirmation.abandonedConfirmationPlans.count, 1)
+        XCTAssertFalse(confirmation.executionAvailable, "未确认前不得给出执行入口")
+    }
+
+    /// B-13：安装失败（非零退出）分支必须像验证失败分支一样调用 `applyDegradation`。
+    /// 扩展包没有可重新指向的可执行文件，这个 kind 的 apply 在生产里是 no-op：
+    /// 这里用替身断言调用确实发生（三条失败路径的降级语义一致）。
+    func testInstallFailureAppliesDegradationExactlyOnce() throws {
+        let ready = try XCTUnwrap(plan())
+        let world = World(fixtureHome: fixtureHome)
+        world.runner.result = { _ in
+            PiPackageUpdateCommandResult(
+                exitCode: 1,
+                startedAt: self.referenceDate,
+                finishedAt: self.referenceDate.addingTimeInterval(3),
+                stdoutTail: "npm ERR!\n",
+                stderrTail: ""
+            )
+        }
+        var batch: PiPackageUpdateBatchOutcome?
+        world.makeCoordinator().runConfirmed([ready]) { batch = $0 }
+        let outcome = try XCTUnwrap(batch)
+        XCTAssertEqual(world.runner.plans.count, 1)
+        XCTAssertEqual(world.degradations.count, 1, "安装失败必须调用一次 applyDegradation")
+        XCTAssertEqual(world.degradations.map(\.kind), [.installFailedKeepingPreviousVersion])
+        XCTAssertEqual(
+            world.degradations.first?.performedAutomaticDegradation,
+            false,
+            "扩展包没有可自动重指向的可执行文件：该 kind 的 apply 是 no-op"
+        )
+        guard case .commandFailed(let failedPlan, let failure, let record, _) = outcome.outcomes[0] else {
+            return XCTFail("命令失败必须如实记录，实际是 \(outcome.outcomes)")
+        }
+        XCTAssertEqual(failedPlan.arguments, ["update", "npm:\(packageName)"])
+        XCTAssertEqual(failure, .nonZeroExit)
+        XCTAssertEqual(record.exitCode, 1)
+        XCTAssertEqual(world.detectCount, 0, "安装失败不必重新检测版本")
+    }
+
+    /// B-13 对照：验证失败分支（既有调用点）与安装失败分支调用同一个替身；
+    /// 成功路径不调用（只记「无需降级」）。
+    func testVerificationFailureStillAppliesDegradationAndSuccessNeverDoes() throws {
+        let ready = try XCTUnwrap(plan())
+
+        let verifyWorld = World(fixtureHome: fixtureHome)
+        verifyWorld.detectedVersions = [packageName: "1.0.0"]
+        var verifyBatch: PiPackageUpdateBatchOutcome?
+        verifyWorld.makeCoordinator().runConfirmed([ready]) { verifyBatch = $0 }
+        let verifyOutcome = try XCTUnwrap(verifyBatch)
+        guard case .versionUnchanged = verifyOutcome.outcomes[0] else {
+            return XCTFail("命令成功但版本没变应按验证失败处理，实际是 \(verifyOutcome.outcomes)")
+        }
+        XCTAssertEqual(verifyWorld.degradations.count, 1, "验证失败分支调用 applyDegradation")
+        XCTAssertNotEqual(verifyWorld.degradations.first?.kind, .notNeeded)
+
+        let successWorld = World(fixtureHome: fixtureHome)
+        successWorld.detectedVersions = [packageName: "2.0.0"]
+        var successBatch: PiPackageUpdateBatchOutcome?
+        successWorld.makeCoordinator().runConfirmed([ready]) { successBatch = $0 }
+        XCTAssertTrue(try XCTUnwrap(successBatch).isSucceeded)
+        XCTAssertTrue(successWorld.degradations.isEmpty, "成功路径不得调用 applyDegradation")
+    }
+
+    /// 读状态接口（GitHub #107）：`isRunning` / `abandonedChildrenUnconfirmed` 都是
+    /// 非阻塞读，菜单在点击之前就能给出可见原因。在真执行器上验证三次过渡：
+    /// 空闲 → 运行中 → 放弃等待但退出未确认 → 结清。
+    func testExecutorReadStateFeedsTheMenuEntryState() throws {
+        let directory = try tempDirectory()
+        let gate = directory.appendingPathComponent("menu-gate")
+        let script = try makeFakePi(
+            in: directory,
+            body: "while [ ! -f \"\(gate.path)\" ]; do sleep 0.1; done\nexit 0"
+        )
+        defer { FileManager.default.createFile(atPath: gate.path, contents: Data()) }
+        let command = ProcessPiPackageUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
+        let updatePlan = try plan(forScript: script)
+
+        func entryState() -> UpdateEntryState {
+            UpdateEntryState.component(
+                transactionInProgress: false,
+                childInFlight: command.isRunning,
+                abandonedChildrenUnconfirmed: command.abandonedChildrenUnconfirmed
+            )
+        }
+
+        XCTAssertEqual(entryState(), .free, "空闲时菜单项必须可用")
+        XCTAssertNil(entryState().menuTitleSuffix)
+
+        let box = Locked<PiPackageUpdateCommandResult>()
+        command.run(updatePlan, timeout: 0.3) { box.value = $0 }
+        XCTAssertTrue(command.isRunning, "运行期间必须报告「忙」，且不需要等子进程")
+        XCTAssertFalse(command.abandonedChildrenUnconfirmed)
+        let busy = entryState()
+        XCTAssertTrue(busy.isBlocked)
+        XCTAssertEqual(busy.menuTitleSuffix, "（正在更新）")
+        XCTAssertTrue(busy.rejectionDetail.contains("尚未结束"))
+
+        let timedOut = try XCTUnwrap(waitForValue(box, timeout: 10))
+        XCTAssertEqual(timedOut.failure, .timedOut)
+        XCTAssertTrue(command.abandonedChildrenUnconfirmed, "放弃等待窗口内必须报告「未确认退出」")
+        XCTAssertTrue(command.isRunning, "放弃等待窗口内仍然算「忙」")
+        let awaiting = entryState()
+        XCTAssertTrue(awaiting.isBlocked)
+        XCTAssertEqual(awaiting.menuTitleSuffix, "（上一次更新未确认退出，重启应用可恢复）")
+        XCTAssertTrue(awaiting.rejectionDetail.contains("重启应用"))
+
+        FileManager.default.createFile(atPath: gate.path, contents: Data())
+        let deadline = Date().addingTimeInterval(15)
+        while command.abandonedChildrenUnconfirmed, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertFalse(command.abandonedChildrenUnconfirmed, "退出确认后不得继续报告「未确认退出」")
+        XCTAssertFalse(command.isRunning)
+        XCTAssertEqual(entryState(), .free, "结清后菜单项必须恢复可用")
     }
 }

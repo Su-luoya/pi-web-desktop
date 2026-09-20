@@ -758,9 +758,13 @@ enum PiPackageUpdatePlanner {
 
     /// 单个包的决策（纯函数）。
     ///
-    /// 顺序：策略 → 包名 → 检查结论 → 目标版本 → 来源 → 命令安全 →「已放弃」
-    /// 记录 → 进程保护。后两项只让“已经就绪的计划”变成需要确认/拒绝的状态，
+    /// 顺序：策略 → 包名 → 检查结论 → 目标版本 → 来源 → 命令安全 → 进程保护
+    /// →「已放弃」记录。后两项只让“已经就绪的计划”变成需要确认/拒绝的状态，
     /// 不会掩盖其它拒绝原因。
+    ///
+    /// 进程保护先于「已放弃」记录（GitHub #107 / W2B B-12）：检测到运行中的 Pi
+    /// 进程时执行阶段必然拒绝，先要求用户确认「已放弃」记录只会让人确认一个注定
+    /// 失败的操作；先给出进程状态，等进程退出后同一条记录仍会要求确认。
     static func decide(
         _ candidate: PiPackageCandidate,
         check: PiPackageCheckOutcome?,
@@ -852,21 +856,24 @@ enum PiPackageUpdatePlanner {
                 reason: .unsafeCommand
             )
         }
+        // 进程保护：只有“确认没有任何 Pi 进程”才允许进入确认流程；否则拒绝执行。
+        // GitHub #107（W2B B-12）：这一判定在「已放弃」记录之前——被进程挡住的
+        // 计划不该再要求用户确认一条记录（执行前的复查同样以进程态优先）。
+        switch processes {
+        case .noProcesses:
+            break
+        case .runningProcesses(let records):
+            return .executeBlocked(plan: plan, reason: .piRunning(records))
+        case .unknown(let reason):
+            return .executeBlocked(plan: plan, reason: .processStateUnknown(reason))
+        }
         // 「已放弃」记录硬前置（GitHub #62 / alpha.3 安全审查 A-6、A-7）：同一包
         // 存在未清除的记录时不允许自动/常规执行；确认框必须先展示这条记录，
         // 用户在看过之后显式确认才执行一次。
         if let abandonedAttempt {
             return .awaitingAbandonedConfirmation(plan: plan, attempt: abandonedAttempt)
         }
-        // 进程保护：只有“确认没有任何 Pi 进程”才允许进入确认流程；否则拒绝执行。
-        switch processes {
-        case .noProcesses:
-            return .awaitingConfirmation(plan)
-        case .runningProcesses(let records):
-            return .executeBlocked(plan: plan, reason: .piRunning(records))
-        case .unknown(let reason):
-            return .executeBlocked(plan: plan, reason: .processStateUnknown(reason))
-        }
+        return .awaitingConfirmation(plan)
     }
 
     private static func notice(
@@ -1068,6 +1075,13 @@ protocol PiPackageUpdateRunning: AnyObject {
     )
     /// 放弃等待进行中的命令。**不发送任何信号**，也不终止子进程。
     func abandon()
+    /// 非阻塞读状态（GitHub #107）：是否有一次运行正在进行（含已经放弃等待、
+    /// 但子进程退出还没确认的窗口）。供菜单/入口在点击之前给出可见原因，
+    /// 不需要创建任何进程或阻塞调用线程。
+    var isRunning: Bool { get }
+    /// 非阻塞读状态（GitHub #107）：是否有已经放弃等待、但退出尚未确认的子进程。
+    /// 这种窗口的拒绝要给出「重启应用即可恢复」的提示，而不是笼统的「正在运行」。
+    var abandonedChildrenUnconfirmed: Bool { get }
 }
 
 /// 生产执行器：`Process` + 固定参数数组，没有 shell、没有 `sudo`、没有信号。
@@ -1150,6 +1164,18 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
         stateQueue.async { [weak self] in
             self?.startLocked(plan, timeout: timeout, completion: completion)
         }
+    }
+
+    /// 是否有一次运行正在进行（供 UI 门控，GitHub #107）。已经放弃等待、但子进程
+    /// 退出还没确认时也算「进行中」：这段时间里不会再启动第二次运行。
+    var isRunning: Bool {
+        stateQueue.sync { running || !abandonedProcesses.isEmpty }
+    }
+
+    /// 已经放弃等待、但子进程退出还没确认（GitHub #107）：这种窗口下的拒绝要给出
+    /// 「重启应用即可恢复」的可见提示，而不是一句「正在运行」之后静默置灰。
+    var abandonedChildrenUnconfirmed: Bool {
+        stateQueue.sync { !abandonedProcesses.isEmpty }
     }
 
     func abandon() {
@@ -1728,6 +1754,11 @@ final class PiPackageUpdateCoordinator {
                 journal.recordInstallFailed(failure.text)
                 journal.recordCommitNotAttempted(reason: "执行阶段失败，未启用新版本")
                 journal.recordDegradation(degradation)
+                // GitHub #107（W2B B-13）：与验证失败分支走同一条降级应用路径。
+                // 扩展包没有可重新指向的可执行文件，生产注入的 applyDegradation
+                // 对这个 kind 是 no-op（只改配置/重检测路径的组件才有实际动作），
+                // 但仍要调用：三条失败路径的降级语义必须一致，测试替身按调用断言。
+                self.environment.transaction.applyDegradation(degradation)
                 let tail = Self.outputTailText(result, redactingWith: self.environment.redactor)
                 self.recordTransaction(
                     journal,

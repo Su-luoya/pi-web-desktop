@@ -112,6 +112,8 @@ final class UpdateTransactionTests: XCTestCase {
 
     private final class RecordingPackageRunner: PiPackageUpdateRunning {
         private(set) var plans: [PiPackageUpdatePlan] = []
+        var isRunning = false
+        var abandonedChildrenUnconfirmed = false
         var result: (PiPackageUpdatePlan) -> PiPackageUpdateCommandResult = { _ in
             PiPackageUpdateCommandResult(
                 exitCode: 0,
@@ -412,6 +414,13 @@ final class UpdateTransactionTests: XCTestCase {
         XCTAssertTrue(report.summaryLines.contains { $0.contains("未验证") })
     }
 
+    func testVersionReachedRejectsUnparseableTarget() throws {
+        XCTAssertFalse(UpdateVerifier.versionReached(detected: "2.0.0", old: "1.0.0", target: "latest"))
+        let result = UpdateVerifier.versionCheck(detected: "2.0.0", previous: "1.0.0", target: "latest")
+        XCTAssertEqual(result.status, .failed)
+        XCTAssertEqual(result.detail, "目标版本不可解析")
+    }
+
     // MARK: - 3. install 失败：状态未变、历史语义、无成功报告
 
     func testInstallFailureKeepsStateAndRecordsNoSuccess() throws {
@@ -461,6 +470,12 @@ final class UpdateTransactionTests: XCTestCase {
         XCTAssertTrue(entry.failureReason?.contains("非零退出码") == true)
         XCTAssertTrue(entry.rollbackDescription?.contains("未尝试回滚") == true)
         XCTAssertFalse(log.text.contains(fixtureHome))
+        // GitHub #106（W2B B-8）：安装失败没有执行任何回滚动作，降级阶段只能记“仅记录”，
+        // 历史行里不得再出现“失败降级：成功”。
+        XCTAssertEqual(entry.phases.first { $0.phase == .degrade }?.status, .recordedOnly)
+        let degradeLine = try XCTUnwrap(UpdateHistoryPresenter.lines(for: entry).first { $0.hasPrefix("· 失败降级") })
+        XCTAssertTrue(degradeLine.contains("仅记录"))
+        XCTAssertFalse(degradeLine.contains("成功"), "安装失败后不得显示“失败降级：成功”：\(degradeLine)")
     }
 
     // MARK: - 4. verify 失败与降级
@@ -1335,6 +1350,94 @@ final class UpdateTransactionTests: XCTestCase {
         XCTAssertFalse(plan.warningText.contains("不校验旧文件内容"), "内容哈希已核对时不得写“不校验旧文件内容”")
     }
 
+    func testBoundedMetadataReadsRejectOversizedFilesBeforeOpening() throws {
+        var opened = false
+        XCTAssertNil(UpdateArtifactProbe.readBoundedData(
+            atPath: "/tmp/oversized",
+            maximumSize: 8,
+            fileSize: { _ in 9 },
+            openFile: { _ in
+                opened = true
+                return nil
+            }
+        ))
+        XCTAssertFalse(opened, "属性报告超限后不得打开文件读取内容")
+
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let packageJSON = root.appendingPathComponent("package.json")
+        FileManager.default.createFile(atPath: packageJSON.path, contents: Data("x".utf8))
+        var handle = try FileHandle(forWritingTo: packageJSON)
+        try handle.truncate(atOffset: UInt64(UpdateArtifactProbe.packageJSONSizeLimitBytes + 1))
+        try handle.close()
+        XCTAssertNil(UpdateArtifactProbe.readPackageName(atPackageJSONPath: packageJSON.path))
+
+        let lockfile = root.appendingPathComponent("package-lock.json")
+        FileManager.default.createFile(atPath: lockfile.path, contents: Data("x".utf8))
+        handle = try FileHandle(forWritingTo: lockfile)
+        try handle.truncate(atOffset: UInt64(UpdateArtifactProbe.lockfileSizeLimitBytes + 1))
+        try handle.close()
+        XCTAssertNil(UpdateArtifactProbe.readIntegrityValue(
+            atLockfilePath: lockfile.path,
+            packageName: "bounded-fixture",
+            packageVersion: "1.0.0"
+        ))
+    }
+
+    func testIntegritySelectionPrefersExactPathAndRejectsVersionMismatchOrAmbiguity() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let lockfile = root.appendingPathComponent("package-lock.json")
+        let exactIntegrity = "sha512-" + String(repeating: "A", count: 86)
+        let nestedIntegrity = "sha512-" + String(repeating: "B", count: 86)
+        let otherNestedIntegrity = "sha512-" + String(repeating: "C", count: 86)
+        let packageName = "@scope/pi-integrity-fixture"
+        let lockObject: [String: Any] = [
+            "packages": [
+                "node_modules/z-parent/node_modules/\(packageName)": [
+                    "version": "2.0.0", "integrity": nestedIntegrity
+                ],
+                "node_modules/\(packageName)": [
+                    "version": "1.0.0", "integrity": exactIntegrity
+                ],
+                "node_modules/a-parent/node_modules/\(packageName)": [
+                    "version": "1.0.0", "integrity": otherNestedIntegrity
+                ]
+            ]
+        ]
+        try JSONSerialization.data(withJSONObject: lockObject).write(to: lockfile)
+
+        for _ in 0..<10 {
+            XCTAssertEqual(UpdateArtifactProbe.readIntegrityValue(
+                atLockfilePath: lockfile.path,
+                packageName: packageName,
+                packageVersion: "1.0.0"
+            ), exactIntegrity)
+        }
+        XCTAssertNil(UpdateArtifactProbe.readIntegrityValue(
+            atLockfilePath: lockfile.path,
+            packageName: packageName,
+            packageVersion: "2.0.0"
+        ), "精确路径存在但版本不符时不得退回其它版本条目")
+
+        let ambiguousObject: [String: Any] = [
+            "packages": [
+                "node_modules/a-parent/node_modules/\(packageName)": [
+                    "version": "1.0.0", "integrity": nestedIntegrity
+                ],
+                "node_modules/z-parent/node_modules/\(packageName)": [
+                    "version": "1.0.0", "integrity": otherNestedIntegrity
+                ]
+            ]
+        ]
+        try JSONSerialization.data(withJSONObject: ambiguousObject).write(to: lockfile)
+        XCTAssertNil(UpdateArtifactProbe.readIntegrityValue(
+            atLockfilePath: lockfile.path,
+            packageName: packageName,
+            packageVersion: "1.0.0"
+        ))
+    }
+
     /// 用真实的临时目录（假可执行文件 + 假 npm 包目录）验证生产探针：内容哈希、
     /// 身份读取与 npm `integrity` 读取都不执行 npm、不联网。
     func testLiveProbeReadsContentHashIdentityAndNpmIntegrityFromFakePackageDirectory() throws {
@@ -1522,5 +1625,241 @@ final class UpdateTransactionTests: XCTestCase {
         XCTAssertTrue(cannot.warningText.contains("无法自动回滚"))
         XCTAssertTrue(cannot.warningText.contains("请按下面的手动方式处理："))
         XCTAssertFalse(cannot.performedAutomaticDegradation)
+    }
+
+    // MARK: - 11. 降级结果语义与探针归因（GitHub #106）
+
+    /// GitHub #106（W2B B-8）：降级阶段的“结果”必须区分“真的执行了恢复动作”与
+    /// “只是记录了结论 / 无法执行”。此前四种降级结果全记成“成功”，安装失败也会
+    /// 在历史里显示“失败降级：成功”。
+    func testDegradationPhaseStatusDistinguishesAppliedFromRecordedOnlyAndNotPossible() throws {
+        let fingerprint = UpdateArtifactFingerprint(
+            executablePath: oldExecutable,
+            resolvedPath: oldExecutable,
+            version: "0.9.0",
+            packageName: InstallCommandManifest.piWebPackageName,
+            fileSize: 100,
+            modifiedAt: referenceDate
+        )
+        let rollbackProbe = FakeProbe()
+        rollbackProbe.executables.insert(oldExecutable)
+        rollbackProbe.readable.insert(oldExecutable)
+        rollbackProbe.realPaths[oldExecutable] = oldExecutable
+        rollbackProbe.packageNamesNear[oldExecutable] = InstallCommandManifest.piWebPackageName
+        rollbackProbe.sizes[oldExecutable] = 100
+        rollbackProbe.mtimes[oldExecutable] = referenceDate
+
+        // 安装命令失败：没有执行任何回滚动作。
+        let installFailed = UpdateDegradationPlanner.installFailure(
+            component: .piWeb,
+            source: .npmGlobal,
+            fingerprint: fingerprint,
+            targetVersion: "0.9.2",
+            failureReason: "npm 安装命令以非零退出码结束（退出码 3）"
+        )
+        // 验证失败，但版本未变化且仍在原路径：文件没被替换，也没有回滚动作。
+        let stillUsing = UpdateDegradationPlanner.verificationFailure(
+            component: .piWeb,
+            source: .npmGlobal,
+            fingerprint: fingerprint,
+            newVersion: "0.9.0",
+            newResolvedPath: oldExecutable,
+            failureReason: "版本重新检测达到目标失败：重新检测到 0.9.0",
+            probe: rollbackProbe.make()
+        )
+        // 验证失败且探针可用：真的把调用方指回更新前记录的路径。
+        let degraded = UpdateDegradationPlanner.verificationFailure(
+            component: .piWeb,
+            source: .npmGlobal,
+            fingerprint: fingerprint,
+            newVersion: "0.9.2",
+            newResolvedPath: newExecutable,
+            failureReason: "版本重新检测达到目标失败：重新检测到 0.9.1",
+            probe: rollbackProbe.make()
+        )
+        // 验证失败且本次没有探针：无法核对，也就无法执行回滚。
+        let notPossible = UpdateDegradationPlanner.verificationFailure(
+            component: .piWeb,
+            source: .npmGlobal,
+            fingerprint: fingerprint,
+            newVersion: "0.9.2",
+            newResolvedPath: newExecutable,
+            failureReason: "版本重新检测达到目标失败：重新检测到 0.9.1",
+            probe: .disabled
+        )
+        let notNeeded = UpdateDegradationPlan(
+            kind: .notNeeded,
+            reason: "版本与目标一致并准备提交，无需降级/回滚",
+            rollbackEligibility: .eligibleRetainedEvidence,
+            previousVersion: "0.9.0",
+            previousExecutablePath: oldExecutable,
+            restoredExecutablePath: nil,
+            restoredVersion: nil,
+            manualAdvice: UpdateManualAdviceBuilder.advice(component: .piWeb, source: .npmGlobal),
+            warningText: "无需降级",
+            evidence: nil
+        )
+
+        XCTAssertEqual(degraded.kind, .degradedToPreviousArtifact, "前置：只有真的把调用方指回旧路径才算已降级")
+        XCTAssertEqual(degraded.restoredExecutablePath, oldExecutable)
+        XCTAssertEqual(installFailed.kind, .installFailedKeepingPreviousVersion)
+        XCTAssertEqual(stillUsing.kind, .stillUsingPreviousArtifact)
+        XCTAssertEqual(notPossible.kind, .cannotAutomaticallyRollback)
+
+        let cases: [(plan: UpdateDegradationPlan, status: UpdateTransactionPhaseStatus)] = [
+            (notNeeded, .skipped),
+            (installFailed, .recordedOnly),
+            (stillUsing, .recordedOnly),
+            (degraded, .applied),
+            (notPossible, .notPossible)
+        ]
+        for (plan, status) in cases {
+            var journal = UpdateTransactionJournal(
+                configuration: UpdateTransactionJournal.Configuration(
+                    component: .piWeb,
+                    source: .npmGlobal,
+                    previousVersion: "0.9.0",
+                    targetVersion: "0.9.2",
+                    fingerprint: fingerprint
+                ),
+                now: { self.referenceDate }
+            )
+            journal.recordPreflight()
+            journal.recordDegradation(plan)
+            let entry = journal.historyEntry(degradation: plan, advice: plan.manualAdvice)
+            let degrade = try XCTUnwrap(entry.phases.first { $0.phase == .degrade })
+            XCTAssertEqual(degrade.status, status, "\(plan.kind.rawValue) 的降级结果语义不对")
+            XCTAssertEqual(degrade.status.displayName, status.displayName)
+            XCTAssertFalse(entry.isSuccessful, "降级结果不得让历史显示成一次成功更新（\(plan.kind.rawValue)）")
+            XCTAssertFalse(degrade.displayLine.contains("：成功"), "降级结果不写“成功”：\(degrade.displayLine)")
+        }
+
+        XCTAssertEqual(UpdateTransactionPhaseStatus.applied.displayName, "已执行")
+        XCTAssertEqual(UpdateTransactionPhaseStatus.recordedOnly.displayName, "仅记录")
+        XCTAssertEqual(UpdateTransactionPhaseStatus.notPossible.displayName, "无法执行")
+
+        // 新结果必须能存取：历史按 rawValue 落盘，重启后不能退化成别的结果。
+        let suiteName = "pi-web-desktop-update-transaction-106-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        var storedJournal = UpdateTransactionJournal(
+            configuration: UpdateTransactionJournal.Configuration(
+                component: .piWeb,
+                source: .npmGlobal,
+                previousVersion: "0.9.0",
+                targetVersion: "0.9.2",
+                fingerprint: fingerprint
+            ),
+            now: { self.referenceDate }
+        )
+        storedJournal.recordPreflight()
+        storedJournal.recordDegradation(notPossible)
+        UpdateHistoryStore.record(
+            storedJournal.historyEntry(degradation: notPossible, advice: notPossible.manualAdvice),
+            to: defaults
+        )
+        XCTAssertEqual(
+            UpdateHistoryStore.load(from: defaults).first?.phases.first { $0.phase == .degrade }?.status,
+            .notPossible,
+            "“无法执行”必须能原样存取，不能回退成“成功”"
+        )
+    }
+
+    /// GitHub #106（W2B B-10）：本次运行没有文件系统探针时，不得把“没核对”写成
+    /// “证据已被覆盖、删除或不可执行”（那是另一条判定，且需要探针才能得出）。
+    func testUnavailableProbeIsAttributedToTheProbeNotToChangedEvidence() throws {
+        let fingerprint = UpdateArtifactFingerprint(
+            executablePath: oldExecutable,
+            resolvedPath: oldExecutable,
+            version: "0.9.0",
+            packageName: InstallCommandManifest.piWebPackageName,
+            fileSize: 100,
+            modifiedAt: referenceDate
+        )
+        let plan = UpdateDegradationPlanner.verificationFailure(
+            component: .piWeb,
+            source: .npmGlobal,
+            fingerprint: fingerprint,
+            newVersion: "0.9.2",
+            newResolvedPath: newExecutable,
+            failureReason: "版本重新检测达到目标失败：重新检测到 0.9.1",
+            probe: .disabled
+        )
+        XCTAssertEqual(plan.kind, .cannotAutomaticallyRollback)
+        XCTAssertEqual(plan.rollbackEligibility, .probeUnavailable)
+        XCTAssertNil(plan.restoredExecutablePath)
+        XCTAssertNil(plan.evidence, "没有探针就不做证据核对，也就没有证据等级可展示")
+        XCTAssertFalse(plan.performedAutomaticDegradation)
+        XCTAssertTrue(plan.reason.contains("没有可用的文件系统探针"))
+        XCTAssertTrue(UpdateRollbackEligibility.probeUnavailable.text.contains("无法核对"))
+
+        let rollbackDescription = UpdateHistoryDescription.rollbackDescription(for: plan)
+        for text in [plan.reason, plan.warningText, rollbackDescription] {
+            XCTAssertFalse(text.contains("已被覆盖、删除"), "探针不可用不得归因成证据被改动：\(text)")
+            XCTAssertFalse(text.contains(UpdateRollbackEligibility.evidenceChangedOrMissing.text),
+                           "探针不可用不得复用“证据已被覆盖/删除/不可执行”的文案：\(text)")
+            XCTAssertFalse(text.contains("不再可执行"), "没有探针就无从判断可执行位：\(text)")
+        }
+        XCTAssertTrue(rollbackDescription.contains(UpdateRollbackEligibility.probeUnavailable.text))
+
+        // 端到端：历史行与建议动作同样不得出现证据被改动的归因，降级结果是“无法执行”。
+        var journal = UpdateTransactionJournal(
+            configuration: UpdateTransactionJournal.Configuration(
+                component: .piWeb,
+                source: .npmGlobal,
+                previousVersion: "0.9.0",
+                targetVersion: "0.9.2",
+                fingerprint: fingerprint
+            ),
+            now: { self.referenceDate }
+        )
+        journal.recordPreflight()
+        journal.recordInstallSucceeded()
+        journal.recordCommitNotAttempted(reason: "验证阶段失败，未启用新版本")
+        journal.recordDegradation(plan)
+        let entry = journal.historyEntry(
+            degradation: plan,
+            advice: plan.manualAdvice,
+            resultingVersion: "0.9.1"
+        )
+        let lines = UpdateHistoryPresenter.lines(for: entry)
+        let degradeLine = try XCTUnwrap(lines.first { $0.hasPrefix("· 失败降级") })
+        XCTAssertTrue(degradeLine.contains("无法执行"), "探针不可用只能记“无法执行”：\(degradeLine)")
+        XCTAssertFalse(degradeLine.contains("成功"), "探针不可用不是“成功”：\(degradeLine)")
+        let joined = lines.joined(separator: " ")
+        XCTAssertFalse(joined.contains("已被覆盖、删除"))
+        XCTAssertTrue(joined.contains(UpdateRollbackEligibility.probeUnavailable.text))
+    }
+
+    /// GitHub #106（W2B B-6）：install 失败的“结果名”与持久警告必须是同一句话，
+    /// 不能再出现“仍在使用旧版本 / 系统状态未改变”这类没有核对过的断言。
+    func testInstallFailureWordingIsConsistentBetweenResultAndWarning() {
+        let fingerprint = UpdateArtifactFingerprint.versionOnly(
+            version: "0.9.0",
+            packageName: InstallCommandManifest.piWebPackageName
+        )
+        let plan = UpdateDegradationPlanner.installFailure(
+            component: .piWeb,
+            source: .npmGlobal,
+            fingerprint: fingerprint,
+            targetVersion: "0.9.2",
+            failureReason: "npm 安装命令以非零退出码结束（退出码 3）"
+        )
+        let rollbackDescription = UpdateHistoryDescription.rollbackDescription(for: plan)
+        XCTAssertEqual(plan.kind, .installFailedKeepingPreviousVersion)
+        XCTAssertEqual(plan.kind.displayName, "更新失败，没有执行任何回滚动作")
+        XCTAssertTrue(plan.warningText.contains(plan.kind.displayName), "结果名与持久警告必须是同一句话")
+        XCTAssertTrue(plan.reason.contains("本次没有执行任何回滚动作"))
+        XCTAssertTrue(rollbackDescription.contains("未尝试回滚"))
+        XCTAssertEqual(plan.rollbackEligibility, .stateNotVerified, "安装失败只记“没核对过旧文件”，不冒充“仍在旧文件上”")
+        for text in [plan.kind.displayName, plan.reason, plan.warningText] {
+            XCTAssertFalse(text.contains("仍在使用旧版本"), "安装失败没有核对过旧文件，不得断言仍在用旧版本：\(text)")
+            XCTAssertFalse(text.contains("系统状态未改变"), "命令失败不证明系统状态未改变，不得当结论写：\(text)")
+            XCTAssertFalse(text.contains("已降级"), "没有执行回滚动作就不能写“已降级”：\(text)")
+        }
+        // 历史里的降级说明只允许把这句话写成否定形式（“不断言系统状态未改变”）。
+        XCTAssertTrue(rollbackDescription.contains("因此不断言系统状态未改变"))
+        XCTAssertFalse(rollbackDescription.contains("仍在使用旧版本"))
+        XCTAssertFalse(rollbackDescription.contains("已降级"))
     }
 }

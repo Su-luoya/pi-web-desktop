@@ -918,6 +918,65 @@ final class PiCLIUpdateAdapterTests: XCTestCase {
         )
     }
 
+    /// B-3（复核）：`abandon()` 落在「进程已退出、只是在等管道读到 EOF」的宽限窗口里
+    /// 时并不算放弃等待：结果照常按真实退出码投递，也不得写一条 `finishedAt == nil`
+    /// 的「已放弃」记录。
+    func testRealExecutorAbandonDuringDrainGraceKeepsSuccessfulExit() throws {
+        let directory = try tempDirectory()
+        let marker = directory.appendingPathComponent("parent-exited")
+        // 后台子进程持有 stdout 写端：父脚本退出后管道不会立刻 EOF，结束流程会停在
+        // 「等排水宽限」这条路径上。宽限（5s）远大于断言耗时，abandon() 必定落在窗口内。
+        let script = try makeFakePi(
+            in: directory,
+            body: "sleep 5 &\necho done > \"\(marker.path)\"\nexit 0"
+        )
+        let abandonedCount = Locked<Int>()
+        let command = ProcessPiCLIUpdateCommand(
+            baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome],
+            recordAbandonedAttempt: { _ in abandonedCount.value = (abandonedCount.value ?? 0) + 1 },
+            pipeDrainGrace: 5
+        )
+        let box = Locked<PiCLIUpdateCommandResult>()
+        command.run(try plan(forScript: script), timeout: 30) { box.value = $0 }
+        XCTAssertTrue(waitForFile(marker.path, timeout: 20), "父脚本必须已经跑到退出前的最后一步")
+        // 父脚本只剩一句 exit：再留一点余量让退出被观察到，使 abandon() 确定地落在
+        // 排水宽限窗口里（宽限 5s，不受这点耗时影响）。
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        command.abandon()
+        let result = try XCTUnwrap(waitForValue(box, timeout: 20))
+        XCTAssertEqual(result.exitCode, 0, "排水窗口里的 abandon() 不得把真实退出码改写成 nil")
+        XCTAssertFalse(result.abandoned, "排水窗口里的 abandon() 不算放弃等待")
+        XCTAssertFalse(result.timedOut)
+        XCTAssertNil(result.failure)
+        XCTAssertEqual(abandonedCount.value ?? 0, 0, "排水窗口里的 abandon() 不得写「已放弃」记录")
+    }
+
+    /// B-2 同型（复核）：超时落在「进程已退出、只是在等管道读到 EOF」的宽限窗口里时
+    /// 不得判成超时，也不得写「已放弃」记录。扩展包执行器有同型用例，本执行器此前缺这条
+    /// （超时只看了当前轮的身份，没看排水窗口）。
+    func testRealExecutorSuccessfulExitWinsOverDrainGraceTimeout() throws {
+        let directory = try tempDirectory()
+        // 后台子进程持有 stdout 写端：父脚本退出后管道不会立刻 EOF，结束流程会走
+        // 「等排水宽限」这条路。
+        let script = try makeFakePi(in: directory, body: "sleep 5 &\nexit 0")
+        let abandonedCount = Locked<Int>()
+        // 宽限窗口（3s）远大于超时（1s）：超时必定落在「进程已退出、管道还没读到 EOF」
+        // 的窗口内——确定性地覆盖这条竞态，不依赖机器快慢。
+        let command = ProcessPiCLIUpdateCommand(
+            baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome],
+            recordAbandonedAttempt: { _ in abandonedCount.value = (abandonedCount.value ?? 0) + 1 },
+            pipeDrainGrace: 3
+        )
+        let box = Locked<PiCLIUpdateCommandResult>()
+        command.run(try plan(forScript: script), timeout: 1) { box.value = $0 }
+        let result = try XCTUnwrap(waitForValue(box, timeout: 20))
+        XCTAssertEqual(result.exitCode, 0, "已观测到退出码 0 时不得判定为超时")
+        XCTAssertFalse(result.timedOut, "已观测到退出码 0 时不得判定为超时")
+        XCTAssertFalse(result.abandoned)
+        XCTAssertNil(result.failure)
+        XCTAssertEqual(abandonedCount.value ?? 0, 0, "成功退出不得写「已放弃」记录")
+    }
+
     /// 非 UTF-8 分块 lossy 保留，而不是整块丢弃（W2A A-6）。
     func testRealExecutorKeepsNonUTF8OutputChunk() throws {
         let directory = try tempDirectory()

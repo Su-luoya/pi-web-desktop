@@ -1307,7 +1307,8 @@ enum PiWebUpdateRunOutcome: Equatable {
                 oldVersion: oldVersion,
                 newVersion: plan.installedVersion,
                 targetVersion: targetVersion,
-                reason: "更新失败，仍在使用旧版本：\(failure.text)"
+                // B-6：命令失败不证明旧文件没被改动，不写“仍在使用旧版本”这类没有探针支撑的断言。
+                reason: "更新失败，没有执行任何回滚动作：\(failure.text)"
             )
         case .versionUnchanged(_, let detectedVersion, let oldVersion, let targetVersion):
             return PiWebUpdateWarning(

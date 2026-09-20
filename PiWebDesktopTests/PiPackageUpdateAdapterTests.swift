@@ -1270,6 +1270,10 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
         XCTAssertEqual(rejected.failure, .notAttempted)
         XCTAssertNil(rejected.exitCode)
         XCTAssertEqual(spawnCount("start"), 1, "被拒绝的 run 不得启动第二个子进程")
+        XCTAssertTrue(
+            rejected.awaitingAbandonedChildExit,
+            "拒绝原因是「上一次命令已放弃等待、退出未确认」，必须能被调用方区分出来"
+        )
 
         // 3. 放掉旧子进程，等它的退出被确认：计数必须结清，run 必须能再执行。
         //    用轮询而不是固定睡眠，既证明不是永久拒绝，也不绑定亚秒级时序。
@@ -1337,6 +1341,96 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
         XCTAssertFalse(result.notAttempted)
         XCTAssertNil(result.failure)
         XCTAssertEqual(abandonedCount.value ?? 0, 0, "成功退出不得写「已放弃」记录")
+    }
+
+    /// B-3（复核）：`abandon()` 落在「进程已退出、只是在等管道读到 EOF」的宽限窗口里
+    /// 时并不算放弃等待：结果照常按真实退出码投递，也不得写一条 `finishedAt == nil`
+    /// 的「已放弃」记录（那是失实的历史，登记也永远无人结清）。
+    func testRealExecutorAbandonDuringDrainGraceKeepsSuccessfulExit() throws {
+        let directory = try tempDirectory()
+        let marker = directory.appendingPathComponent("parent-exited")
+        // 后台子进程持有 stdout 写端：父脚本退出后管道不会立刻 EOF，结束流程会停在
+        // 「等排水宽限」这条路径上。宽限（5s）远大于断言耗时，abandon() 必定落在窗口内。
+        let script = try makeFakePi(
+            in: directory,
+            body: "sleep 5 &\necho done > \"\(marker.path)\"\nexit 0"
+        )
+        let abandonedCount = Locked<Int>()
+        let command = ProcessPiPackageUpdateCommand(
+            baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome],
+            recordAbandonedAttempt: { _ in abandonedCount.value = (abandonedCount.value ?? 0) + 1 },
+            pipeDrainGrace: 5
+        )
+        let box = Locked<PiPackageUpdateCommandResult>()
+        command.run(try plan(forScript: script), timeout: 30) { box.value = $0 }
+        XCTAssertTrue(waitForFile(marker.path, timeout: 20), "父脚本必须已经跑到退出前的最后一步")
+        // 父脚本只剩一句 exit：再留一点余量让退出被观察到，使 abandon() 确定地落在
+        // 排水宽限窗口里（宽限 5s，不受这点耗时影响）。
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        command.abandon()
+        let result = try XCTUnwrap(waitForValue(box, timeout: 20))
+        XCTAssertEqual(result.exitCode, 0, "排水窗口里的 abandon() 不得把真实退出码改写成 nil")
+        XCTAssertFalse(result.abandoned, "排水窗口里的 abandon() 不算放弃等待")
+        XCTAssertFalse(result.timedOut)
+        XCTAssertNil(result.failure)
+        XCTAssertEqual(abandonedCount.value ?? 0, 0, "排水窗口里的 abandon() 不得写「已放弃」记录")
+    }
+
+    /// B-1/W3（复核）：「上一次命令已放弃等待、退出还没确认」导致的拒绝必须能与
+    /// 「真正重叠」区分开，并给出「重启应用可恢复」的可见原因。
+    func testBusyRunAwaitingAbandonedChildExitReportsRecoverableReason() throws {
+        let ready = try XCTUnwrap(plan())
+        let world = World(fixtureHome: fixtureHome)
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        world.runner.result = { _ in
+            PiPackageUpdateCommandResult(
+                exitCode: nil,
+                notAttempted: true,
+                awaitingAbandonedChildExit: true,
+                startedAt: now,
+                finishedAt: now
+            )
+        }
+        var batch: PiPackageUpdateBatchOutcome?
+        world.makeCoordinator().runConfirmed([ready]) { batch = $0 }
+
+        let outcome = try XCTUnwrap(batch)
+        guard case .notAttempted(let name, let reason) = outcome.outcomes[0] else {
+            return XCTFail("执行器拒绝时必须如实记为「未执行」，实际是 \(outcome.outcomes)")
+        }
+        XCTAssertEqual(name, packageName)
+        XCTAssertEqual(reason, .executorBusyAwaitingAbandonedChildExit)
+        XCTAssertTrue(
+            reason.text.contains("重启应用即可恢复"),
+            "未确认退出的拒绝必须给出可恢复路径：\(reason.text)"
+        )
+        XCTAssertTrue(world.log.text.contains("重启应用即可恢复"), "日志同样要给出可恢复路径")
+        XCTAssertEqual(world.runner.plans.count, 1)
+    }
+
+    /// 对照组：真正重叠（旧子进程还在运行）时的拒绝仍是笼统的「执行器忙」，不冒充
+    /// 「重启应用可恢复」——那个窗口重启才有用。
+    func testBusyRunWithoutUnconfirmedChildReportsExecutorBusy() throws {
+        let ready = try XCTUnwrap(plan())
+        let world = World(fixtureHome: fixtureHome)
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        world.runner.result = { _ in
+            PiPackageUpdateCommandResult(
+                exitCode: nil,
+                notAttempted: true,
+                startedAt: now,
+                finishedAt: now
+            )
+        }
+        var batch: PiPackageUpdateBatchOutcome?
+        world.makeCoordinator().runConfirmed([ready]) { batch = $0 }
+
+        let outcome = try XCTUnwrap(batch)
+        guard case .notAttempted(_, let reason) = outcome.outcomes[0] else {
+            return XCTFail("执行器拒绝时必须如实记为「未执行」，实际是 \(outcome.outcomes)")
+        }
+        XCTAssertEqual(reason, .executorBusy)
+        XCTAssertFalse(reason.text.contains("重启应用即可恢复"), "重叠不是重启才能恢复的窗口")
     }
 
     /// B-1：协调器连续两批更新都必须回调（旧实现里第二批会被静默丢弃）。

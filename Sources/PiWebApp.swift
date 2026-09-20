@@ -1702,6 +1702,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             logPiCLIUpdate("Pi CLI 更新未执行：\(reason.text)")
             if manual {
                 var detail = "原因：\(reason.text)"
+                // L-3：CLI 的「更新进行中」拒绝文案本身不带恢复路径（Web 与扩展包都有）。
+                // 只有「已放弃等待、退出未确认」这种窗口才提示重启；真正的更新事务还在跑
+                // 时不能建议重启。
+                if reason == .updateAlreadyInProgress, piCLIUpdateRunner.abandonedChildrenUnconfirmed {
+                    detail += "\n\n上一次更新命令已放弃等待，但还不能确认它已经退出；"
+                        + "如果长时间没有变化，重启应用即可恢复（重启后这个未确认窗口不会保留）。"
+                }
                 if let commandText {
                     detail += "\n\n可以手动执行：\(logRedactor.redact(commandText))"
                 }

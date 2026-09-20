@@ -587,6 +587,10 @@ enum PiWebUpdatePlanner {
 /// 只使用两条证据：检测到的 npm 全局前缀（由 pi-web 的可执行文件 / 真实路径
 /// 推导）与 `PATH` 解析结果；候选路径必须通过注入文件系统探针的可执行位确认。
 /// 解析不出时返回 nil：绝不猜测路径，也绝不回退到 shell。
+///
+/// 信任模型（F3，GitHub #121）与 `PiCLIUpdatePlan.isSafeExecutablePath` 一致：
+/// `PATH` 目录即信任边界，解析结果不固定位置、不校验签名；这里只保证用的是绝对路径、
+/// 没有 `.`/`..` 与 shell 元字符，且确实带可执行位。
 struct PiWebUpdateNPMResolver {
     var fileSystem: DependencyFileSystemProbing
     var environment: [String: String]
@@ -692,6 +696,10 @@ struct PiWebUpdateInstallResult: Equatable {
     /// 停止等待时对本次子进程实际做了什么（超时/取消才非 nil）：用于记录「已放弃」
     /// 状态与日志，让人知道“超时”不等于“进程已经结束”。
     var childProcessAction: UpdateAbandonedAttempt.ChildProcessAction?
+    /// 取消请求落在「子进程已退出、只是在等管道读到 EOF」的收尾窗口内（F5，GitHub #121）：
+    /// 这种情况不会写「已取消」，结果按真实退出码投递；此标记用于如实区分
+    /// 「取消落在收尾窗口内」与「没来得及取消」。
+    var cancelRequestedDuringFinish: Bool
 
     init(
         exitCode: Int32?,
@@ -702,7 +710,8 @@ struct PiWebUpdateInstallResult: Equatable {
         startedAt: Date,
         finishedAt: Date,
         outputTail: String? = nil,
-        childProcessAction: UpdateAbandonedAttempt.ChildProcessAction? = nil
+        childProcessAction: UpdateAbandonedAttempt.ChildProcessAction? = nil,
+        cancelRequestedDuringFinish: Bool = false
     ) {
         self.exitCode = exitCode
         self.timedOut = timedOut
@@ -713,6 +722,7 @@ struct PiWebUpdateInstallResult: Equatable {
         self.finishedAt = finishedAt
         self.outputTail = outputTail
         self.childProcessAction = childProcessAction
+        self.cancelRequestedDuringFinish = cancelRequestedDuringFinish
     }
 
     /// nil 表示执行成功（退出码 0 且未超时/取消）。超时与取消优先于退出码。
@@ -1062,6 +1072,8 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
         var cancelled = false
         var outputTail = ""
         var outputDecoder = IncrementalUTF8Decoder()
+        /// 取消请求落在了收尾窗口内（F5，GitHub #121）：不发信号、不改判定，只留下事实。
+        var cancelRequestedDuringFinish = false
         /// 没有输出管道时视为已经排空；建立管道后改为 false，读到 EOF 再置回 true。
         var outputDrained = true
         /// 已确认退出、但仍在等待输出管道 EOF 时暂存真实退出码。
@@ -1123,8 +1135,13 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
 
     func cancel() {
         stateQueue.async { [weak self] in
-            guard let self, let attempt = self.attempt,
-                  attempt.pendingFinish == nil else { return }
+            guard let self, let attempt = self.attempt else { return }
+            // F5（GitHub #121）：排水宽限窗口内子进程已经退出，没有信号可发。取消不会生效，
+            // 但也不能静默：留下标记，结果与日志都能区分「取消被忽略」与「没来得及取消」。
+            guard attempt.pendingFinish == nil else {
+                attempt.cancelRequestedDuringFinish = true
+                return
+            }
             attempt.cancelled = true
             self.stopWaitingLocked(attempt, reason: .abandonedWaiting)
             self.finishLocked(attempt, exitCode: nil)
@@ -1359,7 +1376,8 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
             startedAt: attempt.startedAt,
             finishedAt: finishedAt,
             outputTail: attempt.outputTail.isEmpty ? nil : attempt.outputTail,
-            childProcessAction: attempt.childProcessAction
+            childProcessAction: attempt.childProcessAction,
+            cancelRequestedDuringFinish: attempt.cancelRequestedDuringFinish
         )
         deliver(result, to: attempt.completion)
     }
@@ -1429,7 +1447,10 @@ enum PiWebUpdateRunOutcome: Equatable {
                 oldVersion: oldVersion,
                 newVersion: detectedVersion,
                 targetVersion: targetVersion,
-                reason: "更新后验证失败，仍在使用更新前的版本：安装命令已结束，但重新检测到的版本是 \(detectedVersion ?? "未知")，未达到目标版本"
+                // L-2：与 CLI / 扩展包同一处理：nil 时不作版本状态断言。
+                reason: detectedVersion.map { detected in
+                    "更新后验证失败，仍在使用更新前的版本：安装命令已结束，但重新检测到的版本是 \(detected)，未达到目标版本"
+                } ?? "更新后验证失败：安装命令已结束，但重新检测没有给出可用的版本结果，因此无法判断是否达到目标版本"
             )
         case .healthCheckFailed(let plan, let oldVersion, let newVersion):
             return PiWebUpdateWarning(
@@ -1614,6 +1635,14 @@ final class PiWebUpdateCoordinator {
                 }
                 return
             }
+            // F5（GitHub #121）：取消请求落在收尾窗口内时不写「已取消」，也不截断结果；
+            // 但这句要记下来，免得「取消被忽略」看起来像「成功了」的静默结果。
+            if result.cancelRequestedDuringFinish {
+                self.logOutcome(
+                    "Pi Web 取消请求落在收尾窗口内：安装进程已经退出，只是还在等管道读到 EOF，"
+                        + "没有信号可发；结果按真实退出码处理。"
+                )
+            }
             if let failure = result.failure {
                 let degradation = UpdateDegradationPlanner.installFailure(
                     component: component,
@@ -1633,18 +1662,21 @@ final class PiWebUpdateCoordinator {
                 )
                 self.logOutcome(
                     "Pi Web 更新失败（\(failure.text)）：退出码 \(result.exitCode.map(String.init) ?? "无")，"
-                    + "当前版本 \(plan.installedVersion)，目标版本 \(plan.targetVersion)。旧版本保持不变。"
+                    + "当前版本 \(plan.installedVersion)，目标版本 \(plan.targetVersion)。本次没有执行任何回滚动作。"
                     + (result.childProcessAction.map { "本次实际动作：\($0.text)。" } ?? "")
                 )
                 if let tail = result.outputTail, !tail.isEmpty {
                     self.logOutputTail(tail)
                 }
+                // F6（GitHub #121）：outcome 会跨类型边界交给 UI，构造前先脱敏，
+                // 不把未脱敏的输出尾巴留在结果里（日志路径本来就是脱敏的）。
+                let outcomeTail = result.outputTail.map { self.environment.redactor.redact($0) }
                 let outcome = PiWebUpdateRunOutcome.installFailed(
                     plan: plan,
                     failure: failure,
                     oldVersion: plan.installedVersion,
                     targetVersion: plan.targetVersion,
-                    outputTail: result.outputTail
+                    outputTail: outcomeTail
                 )
                 self.environment.deliver { completion(outcome) }
                 return

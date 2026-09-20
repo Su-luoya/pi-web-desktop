@@ -41,7 +41,7 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 
 `ServiceManager` 的每个副作用都经过注入的依赖，测试因此不接触真实进程、定时器或网络：
 
-- `CommandRunning`：`ps`/`lsof`/`zsh` 等命令；`SystemCommandRunner` 是唯一真实实现。
+- `CommandRunning`：`ps`/`lsof`/`zsh` 等命令；`SystemCommandRunner` 是唯一真实实现，对每条命令都有超时上限（`timeout` 可注入，默认 10 秒；超时/取消时只尽力终止本次启动的子进程），并用 `CommandRunResult` 区分“超时/取消”与普通不可用。
 - `ProcessInspector`：监听 PID、进程存活判断、`pgid`/`lstart`/`comm` 事实读取；其中 `processIsAlive` 闭包可注入，测试里完全不看真实进程。
 - `ServiceLaunching`：全项目唯一启动服务进程的地方（`SystemServiceLauncher`）。生产实现用 `posix_spawn` + `POSIX_SPAWN_SETPGROUP` 让子进程成为独立进程组的组长，并保留日志重定向、环境变量、工作目录和 stdin 为 `/dev/null`；测试用假实现断言完整命令行与环境变量。远程模式下 `PI_WEB_PASSWORD` 只出现在这个环境字典里（见下节）。
 - `ServiceOwnershipStoring`：`service-owner.json` 的读写（`FileServiceOwnershipStore`）；测试可以注入写入失败的实现来验证“启动后写不进记录就终止刚启动的进程组”。
@@ -70,7 +70,7 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 
 ## 依赖诊断与启动门控
 
-`AppDelegate` 在启动时（smoke 启动除外）异步运行 `DependencyChecker`：命令执行会阻塞，检查在后台队列完成，结果回到主线程后决定路由与门控；检查期间启动/停止/重启菜单项全部保持禁用。
+`AppDelegate` 在启动时（smoke 启动除外）异步运行 `DependencyChecker`：命令探针是同步阻塞调用（现在有超时上限），因此整份检查经 `CommandProbeDispatch.runOffMain` 放到后台队列，结果回到主队列后决定路由与门控；检查期间启动/停止/重启菜单项全部保持禁用。同一条线程约定也用于“选择 pi-web 路径…”的身份校验（`--version` 探针）：校验在后台队列完成，主队列只做配置写入与提示。
 
 `DependencyReport` 有两条派生规则：
 
@@ -97,13 +97,23 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 
 - 路由 `mainWindow`：与拆分前一致——显示“正在检查 Pi Web 服务…”，调用 `serviceManager.startAtLaunch()`；诊断窗口只在用户主动打开时显示。
 - 路由 `diagnostics`：服务控件按 `ServiceControlState` 禁用（`.blocked` 时 start/stop/restart 全不可用），不调用 `startAtLaunch()`，WebView 显示诊断状态页（六个诊断项，每项都有状态、路径、版本、安装来源、可信度五个字段，缺失值用“未找到/未知”占位而不是省略整行）而不是服务地址，并打开/刷新诊断窗口。`.blocked` 时还会 `stopHealthMonitor()` 并把状态置为 stopped，避免健康检查把状态改回 running。
-- “重新检测”只是重新运行一次 `DependencyChecker`（使用当前 `ServiceConfiguration.piWebPath`）；前置满足后立即打开门控、撤销控件禁用并进入主窗口，无需重启应用。“选择 pi-web 路径…”经 `NSOpenPanel` 选择文件，`PiWebPathSelection` 要求绝对路径、可执行，并且身份可核对（`--version` 能解析出版本，或沿真实路径向上找到的 package.json `name` 就是 `@agegr/pi-web`）：`/bin/echo` 这类可执行但不是 pi-web 的文件会被拒绝，失败时返回可读错误、配置不变；成功时经 `AppConfiguration` 写回 `ServiceConfiguration.piWebPath`，随后立即重新检测。身份证据由 `DependencyChecker.piWebIdentityEvidence(atPath:)` 收集，只执行 `--version` 并读 package.json 的 `name`，不安装、不联网。
+- “重新检测”只是重新运行一次 `DependencyChecker`（使用当前 `ServiceConfiguration.piWebPath`）；前置满足后立即打开门控、撤销控件禁用并进入主窗口，无需重启应用。“选择 pi-web 路径…”经 `NSOpenPanel` 选择文件，`PiWebPathSelection` 要求绝对路径、可执行，并且身份可核对（`--version` 能解析出版本，或沿真实路径向上找到的 package.json `name` 就是 `@agegr/pi-web`）：`/bin/echo` 这类可执行但不是 pi-web 的文件会被拒绝。校验在后台队列执行（`CommandProbeDispatch`，`--version` 探针因此不阻塞主线程），失败时主线程弹出可读提示、配置不变；成功时经 `AppConfiguration` 写回 `ServiceConfiguration.piWebPath`，随后立即重新检测。身份证据由 `DependencyChecker.piWebIdentityEvidence(atPath:)` 收集，只执行 `--version` 并读 package.json 的 `name`，不安装、不联网。
 
 `PI_WEB_DESKTOP_SMOKE=1` 在 `applicationDidFinishLaunching` 的第一个分支返回，因此启动 smoke 完全跳过依赖门控（不运行 checker、不等待后台结果），只验证窗口建立与退出路径。`PI_WEB_DESKTOP_SMOKE=diagnostics` 在另一个分支返回：它使用 `DiagnosticsSmokeFixture` 的确定性报告（固定探针，不执行命令、不读真实磁盘或 `~/.pi`、不绑定真实端口），跑真实的 `DiagnosticsRouting` 决策，渲染诊断状态页并建立诊断窗口，然后打印固定标记并以 0 退出；两者都不写真实 support 目录或 UserDefaults。
 
 门控不只在菜单层生效：`ServiceManager.isDependencyGateOpen`（默认关闭，`AppDelegate` 在诊断期间保持关闭、结果通过后打开）是所有服务启动入口的硬前置。`startAtLaunch()`、`ensureServerIsRunning()`、`startService()`、`startManagedService()`、`reloadAfterConfigurationChange()`、启动轮询（`pollUntilReady()`）和健康检查在入口以及每个异步主队列回调执行前都重新确认门控，因此配置变更重载、启动失败重试、外部服务恢复和健康恢复都不能绕过诊断结果；门控关闭时既不启动子进程、不加载服务页，也不改变状态或报启动失败。诊断判定阻塞时 `AppDelegate` 还会调用 `stopHealthMonitor()`（健康轮询本身也在入口拒绝启动），避免健康检查把状态改回 `running`、把诊断页覆盖回服务页。
 
 诊断文本只包含已脱敏的字段：Home 前缀替换为 `~`，URL 去掉 userinfo、query 和 fragment；不写入用户名、绝对 Home 路径、凭据、token 或查询参数。导出前整段文本经过与日志、错误消息、环境变量/命令行展示共用的 `LogRedactor`（规则见 [日志与诊断导出](logging-and-diagnostics.md)）。Pi 配置目录只报告路径（`~/.pi/agent`）与“存在/可读”状态：既不做目录列表，也不读取目录内任何文件，认证内容永远不会进入报告。
+
+### 探针超时与取消语义
+
+依赖诊断与诊断导出共用的 `SystemCommandRunner` 对每条命令都有超时上限（`timeout` 可注入，默认 `SystemCommandRunner.defaultTimeout` = 10 秒；等待 SIGTERM 生效的宽限默认为 0.5 秒）。语义：
+
+- **超时**：`waitForExit` 到期仍未退出时，只对**本次启动的**子进程发一次 `SIGTERM`，宽限后仍未退出才补一次 `SIGKILL`；绝不按名字或进程组发信号，也不触碰任何 Pi 进程。结果返回 `CommandRunResult(output: nil, timedOut: true)`；旧入口 `run(_:)` 仍返回 nil（按不可用处理），差异是超时/取消可以在带超时的入口里区分出来。
+- **取消**：`cancelRunningProbe()` 只终止“取消时正在进行”的那一次子进程，取消标记不粘到后续探测。应用退出（`applicationWillTerminate`）会调用它，挂住的探针因此不会拖住退出路径。
+- **按不可用处理，并给出可读原因**：`DependencyChecker` 用 `TimedProbeCommandRunner` 包一层，记下每条超时的探针，把“路径解析或 `--version` 探测超时”映射成诊断项的 `DependencyFinding.detail`（“依赖探测超时：命令在 N 秒上限内没有返回”）：状态按 `missing` / `unknown` 处理，`canStartService` 因此为 false，但门控**不会**停在 `.checking`——诊断状态页会打印原因行与“请检查登录 shell（`~/.zprofile` 等）是否会阻塞命令，然后点击‘重新检测’”的下一步。超时不是粘性状态：下一次正常探测立即恢复就绪（有单测断言）。
+- **不死锁**：stdout 在等待循环里用非阻塞读排空，子进程输出超过管道缓冲（64 KiB）也不会把双方锁死。
+- 测试向 `spawn` 注入 `ProbeProcess` 替身，因此“超时后先 SIGTERM、宽限后 SIGKILL”“取消只终止本次子进程且不粘住后续探测”“主线程不阻塞（`CommandProbeDispatch` 的工作不在调用线程执行、结果只经注入的交付点送达）”都在不启动真实命令的前提下可断言。
 
 ## 服务所有权
 

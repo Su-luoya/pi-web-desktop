@@ -407,6 +407,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         updateChecker?.stop()
         // 进行中的受限自动安装也必须终止：取消按失败处理，不留孤儿进程。
         piWebUpdateInstaller.cancel()
+        // 依赖探针（`--version` / `command -v` / `ps` / `lsof`）不再等待：取消只会
+        // 终止本次启动的子进程，不按名字或进程组发信号。
+        commandRunner.cancelRunningProbe()
         // Pi CLI 更新命令只放弃等待：本应用不向任何进程发送信号。
         piCLIUpdateRunner.abandon()
         serviceManager.stopHealthMonitor()
@@ -766,8 +769,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         )
     }
 
-    /// 启动时与“重新检测”共用的环境检查。命令执行会阻塞，因此放到后台；
-    /// 结果回到主线程后再决定路由与门控。检查期间服务控件保持禁用。
+    /// 启动时与“重新检测”共用的环境检查。命令探针是同步阻塞调用（现在有超时
+    /// 上限，超时按不可用处理并写进诊断项的“原因”），因此整份检查走
+    /// `CommandProbeDispatch`：后台执行、结果回到主队列再决定路由与门控。
+    /// 检查期间服务控件保持禁用。
     private func runDependencyCheck(triggeredByUser: Bool = false) {
         dependencyGate = .checking
         applyServiceControlAvailability()
@@ -786,12 +791,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // 与 smoke 用默认 `.none`，因此不会读到真实 bundle 路径。
             applicationInstallation: .current
         )
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let report = checker.run()
-            DispatchQueue.main.async {
-                guard let self, generation == self.dependencyCheckGeneration else { return }
-                self.applyDependencyReport(report, triggeredByUser: triggeredByUser)
-            }
+        CommandProbeDispatch.runOffMain(work: { checker.run() }) { [weak self] report in
+            guard let self, generation == self.dependencyCheckGeneration else { return }
+            self.applyDependencyReport(report, triggeredByUser: triggeredByUser)
         }
     }
 
@@ -923,7 +925,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             )
             controller.onRecheck = { [weak self] in self?.runDependencyCheck(triggeredByUser: true) }
             controller.onContinue = { [weak self] in self?.completeFirstLaunchSetup() }
-            controller.onSelectPiWebPath = { [weak self] path in self?.applySelectedPiWebPath(path) }
+            controller.onSelectPiWebPath = { [weak self] path in
+                self?.applySelectedPiWebPath(path)
+                return nil
+            }
             controller.onUpdatePiCLI = { [weak self] in self?.updatePiCLINow(nil) }
             // 与菜单“复制诊断”完全同一条导出路径（W4 M3：提醒 → 后台采集 → 复制）。
             controller.onExportDiagnostics = { [weak self] in
@@ -945,24 +950,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    /// 用户选择的 pi-web 路径：校验失败（不可执行或无法确认是 pi-web）时返回可读
+    /// 用户选择的 pi-web 路径：校验失败（不可执行或无法确认是 pi-web）时显示可读
     /// 错误且不碰配置；成功时经 `AppConfiguration` 写回 `ServiceConfiguration.piWebPath`，
     /// 随即重新检测。身份证据只来自只读的 `--version` 与 package.json `name`。
-    private func applySelectedPiWebPath(_ path: String) -> String? {
+    ///
+    /// 校验会执行 `--version`（同步阻塞、有超时上限），因此不在主线程做：
+    /// 后台队列校验，主队列写配置与提示（与依赖检查同一条线程约定）。
+    /// 参数探测失败时保留原配置，提示的可读文案与原同步实现一致。
+    private func applySelectedPiWebPath(_ path: String) {
+        let configuration = serviceManager.configuration
         let checker = DependencyChecker(commandRunner: commandRunner)
-        let result = PiWebPathSelection.apply(
-            selectedPath: path,
-            configuration: serviceManager.configuration,
-            evidence: { checker.piWebIdentityEvidence(atPath: $0) }
-        )
-        guard let error = result.error else {
-            let configuration = result.configuration
-            appConfiguration.save(configuration)
-            serviceManager.updateConfiguration(configuration)
-            runDependencyCheck(triggeredByUser: true)
-            return nil
+        CommandProbeDispatch.runOffMain(work: {
+            PiWebPathSelection.apply(
+                selectedPath: path,
+                configuration: configuration,
+                evidence: { checker.piWebIdentityEvidence(atPath: $0) }
+            )
+        }) { [weak self] result in
+            guard let self else { return }
+            guard let error = result.error else {
+                let updated = result.configuration
+                self.appConfiguration.save(updated)
+                self.serviceManager.updateConfiguration(updated)
+                self.runDependencyCheck(triggeredByUser: true)
+                return
+            }
+            self.presentPiWebPathSelectionError(error)
         }
-        return error
+    }
+
+    /// 异步路径校验失败时的可读提示（配置保持原样）。
+    private func presentPiWebPathSelectionError(_ message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "无法使用所选的 pi-web 路径"
+        alert.informativeText = message
+        alert.addButton(withTitle: "好")
+        alert.beginSheetModal(for: window)
     }
 
     /// 首次设置完成：记录状态后用最近一次报告重新走路由，随即进入主窗口。

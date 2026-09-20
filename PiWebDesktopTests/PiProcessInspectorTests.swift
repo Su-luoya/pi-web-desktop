@@ -28,6 +28,8 @@ final class PiProcessInspectorTests: XCTestCase {
     private final class MemoryFileSystemProbe: DependencyFileSystemProbing {
         var executables: Set<String> = []
         var symlinks: Set<String> = []
+        /// 符号链接能解析到的真实路径；不在表里的符号链接视为断裂（无法解析）。
+        var resolvedPaths: [String: String] = [:]
         private(set) var probedPaths: [String] = []
         let homeDirectory: String
 
@@ -47,6 +49,7 @@ final class PiProcessInspectorTests: XCTestCase {
 
         func resolvedPath(atPath path: String) -> String? {
             probedPaths.append(path)
+            if let resolved = resolvedPaths[path] { return resolved }
             return executables.contains(path) ? path : nil
         }
 
@@ -59,11 +62,13 @@ final class PiProcessInspectorTests: XCTestCase {
     private func makeInspector(
         snapshots: [PiProcessSnapshot],
         executables: Set<String> = [],
-        symlinks: Set<String> = []
+        symlinks: Set<String> = [],
+        resolvedPaths: [String: String] = [:]
     ) -> (inspector: PiProcessInspector, fileSystem: MemoryFileSystemProbe) {
         let fileSystem = MemoryFileSystemProbe(homeDirectory: fixtureHome)
         fileSystem.executables = executables
         fileSystem.symlinks = symlinks
+        fileSystem.resolvedPaths = resolvedPaths
         let inspector = PiProcessInspector(
             probe: .fixture(snapshots),
             fileSystem: fileSystem,
@@ -356,17 +361,61 @@ final class PiProcessInspectorTests: XCTestCase {
         XCTAssertEqual(Set(fileSystem.probedPaths), [scriptPath])
     }
 
-    /// 符号链接（npm 全局安装的 `bin/pi` → 包内 `cli.js`）同样算命中。
+    /// 符号链接（npm 全局安装的 `bin/pi` → 包内 `cli.js`）能解析到目标时同样算
+    /// 命中；断裂的符号链接见下面的 `unknown` 用例。
     func testInterpreterScriptSymlinkMatchesPi() {
         let scriptPath = "/opt/homebrew/bin/pi"
+        let resolvedPath = "/opt/homebrew/lib/node_modules/@agegr/pi-cli/cli.js"
         let (inspector, _) = makeInspector(
             snapshots: [nodeSnapshot(pid: 700, arguments: [nodePath, scriptPath])],
-            symlinks: [scriptPath]
+            symlinks: [scriptPath],
+            resolvedPaths: [scriptPath: resolvedPath]
         )
         guard case .runningProcesses(let records) = inspector.inspect() else {
-            return XCTFail("符号链接路径为 pi 时应命中")
+            return XCTFail("可解析的符号链接路径为 pi 时应命中")
         }
         XCTAssertEqual(records[0].matchSource, .interpreterScript)
+    }
+
+    /// 相对路径的解释器脚本（`./pi`、`../bin/pi`、解释器脚本位置的裸 `pi`）一律按
+    /// 不确定处理（L2）：无法确认它相对哪个工作目录解析，判 `notPi` 是漏判方向。
+    /// 相对路径也不读磁盘探针。
+    func testRelativeInterpreterScriptPathsAreUnknown() {
+        for relativePath in ["./pi", "../bin/pi", "pi"] {
+            let (inspector, fileSystem) = makeInspector(snapshots: [
+                nodeSnapshot(pid: 1300, arguments: [nodePath, relativePath])
+            ])
+            XCTAssertEqual(
+                inspector.inspect(),
+                .unknown(.scriptPathUnconfirmed(pid: 1300, path: relativePath)),
+                "\(relativePath) 应判 unknown（不确定即不安全），而不是 notPi"
+            )
+            XCTAssertTrue(fileSystem.probedPaths.isEmpty, "相对路径不应触发磁盘探针")
+        }
+    }
+
+    /// 符号链接断裂（目标是文件但无法解析、目标不存在）同样是 `unknown`；
+    /// 它既不能证明脚本存在，也不能证明脚本不存在。
+    func testBrokenInterpreterScriptSymlinkIsUnknown() {
+        let path = "/opt/homebrew/bin/pi"
+        let (inspector, fileSystem) = makeInspector(
+            snapshots: [nodeSnapshot(pid: 1400, arguments: [nodePath, path])],
+            symlinks: [path]
+        )
+        XCTAssertEqual(inspector.inspect(), .unknown(.scriptPathUnconfirmed(pid: 1400, path: path)))
+        XCTAssertEqual(Set(fileSystem.probedPaths), [path])
+        XCTAssertFalse(inspector.inspect().allowsAutomaticUpdate)
+    }
+
+    /// 数据参数位置的裸 `pi`（`node app.js pi`、`node --title pi`）仍不算脚本路径，
+    /// 也不读磁盘；只有解释器的脚本位置（index 1）的裸名才算候选。
+    func testBarePiInDataArgumentPositionStaysNotPi() {
+        let (inspector, fileSystem) = makeInspector(snapshots: [
+            nodeSnapshot(pid: 1500, arguments: ["node", "app.js", "pi"]),
+            nodeSnapshot(pid: 1501, arguments: ["node", "--title", "pi"])
+        ])
+        XCTAssertEqual(inspector.inspect(), .noProcesses)
+        XCTAssertTrue(fileSystem.probedPaths.isEmpty)
     }
 
     /// Pi CLI 会把进程标题改写成 `pi`（原始参数被清零）：`argv[0] == "pi"`
@@ -611,6 +660,79 @@ final class PiProcessInspectorTests: XCTestCase {
         ])
         XCTAssertFalse(combined.contains(secret))
         XCTAssertEqual(combined.components(separatedBy: LogRedactor.marker).count - 1, 5)
+    }
+
+    /// M6：短开关的大小写与三种取值形态逐条断言（`-p 值`、`-p=值`、`-p值`），
+    /// 含多字母开关 `-pw` 与长开关的 `=` 形态；每一行都是精确相等断言，
+    /// 避免“整段字符串里没找到秘密就算过”。
+    func testCommandSummaryMasksCaseInsensitiveShortAndLongSwitchForms() {
+        let redactor = LogRedactor(homeDirectory: fixtureHome)
+        let secret = "S3CRET-VALUE-123"
+
+        func summary(_ arguments: [String]) -> String {
+            PiProcessInspector.commandSummary(arguments: arguments, redactor: redactor)
+        }
+
+        // 1. 短开关 + 等号（原两层脱敏都漏掉的形态）：大小写都要遮值、保留开关名。
+        XCTAssertEqual(summary(["pi", "-p=\(secret)"]), "pi -p=<redacted>")
+        XCTAssertEqual(summary(["pi", "-t=\(secret)"]), "pi -t=<redacted>")
+        XCTAssertEqual(summary(["pi", "-s=\(secret)"]), "pi -s=<redacted>")
+        XCTAssertEqual(summary(["pi", "-P=\(secret)"]), "pi -P=<redacted>")
+        XCTAssertEqual(summary(["pi", "-T=\(secret)"]), "pi -T=<redacted>")
+        XCTAssertEqual(summary(["pi", "-S=\(secret)"]), "pi -S=<redacted>")
+
+        // 2. 短开关 + 下一个 token：只遮值，后续参数仍可读。
+        XCTAssertEqual(summary(["pi", "-P", secret, "--verbose"]), "pi -P <redacted> --verbose")
+        XCTAssertEqual(summary(["pi", "-t", secret]), "pi -t <redacted>")
+
+        // 3. 大小写不敏感的紧跟形态。
+        XCTAssertEqual(summary(["pi", "-P\(secret)"]), "pi -P<redacted>")
+        XCTAssertEqual(summary(["pi", "-T\(secret)"]), "pi -T<redacted>")
+        XCTAssertEqual(summary(["pi", "-S\(secret)"]), "pi -S<redacted>")
+
+        // 4. 多字母短开关 `-pw`：三种形态都要遮，且必须识别为 `pw` 而不是 `p`+值。
+        XCTAssertEqual(summary(["pi", "-pw", secret]), "pi -pw <redacted>")
+        XCTAssertEqual(summary(["pi", "-pw=\(secret)"]), "pi -pw=<redacted>")
+        XCTAssertEqual(summary(["pi", "-pw\(secret)"]), "pi -pw<redacted>")
+        XCTAssertEqual(summary(["pi", "-PW=\(secret)"]), "pi -PW=<redacted>")
+
+        // 5. 长开关：裸开关、等号形态与大小写都要遮。
+        XCTAssertEqual(summary(["pi", "--password", secret, "--verbose"]), "pi --password <redacted> --verbose")
+        XCTAssertEqual(summary(["pi", "--password=\(secret)"]), "pi --password=<redacted>")
+        XCTAssertEqual(summary(["pi", "--PASSWORD=\(secret)"]), "pi --PASSWORD=<redacted>")
+        XCTAssertEqual(summary(["pi", "--token=\(secret)"]), "pi --token=<redacted>")
+        XCTAssertEqual(summary(["pi", "--api-key", secret]), "pi --api-key <redacted>")
+
+        // 6. 值里含空格/引号：argv 已按 token 边界切分，整段值一起遮。
+        XCTAssertEqual(summary(["pi", "--token=a b c"]), "pi --token=<redacted>")
+        XCTAssertEqual(summary(["pi", "-p", "a b c"]), "pi -p <redacted>")
+        XCTAssertEqual(summary(["pi", "-p=\"a b\""]), "pi -p=<redacted>")
+
+        // 7. 开关后面紧跟另一个开关：无法区分值与下一个开关，连尾巴一起隐藏。
+        let ambiguous = summary(["pi", "-p", "--verbose", secret])
+        XCTAssertFalse(ambiguous.contains(secret))
+        XCTAssertEqual(ambiguous, "pi -p <redacted>")
+    }
+
+    /// M6 的近似样例取舍（已知边界，`docs/privacy.md` 同步写明）：遮罩不能区分
+    /// `-p` 是密码还是端口，因此 `-p 8080` 这类非秘密数值也会被遮；纯短开关字母
+    /// 组成的开关组（`-pt`）同样按裸开关处理；不敏感的短开关不受影响。
+    func testCommandSummaryDocumentsNearMissShortSwitchTradeoffs() {
+        let redactor = LogRedactor(homeDirectory: fixtureHome)
+        let secret = "s3cr3t-value"
+
+        func summary(_ arguments: [String]) -> String {
+            PiProcessInspector.commandSummary(arguments: arguments, redactor: redactor)
+        }
+
+        // 端口这类非秘密数值：宁可少展示，不少脱敏（已写进隐私文档）。
+        XCTAssertEqual(summary(["pi", "-p", "8080", "--verbose"]), "pi -p <redacted> --verbose")
+        // 纯短开关字母组成的开关组：取值在下一个 token，同样遮掉。
+        XCTAssertEqual(summary(["pi", "-pt", secret, "--verbose"]), "pi -pt <redacted> --verbose")
+        XCTAssertFalse(summary(["pi", "-pt", secret]).contains(secret))
+        // 不敏感的短开关与普通参数不误伤。
+        XCTAssertEqual(summary(["pi", "-v", "--verbose", "8080"]), "pi -v --verbose 8080")
+        XCTAssertEqual(summary(["pi", "-q"]), "pi -q")
     }
 
     /// 已知边界（明确断言的保留行为）：遮罩是模式化的，不是“凡秘密必被遮”。

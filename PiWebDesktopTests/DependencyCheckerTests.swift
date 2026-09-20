@@ -8,11 +8,21 @@ import XCTest
 /// 真实 npm 前缀。假 Home 是 `/tmp` 下的固定值，用来验证脱敏。
 private final class DependencyFakeRunner: CommandRunning {
     var handler: ([String]) -> String? = { _ in nil }
+    /// 超时替身：非 nil 时接管“带超时”的探测，用来模拟某条探针挂住（不返回）。
+    /// 未设置时走默认实现（退回 `handler`，永不超时），既有的用例因此不受影响。
+    var timeoutHandler: (([String]) -> CommandRunResult)?
     private(set) var invocations: [[String]] = []
 
     func run(_ arguments: [String]) -> String? {
         invocations.append(arguments)
+        if let timeoutHandler { return timeoutHandler(arguments).output }
         return handler(arguments)
+    }
+
+    func run(_ arguments: [String], timeout: TimeInterval) -> CommandRunResult {
+        invocations.append(arguments)
+        if let timeoutHandler { return timeoutHandler(arguments) }
+        return CommandRunResult(output: handler(arguments))
     }
 
     /// 已执行命令的扁平文本，供“没有安装/提权/网络动作”的断言使用。
@@ -214,6 +224,65 @@ final class DependencyCheckerTests: XCTestCase {
         )
         XCTAssertTrue(report.blockingFindings.isEmpty)
         XCTAssertTrue(report.canStartService)
+    }
+
+    // MARK: - 探针超时（W4 M1：超时按不可用处理，不能永久关闭门控）
+
+    private static let timeoutDetail = "依赖探测超时：命令在 10 秒上限内没有返回"
+
+    /// 登录 shell 的 `command -v` 超时：pi 报为缺失，但带着可读原因；诊断文本
+    /// 里能看到“依赖探测超时”，门控关闭不再是无提示的永久状态；超时也不粘住，
+    /// 下一次正常探测立即恢复就绪。
+    func testShellLookupTimeoutBlocksTheGateWithAReadableReasonAndRecovers() {
+        let harness = makeHarness()
+        // `pi` 的候选路径暂时不可用，只能靠登录 shell 解析；这条 shell 探针不返回。
+        let originalExecutables = harness.fileSystem.executables
+        let originalSymlinks = harness.fileSystem.symlinks
+        let originalResolvedPaths = harness.fileSystem.resolvedPaths
+        harness.fileSystem.executables.remove("/opt/homebrew/bin/pi")
+        harness.fileSystem.symlinks.removeValue(forKey: "/opt/homebrew/bin/pi")
+        harness.fileSystem.resolvedPaths.removeValue(forKey: "/opt/homebrew/bin/pi")
+        harness.runner.timeoutHandler = { arguments in
+            arguments.joined(separator: " ") == "/bin/zsh -lc command -v pi 2>/dev/null"
+                ? CommandRunResult(output: nil, timedOut: true)
+                : CommandRunResult(output: harness.runner.handler(arguments))
+        }
+
+        let report = harness.checker().run()
+        XCTAssertFalse(report.canStartService)
+        XCTAssertEqual(report.finding(for: .piCLI)?.status, .missing)
+        XCTAssertEqual(report.finding(for: .piCLI)?.detail, Self.timeoutDetail)
+        XCTAssertNil(report.finding(for: .piWeb)?.detail, "未超时的探针不得背锅")
+        let text = DependencyReportPresenter.statusPageText(for: report, setupIncomplete: false)
+        XCTAssertTrue(text.contains("依赖探测超时"), "诊断文本里要能看到超时原因")
+        XCTAssertTrue(text.contains("重新检测"), "超时后的下一步应是重新检测，而不是安装")
+        XCTAssertTrue(text.contains("~/.zprofile"), "提示要点出登录 shell 阻塞这个可能原因")
+
+        // 超时不是粘性状态：路径恢复、探测正常返回时门控恢复。
+        harness.runner.timeoutHandler = nil
+        harness.fileSystem.executables = originalExecutables
+        harness.fileSystem.symlinks = originalSymlinks
+        harness.fileSystem.resolvedPaths = originalResolvedPaths
+        XCTAssertTrue(harness.checker().run().canStartService)
+    }
+
+    /// `--version` 探针超时：只影响对应的诊断项，原因写在那一项上。
+    func testVersionProbeTimeoutIsReportedOnTheAffectedItemOnly() {
+        // 不提供 package.json，版本只能来自 `--version`。
+        let harness = makeHarness(includePackageJSON: false)
+        harness.runner.timeoutHandler = { arguments in
+            arguments.joined(separator: " ") == "/opt/homebrew/bin/pi-web --version"
+                ? CommandRunResult(output: nil, timedOut: true)
+                : CommandRunResult(output: harness.runner.handler(arguments))
+        }
+
+        let report = harness.checker().run()
+        XCTAssertFalse(report.canStartService)
+        XCTAssertEqual(report.finding(for: .piWeb)?.status, .unknown)
+        XCTAssertEqual(report.finding(for: .piWeb)?.detail, Self.timeoutDetail)
+        XCTAssertNil(report.finding(for: .piCLI)?.detail)
+        XCTAssertNil(report.finding(for: .node)?.detail)
+        XCTAssertNil(report.finding(for: .system)?.detail)
     }
 
     func testGateMatrix() {

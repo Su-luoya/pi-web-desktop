@@ -46,9 +46,9 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
     /// 用户选择 pi-web 可执行文件后的回调；返回可读错误（nil 表示已写入配置
     /// 并触发了重新检测）。窗口不写配置、不校验可执行性。
     var onSelectPiWebPath: ((String) -> String?)?
-    /// 由 `AppDelegate` 注入：与菜单“复制诊断”完全相同的已脱敏导出文本
-    /// （GitHub #10）。窗口自己不组装诊断字段。
-    var diagnosticsTextProvider: (() -> String)?
+    /// 由 `AppDelegate` 注入：诊断导出动作（脱敏提醒 → 后台采集 → 回主线程复制，
+    /// W4 M3）。窗口自己不组装字段、不执行命令，也不在同步调用里阻塞主线程。
+    var onExportDiagnostics: (() -> Void)?
     /// 由 `AppDelegate` 注入：更新检查状态行（GitHub #18：策略、最近检查、
     /// 结果、忽略版本、下次检查）。窗口只渲染，不读设置、不联网、不安装。
     var updateStatusTextProvider: (() -> String)?
@@ -379,10 +379,10 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         NSPasteboard.general.setString(commands, forType: .string)
     }
 
-    /// 与菜单“复制诊断”同一份已脱敏文本，复制前同样弹出脱敏提醒。
+    /// 与菜单“复制诊断”同一份提醒文本、同一条导出路径（W4 M3）：窗口只转发，
+    /// 提醒、后台采集与复制都在 `AppDelegate`。
     @objc private func copyDiagnostics(_ sender: Any?) {
-        guard let text = diagnosticsTextProvider?(), !text.isEmpty else { return }
-        DiagnosticsClipboard.copyAfterConfirmation(text, presentingIn: window)
+        onExportDiagnostics?()
     }
 
     @objc private func closeWindow(_ sender: Any?) {

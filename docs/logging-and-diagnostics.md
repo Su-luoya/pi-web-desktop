@@ -131,12 +131,12 @@ Pi Web 安装超时或取消、Pi CLI 与扩展包的更新命令超时或放弃
 | 字段 | 来源 |
 | --- | --- |
 | `Pi Web Desktop 版本` / `构建号` | bundle `Info.plist` 的 `CFBundleShortVersionString` / `CFBundleVersion`（唯一来源 `Configuration/AppIdentity.xcconfig`；缺失时标注开发构建） |
-| `pi-web 版本` / `pi-web 路径` + 可信度 | 依赖诊断报告（`DependencyReport` 的 pi-web 项）；未运行时回退到实时 `--version` 与路径选择结果 |
-| `Pi CLI 版本` + 可信度 | 依赖诊断报告的 Pi CLI 项 |
-| `Node.js 版本` + 可信度 | 依赖诊断报告的 Node.js 项 |
+| `pi-web 版本` / `pi-web 路径` + 可信度 | 实时 `pi-web --version`（后台串行队列，3 秒超时）；实时值拿不到时回退到依赖诊断报告（`DependencyReport` 的 pi-web 项）的缓存版本，仍为空则写“无法读取（命令超时或失败）”；路径来自报告或路径选择结果 |
+| `Pi CLI 版本` + 可信度 | 依赖诊断报告的 Pi CLI 项（不执行子进程） |
+| `Node.js 版本` + 可信度 | 实时 `node --version`（后台串行队列，3 秒超时）；拿不到时回退到依赖诊断报告的 Node.js 项 |
 | `服务地址` / `端口` / `状态` | `ServiceConfiguration.serviceURL`、端口、`ServiceState.statusText(for:managedPID:)` |
 | `托管关系` | `managed（本应用托管，所有权校验通过；托管 PID …）` 或 `external（外部服务或未运行，无有效所有权记录）` |
-| `监听 PID` / `监听进程` / `托管 PID` | `ProcessInspector` 与所有权记录 |
+| `监听 PID` / `监听进程` / `托管 PID` | 后台探测 `lsof -nP -t -iTCP:<端口> -sTCP:LISTEN` + `ps -o command= -p <PID>`（3 秒超时）与所有权记录；`lsof` 成功但没有监听者写“无”，探测失败才写“无法读取（命令超时或失败）”；监听进程命令行按更新路径共用的 `PiProcessInspector.commandSummary` 遮罩（token 级凭据遮罩 + `LogRedactor` + 折叠空白 + 200 字符上限） |
 | `有效工作目录` | `AppConfiguration.workspaceDirectory(for:)`（默认目录或用户自选目录） |
 | `配置目录` | 固定为 `~/.pi/agent`（只报告路径） |
 | `启动命令` | 应用会为子进程执行的命令行（`--hostname/--port/--no-open`） |
@@ -147,7 +147,18 @@ Pi Web 安装超时或取消、Pi CLI 与扩展包的更新命令超时或放弃
 
 可信度取值与依赖诊断一致，导出里同时给出英文取值与中文标注：`verified（已验证）`、`inferred（推断）`、`unknown（未知）`；没有报告时按 `unknown` 处理。
 
-复制入口：**服务 → 复制诊断**，以及诊断窗口的“复制诊断”按钮。两者调用同一条导出路径，复制前都会弹出提醒：
+### 采集方式与超时（W4 M3）
+
+诊断导出分两步：**先在主线程弹脱敏提醒，用户确认后才采集**，采集完成后回主线程组装文本并写入剪贴板。采集在一条专用串行后台队列（`Sources/DiagnosticsCollector.swift` 的 `DiagnosticsProbeCollector`）上依次执行 `pi-web --version`、`node --version`、`lsof`、`ps`；每个子进程由 `TimeoutCommandRunner` 保证有界返回：
+
+- 单个命令上限 3 秒（`TimeoutCommandRunner.defaultTimeout`）：超时先 `terminate()`（SIGTERM），宽限 1 秒（`defaultTerminationGrace`）内没退出再 `SIGKILL`；只对**本次启动的**子进程发信号，不按名字杀进程；已知边界：不保证清理该子进程自己派生的进程（诊断命令是 `pi-web --version`、`node --version`、`lsof`、`ps`，正常不会留下长命子进程）；
+- stdout 在后台线程读取，输出超过管道缓冲区时不会与子进程互等；stdout 读尽与进程退出共用同一个截止时间；
+- 超时/失败的字段统一写成 `无法读取（命令超时或失败）`（`DiagnosticsProbeText.failure`），其余字段照常导出：一条挂住的命令不会冻结界面，也不会让报告缺项；`lsof` 成功但没有监听者是事实，写成“无”，与探测失败区分；
+- 外部监听进程的 argv（`ps` 输出）不另写一套规则：按空白恢复 token 边界后交给更新路径共用的 `PiProcessInspector.commandSummary`；
+- 提醒先弹的取舍：取消时一个子进程都不起；确认后的等待由上面的超时界定（最坏 4 条命令 × (3 + 1) 秒），期间主线程与 UI 保持响应；
+- 导出文本的每个字段进入 `DiagnosticsCollector.text` 时仍逐行过同一个 `LogRedactor` 实例。
+
+复制入口：**服务 → 复制诊断**，以及诊断窗口的“复制诊断”按钮。两者调用同一条导出路径（`AppDelegate.beginDiagnosticsExport`）：先弹脱敏提醒，确认后才在后台串行队列上采集，采集完成后回主线程写入剪贴板。主窗口被 ⌘W 隐藏时提醒改用应用级模态，不在不可见窗口上挂 sheet（W4 L5）。提醒内容：
 
 > 诊断信息已按规则脱敏——已替换 Home 路径、URL 查询串、Authorization/Bearer、token/password/secret/api_key 等键值、代理凭据、JWT 与私钥。脱敏不能替代自查：公开粘贴前请再确认一次。
 
@@ -166,6 +177,7 @@ Pi Web 安装超时或取消、Pi CLI 与扩展包的更新命令超时或放弃
 | 轮转、轮转说明、保留份数、轮转失败降级、假时钟、子进程输出跨轮转仍可见、应用 + 子进程并发写入不丢行、重启时读尽旧管道、外部改名后按 `O_APPEND` 续写、启动路径不被历史脱敏阻塞、退出时读端交给排空进程（`/bin/cat`） | `PiWebDesktopTests/LogWriterTests.swift` |
 | 各条脱敏规则、引号/含空格值、续行、多行、幂等（含 JSON 边界）、不覆盖形态的边界、精度 | `PiWebDesktopTests/LogRedactorTests.swift` |
 | 导出布局、脱敏后上下文保留、可信度映射 | `PiWebDesktopTests/DiagnosticsCollectorTests.swift` |
+| 探测不阻塞调用方（阻塞替身）、超时终止子进程并降级、“没有监听者 ≠ 探测失败”、失败项标注、监听 argv 复用更新路径遮罩、设置窗口控制器单例复用，以及 M2/M3/L5 的源码级接线断言 | `PiWebDesktopTests/DiagnosticsCollectorTests.swift` |
 | 组件安装区块的多行标签与逐项渲染（`组件安装[2]:`） | `PiWebDesktopTests/DiagnosticsCollectorTests.swift` |
 | 组件安装识别、只读约束与建议命令策略 | `PiWebDesktopTests/ComponentInstallationTests.swift` |
 | 启动失败消息先脱敏再进状态/回调/日志 | `PiWebDesktopTests/ServiceManagerTests.swift` |

@@ -129,6 +129,14 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 
 只有验证通过的记录才会收到信号：先向记录的进程组发送 `SIGTERM`，在 `stopPollAttempts`（40 × 0.1 秒）内等待进程组消失，仍存活才对同一进程组发送 `SIGKILL`。`ServiceSignaling` 接口只暴露进程组形式（`kill(-pgid, ...)`），因此不存在向单个 PID 发送信号的路径。外部服务或验证失败时不发送任何信号：`stopService()` 只在验证通过后才会把状态更新为已停止，找不到可验证记录时直接完成回调、保持当前状态（例如仍显示“正在运行（外部服务）”）并删除不匹配的记录；菜单的停止/重启动作仍然先显示原有的“这是外部启动的 Pi Web 服务”警告。`stopManagedServiceOnQuit`（“退出并停止服务”，由 `QuitPlan`/`QuitCoordinator` 决定是否调用）也只停止已验证的托管子进程，不再清理端口上的其他监听进程；外部服务在任何退出行为下都不发信号。
 
+### 生命周期代次与启动预算
+
+服务状态机用一个单调递增的“生命周期代次”（`ServiceManager.lifecycleGeneration`）给异步结果编号：每次真正 launch、每次停止、每次放弃半托管启动都会递增它。所有异步入口——启动探测（`startAtLaunch()` / `ensureServerIsRunning()` / `startService()` / `reloadAfterConfigurationChange()`）、健康检查、进程退出回调、停止完成回调和就绪轮询——在调度时捕获当前代次，回到主队列后先比对该代次（就绪轮询还要再比对所属的启动会话号 `activeStartupSession`），不匹配的回调只写一条“忽略过期的…回调”日志，不改状态、不加载服务页、不弹提示。因此“停止完成后才到达的 `ready=true`”不会把已停止的服务改回 `running`，也不会对已停止的端口触发一次页面加载（W3 M2）；被新进程替换的旧进程退出回调也不会清空替换它的句柄（同 GitHub #9 的认领语义）。
+
+启动预算是“一次启动会话”的预算（`activeStartupSession` + `startupAttempts`，150 × 0.2 秒 ≈ 30 秒）：真正 launch 会开启新会话；`startDecision` 返回 `.existingProcess` 时，同一个代次里已有活动会话就复用同一条轮询链（重复点“启动服务”、配置重载、健康恢复、弹窗“重试”都不会再各挂一条链，因此不会 N 倍速耗尽预算、不会产生 N 个同文案的模态框），上一轮已经结束（超时、进程退出或成功）时开启新会话并清零预算。于是“30 秒未就绪”超时后的重试会重新进入轮询，而不是立刻复用上一轮的失败结论（W3 M1/M3）；同一会话最多弹一次启动失败提示（`reportStartupFailureOnce`），重复结论只写日志。
+
+“停止中”状态同样按代次记账：`isStoppingService` 等价于 `stoppingGeneration == lifecycleGeneration`。停止开始时把当前代次记为停止代次；`finishStopping` 只清除属于自己代次的标志；记录不可验证等提前返回分支统一调用 `clearStopping()`（`stopManagedServiceOnQuit` 不再自行预置后漏清零）。任何一次代次递增都会让旧标志自动失效，所以退出失败的停止路径不会把应用永久锁在“停止中”，后续启动入口（`startDecision`、`startManagedService`）仍然可用（W3 L1）。停止完成后应用侧的日志管道写端在 `finishStopping` 里关闭，与“进程退出回调”时代的清理等价。
+
 ### 过期记录与应用重启
 
 启动时（`startAtLaunch()` → `reconcileOwnershipRecord()`）会重新验证磁盘上的记录：进程已不存在、或记录来自上一次应用运行（`instanceID` 不同）时，只删除记录文件，绝不向对应 PID 发送信号；“退出但保持服务运行”留下的服务在下次启动时因此按外部服务处理。删除规则由 `ServiceOwnershipVerdict.shouldRemoveRecord` 决定：唯一保留记录的情况是 `ps` 事实暂时不可读，此时仍然不会发送信号，留待下次再验证。

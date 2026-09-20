@@ -2468,7 +2468,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc private func clearRecentWorkspaces(_ sender: Any?) {
         appConfiguration.recentWorkspaceStore.clear()
-        recordCurrentWorkspace()
+        rebuildRecentWorkspacesMenu()
     }
 
     @objc private func openCurrentWorkspace(_ sender: Any?) {

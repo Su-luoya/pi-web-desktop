@@ -266,14 +266,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
-            <key>CFBundleTypeExtensions</key>
-            <array><string>*</string></array>
             <key>CFBundleTypeName</key>
             <string>Folder</string>
             <key>CFBundleTypeRole</key>
             <string>Editor</string>
-            <key>LSTypeIsPackage</key>
-            <false/>
+            <key>LSItemContentTypes</key>
+            <array><string>public.folder</string></array>
         </dict>
     </array>
     <key>CFBundleExecutable</key>

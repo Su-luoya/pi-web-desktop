@@ -2896,6 +2896,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         )
     }
 
+    /// Pi 扩展包的更新入口状态（GitHub #107）：与 Pi Web / Pi CLI 同一套判据，
+    /// 数据来自扩展包自己的执行器（`isRunning` / `abandonedChildrenUnconfirmed`，
+    /// 都是非阻塞读状态）与编排中标记。
+    private var piPackageUpdateEntryState: UpdateEntryState {
+        UpdateEntryState.component(
+            transactionInProgress: piPackageUpdateInProgress,
+            childInFlight: piPackageUpdateRunner.isRunning,
+            abandonedChildrenUnconfirmed: piPackageUpdateRunner.abandonedChildrenUnconfirmed
+        )
+    }
+
     private func refreshUpdateMenuState() {
         updateStatusMenuItem?.title = updateCheckStatusText()
         if let piWebUpdateWarningMenuItem {
@@ -2919,7 +2930,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             piPackageUpdateWarningMenuItem.title = piPackageUpdateWarning?.shortText ?? ""
             piPackageUpdateWarningMenuItem.isHidden = piPackageUpdateWarning == nil
         }
-        piPackageUpdateMenuItem?.isEnabled = dependencyGate == .ready
+        // 扩展包入口与上面两个组件同一套闸控（GitHub #107）：忙或上一次命令已放弃等待、
+        // 退出未确认时，菜单项直接带可见原因置灰，而不是让用户点下去才被拒。
+        let packageEntry = piPackageUpdateEntryState
+        piPackageUpdateMenuItem?.title = "查看 Pi 扩展包更新…" + (packageEntry.menuTitleSuffix ?? "")
+        piPackageUpdateMenuItem?.isEnabled = dependencyGate == .ready && !packageEntry.isBlocked
         // 「已放弃」记录项：只有真的有记录时才可用并显示条数（GitHub #62）。
         if let abandonedAttemptsMenuItem {
             let attempts = appConfiguration.abandonedAttempts()

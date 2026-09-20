@@ -306,6 +306,8 @@ final class UpdateAbandonedAttemptTests: XCTestCase {
 
     private final class RecordingPiPackageRunner: PiPackageUpdateRunning {
         private(set) var plans: [PiPackageUpdatePlan] = []
+        var isRunning = false
+        var abandonedChildrenUnconfirmed = false
         var result: PiPackageUpdateCommandResult
 
         init(result: PiPackageUpdateCommandResult) {

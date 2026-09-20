@@ -62,29 +62,68 @@ final class LogWriterTests: XCTestCase {
 
     // MARK: 子进程输出管道
 
-    /// 关闭管道写端（模拟子进程退出）并等读端排空、写入队列清空。返回是否在超时
-    /// 前完成；断言 helper 用它把“读到 EOF 并落盘”变成确定性的同步点。
+    /// 轮询 `condition` 直到成立；超时用 `XCTFail` 结束并打印 `diagnostics`，而不是
+    /// 让调用方继续对半写入的文件做一串看似无关的断言（GitHub #88）。
+    ///
+    /// 轮询间隔只决定“多久再看一眼”，正确性来自条件本身：固定 `sleep` 把时长当同步
+    /// 保证，在慢 runner 上必现失败、在快 runner 上白白等待。只有无法用生产者已有的
+    /// 排空原语（`flush()` / `childOutputIsDrained`）表达的等待才允许走这里。
     @discardableResult
-    private func drainChildOutput(_ writer: LogWriter, timeout: TimeInterval = 10) -> Bool {
+    private func waitUntil(
+        _ description: String,
+        timeout: TimeInterval = 10,
+        diagnostics: @autoclosure () -> String = "",
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ condition: () -> Bool
+    ) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if writer.childOutputIsDrained {
-                writer.flush()
-                return true
-            }
-            Thread.sleep(forTimeInterval: 0.02)
+        while true {
+            if condition() { return true }
+            if Date() >= deadline { break }
+            Thread.sleep(forTimeInterval: 0.01)
         }
+        let detail = diagnostics()
+        XCTFail(
+            "等待超时（\(timeout)s）：\(description)" + (detail.isEmpty ? "" : "\n--- 现场 ---\n\(detail)"),
+            file: file,
+            line: line
+        )
         return false
     }
 
+    /// 超时诊断：当前日志、存在的轮转文件与失败记录一次给全，CI 上不必再猜是哪一步
+    /// 没落地。
+    private func logDiagnostics(_ writer: LogWriter) -> String {
+        var lines = ["当前日志 \(logURL.path):", text(at: logURL)]
+        for index in 1...8 where FileManager.default.fileExists(atPath: rotatedURL(index).path) {
+            lines.append("轮转文件 .\(index) \(rotatedURL(index).path):")
+            lines.append(text(at: rotatedURL(index)))
+        }
+        lines.append("failureDescription: \(writer.failureDescription ?? "无")")
+        return lines.joined(separator: "\n")
+    }
+
+    /// 关闭管道写端（模拟子进程退出）并等读端排空、写入队列清空。这是确定性的同步点：
+    /// `childOutputIsDrained` 由读取队列在读到 EOF 前把所有数据交给写入队列之后才置位
+    /// （见 `LogWriter.readChildOutput`），再 `flush()` 写入队列，因此返回后日志文件
+    /// 的内容才允许被断言。超时由 `waitUntil` 失败并打印现场。
+    private func drainChildOutput(_ writer: LogWriter, timeout: TimeInterval = 10) {
+        _ = waitUntil(
+            "子进程输出读端排空（EOF）",
+            timeout: timeout,
+            diagnostics: logDiagnostics(writer)
+        ) { writer.childOutputIsDrained }
+        writer.flush()
+    }
+
     /// 把 `lines` 写到管道写端，然后关闭并等落盘。
-    @discardableResult
-    private func writeChildOutput(_ writer: LogWriter, _ handle: FileHandle, _ lines: [String]) -> Bool {
+    private func writeChildOutput(_ writer: LogWriter, _ handle: FileHandle, _ lines: [String]) {
         for line in lines {
             try? handle.write(contentsOf: Data(line.utf8))
         }
         try? handle.close()
-        return drainChildOutput(writer)
+        drainChildOutput(writer)
     }
 
     private func visibleLogText() -> String {
@@ -220,7 +259,7 @@ final class LogWriterTests: XCTestCase {
         try "token=old-history-secret\nplain history\n".write(to: logURL, atomically: true, encoding: .utf8)  // scan-secrets: allow(reason=redaction fixture)
 
         let handle = try writer.openChildOutput()
-        XCTAssertTrue(writeChildOutput(writer, handle, ["child output\n"]))
+        writeChildOutput(writer, handle, ["child output\n"])
 
         let log = text(at: logURL)
         XCTAssertFalse(log.contains("old-history-secret"))
@@ -233,11 +272,11 @@ final class LogWriterTests: XCTestCase {
     func testChildOutputIsRedactedBeforeItReachesTheLog() throws {
         let writer = makeWriter()
         let handle = try writer.openChildOutput()
-        XCTAssertTrue(writeChildOutput(writer, handle, [
+        writeChildOutput(writer, handle, [
             "child token=child-secret-value\n",  // scan-secrets: allow
             "child cwd \(fakeHome)/project\n",
             "child tail without newline"
-        ]))
+        ])
 
         let log = text(at: logURL)
         XCTAssertFalse(log.contains("child-secret-value"), log)
@@ -270,7 +309,7 @@ final class LogWriterTests: XCTestCase {
 
         let handle = try writer.openChildOutput()
         try handle.close()
-        XCTAssertTrue(drainChildOutput(writer))
+        drainChildOutput(writer)
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: rotatedURL(1).path))
         XCTAssertTrue(text(at: rotatedURL(1)).contains("zzz"))
@@ -300,7 +339,7 @@ final class LogWriterTests: XCTestCase {
         XCTAssertLessThan(startupElapsed, 1.5, "启动路径被历史脱敏阻塞了 \(startupElapsed) 秒")
 
         try handle.close()
-        XCTAssertTrue(drainChildOutput(writer, timeout: 120))
+        drainChildOutput(writer, timeout: 120)
         let scrubbed = text(at: logURL)
         XCTAssertFalse(scrubbed.contains("history-secret-value"), "后台脱敏必须仍然完成")
         XCTAssertTrue(scrubbed.contains("服务已启动：PID 4321"), "脱敏重写不能吞掉之后写入的行")
@@ -324,11 +363,15 @@ final class LogWriterTests: XCTestCase {
         for index in 1...6 {
             writer.append("entry-\(index)-" + String(repeating: "r", count: 190) + "\n")
         }
+        // GitHub #88：`openChildOutput()` 先在写入队列上排了后台准备（历史脱敏 →
+        // 轮转），上面的 `append` 因此可能被异步排队。断言文件系统之前必须用
+        // `flush()` 把队列排空，不能假定调用返回时轮转已经落盘。
+        writer.flush()
         XCTAssertTrue(FileManager.default.fileExists(atPath: rotatedURL(3).path), "至少要轮转过 3 次")
 
         try handle.write(contentsOf: Data("CHILD-SENTINEL-AFTER-ROTATIONS\n".utf8))
         try handle.close()
-        XCTAssertTrue(drainChildOutput(writer))
+        drainChildOutput(writer)
         writer.flush()
 
         let current = text(at: logURL)
@@ -354,7 +397,7 @@ final class LogWriterTests: XCTestCase {
 
         try second.write(contentsOf: Data("second-child-line\n".utf8))
         try second.close()
-        XCTAssertTrue(drainChildOutput(writer))
+        drainChildOutput(writer)
         XCTAssertTrue(text(at: logURL).contains("second-child-line"))
         XCTAssertNil(writer.failureDescription)
     }
@@ -387,12 +430,10 @@ final class LogWriterTests: XCTestCase {
 
         try handle.close()
         // 写端关闭 → 排空进程读到 EOF 并退出（它是本测试进程的子进程，要收尸）。
-        var reaped = false
-        for _ in 0..<500 where !reaped {
-            reaped = waitpid(drainerPID, nil, WNOHANG) == drainerPID
-            if !reaped { Thread.sleep(forTimeInterval: 0.02) }
+        // 有界轮询而不是固定等待：慢 runner 上进程退出可以晚于任意短 sleep。
+        let reaped = waitUntil("排空进程在写端关闭后自行退出", timeout: 10) {
+            waitpid(drainerPID, nil, WNOHANG) == drainerPID
         }
-        XCTAssertTrue(reaped, "排空进程应该在写端关闭后自行退出")
         if !reaped { kill(drainerPID, SIGKILL) }
 
         let log = text(at: logURL)
@@ -416,7 +457,7 @@ final class LogWriterTests: XCTestCase {
             }
         }
         try handle.close()
-        XCTAssertTrue(drainChildOutput(writer))
+        drainChildOutput(writer)
         writer.flush()
 
         let text = visibleLogText()

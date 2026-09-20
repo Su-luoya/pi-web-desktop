@@ -271,6 +271,7 @@ final class UpdateCheckerTests: XCTestCase {
         latestVersion: String,
         status: UpdateCheckStatus,
         confidence: DetectionConfidence = .verified,
+        installedVersion: String? = nil,
         lastAttemptAt: Date,
         lastSuccessAt: Date?,
         etag: String? = nil,
@@ -286,6 +287,7 @@ final class UpdateCheckerTests: XCTestCase {
             etag: etag,
             lastModified: lastModified,
             latestVersion: latestVersion,
+            installedVersion: installedVersion,
             status: status.rawValue,
             confidence: confidence.rawValue
         )
@@ -496,13 +498,17 @@ final class UpdateCheckerTests: XCTestCase {
 
     // MARK: - 失败、限流与降级
 
+    /// 网络失败时，TTL 内的上次成功结果仍可展示“上游版本”，但结论必须按当前
+    /// 本机版本现算（GitHub #74）：这条用例的缓存条目就是为当前本机版本写的，
+    /// 所以现算结果与缓存里的结论一致。
     func testOfflineFailureReusesFreshCachedResult() {
         var cached = UpdateCheckCacheFile()
         let lastSuccess = referenceDate.addingTimeInterval(-3600)
         cached.upsert(makeCachedEntry(
             category: .desktopApp,
-            latestVersion: "0.2.0",
+            latestVersion: "9.9.9",
             status: .updateAvailable,
+            installedVersion: desktopInstalledVersion,
             lastAttemptAt: lastSuccess,
             lastSuccessAt: lastSuccess,
             etag: "\"v1\""
@@ -518,7 +524,7 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertEqual(result?.status, .updateAvailable)
         XCTAssertEqual(result?.freshness, .cached)
         XCTAssertEqual(result?.failure, .offline)
-        XCTAssertEqual(result?.latestVersion, "0.2.0")
+        XCTAssertEqual(result?.latestVersion, "9.9.9")
         XCTAssertEqual(result?.confidence, .verified)
         XCTAssertEqual(result?.displayText.contains("网络不可用"), true)
         // 上次成功时间不被失败覆盖，etag 保留供下次条件请求使用。
@@ -526,7 +532,8 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertEqual(entry?.lastSuccessAt, lastSuccess)
         XCTAssertEqual(entry?.etag, "\"v1\"")
         XCTAssertEqual(entry?.failure, UpdateCheckFailure.offline.rawValue)
-        XCTAssertEqual(entry?.latestVersion, "0.2.0")
+        XCTAssertEqual(entry?.latestVersion, "9.9.9")
+        XCTAssertEqual(entry?.installedVersion, desktopInstalledVersion)
     }
 
     func testTimeoutRateLimitAndServerErrorAreUnderstoodWithoutCrash() {
@@ -594,6 +601,7 @@ final class UpdateCheckerTests: XCTestCase {
             packageName: "pi-extension-demo",
             latestVersion: "2.0.0",
             status: .updateAvailable,
+            installedVersion: "1.0.0",
             lastAttemptAt: lastSuccess,
             lastSuccessAt: lastSuccess
         ))
@@ -744,6 +752,7 @@ final class UpdateCheckerTests: XCTestCase {
             category: .desktopApp,
             latestVersion: desktopInstalledVersion,
             status: .upToDate,
+            installedVersion: desktopInstalledVersion,
             lastAttemptAt: lastSuccess,
             lastSuccessAt: lastSuccess,
             etag: "\"v1\""
@@ -874,8 +883,9 @@ final class UpdateCheckerTests: XCTestCase {
         let lastSuccess = referenceDate.addingTimeInterval(-3600)
         cached.upsert(makeCachedEntry(
             category: .desktopApp,
-            latestVersion: "0.2.0",
+            latestVersion: "9.9.9",
             status: .updateAvailable,
+            installedVersion: desktopInstalledVersion,
             lastAttemptAt: lastSuccess,
             lastSuccessAt: lastSuccess
         ))
@@ -950,6 +960,257 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertEqual(skipped?.failure, .installedVersionUnknown)
         XCTAssertEqual(skipped?.origin, .unavailable)
         XCTAssertEqual(requestCount(withoutCache, category: .piCLI), 0)
+    }
+
+    // MARK: - 缓存回退结论按当前本机版本现算（GitHub #74）
+
+    /// 方向一：缓存写于本机 3.0.0（当时上游 2.0.0 → up-to-date），本机降到
+    /// 1.0.0 后网络失败。缓存里的旧结论不得沿用，必须现算出“可更新 2.0.0”。
+    func testCachedUpToDateIsRecomputedForADowngradedLocalVersion() {
+        var cached = UpdateCheckCacheFile()
+        let lastSuccess = referenceDate.addingTimeInterval(-3600)
+        cached.upsert(makeCachedEntry(
+            category: .piWeb,
+            latestVersion: "2.0.0",
+            status: .upToDate,
+            installedVersion: "3.0.0",
+            lastAttemptAt: lastSuccess,
+            lastSuccessAt: lastSuccess
+        ))
+        let world = makeWorld(cached: cached, responder: { _ in .failure(.offline) })
+
+        world.checker.checkNow(
+            triggeredBy: .manual,
+            inventory: UpdateCheckInventory(piWebVersion: "1.0.0")
+        )
+
+        let result = world.checker.summary.result(for: UpdateCheckTarget(category: .piWeb).id)
+        XCTAssertEqual(result?.status, .updateAvailable)
+        XCTAssertEqual(result?.latestVersion, "2.0.0")
+        XCTAssertEqual(result?.installedVersion, "1.0.0")
+        XCTAssertEqual(result?.failure, .offline)
+        XCTAssertFalse(result?.displayText.contains("已是最新") ?? true)
+        XCTAssertTrue(result?.displayText.contains("上游有新版本 2.0.0") ?? false)
+        // 结论可以提示，但来源仍是缓存回退，不参与自动安装。
+        XCTAssertEqual(result?.origin, .cachedFallback)
+        XCTAssertFalse(result?.origin.isEligibleForAutomaticInstall ?? true)
+        XCTAssertEqual(world.checker.summary.updateAvailableCount, 1)
+        XCTAssertEqual(
+            UpdateNotificationPlanner.plan(
+                results: world.checker.summary.results,
+                preferences: world.checker.preferences,
+                ignoredVersions: .empty,
+                alreadyNotified: [:]
+            ).map(\.latestVersion),
+            ["2.0.0"]
+        )
+
+        // 同一条目即使写下的本机版本就是当前版本、存储的 status 仍是与版本对
+        // 不上的 up-to-date（被改写/旧结论），也只能按现算结果展示。
+        var contradictory = UpdateCheckCacheFile()
+        contradictory.upsert(makeCachedEntry(
+            category: .piWeb,
+            latestVersion: "2.0.0",
+            status: .upToDate,
+            installedVersion: "1.0.0",
+            lastAttemptAt: lastSuccess,
+            lastSuccessAt: lastSuccess
+        ))
+        let second = makeWorld(cached: contradictory, responder: { _ in .failure(.offline) })
+        second.checker.checkNow(
+            triggeredBy: .manual,
+            inventory: UpdateCheckInventory(piWebVersion: "1.0.0")
+        )
+        let secondResult = second.checker.summary.result(for: UpdateCheckTarget(category: .piWeb).id)
+        XCTAssertEqual(secondResult?.status, .updateAvailable)
+        XCTAssertFalse(secondResult?.displayText.contains("已是最新") ?? true)
+        XCTAssertEqual(secondResult?.confidence, .verified)
+    }
+
+    /// 方向二：缓存写于本机 1.0.0（当时上游 2.0.0 → update-available），本机
+    /// 升到 2.0.0 后网络失败。不得沿用旧结论进入通知名单或菜单计数。
+    func testCachedUpdateAvailableIsRecomputedForAnUpgradedLocalVersion() {
+        var cached = UpdateCheckCacheFile()
+        let lastSuccess = referenceDate.addingTimeInterval(-3600)
+        cached.upsert(makeCachedEntry(
+            category: .piWeb,
+            latestVersion: "2.0.0",
+            status: .updateAvailable,
+            installedVersion: "1.0.0",
+            lastAttemptAt: lastSuccess,
+            lastSuccessAt: lastSuccess
+        ))
+        let world = makeWorld(cached: cached, responder: { _ in .failure(.offline) })
+
+        world.checker.checkNow(
+            triggeredBy: .manual,
+            inventory: UpdateCheckInventory(piWebVersion: "2.0.0")
+        )
+
+        let result = world.checker.summary.result(for: UpdateCheckTarget(category: .piWeb).id)
+        XCTAssertEqual(result?.status, .upToDate)
+        XCTAssertEqual(result?.latestVersion, "2.0.0")
+        XCTAssertEqual(result?.installedVersion, "2.0.0")
+        XCTAssertEqual(result?.failure, .offline)
+        XCTAssertFalse(result?.displayText.contains("上游有新版本") ?? true)
+        XCTAssertEqual(world.checker.summary.updateAvailableCount, 0)
+        XCTAssertTrue(
+            UpdateNotificationPlanner.plan(
+                results: world.checker.summary.results,
+                preferences: world.checker.preferences,
+                ignoredVersions: .empty,
+                alreadyNotified: [:]
+            ).isEmpty
+        )
+        XCTAssertEqual(
+            world.checker.summary.categoryStatuses.first { $0.category == .piWeb }?.status,
+            .upToDate
+        )
+    }
+
+    /// 304 命中的缓存条目也按当前本机版本现算（本机 1.0.0 / 缓存上游 2.0.0
+    /// → 可更新）：这就是缓存回退要走的同一条比较路径。
+    func testNotModifiedRecomputesTheStatusForTheCurrentInstalledVersion() {
+        var cached = UpdateCheckCacheFile()
+        let lastSuccess = referenceDate.addingTimeInterval(-3600)
+        cached.upsert(makeCachedEntry(
+            category: .piWeb,
+            latestVersion: "2.0.0",
+            status: .upToDate,
+            installedVersion: "3.0.0",
+            lastAttemptAt: lastSuccess,
+            lastSuccessAt: lastSuccess,
+            etag: "\"v1\""
+        ))
+        let world = makeWorld(cached: cached, responder: { _ in
+            .success(UpdateHTTPResponse(statusCode: 304, headers: ["etag": "\"v1\""], body: Data(), finalURL: nil))
+        })
+
+        world.checker.checkNow(
+            triggeredBy: .manual,
+            inventory: UpdateCheckInventory(piWebVersion: "1.0.0")
+        )
+
+        let result = world.checker.summary.result(for: UpdateCheckTarget(category: .piWeb).id)
+        XCTAssertEqual(result?.status, .updateAvailable)
+        XCTAssertEqual(result?.origin, .cachedFallback)
+        XCTAssertEqual(result?.freshness, .fresh)
+        XCTAssertFalse(result?.displayText.contains("已是最新") ?? true)
+    }
+
+    /// 缓存条目缺 `installedVersion`（旧 schema 或手工改写）时结论不可判定：
+    /// 即便现算看起来像“可更新”，也不把未绑定的结论当成事实。
+    func testCacheEntryWithoutRecordedInstalledVersionIsUndecidable() {
+        var cached = UpdateCheckCacheFile()
+        let lastSuccess = referenceDate.addingTimeInterval(-3600)
+        cached.upsert(makeCachedEntry(
+            category: .piWeb,
+            latestVersion: "2.0.0",
+            status: .upToDate,
+            lastAttemptAt: lastSuccess,
+            lastSuccessAt: lastSuccess
+        ))
+        let world = makeWorld(cached: cached, responder: { _ in .failure(.offline) })
+
+        world.checker.checkNow(
+            triggeredBy: .manual,
+            inventory: UpdateCheckInventory(piWebVersion: "1.0.0")
+        )
+
+        let result = world.checker.summary.result(for: UpdateCheckTarget(category: .piWeb).id)
+        XCTAssertEqual(result?.status, .unknown)
+        XCTAssertEqual(result?.latestVersion, "2.0.0")
+        XCTAssertEqual(result?.freshness, .cached)
+        XCTAssertFalse(result?.displayText.contains("已是最新") ?? true)
+        XCTAssertFalse(result?.displayText.contains("上游有新版本") ?? true)
+        XCTAssertEqual(world.checker.summary.updateAvailableCount, 0)
+    }
+
+    /// 本机版本不可解析 + 缓存存在：结论 `.unknown`，绝不沿用缓存里的旧结论；
+    /// 记录的本机版本与当前一致或不一致都一样。
+    func testUnparsableInstalledVersionWithCacheIsUnknown() {
+        for recorded in [nil, "1.0.0", "dev-build"] {
+            var cached = UpdateCheckCacheFile()
+            let lastSuccess = referenceDate.addingTimeInterval(-3600)
+            cached.upsert(makeCachedEntry(
+                category: .piWeb,
+                latestVersion: "2.0.0",
+                status: .upToDate,
+                installedVersion: recorded,
+                lastAttemptAt: lastSuccess,
+                lastSuccessAt: lastSuccess
+            ))
+            let world = makeWorld(cached: cached, responder: { _ in .failure(.offline) })
+
+            world.checker.checkNow(
+                triggeredBy: .manual,
+                inventory: UpdateCheckInventory(piWebVersion: "dev-build")
+            )
+
+            let result = world.checker.summary.result(for: UpdateCheckTarget(category: .piWeb).id)
+            XCTAssertEqual(result?.status, .unknown, "recorded=\(recorded ?? "nil")")
+            XCTAssertFalse(result?.displayText.contains("已是最新") ?? true)
+            XCTAssertFalse(result?.displayText.contains("上游有新版本") ?? true)
+        }
+    }
+
+    /// 旧 schema（1）整文件缓存：读取不崩溃、不当作损坏丢弃，但条目缺少
+    /// `installedVersion`，结论一律不可判定；写回时升级到当前 schema。
+    func testLegacySchemaCacheWithoutInstalledVersionIsDowngradedToUnknown() throws {
+        let directory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("update-check-cache.json")
+        try cacheFileJSON(schemaVersion: UpdateCheckCacheFile.legacySchemaVersion, entries: [
+            cacheEntryJSON([
+                "targetID": "\"pi-web\"",
+                "category": "\"pi-web\"",
+                "latestVersion": "\"2.0.0\""
+            ])
+        ]).write(to: fileURL)
+
+        let clock = FixedClock(referenceDate)
+        let client = RecordingUpdateHTTPClient()
+        client.responder = { _ in .failure(.offline) }
+        let store = UpdateCheckCacheFileStore(fileURL: fileURL, clock: clock.clock)
+        let logs = LogSink()
+        let checker = UpdateChecker(
+            httpClient: client,
+            clock: clock.clock,
+            cacheStore: store,
+            scheduler: ImmediateUpdateCheckScheduler(),
+            identity: UpdateCheckIdentity(appName: "Pi Web Desktop", version: desktopInstalledVersion, bundleIdentifier: nil),
+            intervals: .standard,
+            preferences: .factoryDefaults,
+            log: { logs.append($0) }
+        )
+
+        checker.checkNow(triggeredBy: .manual, inventory: UpdateCheckInventory(piWebVersion: "1.0.0"))
+
+        let result = checker.summary.result(for: UpdateCheckTarget(category: .piWeb).id)
+        XCTAssertEqual(result?.status, .unknown)
+        XCTAssertEqual(result?.latestVersion, "2.0.0")
+        XCTAssertEqual(result?.freshness, .cached)
+        XCTAssertEqual(result?.origin, .cachedFallback)
+        XCTAssertFalse(result?.origin.isEligibleForAutomaticInstall ?? true)
+        XCTAssertTrue(UpdateNotificationPlanner.plan(
+            results: checker.summary.results,
+            preferences: checker.preferences,
+            ignoredVersions: .empty,
+            alreadyNotified: [:]
+        ).isEmpty)
+
+        // 旧文件被兼容读取（不当作损坏、不写拒绝日志），写回时升级 schema
+        // 并记录本机版本。
+        XCTAssertNil(store.lastLoadRejection)
+        XCTAssertFalse(logs.messages.contains { $0.contains("缓存已丢弃") })
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let saved = try decoder.decode(UpdateCheckCacheFile.self, from: Data(contentsOf: fileURL))
+        XCTAssertEqual(saved.schemaVersion, UpdateCheckCacheFile.currentSchemaVersion)
+        XCTAssertEqual(
+            saved.entry(for: UpdateCheckTarget(category: .piWeb).id)?.installedVersion,
+            "1.0.0"
+        )
     }
 
     // MARK: - 版本比较
@@ -1294,6 +1555,42 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertEqual(outcome.rejection, .invalidVersionShape)
         XCTAssertEqual(outcome.file, .empty)
         XCTAssertNil(outcome.file.entry(for: "desktop-app"))
+    }
+
+    /// 旧 schema（1）是兼容读取：按当前结构载入、无拒绝原因，条目缺少
+    /// `installedVersion` 由检查器降级（GitHub #74）。
+    func testCacheValidationReadsLegacySchemaAndNormalizesItToCurrent() {
+        let outcome = UpdateCheckCacheFile.validated(
+            cacheFileJSON(schemaVersion: UpdateCheckCacheFile.legacySchemaVersion, entries: [cacheEntryJSON()]),
+            now: referenceDate
+        )
+
+        XCTAssertNil(outcome.rejection)
+        XCTAssertEqual(outcome.file.schemaVersion, UpdateCheckCacheFile.currentSchemaVersion)
+        XCTAssertEqual(outcome.file.entries.count, 1)
+        XCTAssertNil(outcome.file.entries.first?.installedVersion)
+    }
+
+    /// `installedVersion` 是缓存里唯一允许非规范化语义化版本的字段（本机安装
+    /// 元数据可以是 `dev-build` 这类值），但仍要有长度上限、不含控制字符。
+    func testCacheValidationRestrictsInstalledVersionShape() {
+        let rejected = [
+            cacheEntryJSON(["installedVersion": "\"\""]),
+            cacheEntryJSON(["installedVersion": "\"1.0.0\\n（注入）\""]),
+            cacheEntryJSON(["installedVersion": "\"1.0.0\u{7F}\""])
+        ]
+        for entry in rejected {
+            let outcome = UpdateCheckCacheFile.validated(cacheFileJSON(entries: [entry]), now: referenceDate)
+            XCTAssertEqual(outcome.rejection, .invalidEntry)
+            XCTAssertEqual(outcome.file, .empty)
+        }
+
+        let valid = UpdateCheckCacheFile.validated(
+            cacheFileJSON(entries: [cacheEntryJSON(["installedVersion": "\"dev-build\""])]),
+            now: referenceDate
+        )
+        XCTAssertNil(valid.rejection)
+        XCTAssertEqual(valid.file.entries.first?.installedVersion, "dev-build")
     }
 
     /// 文件存储：未来时间戳与被改写的版本一律丢弃，并给出原因；合法缓存仍然可读。

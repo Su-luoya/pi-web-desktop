@@ -491,6 +491,25 @@ enum UpdateCheckStatus: String, Equatable {
     case unknown
 }
 
+/// 结论只能由“本机版本 + 上游版本”现算，绝不沿用缓存里的旧结论（GitHub #74）。
+///
+/// 缓存回退、条件请求（304）与本次网络响应都走这里，因此同一种输入在三处
+/// 得到同一个结论；缓存条目里记录的 `status` 只是当时那次计算的产物，不是
+/// 可以拿去覆盖当前本机版本的事实。
+enum UpdateVersionVerdict {
+    /// 语义化比较：本机 < 上游 → 有新版本；本机 >= 上游 → 已是最新；
+    /// 任一侧缺失或无法解析 → nil（不可判定，不猜）。
+    static func status(installed: String?, upstream: String?) -> UpdateCheckStatus? {
+        guard let installed,
+              let upstream,
+              let installedVersion = SemanticVersion(installed),
+              let upstreamVersion = SemanticVersion(upstream) else {
+            return nil
+        }
+        return installedVersion < upstreamVersion ? .updateAvailable : .upToDate
+    }
+}
+
 /// 检查失败的原因；写入缓存的只有这个枚举的 rawValue，没有自由文本。
 enum UpdateCheckFailure: String, Equatable {
     case timedOut
@@ -760,6 +779,10 @@ struct UpdateCacheEntry: Codable, Equatable {
     var etag: String?
     var lastModified: String?
     var latestVersion: String?
+    /// 写下这条结论时的本机版本（GitHub #74）。缓存里的 `status` 只对写下它的
+    /// 那个本机版本成立，因此复用任何结论字段前都要先与当前本机版本核对；
+    /// 旧缓存（schema 1）没有这个字段，读取后一律按“结论不可判定”处理。
+    var installedVersion: String?
     var status: String?
     var confidence: String?
     var failure: String?
@@ -774,6 +797,7 @@ struct UpdateCacheEntry: Codable, Equatable {
         etag: String? = nil,
         lastModified: String? = nil,
         latestVersion: String? = nil,
+        installedVersion: String? = nil,
         status: String? = nil,
         confidence: String? = nil,
         failure: String? = nil,
@@ -787,13 +811,13 @@ struct UpdateCacheEntry: Codable, Equatable {
         self.etag = etag
         self.lastModified = lastModified
         self.latestVersion = latestVersion
+        self.installedVersion = installedVersion
         self.status = status
         self.confidence = confidence
         self.failure = failure
         self.httpStatusCode = httpStatusCode
     }
 
-    var decodedStatus: UpdateCheckStatus? { status.flatMap(UpdateCheckStatus.init(rawValue:)) }
     var decodedConfidence: DetectionConfidence? { confidence.flatMap(DetectionConfidence.init(rawValue:)) }
 
     /// 上次成功结果是否仍可沿用：有版本、有成功时间，且没有超过该分类的 TTL。
@@ -803,10 +827,17 @@ struct UpdateCacheEntry: Codable, Equatable {
     }
 }
 
-/// 缓存文件结构。`schemaVersion` 不匹配时整份缓存视为不可用（返回空缓存），
-/// 因此未来格式变化不会让旧数据以错误语义被读入。
+/// 缓存文件结构。`schemaVersion` 不在 `supportedSchemaVersions` 内时整份缓存
+/// 视为不可用（返回空缓存），因此未来格式变化不会让旧数据以错误语义被读入；
+/// 已知的旧版本按当前结构读入，缺少 `installedVersion` 的旧条目由检查器降级为
+/// 不可判定（见 `cachedFallback`）。
 struct UpdateCheckCacheFile: Codable, Equatable {
-    static let currentSchemaVersion = 1
+    static let currentSchemaVersion = 2
+    /// 兼容读取的旧版本（GitHub #74 之前写入）：条目没有 `installedVersion`，
+    /// 无法判断缓存里的结论是否适用于当前本机版本，因此不参与结论复用。
+    static let legacySchemaVersion = 1
+    /// 可读取的 schema 版本。旧版本读入后按当前版本处理，不部分采用。
+    static let supportedSchemaVersions: [Int] = [legacySchemaVersion, currentSchemaVersion]
     /// 条目上限：包名列表长期变化时避免文件无限增长。
     static let maximumEntries = 200
     /// 文件大小上限：超过它的缓存文件不解析、不部分采用，直接丢弃。
@@ -932,6 +963,16 @@ extension UpdateCacheEntry {
                   let parsed = SemanticVersion(latestVersion),
                   parsed.description == latestVersion else { return .invalidVersionShape }
         }
+        // 写入结论时的本机版本不必是规范化的语义化版本（本机安装元数据可以是
+        // `dev-build` 这类值），但必须是有限长度、不含控制字符的字符串：它只
+        // 用于与当前本机版本核对，不进入界面。
+        if let installedVersion {
+            guard !installedVersion.isEmpty,
+                  installedVersion.count <= UpdateCheckCacheFile.maximumVersionLength,
+                  !installedVersion.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) else {
+                return .invalidEntry
+            }
+        }
         // 时间戳不能落在未来；允许小幅时钟偏移，但偏移必须小于容差。
         for timestamp in [lastAttemptAt, lastSuccessAt].compactMap({ $0 }) where
             timestamp.timeIntervalSince(now) > UpdateCheckCacheFile.futureTimestampTolerance {
@@ -956,18 +997,21 @@ extension UpdateCheckCacheFile {
         guard let file = try? decoder.decode(UpdateCheckCacheFile.self, from: data) else {
             return (.empty, .malformedStructure)
         }
-        guard file.schemaVersion == currentSchemaVersion else {
+        guard supportedSchemaVersions.contains(file.schemaVersion) else {
             return (.empty, .unsupportedSchemaVersion(file.schemaVersion))
         }
-        guard file.entries.count <= maximumEntries else {
-            return (.empty, .tooManyEntries(file.entries.count))
+        // 旧 schema 按当前结构使用（GitHub #74）：条目里缺少 `installedVersion`
+        // 时结论不可判定，由 `cachedFallback` 降级为 unknown，不沿用旧结论。
+        let normalized = UpdateCheckCacheFile(schemaVersion: currentSchemaVersion, entries: file.entries)
+        guard normalized.entries.count <= maximumEntries else {
+            return (.empty, .tooManyEntries(normalized.entries.count))
         }
-        for entry in file.entries {
+        for entry in normalized.entries {
             if let rejection = entry.validationRejection(at: now) {
                 return (.empty, rejection)
             }
         }
-        return (file, nil)
+        return (normalized, nil)
     }
 }
 
@@ -1028,6 +1072,8 @@ final class UpdateCheckCacheFileStore: UpdateCacheStoring {
 
     func save(_ file: UpdateCheckCacheFile) {
         var file = file
+        // 写盘一律用当前 schema：旧版本读入的缓存会在下一次保存时自动升级。
+        file.schemaVersion = UpdateCheckCacheFile.currentSchemaVersion
         file.pruneToMaximumEntries()
         do {
             try fileManager.createDirectory(
@@ -1544,7 +1590,12 @@ final class UpdateChecker {
         switch response {
         case .failure(let transportFailure):
             let failure = Self.checkFailure(from: transportFailure)
-            let fallback = cachedFallback(entry: item.cached, at: now, allowStatus: true)
+            let fallback = cachedFallback(
+                entry: item.cached,
+                installedVersion: item.installedVersion,
+                at: now,
+                allowStatus: true
+            )
             return resolve(
                 status: fallback.status,
                 latestVersion: fallback.latestVersion,
@@ -1560,7 +1611,12 @@ final class UpdateChecker {
         case .success(let http):
             // 最终主机不在白名单内：不采信内容，未经验证 → unknown，保留上一次成功结果。
             if let finalURL = http.finalURL, !endpoint.allows(host: finalURL.host) {
-                let fallback = cachedFallback(entry: item.cached, at: now, allowStatus: false)
+                let fallback = cachedFallback(
+                    entry: item.cached,
+                    installedVersion: item.installedVersion,
+                    at: now,
+                    allowStatus: false
+                )
                 return resolve(
                     status: fallback.status,
                     latestVersion: fallback.latestVersion,
@@ -1581,9 +1637,17 @@ final class UpdateChecker {
                     // 只有“预期端点 + 结构可解析”才标记 verified。
                     entry.etag = http.etag ?? item.cached?.etag
                     entry.lastModified = http.lastModified ?? item.cached?.lastModified
-                    guard let verdict = compare(installed: item.installedVersion, upstream: upstream.version) else {
+                    guard let verdict = UpdateVersionVerdict.status(
+                        installed: item.installedVersion,
+                        upstream: upstream.version
+                    ) else {
                         // 上游版本无法与本机版本比较：未经验证 → unknown。
-                        let fallback = cachedFallback(entry: item.cached, at: now, allowStatus: false)
+                        let fallback = cachedFallback(
+                            entry: item.cached,
+                            installedVersion: item.installedVersion,
+                            at: now,
+                            allowStatus: false
+                        )
                         return resolve(
                             status: fallback.status,
                             latestVersion: fallback.latestVersion,
@@ -1610,7 +1674,12 @@ final class UpdateChecker {
                     )
                 case .failure:
                     // 解析失败：未经验证 → unknown，并保留上一次成功结果与条件请求字段。
-                    let fallback = cachedFallback(entry: item.cached, at: now, allowStatus: false)
+                    let fallback = cachedFallback(
+                        entry: item.cached,
+                        installedVersion: item.installedVersion,
+                        at: now,
+                        allowStatus: false
+                    )
                     return resolve(
                         status: fallback.status,
                         latestVersion: fallback.latestVersion,
@@ -1627,8 +1696,16 @@ final class UpdateChecker {
                 // 条件请求命中：沿用缓存里的成功结果。
                 guard let cachedVersion = item.cached?.latestVersion,
                       let cachedEntry = item.cached,
-                      let verdict = compare(installed: item.installedVersion, upstream: cachedVersion) else {
-                    let fallback = cachedFallback(entry: item.cached, at: now, allowStatus: false)
+                      let verdict = UpdateVersionVerdict.status(
+                          installed: item.installedVersion,
+                          upstream: cachedVersion
+                      ) else {
+                    let fallback = cachedFallback(
+                        entry: item.cached,
+                        installedVersion: item.installedVersion,
+                        at: now,
+                        allowStatus: false
+                    )
                     return resolve(
                         status: fallback.status,
                         latestVersion: fallback.latestVersion,
@@ -1662,7 +1739,12 @@ final class UpdateChecker {
                 let failure = Self.failure(forStatusCode: http.statusCode)
                 // 重定向属于未经验证的响应；限流 / 5xx 等明确的上游回答可以沿用旧缓存。
                 let allowCachedStatus = failure != .unexpectedRedirect
-                let fallback = cachedFallback(entry: item.cached, at: now, allowStatus: allowCachedStatus)
+                let fallback = cachedFallback(
+                    entry: item.cached,
+                    installedVersion: item.installedVersion,
+                    at: now,
+                    allowStatus: allowCachedStatus
+                )
                 return resolve(
                     status: fallback.status,
                     latestVersion: fallback.latestVersion,
@@ -1685,29 +1767,26 @@ final class UpdateChecker {
         return UpdateResponseParser.latestNpmVersion(from: body)
     }
 
-    /// 语义化比较：本机 < 上游 → 有新版本；本机 >= 上游 → 已是最新；
-    /// 任一侧无法解析 → nil（unknown，不猜）。
-    private func compare(installed: String?, upstream: String) -> UpdateCheckStatus? {
-        guard let installedText = installed,
-              let installedVersion = SemanticVersion(installedText),
-              let upstreamVersion = SemanticVersion(upstream) else {
-            return nil
-        }
-        if installedVersion < upstreamVersion { return .updateAvailable }
-        return .upToDate
-    }
-
     /// 失败时的结论。
     ///
     /// - `allowStatus == true`（网络失败、超时、429/5xx）：TTL 内的上次成功结果
-    ///   连结论一起沿用，标记为 `.cached`；超过 TTL 或从未成功过则 unknown。
+    ///   可以拿来展示，但**结论一律按当前本机版本现算**（GitHub #74）：用当前
+    ///   本机版本与缓存里的上游版本走与 304 分支同一条
+    ///   `UpdateVersionVerdict.status(installed:upstream:)` 路径，绝不沿用条目里
+    ///   的旧 `status`。本机版本或缓存版本无法解析时降级为 `.unknown`（不猜）。
     /// - `allowStatus == false`（解析失败、非预期主机/重定向、版本无法比较）：
     ///   响应未经验证，本次结论一律 unknown，但仍展示上次成功版本。
+    ///
+    /// 旧缓存条目（schema 1）没有记录写下结论时的本机版本，无法判断缓存里的
+    /// 结论是否适用于当前本机版本，因此一律按不可判定处理（`.unknown`）；
+    /// 记录存在但与当前本机版本不同、或者本机版本无法解析时，同样只相信现算
+    /// 的结果，不沿用旧结论。条目的可信度标记只在与当前本机版本一致时才继承。
     ///
     /// 无论哪种情况，结论来源都是 `.cachedFallback`（没有可展示版本时为
     /// `.unavailable`）：缓存文件不是可信输入，因此这些结论只供提示。
     private func cachedFallback(
         entry: UpdateCacheEntry?,
+        installedVersion: String?,
         at now: Date,
         allowStatus: Bool
     ) -> CachedFallbackOutcome {
@@ -1722,8 +1801,8 @@ final class UpdateChecker {
                 cacheWrittenAt: cacheOrigin.cacheWrittenAt
             )
         }
-        if !allowStatus {
-            return CachedFallbackOutcome(
+        func undecidable() -> CachedFallbackOutcome {
+            CachedFallbackOutcome(
                 status: .unknown,
                 latestVersion: latestVersion,
                 confidence: .unknown,
@@ -1732,40 +1811,60 @@ final class UpdateChecker {
                 cacheWrittenAt: cacheOrigin.cacheWrittenAt
             )
         }
+        if !allowStatus {
+            return undecidable()
+        }
         let ttl = UpdateCheckCategory(rawValue: entry.category).map { intervals.ttl(for: $0) }
             ?? intervals.ttl(for: .desktopApp)
-        if entry.isReusable(at: now, ttl: ttl),
-           let status = entry.decodedStatus,
-           status != .unknown {
-            return CachedFallbackOutcome(
-                status: status,
-                latestVersion: latestVersion,
-                confidence: entry.decodedConfidence ?? .unknown,
-                freshness: .cached,
-                origin: cacheOrigin.origin,
-                cacheWrittenAt: cacheOrigin.cacheWrittenAt
-            )
+        guard entry.isReusable(at: now, ttl: ttl) else {
+            return undecidable()
         }
+        // 缓存里的结论没有绑定到“写下它时的本机版本”：旧缓存缺字段，无法判定。
+        guard let cachedInstalledVersion = entry.installedVersion else {
+            return undecidable()
+        }
+        // 现算：当前本机版本 vs 缓存里的上游版本；本机版本不可解析 → unknown。
+        guard let status = UpdateVersionVerdict.status(installed: installedVersion, upstream: latestVersion) else {
+            return undecidable()
+        }
+        // 缓存条目的可信度只对写下它的那个本机版本成立：版本不一致时本轮结论
+        // 是重新推导的，不继承缓存里的置信度标记。
+        let confidence = isSameInstalledVersion(cachedInstalledVersion, installedVersion)
+            ? (entry.decodedConfidence ?? .unknown)
+            : .unknown
         return CachedFallbackOutcome(
-            status: .unknown,
+            status: status,
             latestVersion: latestVersion,
-            confidence: .unknown,
+            confidence: confidence,
             freshness: .cached,
             origin: cacheOrigin.origin,
             cacheWrittenAt: cacheOrigin.cacheWrittenAt
         )
     }
 
+    /// 写下缓存结论时的本机版本与当前本机版本是否是同一个版本。两边都能解析时
+    /// 按语义化版本比较（`v2.0.0` 与 `2.0.0` 视为同一个版本），否则退回字符串
+    /// 相等；任一为 nil 时不等（调用方在此之前已把缺字段降级为 unknown）。
+    private func isSameInstalledVersion(_ lhs: String?, _ rhs: String?) -> Bool {
+        guard let lhs, let rhs else { return false }
+        if let left = SemanticVersion(lhs), let right = SemanticVersion(rhs) { return left == right }
+        return lhs == rhs
+    }
+
     private func baseEntry(for item: PlanItem) -> UpdateCacheEntry {
         if var cached = item.cached {
             cached.category = item.target.category.rawValue
             cached.packageName = item.target.packageName
+            // 记录写下结论时的本机版本：下一次缓存回退据此判断旧结论是否仍
+            // 适用于当前本机版本（GitHub #74）。
+            cached.installedVersion = item.installedVersion
             return cached
         }
         return UpdateCacheEntry(
             targetID: item.target.id,
             category: item.target.category.rawValue,
-            packageName: item.target.packageName
+            packageName: item.target.packageName,
+            installedVersion: item.installedVersion
         )
     }
 
@@ -1802,7 +1901,7 @@ final class UpdateChecker {
         if let rejection = cacheStore.lastLoadRejection {
             log?(rejection.logLine)
         }
-        cache = loaded.schemaVersion == UpdateCheckCacheFile.currentSchemaVersion ? loaded : .empty
+        cache = UpdateCheckCacheFile.supportedSchemaVersions.contains(loaded.schemaVersion) ? loaded : .empty
     }
 
     /// 只记录状态计数：不记录 URL、响应体、包名列表或任何请求细节。

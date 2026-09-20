@@ -619,7 +619,13 @@ enum UpdateCategoryStatusBuilder {
             status = chosenResult.status
             failure = chosenResult.failure
         } else if let entryWithVersion {
-            status = entryWithVersion.decodedStatus
+            // 没有本次结果时，缓存条目里的旧结论不能直接展示（GitHub #74）：用
+            // 条目记录的本机版本与缓存里的上游版本现算，缺字段或任一侧不可解析
+            // 时降级为 unknown，因此不会出现“已是最新 / 可更新”与版本自相矛盾。
+            status = UpdateVersionVerdict.status(
+                installed: entryWithVersion.installedVersion,
+                upstream: entryWithVersion.latestVersion
+            ) ?? .unknown
             if status == .unknown {
                 failure = entryWithVersion.failure.flatMap(UpdateCheckFailure.init(rawValue:))
             }
@@ -743,7 +749,9 @@ struct UpdateNotificationEntry: Equatable {
 ///
 /// 只挑选“可更新、未被忽略、本次运行尚未为这个版本提示过”的结果，因此：
 /// 忽略某个版本后不再提示，上游发布更高版本时会重新进入名单；关闭的分类永远
-/// 不进入名单。通知走应用内提示框（见 `docs/privacy.md` 的取舍说明），这里只
+/// 不进入名单。名单只消费 `UpdateChecker` 重建过的结果（status 按当前本机
+/// 版本现算，GitHub #74），本函数自己不读缓存、也不沿用缓存里的结论。
+/// 通知走应用内提示框（见 `docs/privacy.md` 的取舍说明），这里只
 /// 决定提示哪些条目。
 enum UpdateNotificationPlanner {
     static func plan(

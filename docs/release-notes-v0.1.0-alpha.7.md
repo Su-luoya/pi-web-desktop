@@ -214,8 +214,11 @@ W2B 的 `B-1` … `B-13`，W2A 的 `F5` / `F6` / `F7`，以及 alpha.6 delta 安
 回填流程相同）；本机演练值只用于追溯，**不用于发布核对**。
 
 - 资产：`Pi-Web-Desktop-0.1.0-alpha.7+build.7.zip`（以及同前缀的 `.sha256` 与证据 Markdown）
-- 字节数：**待回填**
-- SHA-256：**待回填**
+- 字节数：**1,590,986**
+- SHA-256：`782f97ef755c596b1e458964cdc1eb4fd47a588db3e867559dccb8dc2da38c1f`
+- 发布 tag `v0.1.0-alpha.7`（合并提交 `fba1f12`，`release.yml` run `35499610608`，`success`）：
+  <https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.7>（`2026-09-20T08:30:20Z`，
+  下载后 `shasum -a 256 -c` 通过）
 - 校验命令（下载目录执行）：
 
   ```bash

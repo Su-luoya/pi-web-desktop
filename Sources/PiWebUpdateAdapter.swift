@@ -17,6 +17,59 @@ import Foundation
 // - 安装后重新检测版本并复用既有健康检查；验证失败或健康检查失败时保留旧版本
 //   语义并记录失败原因，不静默继续、也不声称回滚成功（完整回滚框架属于 #23）。
 
+// MARK: - 更新入口闸控状态（W3B F2/F3）
+
+/// 一个组件更新入口（菜单项与手动更新动作）的闸控状态（W3B F2/F3）。每个组件
+/// 一份，互不影响：Pi Web 的卡住的子进程不得禁用 Pi CLI 的入口，反之亦然；
+/// 被挡住时带可见原因，不能静默置灰。
+///
+/// 定在这里而不是 `Sources/PiWebApp.swift` 的原因：本文件同时属于
+/// PiWebDesktop 与 PiWebDesktopTests 两个 target；`PiWebApp.swift` 不在测试
+/// target 的源文件清单里，放在那里会让测试 target 编译时报
+/// “cannot find 'UpdateEntryState' in scope”。
+struct UpdateEntryState: Equatable {
+    /// 一次更新事务正在进行中：安装/命令执行、版本重检测、服务启动与健康检查
+    /// 都算（不再只看安装子进程，W3B F2）。
+    var transactionInProgress: Bool
+    /// 上一次更新的子进程已经放弃等待，但退出尚未确认：保守起见先不启动第二次
+    /// 更新（这种窗口只能靠重启应用可靠恢复，W3B F3）。
+    var awaitingAbandonedChildExit: Bool
+
+    static let free = UpdateEntryState(transactionInProgress: false, awaitingAbandonedChildExit: false)
+
+    /// 由一个组件**自己**的三个状态合成入口闸控（W3B F3：构建时不会看到另一个
+    /// 组件的状态，因此不可能跨组件误伤）。
+    static func component(
+        transactionInProgress: Bool,
+        childInFlight: Bool,
+        abandonedChildrenUnconfirmed: Bool
+    ) -> UpdateEntryState {
+        UpdateEntryState(
+            transactionInProgress: transactionInProgress || (childInFlight && !abandonedChildrenUnconfirmed),
+            awaitingAbandonedChildExit: abandonedChildrenUnconfirmed
+        )
+    }
+
+    var isBlocked: Bool { transactionInProgress || awaitingAbandonedChildExit }
+
+    /// 菜单标题后缀：被挡住时给出可见原因（W3B F3：不得静默置灰）。
+    var menuTitleSuffix: String? {
+        guard isBlocked else { return nil }
+        return awaitingAbandonedChildExit
+            ? "（上一次更新未确认退出，重启应用可恢复）"
+            : "（正在更新）"
+    }
+
+    /// 入口被拒时的可见说明（含可恢复路径，W3B F3）。
+    var rejectionDetail: String {
+        if awaitingAbandonedChildExit {
+            return "上一次更新命令已放弃等待，但还不能确认它已经退出，因此不会启动第二次更新。"
+                + "如果长时间没有变化，重启应用即可恢复（重启后这个未确认窗口不会保留）。"
+        }
+        return "上一次更新尚未结束（可能正在重新检测版本、启动服务或做健康检查），请等它完成后再试。"
+    }
+}
+
 // MARK: - 拒绝 / 授权原因
 
 /// 不自动安装的原因，或自动安装被拒绝的原因。全部是固定文案：不含路径、包名

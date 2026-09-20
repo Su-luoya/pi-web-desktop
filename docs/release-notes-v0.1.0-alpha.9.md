@@ -164,14 +164,17 @@ and does not compare installer contents**.
 
 ## 校验值
 
-本节在 tag 与 Release 草稿建立后，由协调者从 workflow 产物回填**实际值**（与 `v0.1.0-alpha.8` 的做法一致）。
+本节的值来自 `release.yml` 在 tag `v0.1.0-alpha.9` 上生成的发布产物，由协调者回填（与 `v0.1.0-alpha.8` 的做法一致）。
 
 | 项 | 值 |
 | --- | --- |
 | 发布资产 | `Pi-Web-Desktop-0.1.0-alpha.9+build.9.zip` |
-| 大小 | 〈待回填〉 |
-| SHA-256 | 〈待回填〉 |
-| 发布提交 | 〈待回填〉（tag `v0.1.0-alpha.9` 指向该提交） |
+| 大小 | `1595202` 字节 |
+| SHA-256 | `b03a4630d039179f8a5e094b23f12836eac6f7d1bedef4f07c4f0e7d24cf2a3d` |
+| 发布提交 | `0b52e2c68e127df2deae1154682402f6e6ea0191`（`chore(release): v0.1.0-alpha.9 版本 bump、发布说明、安全评审与门槛执行记录 (#132)`，tag `v0.1.0-alpha.9` 指向该提交） |
+| 校验 | `shasum -a 256 -c Pi-Web-Desktop-0.1.0-alpha.9+build.9.zip.sha256` 与 Release 上的 `.zip.sha256` 一致 |
+
+发布页：<https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.9>（prerelease，发布于 `2026-09-20T11:13:19Z`）。生成该产物的 `release.yml` 运行：<https://github.com/Su-luoya/pi-web-desktop/actions/runs/35507037689>；发布提交在 `main` 上的 CI 运行：<https://github.com/Su-luoya/pi-web-desktop/actions/runs/35507032580>（均 success）。
 
 **本机演练值（不是发布资产）** —— 在候选工作区 `~/orca/workspaces/Pi-Web/release-alpha-9`（`HEAD = 8b7e74d`，工作区含本版版本 bump 与本文档）用 `Scripts/package-release.sh --tag v0.1.0-alpha.9` 打包，用来验证打包链路与记录产物形态：
 

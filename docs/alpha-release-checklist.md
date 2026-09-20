@@ -1149,17 +1149,17 @@ squash 合入 main → `fba1f12`（CI run `35499346342`，`build` success）；t
 | # | 检查 | 实测输出摘要 | 判定 |
 | --- | --- | --- | --- |
 | C1 | PR CI（候选提交 `8b7e74d`） | `build.yml` run `35506224959` | **success** |
-| C2 | 发布提交的 CI | 〈待回填〉 | 待完成 |
-| C3 | `git tag -a v0.1.0-alpha.9` 指向发布提交 | 〈待回填〉 | 待完成 |
-| C4 | `release.yml`（tag push 触发） | 〈待回填〉 | 待完成 |
-| C5 | 草稿 prerelease 的正文与真机表 | 〈待回填〉 | 待完成 |
-| C6 | 真机 macOS 与 Node / pi / pi-web 版本 | Apple M4（`Mac16,10`）/ macOS 27.0（`26A428`）arm64 / Node v24.21.0 / pi 0.86.0 / `@agegr/pi-web` 0.9.1；`smoke.sh` 双模式通过（`items=6 blockers=3`） | 已实测；待写入 Release 正文 |
-| C7 | `gh release edit --draft=false`（prerelease） | 〈待回填〉 | 待完成 |
+| C2 | 发布提交的 CI | `build.yml` run `35507032580`（`push` / `main` / head `0b52e2c`） | **success** |
+| C3 | `git tag -a v0.1.0-alpha.9` 指向发布提交 | tag → `0b52e2c68e127df2deae1154682402f6e6ea0191`（`chore(release): v0.1.0-alpha.9 … (#132)`），与 `origin/main` 顶端一致 | 通过 |
+| C4 | `release.yml`（tag push 触发） | run `35507037689`（`push` / `v0.1.0-alpha.9` / head `0b52e2c`）：上传 ZIP（`1595202` 字节）、`.zip.sha256`、`.evidence.md`，并创建草稿 prerelease（`2026-09-20T11:09:14Z`） | **success** |
+| C5 | 草稿 prerelease 的正文与真机表 | 正文 168 行：真机表已填（值同本表 C6）、「校验值」一节含发布 SHA-256 `b03a4630…`、「已知问题」列出本版修掉的 `L-1` / `L-3` / `L-4` / `L-5` 与保留项 `O-1` | 通过 |
+| C6 | 真机 macOS 与 Node / pi / pi-web 版本 | Apple M4（`Mac16,10`）/ macOS 27.0（`26A428`）arm64 / Node v24.21.0 / pi 0.86.0 / `@agegr/pi-web` 0.9.1；`smoke.sh` 双模式通过（`items=6 blockers=3`） | 已实测，已写入 Release 正文 |
+| C7 | `gh release edit --draft=false`（prerelease） | 发布于 `2026-09-20T11:13:19Z`；`gh release view v0.1.0-alpha.9` 显示 `isDraft=false`、`isPrerelease=true` | 通过 |
 | C8 | 回退路径（上一版资产仍在 Releases） | `v0.1.0-alpha.8`（`2026-09-20T09:43:25Z`，3 个资产：ZIP / `.sha256` / `.evidence.md`） | 已核实 |
-| C9 | 回填 Release issue 的 run 链接与 SHA-256、关闭 issue | issue [#131](https://github.com/Su-luoya/pi-web-desktop/issues/131) | 待回填 |
+| C9 | 回填 Release issue 的 run 链接与 SHA-256、关闭 issue | issue [#131](https://github.com/Su-luoya/pi-web-desktop/issues/131)：回填评论 <https://github.com/Su-luoya/pi-web-desktop/issues/131#issuecomment-5749441365>；issue 已由 PR #132 的 `Closes #131` 在 `2026-09-20T11:09:09Z` 关闭 | 通过 |
 
-本节的边界：C2–C5、C7 与 C9 在 CI / workflow / 维护者操作里完成，本机没有对应的实测输出；C5–C6 的正文
-与真机表由维护者在本机填写。
+本节的边界：C2–C5、C7 与 C9 的输出来自 CI / workflow / 维护者操作，不是本机脚本的直接输出；C5–C6 的
+正文与真机表由维护者填写（已写入 Release 正文）。
 
 ### 本版同时做的文档一致性改动
 

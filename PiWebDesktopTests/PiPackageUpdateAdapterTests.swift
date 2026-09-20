@@ -1417,6 +1417,30 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
         XCTAssertEqual(abandonedCount.value ?? 0, 0, "成功退出不得写「已放弃」记录")
     }
 
+    /// L-4（GitHub #127）：排水宽限到期结束时也必须冲刷增量解码器的暂存字节。
+    /// 父脚本只写半个多字节序列就退出、后台子进程继续持有 stdout 写端，因此不会读到
+    /// EOF，结束流程只能走「排水宽限到期」这条路——此前它不冲刷解码器，那半个字符
+    /// 会被静默丢掉（EOF 路径才会冲刷）。
+    func testRealExecutorDrainGraceExpiryFlushesPendingDecoderBytes() throws {
+        let directory = try tempDirectory()
+        // 半个「☃」（E2 98 83）：只写第一个字节，剩下两字节从未到达。
+        let script = try makeFakePi(in: directory, body: "printf '\\342'\nsleep 5 &\nexit 0")
+        let box = Locked<PiPackageUpdateCommandResult>()
+        let command = ProcessPiPackageUpdateCommand(
+            baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome],
+            pipeDrainGrace: 1
+        )
+        command.run(try plan(forScript: script), timeout: 30) { box.value = $0 }
+        let result = try XCTUnwrap(waitForValue(box, timeout: 30))
+        XCTAssertEqual(result.exitCode, 0, "宽限到期结束仍按真实退出码结束")
+        XCTAssertFalse(result.timedOut, "已观测到退出码 0 时不得判定为超时")
+        XCTAssertEqual(
+            result.stdoutTail,
+            "\u{FFFD}",
+            "宽限到期也必须冲刷解码器暂存：尾部只应有替换字符，不得静默丢掉"
+        )
+    }
+
     /// B-3（复核）：`abandon()` 落在「进程已退出、只是在等管道读到 EOF」的宽限窗口里
     /// 时并不算放弃等待：结果照常按真实退出码投递，也不得写一条 `finishedAt == nil`
     /// 的「已放弃」记录（那是失实的历史，登记也永远无人结清）。

@@ -1468,6 +1468,10 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
         timer = nil
         drainTimer?.cancel()
         drainTimer = nil
+        // L-4（GitHub #127）：与 CLI / Web 的收尾路径一致，完成时冲刷两个解码器的暂存字节。
+        // 排水宽限到期结束走的就是这条路径，此前只有 EOF 路径冲刷，尾部可能少一个不完整字符。
+        appendDecodedLocked(stdoutDecoder.decode(Data(), final: true), toStdout: true)
+        appendDecodedLocked(stderrDecoder.decode(Data(), final: true), toStdout: false)
         if let handle = (process?.standardOutput as? Pipe)?.fileHandleForReading {
             handle.readabilityHandler = nil
         }
@@ -1591,7 +1595,8 @@ enum PiPackageUpdateRunOutcome: Equatable {
         case .versionUnchanged(let plan, let detected, let record):
             return "Pi 扩展包更新（\(plan.packageName)）未通过版本验证：命令退出码 0、耗时 \(record.durationText)，"
                 + "但重新检测到的版本是 \(detected ?? "未知")，目标版本 \(plan.targetVersion ?? "未知")。"
-                + "旧版本保持不变；应用不会自动重试无上限，也不声称更新成功。"
+                + UpdateWarningText.oldVersionClaimText(detectedVersion: detected)
+                + "应用不会自动重试无上限，也不声称更新成功。"
         case .succeeded(let plan, let newVersion, let record):
             return "Pi 扩展包更新（\(plan.packageName)）完成：\(plan.installedVersion) → \(newVersion)，"
                 + "退出码 \(record.exitCode.map(String.init) ?? "未知")，耗时 \(record.durationText)。"
@@ -1852,7 +1857,8 @@ final class PiPackageUpdateCoordinator {
                 self.logOutcome(
                     "Pi 扩展包更新（\(plan.packageName)）未通过版本验证：命令退出码 0，但重新检测到的版本是 "
                         + "\(detected ?? "未知")，目标版本 \(plan.targetVersion ?? "未知")。"
-                        + "旧版本保持不变；应用不会自动重试无上限，也不声称更新成功。"
+                        + UpdateWarningText.oldVersionClaimText(detectedVersion: detected)
+                        + "应用不会自动重试无上限，也不声称更新成功。"
                 )
                 completion(.versionUnchanged(plan: plan, detectedVersion: detected, record: record))
                 return

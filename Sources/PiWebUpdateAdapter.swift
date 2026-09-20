@@ -1723,7 +1723,8 @@ final class PiWebUpdateCoordinator {
                 self.logOutcome(
                     "Pi Web 更新未通过版本验证：安装命令退出码 0，但重新检测到的版本是 "
                     + "\(detectedVersion ?? "未知")，目标版本 \(plan.targetVersion)。"
-                    + "旧版本语义保持不变；应用不会自动回滚，也不声称更新成功。"
+                    + UpdateWarningText.oldVersionClaimText(detectedVersion: detectedVersion)
+                    + "应用不会自动回滚，也不声称更新成功。"
                 )
                 let outcome = PiWebUpdateRunOutcome.versionUnchanged(
                     plan: plan,

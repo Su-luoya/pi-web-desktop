@@ -412,6 +412,13 @@ final class UpdateTransactionTests: XCTestCase {
         XCTAssertTrue(report.summaryLines.contains { $0.contains("未验证") })
     }
 
+    func testVersionReachedRejectsUnparseableTarget() throws {
+        XCTAssertFalse(UpdateVerifier.versionReached(detected: "2.0.0", old: "1.0.0", target: "latest"))
+        let result = UpdateVerifier.versionCheck(detected: "2.0.0", previous: "1.0.0", target: "latest")
+        XCTAssertEqual(result.status, .failed)
+        XCTAssertEqual(result.detail, "目标版本不可解析")
+    }
+
     // MARK: - 3. install 失败：状态未变、历史语义、无成功报告
 
     func testInstallFailureKeepsStateAndRecordsNoSuccess() throws {
@@ -1333,6 +1340,94 @@ final class UpdateTransactionTests: XCTestCase {
         XCTAssertEqual(plan.evidence?.level, .contentHash)
         XCTAssertTrue(plan.warningText.contains("已重新核对旧文件内容哈希"))
         XCTAssertFalse(plan.warningText.contains("不校验旧文件内容"), "内容哈希已核对时不得写“不校验旧文件内容”")
+    }
+
+    func testBoundedMetadataReadsRejectOversizedFilesBeforeOpening() throws {
+        var opened = false
+        XCTAssertNil(UpdateArtifactProbe.readBoundedData(
+            atPath: "/tmp/oversized",
+            maximumSize: 8,
+            fileSize: { _ in 9 },
+            openFile: { _ in
+                opened = true
+                return nil
+            }
+        ))
+        XCTAssertFalse(opened, "属性报告超限后不得打开文件读取内容")
+
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let packageJSON = root.appendingPathComponent("package.json")
+        FileManager.default.createFile(atPath: packageJSON.path, contents: Data("x".utf8))
+        var handle = try FileHandle(forWritingTo: packageJSON)
+        try handle.truncate(atOffset: UInt64(UpdateArtifactProbe.packageJSONSizeLimitBytes + 1))
+        try handle.close()
+        XCTAssertNil(UpdateArtifactProbe.readPackageName(atPackageJSONPath: packageJSON.path))
+
+        let lockfile = root.appendingPathComponent("package-lock.json")
+        FileManager.default.createFile(atPath: lockfile.path, contents: Data("x".utf8))
+        handle = try FileHandle(forWritingTo: lockfile)
+        try handle.truncate(atOffset: UInt64(UpdateArtifactProbe.lockfileSizeLimitBytes + 1))
+        try handle.close()
+        XCTAssertNil(UpdateArtifactProbe.readIntegrityValue(
+            atLockfilePath: lockfile.path,
+            packageName: "bounded-fixture",
+            packageVersion: "1.0.0"
+        ))
+    }
+
+    func testIntegritySelectionPrefersExactPathAndRejectsVersionMismatchOrAmbiguity() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let lockfile = root.appendingPathComponent("package-lock.json")
+        let exactIntegrity = "sha512-" + String(repeating: "A", count: 86)
+        let nestedIntegrity = "sha512-" + String(repeating: "B", count: 86)
+        let otherNestedIntegrity = "sha512-" + String(repeating: "C", count: 86)
+        let packageName = "@scope/pi-integrity-fixture"
+        let lockObject: [String: Any] = [
+            "packages": [
+                "node_modules/z-parent/node_modules/\(packageName)": [
+                    "version": "2.0.0", "integrity": nestedIntegrity
+                ],
+                "node_modules/\(packageName)": [
+                    "version": "1.0.0", "integrity": exactIntegrity
+                ],
+                "node_modules/a-parent/node_modules/\(packageName)": [
+                    "version": "1.0.0", "integrity": otherNestedIntegrity
+                ]
+            ]
+        ]
+        try JSONSerialization.data(withJSONObject: lockObject).write(to: lockfile)
+
+        for _ in 0..<10 {
+            XCTAssertEqual(UpdateArtifactProbe.readIntegrityValue(
+                atLockfilePath: lockfile.path,
+                packageName: packageName,
+                packageVersion: "1.0.0"
+            ), exactIntegrity)
+        }
+        XCTAssertNil(UpdateArtifactProbe.readIntegrityValue(
+            atLockfilePath: lockfile.path,
+            packageName: packageName,
+            packageVersion: "2.0.0"
+        ), "精确路径存在但版本不符时不得退回其它版本条目")
+
+        let ambiguousObject: [String: Any] = [
+            "packages": [
+                "node_modules/a-parent/node_modules/\(packageName)": [
+                    "version": "1.0.0", "integrity": nestedIntegrity
+                ],
+                "node_modules/z-parent/node_modules/\(packageName)": [
+                    "version": "1.0.0", "integrity": otherNestedIntegrity
+                ]
+            ]
+        ]
+        try JSONSerialization.data(withJSONObject: ambiguousObject).write(to: lockfile)
+        XCTAssertNil(UpdateArtifactProbe.readIntegrityValue(
+            atLockfilePath: lockfile.path,
+            packageName: packageName,
+            packageVersion: "1.0.0"
+        ))
     }
 
     /// 用真实的临时目录（假可执行文件 + 假 npm 包目录）验证生产探针：内容哈希、

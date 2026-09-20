@@ -150,6 +150,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # flags, never a single value, and it never contains shell metacharacters.
 swiftc $OPTIMIZATION_FLAGS "$ROOT/Sources/PiWebApp.swift" \
   "$ROOT/Sources/AppConfiguration.swift" \
+  "$ROOT/Sources/RecentWorkspace.swift" \
   "$ROOT/Sources/AppPaths.swift" \
   "$ROOT/Sources/DiagnosticsCollector.swift" \
   "$ROOT/Sources/DiagnosticsClipboard.swift" \
@@ -262,6 +263,19 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>zh_CN</string>
     <key>CFBundleDisplayName</key>
     <string>$APP_DISPLAY_NAME</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeExtensions</key>
+            <array><string>*</string></array>
+            <key>CFBundleTypeName</key>
+            <string>Folder</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSTypeIsPackage</key>
+            <false/>
+        </dict>
+    </array>
     <key>CFBundleExecutable</key>
     <string>$APP_EXECUTABLE_NAME</string>
     <key>CFBundleIconFile</key>

@@ -33,6 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var shouldPresentDiagnostics = false
     /// 工作目录校验结果（GitHub #9）。不可用时门控关闭、路由进入诊断页。
     private var workspaceValidation: WorkspaceDirectoryValidation = .usable(path: "")
+    /// “服务”菜单中的最近工作目录；菜单每次打开时从持久存储重建。
+    private var recentWorkspacesMenu: NSMenu?
 
     // MARK: - 更新检查（GitHub #17）
 
@@ -347,10 +349,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         serviceManager.setState(.checking)
         webViewController.showLoadingPage(message: "正在检查运行环境…")
         refreshWorkspaceState()
+        recordCurrentWorkspace()
+        rebuildRecentWorkspacesMenu()
         // 更新检查立即开始：先把应用自身版本发出去；依赖检测完成后补齐
         // Pi / Pi Web / 扩展包版本（见 `startUpdateChecking`）。
         startUpdateChecking(with: UpdateCheckInventory(desktopAppVersion: ApplicationInstallationProbe.current.version))
         runDependencyCheck()
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let directory = urls.first else { return }
+        requestWorkspaceSwitch(to: directory)
     }
 
     // MARK: - Smoke launch
@@ -719,6 +728,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         serviceMenu.addItem(makeServiceControlMenuItem(title: "重启服务", action: #selector(restartServiceAction(_:))))
         serviceMenu.addItem(makeServiceControlMenuItem(title: "停止服务", action: #selector(stopServiceAction(_:))))
         serviceMenu.addItem(withTitle: "设置…", action: #selector(showPreferences(_:)), keyEquivalent: "")
+        let recentWorkspacesItem = NSMenuItem(title: "最近工作目录", action: nil, keyEquivalent: "")
+        let recentWorkspacesMenu = NSMenu(title: "最近工作目录")
+        recentWorkspacesMenu.delegate = self
+        recentWorkspacesItem.submenu = recentWorkspacesMenu
+        self.recentWorkspacesMenu = recentWorkspacesMenu
+        serviceMenu.addItem(recentWorkspacesItem)
+        serviceMenu.addItem(withTitle: "在 Finder 中打开当前工作目录", action: #selector(openCurrentWorkspace(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "在浏览器中打开", action: #selector(openInBrowser(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "复制本地地址", action: #selector(copyLocalAddress(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "打开日志", action: #selector(openLog(_:)), keyEquivalent: "")
@@ -742,6 +758,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSApp.windowsMenu = windowMenu
 
         NSApp.mainMenu = mainMenu
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        if menu === recentWorkspacesMenu {
+            rebuildRecentWorkspacesMenu()
+        }
     }
 
     /// 依赖门控禁用的服务控件菜单项（启动/停止/重启）；菜单打开时由
@@ -2320,11 +2342,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let previous = serviceManager.configuration
         appConfiguration.save(newConfiguration)
         let changed = previous.runtimeSignature != newConfiguration.runtimeSignature
+        let workspaceChanged = previous.workspacePath != newConfiguration.workspacePath
         let needsRestartForCredentials = credentialsChanged && !RemoteAccessPolicy.isLoopbackHostname(newConfiguration.hostname)
         let managed = (changed || needsRestartForCredentials) && serviceManager.managedServicePID() != nil
         // 工作目录门控与菜单可用性读最新配置，但配置要等旧服务停止后才交给
         // ServiceManager（否则停止校验会因端口/参数变化把旧进程误判为外部服务）。
         refreshWorkspaceState(configuration: newConfiguration)
+        if workspaceChanged {
+            recordWorkspace(path: appConfiguration.workspaceDirectory(for: newConfiguration).path)
+        }
         applyServiceControlAvailability()
 
         if managed {
@@ -2347,6 +2373,113 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
 
     // MARK: - Actions
+
+    /// Finder 拖放、`open -a` 与菜单选择共用同一套校验和确认流程。
+    private func requestWorkspaceSwitch(to url: URL) {
+        let currentPath = appConfiguration.workspaceDirectory(for: serviceManager.configuration).path
+        switch WorkspaceSwitchDecision.decide(
+            requestedPath: url.path,
+            currentPath: currentPath,
+            probe: workspaceProbe
+        ) {
+        case .unchanged:
+            recordWorkspace(path: currentPath)
+        case .reject(let validation):
+            presentWorkspaceSwitchFailure(validation)
+        case .confirm(let path):
+            let managed = serviceManager.managedServicePID() != nil
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "切换工作目录？"
+            alert.informativeText = managed
+                ? "将工作目录切换到：\n\(path)\n\n当前服务由应用管理并正在运行，确认后将重启服务。"
+                : "将工作目录切换到：\n\(path)"
+            alert.addButton(withTitle: managed ? "切换并重启" : "切换")
+            alert.addButton(withTitle: "取消")
+            presentWorkspaceAlert(alert) { [weak self] response in
+                guard response == .alertFirstButtonReturn else { return }
+                self?.applyWorkspaceSwitch(path: path)
+            }
+        }
+    }
+
+    private func presentWorkspaceAlert(_ alert: NSAlert, completion: @escaping (NSApplication.ModalResponse) -> Void) {
+        if let window, window.isVisible {
+            alert.beginSheetModal(for: window, completionHandler: completion)
+        } else {
+            completion(alert.runModal())
+        }
+    }
+
+    private func presentWorkspaceSwitchFailure(_ validation: WorkspaceDirectoryValidation) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "无法切换工作目录"
+        alert.informativeText = validation.problem?.message(path: validation.path, isDefaultLocation: false)
+            ?? "请选择一个已存在且可写的文件夹。"
+        alert.addButton(withTitle: "好")
+        presentWorkspaceAlert(alert) { _ in }
+    }
+
+    private func applyWorkspaceSwitch(path: String) {
+        var configuration = serviceManager.configuration
+        configuration.workspacePath = path
+        applyPreferencesConfiguration(configuration, credentialsChanged: false)
+    }
+
+    private func recordCurrentWorkspace() {
+        recordWorkspace(path: appConfiguration.workspaceDirectory(for: serviceManager.configuration).path)
+    }
+
+    private func recordWorkspace(path: String) {
+        _ = appConfiguration.recentWorkspaceStore.record(path: path)
+        rebuildRecentWorkspacesMenu()
+    }
+
+    private func rebuildRecentWorkspacesMenu() {
+        guard let menu = recentWorkspacesMenu else { return }
+        menu.removeAllItems()
+        let currentPath = RecentWorkspaceStore.normalizedPath(
+            appConfiguration.workspaceDirectory(for: serviceManager.configuration).path
+        )
+        let paths = appConfiguration.recentWorkspaceStore.load()
+        if paths.isEmpty {
+            let empty = NSMenuItem(title: "无最近工作目录", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+        } else {
+            for path in paths {
+                let item = NSMenuItem(title: path, action: #selector(selectRecentWorkspace(_:)), keyEquivalent: "")
+                item.representedObject = path
+                item.state = path == currentPath ? .on : .off
+                menu.addItem(item)
+            }
+        }
+        menu.addItem(.separator())
+        let clear = NSMenuItem(title: "清除历史记录", action: #selector(clearRecentWorkspaces(_:)), keyEquivalent: "")
+        clear.isEnabled = !paths.isEmpty
+        menu.addItem(clear)
+    }
+
+    @objc private func selectRecentWorkspace(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        requestWorkspaceSwitch(to: URL(fileURLWithPath: path, isDirectory: true))
+    }
+
+    @objc private func clearRecentWorkspaces(_ sender: Any?) {
+        appConfiguration.recentWorkspaceStore.clear()
+        recordCurrentWorkspace()
+    }
+
+    @objc private func openCurrentWorkspace(_ sender: Any?) {
+        let directory = appConfiguration.workspaceDirectory(for: serviceManager.configuration)
+        let validation = WorkspaceDirectory.validate(path: directory.path, probe: workspaceProbe)
+        guard validation.isUsable else {
+            presentWorkspaceSwitchFailure(validation)
+            return
+        }
+        NSWorkspace.shared.open(directory)
+    }
 
     @objc private func startServiceAction(_ sender: Any?) {
         guard dependencyGate == .ready else { return }

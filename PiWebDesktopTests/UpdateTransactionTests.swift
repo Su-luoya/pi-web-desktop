@@ -491,6 +491,31 @@ final class UpdateTransactionTests: XCTestCase {
         XCTAssertTrue(plan.warningText.contains("0.9.0"))
     }
 
+    /// B-3：指纹里没有路径证据时，它记录的包名只是计划里的期望值，不能拿来当
+    /// 「检测到的包名」核对身份——否则「身份名称一致」恒真，未验证的结论会被写进历史。
+    func testPathlessFingerprintNameIsNotTreatedAsDetectedIdentity() {
+        let report = UpdateVerifier.verify(
+            UpdateVerificationInput(
+                component: .piWeb,
+                packageName: InstallCommandManifest.piWebPackageName,
+                previousVersion: "0.9.0",
+                targetVersion: "0.9.2",
+                detectedVersion: "0.9.2",
+                detectedPackageName: nil,
+                detectedExecutablePath: nil,
+                detectedResolvedPath: nil,
+                detectedPackageJSONPath: nil,
+                fingerprint: UpdateArtifactFingerprint.versionOnly(
+                    version: "0.9.0",
+                    packageName: InstallCommandManifest.piWebPackageName
+                )
+            ),
+            probe: .disabled
+        )
+        XCTAssertEqual(report.result(for: .packageIdentity)?.status, .notChecked)
+        XCTAssertTrue(report.result(for: .packageIdentity)?.detail.contains("无法核对身份") == true)
+    }
+
     func testIdentityMismatchFailsPackageIdentityCheck() throws {
         let probe = FakeProbe()
         probe.executables.insert(newExecutable)
@@ -532,8 +557,11 @@ final class UpdateTransactionTests: XCTestCase {
             failureReason: report.failureReason ?? "",
             probe: probe.make()
         )
-        // 路径未变且证据一致（身份一致、无 size/mtime 记录）：仍按“仍在更新前的文件上”处理。
-        XCTAssertEqual(plan.kind, .stillUsingPreviousArtifact)
+        // B-7：指纹没有内容哈希，也没有 size/mtime，等于没有任何可核对的元数据：
+        // 未验证不等于通过，不能按“仍在更新前的文件上”处理。
+        XCTAssertEqual(plan.kind, .cannotAutomaticallyRollback)
+        XCTAssertEqual(plan.rollbackEligibility, .evidenceChangedOrMissing)
+        XCTAssertTrue(plan.reason.contains("没有可核对的元数据"))
     }
 
     func testHealthCheckFailureDegradesToRetainedPreviousExecutable() throws {

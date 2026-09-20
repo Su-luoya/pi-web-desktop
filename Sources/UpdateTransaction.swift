@@ -359,6 +359,9 @@ enum UpdateRollbackEligibility: String, Equatable {
     case evidenceChangedOrMissing
     /// 路径与指纹一致：仍然就是更新前的文件，不需要回滚。
     case alreadyOnPreviousArtifact
+    /// 安装命令失败，但没有核对过旧文件是否被改动（B-6）：既不断言“仍在更新前的
+    /// 文件上”，也不断言“系统状态未改变”，只是不执行回滚动作。
+    case stateNotVerified
 
     var text: String {
         switch self {
@@ -367,6 +370,7 @@ enum UpdateRollbackEligibility: String, Equatable {
         case .missingEvidence: return "没有保留更新前的路径/版本证据"
         case .evidenceChangedOrMissing: return "更新前的证据已被覆盖、删除或不可执行"
         case .alreadyOnPreviousArtifact: return "当前仍在更新前的文件上"
+        case .stateNotVerified: return "安装命令失败后没有核对过旧文件，无法断言仍在更新前的文件上"
         }
     }
 }
@@ -487,7 +491,8 @@ struct UpdateDegradationPlan: Equatable {
 /// 降级判定器（纯函数）。判定依据只有：来源、更新前指纹、重新检测到的路径与
 /// 版本，以及注入的文件系统探针。
 enum UpdateDegradationPlanner {
-    /// 安装阶段失败：系统状态未改变，不执行任何回滚动作，只保留旧版本语义。
+    /// 安装阶段失败：不执行任何回滚动作。命令失败不证明旧文件没被改动（可能已经
+    /// 写入了部分内容），因此既不声称“系统状态未改变”，也不声称“仍在旧版本上”。
     static func installFailure(
         component: UpdateTransactionComponent,
         source: InstallSource,
@@ -505,8 +510,8 @@ enum UpdateDegradationPlanner {
         )
         return UpdateDegradationPlan(
             kind: .installFailedKeepingPreviousVersion,
-            reason: "安装命令失败（\(failureReason)）；系统状态未改变，仍在使用更新前的版本",
-            rollbackEligibility: source == .npmGlobal ? .alreadyOnPreviousArtifact : .sourceDoesNotSupportRollback,
+            reason: "安装命令失败（\(failureReason)）；本次没有执行任何回滚动作",
+            rollbackEligibility: source == .npmGlobal ? .stateNotVerified : .sourceDoesNotSupportRollback,
             previousVersion: previous,
             previousExecutablePath: fingerprint.evidencePath,
             restoredExecutablePath: nil,
@@ -670,8 +675,17 @@ enum UpdateDegradationPlanner {
         // 文案里写明“未做内容哈希”。内容哈希一致时不再要求 size/mtime 相同：
         // 哈希是更强的证据（上面明示的等价规则）。
         if !evidence.contentHashVerified {
-            let sizeMatches = fingerprint.fileSize.map { probe.fileSize(previousPath) == $0 } ?? true
-            let mtimeMatches = fingerprint.modifiedAt.map { probe.modificationDate(previousPath) == $0 } ?? true
+            // B-7：没有内容哈希时只能用 size/mtime 兜底；没记录的字段一律算未验证
+            // （不能默认通过），两者都没记录时就没有任何可核对的元数据。
+            guard fingerprint.fileSize != nil || fingerprint.modifiedAt != nil else {
+                return plan(
+                    kind: .cannotAutomaticallyRollback,
+                    eligibility: .evidenceChangedOrMissing,
+                    reason: "验证失败（\(failureReason)）；更新前的指纹没有内容哈希，也没有记录大小与 mtime，没有可核对的元数据，无法回滚"
+                )
+            }
+            let sizeMatches = fingerprint.fileSize.map { probe.fileSize(previousPath) == $0 } ?? false
+            let mtimeMatches = fingerprint.modifiedAt.map { probe.modificationDate(previousPath) == $0 } ?? false
             guard sizeMatches, mtimeMatches else {
                 return plan(
                     kind: .cannotAutomaticallyRollback,
@@ -706,7 +720,7 @@ enum UpdateDegradationPlanner {
 // MARK: - 用户可见警告文案
 
 /// 用户可见的持久警告文案。明确区分：
-///   * “更新失败，仍在使用旧版本”（install 阶段失败）；
+///   * “更新失败，没有执行任何回滚动作”（install 阶段失败）；
 ///   * “更新后验证失败，已降级 / 仍在旧版本 / 无法自动回滚”。
 enum UpdateWarningText {
     static func installFailed(
@@ -715,9 +729,9 @@ enum UpdateWarningText {
         targetVersion: String?,
         failureReason: String
     ) -> String {
-        "\(component.displayName)更新失败，仍在使用旧版本 \(previousVersion ?? "未知")"
-            + "（目标版本 \(targetVersion ?? "未知")；原因：\(failureReason)）。"
-            + "应用不会回滚已替换的文件，也不声称更新成功。"
+        "\(component.displayName)更新失败，没有执行任何回滚动作"
+            + "（更新前版本 \(previousVersion ?? "未知")，目标版本 \(targetVersion ?? "未知")；原因：\(failureReason)）。"
+            + "应用不声称更新成功，也未核对更新前的文件是否被改动。"
     }
 
     static func verificationFailed(
@@ -938,7 +952,7 @@ enum UpdateHistoryDescription {
         case .notNeeded:
             return "无需降级"
         case .installFailedKeepingPreviousVersion:
-            return "安装失败，系统状态未改变，未尝试回滚"
+            return "安装失败，未尝试回滚（命令失败不证明旧文件未被改动，因此不断言系统状态未改变）"
         case .stillUsingPreviousArtifact:
             return "验证失败，当前仍是更新前的文件，未尝试回滚"
         case .degradedToPreviousArtifact:

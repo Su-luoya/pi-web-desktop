@@ -1185,6 +1185,184 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
         XCTAssertTrue(waitForFile(marker.path, timeout: 10), "放弃等待不得向子进程发送信号")
     }
 
+    /// B-1（审查 W2）：同一个执行器实例连续执行两次，两次都必须回调。旧实现把
+    /// `finished` 当实例级一次性标记，第二次 run 会被静默丢弃。
+    func testRealExecutorSecondRunOnSameInstanceCallsBack() throws {
+        let directory = try tempDirectory()
+        let script = try makeFakePi(in: directory, body: "echo ok\nexit 0")
+        let command = ProcessPiPackageUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
+        for index in 1...2 {
+            let box = Locked<PiPackageUpdateCommandResult>()
+            command.run(try plan(forScript: script), timeout: 30) { box.value = $0 }
+            let result = try XCTUnwrap(waitForValue(box, timeout: 20), "第 \(index) 次 run 必须回调（B-1）")
+            XCTAssertEqual(result.exitCode, 0)
+            XCTAssertFalse(result.notAttempted, "第 \(index) 次 run 是顺序执行的，不得被判为「未执行」")
+            XCTAssertNil(result.failure)
+        }
+    }
+
+    /// B-1：同一实例上还有一次运行没结束时，新的 run 必须立刻回调 `.notAttempted`，
+    /// 不得静默 return（否则调用方永远等不到 completion）。
+    func testRealExecutorBusyRunCallsBackAsNotAttempted() throws {
+        let directory = try tempDirectory()
+        let script = try makeFakePi(in: directory, body: "sleep 3\nexit 0")
+        let command = ProcessPiPackageUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
+        let updatePlan = try plan(forScript: script)
+        let first = Locked<PiPackageUpdateCommandResult>()
+        let second = Locked<PiPackageUpdateCommandResult>()
+        command.run(updatePlan, timeout: 30) { first.value = $0 }
+        // 两次 run 在状态队列上先进先出：第二次必定落在“忙”分支。
+        command.run(updatePlan, timeout: 30) { second.value = $0 }
+        let rejected = try XCTUnwrap(waitForValue(second, timeout: 10), "忙时拒绝也必须回调")
+        XCTAssertTrue(rejected.notAttempted)
+        XCTAssertEqual(rejected.failure, .notAttempted)
+        XCTAssertNil(rejected.exitCode)
+        // 先到的运行不受影响，照常跑完。
+        let finished = try XCTUnwrap(waitForValue(first, timeout: 20))
+        XCTAssertEqual(finished.exitCode, 0)
+        XCTAssertFalse(finished.notAttempted)
+        XCTAssertNil(finished.failure)
+    }
+
+    /// W3（复核发现的中危并发风险）：超时只放弃等待、不终止子进程，所以旧子进程
+    /// 可能还在运行。在它的退出被确认之前，新的 run 必须走「忙」拒绝路径
+    /// （`.notAttempted`、不新增子进程），不得与旧子进程并发写同一个 prefix；
+    /// 旧子进程退出被确认后计数结清，后续 run 必须恢复正常（不是永久拒绝）。
+    func testRealExecutorRejectsRunUntilAbandonedChildExitIsConfirmed() throws {
+        let directory = try tempDirectory()
+        let spawns = directory.appendingPathComponent("spawns")
+        let gate = directory.appendingPathComponent("gate")
+        // 子进程用 gate 文件自己决定何时退出：只要断言还没做完，旧子进程就不可能
+        // 先退出，因此「拒绝/结清」两段的先后顺序不依赖任何亚秒级时序。
+        // 每个子进程启动时写一行 start、退出时写一行 exited，用行数判断到底启动了
+        // 几个子进程（而不是只看回调）。
+        let script = try makeFakePi(
+            in: directory,
+            body: "echo start >> \"\(spawns.path)\"\n"
+                + "while [ ! -f \"\(gate.path)\" ]; do sleep 0.1; done\n"
+                + "echo exited >> \"\(spawns.path)\"\nexit 0"
+        )
+        // 无论断言从哪一步抛出，都要放掉旧子进程，避免测试留下永久循环的子进程。
+        defer { FileManager.default.createFile(atPath: gate.path, contents: Data()) }
+        let command = ProcessPiPackageUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
+        let updatePlan = try plan(forScript: script)
+        func spawnCount(_ marker: String) -> Int {
+            guard let data = FileManager.default.contents(atPath: spawns.path) else { return 0 }
+            return String(decoding: data, as: UTF8.self)
+                .split(separator: "\n")
+                .filter { String($0) == marker }
+                .count
+        }
+
+        // 1. 超时放弃等待：旧子进程被 gate 挡住，必定还活着。
+        let first = Locked<PiPackageUpdateCommandResult>()
+        command.run(updatePlan, timeout: 0.3) { first.value = $0 }
+        let timedOut = try XCTUnwrap(waitForValue(first, timeout: 10))
+        XCTAssertEqual(timedOut.failure, .timedOut)
+        XCTAssertNil(timedOut.exitCode)
+        XCTAssertEqual(spawnCount("start"), 1, "第一次运行只应启动一个子进程")
+
+        // 2. 旧子进程还没退出：第二次 run 必须被拒绝，且真的没有再启动子进程。
+        let second = Locked<PiPackageUpdateCommandResult>()
+        command.run(updatePlan, timeout: 30) { second.value = $0 }
+        let rejected = try XCTUnwrap(waitForValue(second, timeout: 10), "放弃等待窗口内必须回调「未执行」")
+        XCTAssertTrue(rejected.notAttempted)
+        XCTAssertEqual(rejected.failure, .notAttempted)
+        XCTAssertNil(rejected.exitCode)
+        XCTAssertEqual(spawnCount("start"), 1, "被拒绝的 run 不得启动第二个子进程")
+
+        // 3. 放掉旧子进程，等它的退出被确认：计数必须结清，run 必须能再执行。
+        //    用轮询而不是固定睡眠，既证明不是永久拒绝，也不绑定亚秒级时序。
+        FileManager.default.createFile(atPath: gate.path, contents: Data())
+        var settled: PiPackageUpdateCommandResult?
+        let deadline = Date().addingTimeInterval(15)
+        while settled == nil, Date() < deadline {
+            let box = Locked<PiPackageUpdateCommandResult>()
+            command.run(updatePlan, timeout: 30) { box.value = $0 }
+            let result = try XCTUnwrap(waitForValue(box, timeout: 20))
+            if result.notAttempted {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            } else {
+                settled = result
+            }
+        }
+        let last = try XCTUnwrap(settled, "旧子进程退出确认后「放弃等待」计数必须结清，run 不得被永久拒绝")
+        XCTAssertEqual(last.exitCode, 0)
+        XCTAssertNil(last.failure)
+        XCTAssertEqual(spawnCount("start"), 2, "结清后应恰好再启动一个新的子进程")
+    }
+
+    /// W3 计时器修正的回归：第一次运行正常完成、计时器被取消并释放之后，第二次
+    /// 运行自己的超时计时器必须照常触发（弱捕获不能把身份判定改坏，也不能让计时器
+    /// 提前析构）。既有排水宽限用例（B-2）同样表达宽限计时器的语义。
+    func testRealExecutorTimeoutStillFiresOnRunAfterNormalCompletion() throws {
+        let quickDirectory = try tempDirectory()
+        let slowDirectory = try tempDirectory()
+        let quick = try makeFakePi(in: quickDirectory, body: "exit 0")
+        let slow = try makeFakePi(in: slowDirectory, body: "sleep 5\nexit 0")
+        let command = ProcessPiPackageUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
+        let first = Locked<PiPackageUpdateCommandResult>()
+        command.run(try plan(forScript: quick), timeout: 30) { first.value = $0 }
+        let normal = try XCTUnwrap(waitForValue(first, timeout: 20))
+        XCTAssertEqual(normal.exitCode, 0)
+        XCTAssertNil(normal.failure)
+
+        let second = Locked<PiPackageUpdateCommandResult>()
+        command.run(try plan(forScript: slow), timeout: 0.3) { second.value = $0 }
+        let timedOut = try XCTUnwrap(waitForValue(second, timeout: 10), "第二次运行的超时计时器必须触发")
+        XCTAssertEqual(timedOut.failure, .timedOut)
+        XCTAssertNil(timedOut.exitCode)
+    }
+
+    /// B-2（审查 W2）：进程已经以 0 退出、只是管道还没读到 EOF（后台子进程持有
+    /// 写端）时，超时不得把这次运行判成 timedOut，也不得写「已放弃」记录。
+    func testRealExecutorSuccessfulExitWinsOverDrainGraceTimeout() throws {
+        let directory = try tempDirectory()
+        // 后台子进程持有 stdout 写端：父脚本退出后管道不会立刻 EOF，
+        // 结束流程会走「等排水宽限」这条路径。
+        let script = try makeFakePi(in: directory, body: "sleep 5 &\nexit 0")
+        let abandonedCount = Locked<Int>()
+        // 宽限窗口（3s）远大于超时（1s）：超时必定落在「进程已退出、管道还没读到
+        // EOF」的窗口内——确定性地覆盖 B-2 的竞态，不依赖机器快慢。
+        let command = ProcessPiPackageUpdateCommand(
+            baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome],
+            recordAbandonedAttempt: { _ in abandonedCount.value = (abandonedCount.value ?? 0) + 1 },
+            pipeDrainGrace: 3
+        )
+        let box = Locked<PiPackageUpdateCommandResult>()
+        command.run(try plan(forScript: script), timeout: 1) { box.value = $0 }
+        let result = try XCTUnwrap(waitForValue(box, timeout: 20))
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertFalse(result.timedOut, "已观测到退出码 0 时不得判定为超时")
+        XCTAssertFalse(result.notAttempted)
+        XCTAssertNil(result.failure)
+        XCTAssertEqual(abandonedCount.value ?? 0, 0, "成功退出不得写「已放弃」记录")
+    }
+
+    /// B-1：协调器连续两批更新都必须回调（旧实现里第二批会被静默丢弃）。
+    func testRealExecutorServesTwoConsecutiveCoordinatorBatches() throws {
+        let directory = try tempDirectory()
+        let script = try makeFakePi(in: directory, body: "echo run\nexit 0")
+        let command = ProcessPiPackageUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
+        let log = LogSink()
+        let coordinator = PiPackageUpdateCoordinator(environment: PiPackageUpdateCoordinator.Environment(
+            inspectProcesses: { .noProcesses },
+            runner: command,
+            detectPackageVersion: { _ in "2.0.0" },
+            redactor: LogRedactor(homeDirectory: fixtureHome),
+            log: { log.append($0) },
+            deliver: { $0() },
+            timeout: 30
+        ))
+        for name in [packageName, "pi-extension-other"] {
+            let box = Locked<PiPackageUpdateBatchOutcome>()
+            let batchPlan = try XCTUnwrap(plan(path: script, name: name))
+            coordinator.runConfirmed([batchPlan]) { box.value = $0 }
+            let outcome = try XCTUnwrap(waitForValue(box, timeout: 20), "第 \(name) 批必须回调")
+            XCTAssertTrue(outcome.isSucceeded, "第 \(name) 批应当成功：\(outcome.outcomes)")
+        }
+    }
+
     func testEnvironmentWhitelistKeepsOnlySafeKeysAndPrependsPiDirectory() {
         let environment = PiPackageUpdateEnvironment.environment(
             base: [

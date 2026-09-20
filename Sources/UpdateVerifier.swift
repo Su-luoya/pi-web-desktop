@@ -430,10 +430,12 @@ enum UpdateVerifier {
             previous: input.previousVersion,
             target: input.targetVersion
         ))
+        // B-3：只有带路径证据的指纹里的包名才算「检测到的名称」；没有路径证据时
+        // 它只是计划里的期望值，用它核对身份等于同义反复（恒真）。
         checks.append(identityCheck(
             expected: input.packageName,
             detected: input.detectedPackageName,
-            fingerprintName: input.fingerprint.packageName,
+            fingerprintName: input.fingerprint.evidencePath == nil ? nil : input.fingerprint.packageName,
             packageJSONPath: input.detectedPackageJSONPath,
             executablePath: artifactPath,
             probe: probe
@@ -589,6 +591,9 @@ enum UpdateVerifier {
         )
     }
 
+    /// 身份层检查。`fingerprintName` 必须是**实际观测到**的包名（例如指纹来自
+    /// 真实文件路径）；调用方不得把计划里的期望包名当作检测值传进来，否则
+    /// “身份名称一致”会恒真，历史里就会留下一条未经验证的结论。
     static func identityCheck(
         expected: String?,
         detected: String?,

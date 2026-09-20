@@ -220,11 +220,17 @@ alpha.7 delta 评审的 `F1` … `F6`（[#121](https://github.com/Su-luoya/pi-we
 回填流程相同）；本机演练值只用于追溯，**不用于发布核对**。
 
 - 资产：`Pi-Web-Desktop-0.1.0-alpha.8+build.8.zip`（以及同前缀的 `.sha256` 与证据 Markdown）
-- 字节数：**1,520,630**
-- SHA-256：`74aabbe2447e524ded0a5af03fc3a84d4f87a9f21af217195cecd21641406e19`
-- 发布 tag `v0.1.0-alpha.8`（合并提交与 `release.yml` run 在发布后回填）：
-  <https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.8>（**待回填**：发布时间与
-  `shasum -a 256 -c` 的复核结果）
+- **发布值**（来自 `release.yml` run `35502909886` 的产物，即 Release assets）：字节数 **1,594,019**、
+  SHA-256 `f90df492376aed022356b74f48e1e47140566e55d07dc3f809b3b873beb88c76`
+- 本机演练值（只用于追溯，**不用于发布核对**）：字节数 1,520,630、SHA-256
+  `74aabbe2447e524ded0a5af03fc3a84d4f87a9f21af217195cecd21641406e19`（对应
+  `dist/release-metadata.env` 的 `COMMIT=c4f26a1…`；演练与发布产物的字节数不同，是因为 `release.yml`
+  用 `xcodebuild` 构建，本机演练用 `Scripts/build.sh`）
+- 发布 tag `v0.1.0-alpha.8` 指向发布提交 `5f8f38b`（PR #128 squash 合入 `main`）：
+  <https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.8>；发布于
+  `2026-09-20T09:43:25Z`（prerelease）。维护者在本机重新下载三个资产复核：`shasum -a 256 -c` → `OK`、
+  ZIP 内 9 项且无 `__MACOSX/`、包内 `CFBundleShortVersionString=0.1.0-alpha.8` 与 `CFBundleVersion=8`、
+  `codesign --verify --deep --strict` 退出 0（ad-hoc、`TeamIdentifier=not set`）。
 - 校验命令（下载目录执行）：
 
   ```bash
@@ -263,7 +269,7 @@ GUI 手工验收、真实更新执行仍不在本机范围内。
 | `shasum -a 256 -c`（演练 ZIP） | `Pi-Web-Desktop-0.1.0-alpha.8+build.8.zip: OK`（退出 0） |
 | `ditto -x -k` + `plutil -p` + `codesign --verify --deep --strict` | 解压到 `mktemp -d` 后：`CFBundleShortVersionString=0.1.0-alpha.8`、`CFBundleVersion=8`、`LSMinimumSystemVersion=14.0`、`CFBundleIdentifier=io.github.su-luoya.pi-web-desktop`、`CFBundleIconFile=ApplicationIcon`；解压出的 bundle 签名校验退出 0（临时目录已删除） |
 | `xcodebuild build` / `xcodebuild test` / GUI 手工验收 / 真实更新执行 | 本机未执行：`xcode-select -p` → `/Library/Developer/CommandLineTools`，没有 Xcode；GUI 手工验收与真实更新执行本轮未执行。由 CI 的 `macos-14` job 与维护者真机验收覆盖 |
-| CI（本版提交） | `build.yml`：`c4f26a1`（#125）run `35501956085` **success**（`xcodebuild build` / `xcodebuild test`、`build.sh`、`check-identity.sh --test-bundle`、`smoke.sh`、秘密扫描与 `sh -n Scripts/*.sh`）；发布提交的 run 待回填 |
+| CI（本版提交） | `build.yml`：`c4f26a1`（#125）run `35501956085` **success**（`xcodebuild build` / `xcodebuild test`、`build.sh`、`check-identity.sh --test-bundle`、`smoke.sh`、秘密扫描与 `sh -n Scripts/*.sh`）；发布提交 `5f8f38b` 的 run `35502904190` **success**（tag `v0.1.0-alpha.8` 上的 `release.yml` run `35502909886` **success**） |
 
 **演练值的工作区状态（如实记录）**：这次本机打包发生在“版本 bump 已写入工作区、但发布提交尚未
 创建”的状态下，`release-metadata.env` 的 `COMMIT` 记的是打包时的工作区 `HEAD`（`c4f26a1`，即

@@ -646,7 +646,15 @@ final class PiWebUpdateAdapterTests: XCTestCase {
             XCTAssertTrue(warning.text.contains(testCase.expected.text), "\(testCase.name) 警告应含原因")
             XCTAssertEqual(world.detectionCount, 0, "\(testCase.name) 不应进入版本验证")
             XCTAssertEqual(world.startCallCount, 0, "\(testCase.name) 不应启动服务")
-            XCTAssertTrue(world.log.text.contains("旧版本保持不变"), "\(testCase.name) 日志应写明旧版本语义")
+            // L-1：命令失败不证明旧文件没被改动，日志只记命令事实与「没有执行任何回滚动作」。
+            XCTAssertTrue(
+                world.log.text.contains("本次没有执行任何回滚动作"),
+                "\(testCase.name) 日志应写明没有执行回滚动作，而不是断言文件状态"
+            )
+            XCTAssertFalse(
+                world.log.text.contains("旧版本保持不变"),
+                "\(testCase.name) 日志不得断言旧版本仍在（无探针支撑）"
+            )
         }
     }
 

@@ -163,6 +163,12 @@ struct PiCLIUpdatePlan: Equatable {
     }
 
     /// 绝对路径、无空白、无 shell 元字符、非空段。路径来自 #16，仍要再校验一次。
+    ///
+    /// 信任模型（F3，GitHub #121）：应用不固定可执行文件的位置，也不校验它的签名或哈希；
+    /// `PATH` 目录本身就是信任边界——能改写 `PATH` 里内容的人，本来也能直接决定跑哪个程序，
+    /// 与该用户在该 `PATH` 下亲手执行 `pi-web` 等价。这道校验只负责排除相对路径、`.`/`..`
+    /// 段、`//` 与 shell 元字符，避免“在错误的位置、以错误的方式”启动；解析到的路径会写进
+    /// `executablePath` 并展示给用户，用户可以在更新前看到到底要跑哪个文件。
     static func isSafeExecutablePath(_ path: String) -> Bool {
         guard path.hasPrefix("/"), path.count > 1 else { return false }
         guard path.unicodeScalars.allSatisfy({ executablePathAllowedCharacters.contains($0) }) else { return false }
@@ -1058,7 +1064,11 @@ enum PiCLIUpdateRunOutcome: Equatable {
                 oldVersion: oldVersion,
                 newVersion: detectedVersion,
                 targetVersion: targetVersion,
-                reason: "更新后验证失败，仍在使用更新前的版本：更新命令已结束，但重新检测到的版本是 \(detectedVersion ?? "未知")，未达到目标版本"
+                // L-2：重新检测没有给出可用结果时不能既断言“仍在使用更新前的版本”，又说“检测到未知版本”；
+                // 前一句需要探针证据。nil 时改为只报“未能确认”。
+                reason: detectedVersion.map { detected in
+                    "更新后验证失败，仍在使用更新前的版本：更新命令已结束，但重新检测到的版本是 \(detected)，未达到目标版本"
+                } ?? "更新后验证失败：更新命令已结束，但重新检测没有给出可用的版本结果，因此无法判断是否达到目标版本"
             )
         }
     }
@@ -1279,7 +1289,7 @@ final class PiCLIUpdateCoordinator {
                 self.logOutcome(
                     "Pi CLI 更新失败（\(failure.text)）：退出码 \(result.exitCode.map(String.init) ?? "无")，"
                         + "耗时 \(Self.durationText(result.duration))，当前版本 \(plan.installedVersion)，"
-                        + "目标版本 \(targetText)。旧版本保持不变。"
+                        + "目标版本 \(targetText)。本次没有执行任何回滚动作。"
                 )
                 let tail = Self.outputTailText(result, redactingWith: self.environment.redactor)
                 if let tail {

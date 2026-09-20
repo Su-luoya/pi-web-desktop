@@ -267,7 +267,9 @@ struct UpdateArtifactFingerprint: Equatable {
                     }
                 }
                 // 只接受形状合法的完整性值；其它一律按“未获取”处理。
-                integrity = probe.npmIntegrity(path, packageName).flatMap { value in
+                // GitHub #124：把这次记录的版本一并交给探针，让锁文件里的
+                // 版本比对相对已记录证据，而不是探针自己重新推导。
+                integrity = probe.npmIntegrity(path, packageName, version).flatMap { value in
                     UpdateArtifactProbe.isIntegrityValue(value) ? value : nil
                 }
             } else {

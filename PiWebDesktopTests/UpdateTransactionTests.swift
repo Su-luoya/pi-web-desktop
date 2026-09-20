@@ -43,7 +43,7 @@ final class UpdateTransactionTests: XCTestCase {
                     if let hash = contentHashes[path] { return .hashed(hash) }
                     return .unsupported
                 },
-                npmIntegrity: { [self] path, _ in npmIntegrities[path] },
+                npmIntegrity: { [self] path, _, _ in npmIntegrities[path] },
                 packageNameAtPackageJSON: { [self] path in packageNamesAtJSON[path] },
                 packageNameNear: { [self] path in packageNamesNear[path] }
             )
@@ -1384,6 +1384,56 @@ final class UpdateTransactionTests: XCTestCase {
         ))
     }
 
+    /// GitHub #124（W2B B-5）：锁文件里的版本必须与指纹记录的版本对得上；
+    /// 指纹没有版本时才退回 package.json 身份版本（取不到就不比对）。
+    func testNpmIntegrityUsesFingerprintVersionAsComparisonBaseline() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let packageName = "@scope/pi-version-fixture"
+        let packageDir = root.appendingPathComponent("lib/node_modules/\(packageName)", isDirectory: true)
+        let binDir = packageDir.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true)
+        let executable = binDir.appendingPathComponent("pi-version-fixture")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data(#"{"name":"@scope/pi-version-fixture","version":"2.0.0"}"#.utf8)
+            .write(to: packageDir.appendingPathComponent("package.json"))
+        let integrity = "sha512-" + String(repeating: "A", count: 86)
+        let lockfile = root.appendingPathComponent("lib/node_modules/.package-lock.json")
+        let lockJSON = "{\"packages\":{\"node_modules/\(packageName)\":"
+            + "{\"version\":\"2.0.0\",\"integrity\":\"\(integrity)\"}}}"
+        try Data(lockJSON.utf8).write(to: lockfile)
+
+        // 指纹版本与锁文件一致 → 记录完整性。
+        XCTAssertEqual(
+            UpdateArtifactProbe.readNpmIntegrity(
+                executablePath: executable.path,
+                packageName: packageName,
+                fingerprintVersion: "2.0.0"
+            ),
+            integrity
+        )
+        // 指纹版本与锁文件不符 → 判为“未获取”，不退回其它条目。
+        XCTAssertNil(UpdateArtifactProbe.readNpmIntegrity(
+            executablePath: executable.path,
+            packageName: packageName,
+            fingerprintVersion: "1.0.0"
+        ))
+        // 指纹没有版本 → 退回 package.json 身份版本（2.0.0）。
+        XCTAssertEqual(
+            UpdateArtifactProbe.readNpmIntegrity(
+                executablePath: executable.path,
+                packageName: packageName
+            ),
+            integrity
+        )
+        // 声明的包名与 package.json 不一致且没有指纹版本 → 不比对，返回“未获取”。
+        XCTAssertNil(UpdateArtifactProbe.readNpmIntegrity(
+            executablePath: executable.path,
+            packageName: "@scope/other-fixture"
+        ))
+    }
+
     func testIntegritySelectionPrefersExactPathAndRejectsVersionMismatchOrAmbiguity() throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1625,6 +1675,70 @@ final class UpdateTransactionTests: XCTestCase {
         XCTAssertTrue(cannot.warningText.contains("无法自动回滚"))
         XCTAssertTrue(cannot.warningText.contains("请按下面的手动方式处理："))
         XCTAssertFalse(cannot.performedAutomaticDegradation)
+    }
+
+    /// GitHub #120（T-2）：事实句必须能映射到一个可测的证据来源。同一条验证路径
+    /// 下，有身份证据就写“身份名称一致”；把证据来源变成缺失，就必须不再给正向断言。
+    func testIdentityWordingFollowsTheEvidenceSource() throws {
+        func verification(hasIdentityEvidence: Bool) throws -> (check: UpdateVerificationCheckResult?, reason: String) {
+            let fixture = FakeProbe()
+            fixture.executables.insert(newExecutable)
+            fixture.readable.insert(newExecutable)
+            fixture.realPaths[newExecutable] = newExecutable
+            if hasIdentityEvidence {
+                fixture.packageNamesNear[newExecutable] = InstallCommandManifest.piWebPackageName
+            }
+            let report = UpdateVerifier.report(
+                UpdateVerifier.verify(
+                    UpdateVerificationInput(
+                        component: .piWeb,
+                        packageName: InstallCommandManifest.piWebPackageName,
+                        previousVersion: "0.9.0",
+                        targetVersion: "0.9.2",
+                        detectedVersion: "0.9.2",
+                        detectedPackageName: hasIdentityEvidence ? InstallCommandManifest.piWebPackageName : nil,
+                        detectedExecutablePath: newExecutable,
+                        detectedResolvedPath: newExecutable,
+                        detectedPackageJSONPath: nil,
+                        fingerprint: UpdateArtifactFingerprint.versionOnly(version: "0.9.0", packageName: nil)
+                    ),
+                    probe: fixture.make()
+                ),
+                healthCheck: .passed
+            )
+            var journal = UpdateTransactionJournal(
+                configuration: UpdateTransactionJournal.Configuration(
+                    component: .piWeb,
+                    source: .npmGlobal,
+                    previousVersion: "0.9.0",
+                    targetVersion: "0.9.2",
+                    fingerprint: UpdateArtifactFingerprint.versionOnly(version: "0.9.0", packageName: nil)
+                ),
+                now: { self.referenceDate }
+            )
+            XCTAssertTrue(journal.recordVerification(report, detectedVersion: "0.9.2"))
+            return (
+                report.result(for: .packageIdentity),
+                try XCTUnwrap(journal.phases.first { $0.phase == .verify }?.reason)
+            )
+        }
+
+        let withEvidence = try verification(hasIdentityEvidence: true)
+        XCTAssertEqual(withEvidence.check?.status, .passed)
+        XCTAssertEqual(withEvidence.check?.factText.contains("身份名称一致"), true)
+        XCTAssertTrue(withEvidence.reason.contains("身份名称一致"))
+
+        let withoutEvidence = try verification(hasIdentityEvidence: false)
+        XCTAssertNotEqual(withoutEvidence.check?.status, .passed, "缺证据时不得判为通过")
+        XCTAssertEqual(
+            withoutEvidence.check?.factText.contains("身份名称一致"),
+            false,
+            "证据缺失时不得留下正向断言：\(withoutEvidence.check?.factText ?? "-")"
+        )
+        XCTAssertFalse(
+            withoutEvidence.reason.contains("身份名称一致"),
+            "验证阶段文案不得在没有证据时声称身份一致：\(withoutEvidence.reason)"
+        )
     }
 
     // MARK: - 11. 降级结果语义与探针归因（GitHub #106）

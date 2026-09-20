@@ -1215,6 +1215,50 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
         XCTAssertTrue(waitForFile(marker.path, timeout: 10), "放弃等待不得向子进程发送信号")
     }
 
+    /// F1（GitHub #121）：结果投递不在状态队列上——completion 自己阻塞时，状态查询
+    /// （`isRunning`/`abandonedChildrenUnconfirmed`，`stateQueue.sync`）也必须立即返回，
+    /// 否则一个慢回调就能拖住 UI 与退出流程。
+    func testRealExecutorDeliversResultOffTheStateQueue() throws {
+        let directory = try tempDirectory()
+        let script = try makeFakePi(in: directory, body: "sleep 0.2\nexit 0")
+        let command = ProcessPiPackageUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
+        let entered = expectation(description: "completion 已被回调")
+        let release = DispatchSemaphore(value: 0)
+        command.run(try plan(forScript: script), timeout: 30) { _ in
+            entered.fulfill()
+            _ = release.wait(timeout: .now() + 30)
+        }
+        defer { release.signal() }
+        wait(for: [entered], timeout: 20)
+
+        // completion 仍被上面的信号量挡着：状态查询不得排队等它。
+        let start = Date()
+        _ = command.isRunning
+        _ = command.abandonedChildrenUnconfirmed
+        XCTAssertLessThan(
+            Date().timeIntervalSince(start),
+            1,
+            "状态查询不得被阻塞的 completion 挡住（F1）"
+        )
+    }
+
+    /// F2（GitHub #121）：一次读把多字节字符截断时不能丢掉，尾部要留到下一块。
+    func testRealExecutorDecodesUTF8SplitAcrossReadChunks() throws {
+        let directory = try tempDirectory()
+        // 逐字节写“☃”（E2 98 83），中间 sleep 让可读性回调分两次拿到不完整的序列；
+        // 旧实现把两块都当非法 UTF-8 丢弃，尾部是空字符串。
+        let script = try makeFakePi(
+            in: directory,
+            body: "printf '\\342'\nsleep 0.3\nprintf '\\230\\203'\nsleep 0.3\nexit 0"
+        )
+        let command = ProcessPiPackageUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
+        let box = Locked<PiPackageUpdateCommandResult>()
+        command.run(try plan(forScript: script), timeout: 30) { box.value = $0 }
+        let result = try XCTUnwrap(waitForValue(box, timeout: 20))
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(result.stdoutTail, "☃", "跨读取块的 UTF-8 序列必须在收尾时补齐（F2）")
+    }
+
     /// B-1（审查 W2）：同一个执行器实例连续执行两次，两次都必须回调。旧实现把
     /// `finished` 当实例级一次性标记，第二次 run 会被静默丢弃。
     func testRealExecutorSecondRunOnSameInstanceCallsBack() throws {

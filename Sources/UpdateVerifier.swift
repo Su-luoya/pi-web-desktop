@@ -60,7 +60,8 @@ struct UpdateArtifactProbe {
     var contentHash: (String) -> UpdateArtifactContentHashResult = { _ in .unsupported }
     /// npm 记录的完整性（`integrity`）值：只从本机 npm 元数据/锁文件读取，
     /// 不联网、不执行 npm；取不到或值不符合哈希形状时返回 nil。
-    var npmIntegrity: (String, String?) -> String? = { _, _ in nil }
+    /// 参数依次为：（可执行文件路径，包名，指纹记录的版本）。
+    var npmIntegrity: (String, String?, String?) -> String? = { _, _, _ in nil }
     /// 读取指定 `package.json` 的 `name` 字段；读不到或不是合法包名时返回 nil。
     var packageNameAtPackageJSON: (String) -> String?
     /// 从可执行文件路径向上最多 6 层找最近的 `package.json` 并读 `name`。
@@ -81,7 +82,7 @@ struct UpdateArtifactProbe {
         modificationDate: { _ in nil },
         fileInode: { _ in nil },
         contentHash: { _ in .unsupported },
-        npmIntegrity: { _, _ in nil },
+        npmIntegrity: { _, _, _ in nil },
         packageNameAtPackageJSON: { _ in nil },
         packageNameNear: { _ in nil }
     )
@@ -111,8 +112,12 @@ struct UpdateArtifactProbe {
         contentHash: { path in
             UpdateArtifactProbe.readContentHash(atPath: path)
         },
-        npmIntegrity: { path, packageName in
-            UpdateArtifactProbe.readNpmIntegrity(executablePath: path, packageName: packageName)
+        npmIntegrity: { path, packageName, fingerprintVersion in
+            UpdateArtifactProbe.readNpmIntegrity(
+                executablePath: path,
+                packageName: packageName,
+                fingerprintVersion: fingerprintVersion
+            )
         },
         packageNameAtPackageJSON: { path in
             UpdateArtifactProbe.readPackageName(atPackageJSONPath: path)
@@ -127,7 +132,8 @@ struct UpdateArtifactProbe {
     static func readContentHash(atPath path: String) -> UpdateArtifactContentHashResult {
         guard let size = fileSize(atPath: path) else { return .unreadable }
         if size > contentHashSizeLimitBytes { return .aboveSizeLimit }
-        guard let handle = FileHandle(forReadingAtPath: path) else { return .unreadable }
+        // F4（GitHub #121）：与 readBoundedData 同一道口子，常规文件才打开。
+        guard let handle = openRegularFile(atPath: path) else { return .unreadable }
         defer { try? handle.close() }
         var hasher = SHA256()
         var total = 0
@@ -154,12 +160,27 @@ struct UpdateArtifactProbe {
         return size.intValue
     }
 
+    /// 取文件类型（不跟随末级符号链接，与 `lstat` 同语义）。
+    static func fileType(atPath path: String) -> FileAttributeType? {
+        (try? FileManager.default.attributesOfItem(atPath: path))?[.type] as? FileAttributeType
+    }
+
+    /// 只打开常规文件（F4，GitHub #121）：FIFO / 设备 / socket 的 `open` 可能无超时阻塞，
+    /// 而 `attributesOfItem` 对 FIFO 报出的大小是 `0`，能通过大小上限检查。
+    /// 末级符号链接先解析到目标，再要求目标是常规文件（不跟随链接就无法判断真实类型）。
+    static func openRegularFile(atPath path: String) -> FileHandle? {
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        guard fileType(atPath: resolved) == .typeRegular else { return nil }
+        return FileHandle(forReadingAtPath: resolved)
+    }
+
     /// 先检查文件属性，再通过句柄做有界读取；超限文件不会打开，读取期间增长也不会越界。
+    /// 默认打开路径只接受常规文件（F4，GitHub #121）：FIFO 之类不能无超时地读。
     static func readBoundedData(
         atPath path: String,
         maximumSize: Int,
         fileSize: (String) -> Int? = { UpdateArtifactProbe.fileSize(atPath: $0) },
-        openFile: (String) -> FileHandle? = { FileHandle(forReadingAtPath: $0) }
+        openFile: (String) -> FileHandle? = { UpdateArtifactProbe.openRegularFile(atPath: $0) }
     ) -> Data? {
         guard maximumSize >= 0,
               let size = fileSize(path),
@@ -227,12 +248,21 @@ struct UpdateArtifactProbe {
     /// 锁文件），在 `packages` / `dependencies` 里找与包名匹配的条目并读 `integrity`。
     /// 取值有界（单个锁文件上限 4 MiB）、值经过形状校验；不联网、不执行 npm、
     /// 不读取 npm 凭据。取不到时返回 nil，调用方必须标注“未获取”。
-    static func readNpmIntegrity(executablePath: String, packageName: String?) -> String? {
+    ///
+    /// 版本基准（GitHub #124）：优先用指纹记录的版本 `fingerprintVersion`，
+    /// 使“版本不符”成为相对已记录证据的判断；指纹没有版本时才退回
+    /// 可执行文件近旁 `package.json` 的身份版本（同为本机磁盘事实，取不到就不比对）。
+    static func readNpmIntegrity(
+        executablePath: String,
+        packageName: String?,
+        fingerprintVersion: String? = nil
+    ) -> String? {
         guard executablePath.hasPrefix("/") else { return nil }
         let installedIdentity = readPackageIdentity(near: executablePath)
         let expectedName = packageName ?? installedIdentity?.name
         guard let expectedName, !expectedName.isEmpty else { return nil }
-        let expectedVersion = installedIdentity?.name == expectedName ? installedIdentity?.version : nil
+        let expectedVersion = fingerprintVersion
+            ?? (installedIdentity?.name == expectedName ? installedIdentity?.version : nil)
         var directory = (executablePath as NSString).deletingLastPathComponent
         var depth = 0
         while !directory.isEmpty, directory != "/", depth < 6 {

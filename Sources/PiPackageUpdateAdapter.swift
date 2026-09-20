@@ -1103,6 +1103,10 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
     static let maxTimeoutRetries = 5
 
     private let stateQueue = DispatchQueue(label: "io.github.su-luoya.pi-web-desktop.pi-package-update-command")
+    /// 结果投递队列（F1，GitHub #121）：`stateQueue` 上跑着协调器的整条安装后同步链
+    /// （版本探测、验证探针、写历史），在主线程读 `isRunning` 就要等它跑完。结果改在
+    /// 这个队列上回调，让协调器的长耗时工作离开 `stateQueue`（与 Pi Web / Pi CLI 同型）。
+    private let deliveryQueue = DispatchQueue(label: "io.github.su-luoya.pi-web-desktop.pi-package-update-delivery")
     private let clock: () -> Date
     private let baseEnvironment: [String: String]
     private let redact: (String) -> String
@@ -1131,6 +1135,10 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
     private var startedAt: Date?
     private var stdoutTail = ""
     private var stderrTail = ""
+    /// 两条管道的增量 UTF-8 解码器（F2，GitHub #121）：一次读把多字节字符截断时，
+    /// 未收齐的尾部留到下一块，不再丢弃整块文本。
+    private var stdoutDecoder = IncrementalUTF8Decoder()
+    private var stderrDecoder = IncrementalUTF8Decoder()
     private var stdoutDrained = false
     private var stderrDrained = false
     /// 本轮运行的两条管道读端：用来忽略上一轮运行残留的管道回调（状态按轮次隔离）。
@@ -1204,7 +1212,7 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
         // 同样按「忙」拒绝，不新增子进程、也不覆盖旧回调与计时器。
         guard !running, abandonedProcesses.isEmpty else {
             let now = clock()
-            completion(PiPackageUpdateCommandResult(
+            let refused = PiPackageUpdateCommandResult(
                 exitCode: nil,
                 notAttempted: true,
                 // B-1/W3：旧子进程已放弃等待但退出还没确认时，拒绝的理由不是笼统的
@@ -1212,7 +1220,9 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
                 awaitingAbandonedChildExit: !abandonedProcesses.isEmpty,
                 startedAt: now,
                 finishedAt: now
-            ))
+            )
+            // F1：拒绝也走 `deliveryQueue`，与正常结果同一投递语义。
+            deliveryQueue.async { completion(refused) }
             return
         }
         resetRunStateLocked()
@@ -1285,6 +1295,8 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
         startedAt = nil
         stdoutTail = ""
         stderrTail = ""
+        stdoutDecoder = IncrementalUTF8Decoder()
+        stderrDecoder = IncrementalUTF8Decoder()
         stdoutHandle = nil
         stderrHandle = nil
         stdoutDrained = false
@@ -1356,6 +1368,12 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
             guard handle === currentHandle else { return }
             if data.isEmpty {
                 handle.readabilityHandler = nil
+                // F2：EOF 时冲刷未收齐的多字节尾部，不丢同一块里已经完整的前缀。
+                self.appendDecodedLocked(
+                    toStdout ? self.stdoutDecoder.decode(Data(), final: true)
+                        : self.stderrDecoder.decode(Data(), final: true),
+                    toStdout: toStdout
+                )
                 if toStdout {
                     self.stdoutDrained = true
                 } else {
@@ -1364,12 +1382,20 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
                 self.completePendingLocked()
                 return
             }
-            guard let text = String(data: data, encoding: .utf8), !text.isEmpty else { return }
-            if toStdout {
-                self.stdoutTail = Self.bounded(self.stdoutTail + text)
-            } else {
-                self.stderrTail = Self.bounded(self.stderrTail + text)
-            }
+            self.appendDecodedLocked(
+                toStdout ? self.stdoutDecoder.decode(data) : self.stderrDecoder.decode(data),
+                toStdout: toStdout
+            )
+        }
+    }
+
+    /// 追加一段解码后的输出到对应的尾部（同一轮状态队列上调用）。
+    private func appendDecodedLocked(_ text: String, toStdout: Bool) {
+        guard !text.isEmpty else { return }
+        if toStdout {
+            stdoutTail = Self.bounded(stdoutTail + text)
+        } else {
+            stderrTail = Self.bounded(stderrTail + text)
         }
     }
 
@@ -1465,7 +1491,10 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
         self.completion = nil
         self.process = nil
         self.pendingFinish = nil
-        completion?(result)
+        // F1：在 `deliveryQueue` 上回调，不占住 `stateQueue`。
+        if let completion {
+            deliveryQueue.async { completion(result) }
+        }
     }
 }
 
@@ -1486,7 +1515,7 @@ enum PiPackageUpdateRunOutcome: Equatable {
     case notAttempted(packageName: String, reason: PiPackageUpdateRefusal)
     /// 进程保护拒绝执行（执行前复查或确认后复查）。
     case refused(plan: PiPackageUpdatePlan, reason: PiPackageUpdateRefusal)
-    /// 命令失败（非零退出 / 超时 / 启动失败 / 放弃等待）：旧版本保持不变。
+    /// 命令失败（非零退出 / 超时 / 启动失败 / 放弃等待）：不断言文件状态，只记命令事实与「没有回滚动作」。
     case commandFailed(
         plan: PiPackageUpdatePlan,
         failure: PiPackageUpdateCommandFailure,
@@ -1540,7 +1569,10 @@ enum PiPackageUpdateRunOutcome: Equatable {
                 oldVersion: plan.installedVersion,
                 newVersion: detectedVersion,
                 targetVersion: plan.targetVersion,
-                reason: "更新后验证失败，仍在使用更新前的版本：更新命令已结束，但重新检测到的版本是 \(detectedVersion ?? "未知")，未达到目标版本"
+                // L-2：与 CLI / Pi Web 同一处理：nil 时不作版本状态断言。
+                reason: detectedVersion.map { detected in
+                    "更新后验证失败，仍在使用更新前的版本：更新命令已结束，但重新检测到的版本是 \(detected)，未达到目标版本"
+                } ?? "更新后验证失败：更新命令已结束，但重新检测没有给出可用的版本结果，因此无法判断是否达到目标版本"
             )
         }
     }
@@ -1555,7 +1587,7 @@ enum PiPackageUpdateRunOutcome: Equatable {
         case .commandFailed(let plan, let failure, let record, _):
             return "Pi 扩展包更新（\(plan.packageName)）失败：\(failure.text)；退出码 "
                 + "\(record.exitCode.map(String.init) ?? "无")，耗时 \(record.durationText)，"
-                + "当前版本 \(plan.installedVersion)，目标版本 \(plan.targetVersion ?? "未知")。旧版本保持不变。"
+                + "当前版本 \(plan.installedVersion)，目标版本 \(plan.targetVersion ?? "未知")。本次没有执行任何回滚动作。"
         case .versionUnchanged(let plan, let detected, let record):
             return "Pi 扩展包更新（\(plan.packageName)）未通过版本验证：命令退出码 0、耗时 \(record.durationText)，"
                 + "但重新检测到的版本是 \(detected ?? "未知")，目标版本 \(plan.targetVersion ?? "未知")。"
@@ -2055,7 +2087,7 @@ struct PiPackageUpdateWarning: Equatable {
         self.recordedAt = recordedAt
     }
 
-    /// 用户可见的持久警告：明确说明旧版本保持不变、没有回滚这回事。
+    /// 用户可见的持久警告：明确说明没有回滚这回事、也不声称更新成功。
     var text: String {
         var parts: [String] = []
         parts.append("Pi 扩展包更新未完成（\(packageName)）：\(reason)。")

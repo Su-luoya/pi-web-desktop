@@ -1013,3 +1013,84 @@ squash 合入 main → `fba1f12`（CI run `35499346342`，`build` success）；t
 - `docs/architecture.md`、`docs/settings-and-workspace.md`：由 #106 / #107 / #108 同步（降级阶段结果、
   计划判定顺序与菜单三态、三个适配器的排水与放弃等待描述）。
 - 本文件：新增本节（alpha.7 执行记录、覆盖方式、C 项与文档一致性清单）。
+
+## 本次发布执行记录（v0.1.0-alpha.8）
+
+本记录对应 `v0.1.0-alpha.8`（PR #125 合并后的发布提交）。候选提交是 `c4f26a1`（PR #125 squash 合入
+`main` 的提交，`build.yml` run `35501956085` **success**）。本版只有这一个代码提交，除此之外只有发布
+提交本身（版本 bump、发布说明、安全评审与本节的记录）。
+
+### 已在候选提交上实测
+
+| # | 门槛 | 命令 | 实测输出摘要 | 判定 |
+| --- | --- | --- | --- | --- |
+| 1 | 脚本语法 | `sh -n Scripts/*.sh` | 无输出 | 退出 0，通过 |
+| 2 | 空白与补丁格式 | `git diff --check` | 无输出 | 退出 0，通过 |
+| 3 | 构建 | `./Scripts/build.sh` | `Built: build/Pi-Web-Desktop.app`；`Contents/MacOS/PiWebDesktop: Mach-O 64-bit executable arm64` | 退出 0，通过 |
+| 4 | 身份与版本一致性 | `./Scripts/check-identity.sh` | `check-identity: PASSED (45 checks)`；bundle `CFBundleShortVersionString=0.1.0-alpha.8`、`CFBundleVersion=8`、`LSMinimumSystemVersion=14.0`、`CFBundleIdentifier=io.github.su-luoya.pi-web-desktop`、`CFBundleIconFile=ApplicationIcon` | 退出 0，通过（首次运行报 `FAILED (1 of 46 checks)`：本版新增的两份文档尚未 `git add`，未跟踪文件不在文本扫描范围内；`git add -A` 后重跑通过） |
+| 5 | tag 与 bundle 版本一致 | `sh Scripts/check-release-version.sh v0.1.0-alpha.8` | `check-release-version: PASSED (tag v0.1.0-alpha.8, MARKETING_VERSION 0.1.0-alpha.8, CURRENT_PROJECT_VERSION 8)` | 退出 0，通过（脚本只做字符串比对，**不检查 tag 是否存在**；本次 tag 尚未创建） |
+| 6 | 签名校验 | `codesign --verify --deep --strict build/Pi-Web-Desktop.app` | 无输出（`valid on disk` / `satisfies its Designated Requirement`） | 退出 0，通过 |
+| 7 | 签名身份与公证状态 | `codesign -dv --verbose=4 build/Pi-Web-Desktop.app` | `Identifier=io.github.su-luoya.pi-web-desktop`、`Format=app bundle with Mach-O thin (arm64)`、`flags=0x2(adhoc)`、`Signature=adhoc`、`TeamIdentifier=not set` | 预期结果：ad-hoc、未公证 |
+| 8 | Gatekeeper 行为 | `spctl -a -vv build/Pi-Web-Desktop.app` | 输出 `rejected`（退出 3）：未公证 ad-hoc 产物的预期结果 | 退出 3，预期 |
+| 9 | smoke 启动模式 | `./Scripts/smoke.sh`（脚本内含两种模式） | 标记 `smoke: ready`（app 退出 0） | 通过 |
+| 10 | smoke 诊断模式 | `./Scripts/smoke.sh` | 标记 `smoke: diagnostics items=6 blockers=3` 与 `smoke: diagnostics ready`（app 退出 0） | 通过（脚本整体退出 0，两种模式都断言） |
+| 11 | 扫描器自检 | `./Scripts/scan-secrets.sh --self-test` | `self-test: PASS (all rules fired, look-alikes stayed clean, suppression and rejection verified, untracked-file gate verified, samples cleaned up)` | 退出 0，通过 |
+| 12 | 仓库 secret 扫描 | `./Scripts/scan-secrets.sh` | `scan-secrets: suppressed 15 lines`、`scan-secrets: PASS (no matches in tracked files; no untracked files)` | 退出 0，通过；N=15 与 alpha.5 / alpha.6 / alpha.7 记录一致（本版没有新增抑制标记） |
+| 13 | 本地打包与证据 | `./Scripts/package-release.sh --tag v0.1.0-alpha.8` | `package-release: OK`，产出 `Pi-Web-Desktop-0.1.0-alpha.8+build.8.zip`（1,520,630 字节，SHA-256 `74aabbe2447e…`）、`.zip.sha256`、`.evidence.md`、`release-metadata.env`（`VERSION=0.1.0-alpha.8`、`BUILD=8`、`COMMIT=c4f26a1c28886c2c79d17e85907c6be6c1b6a8a1`）；脚本同时复验“包内条目固定修改时间”“归一化时间后签名仍通过”“白名单条目集合一致（无 `__MACOSX/`）”，并打印 `signature: adhoc (TeamIdentifier=not set), not notarized` | 通过（演练值；发布产物由 workflow 在 tag 上生成） |
+| 14 | ZIP 内容清单 | `unzip -l dist/Pi-Web-Desktop-0.1.0-alpha.8+build.8.zip` | 9 项：`Pi-Web-Desktop.app/` 与 `Contents/{,_CodeSignature,MacOS,Resources}` 四个目录，加 `Contents/Info.plist`、`Contents/MacOS/PiWebDesktop`、`Contents/Resources/ApplicationIcon.icns`、`Contents/_CodeSignature/CodeResources`；无 `__MACOSX/`、无源码/测试/日志/个人路径 | 通过 |
+| 15 | checksum 复验 | `shasum -a 256 -c Pi-Web-Desktop-0.1.0-alpha.8+build.8.zip.sha256`（在 `dist/` 内执行） | `Pi-Web-Desktop-0.1.0-alpha.8+build.8.zip: OK` | 退出 0，通过 |
+| 16 | 包内版本与签名复验 | `ditto -x -k <zip> <mktemp -d>` + `plutil -p .../Info.plist` + `codesign --verify --deep --strict .../Pi-Web-Desktop.app` | `CFBundleShortVersionString=0.1.0-alpha.8`、`CFBundleVersion=8`、`LSMinimumSystemVersion=14.0`、`CFBundleIdentifier=io.github.su-luoya.pi-web-desktop`、`CFBundleIconFile=ApplicationIcon`；解压出的 bundle 签名校验退出 0 | 通过（临时目录已删除） |
+| 17 | 版本字面值门禁（回归） | `./Scripts/check-identity.sh` 第 6 节 | `ok   no hardcoded MARKETING_VERSION outside Configuration/AppIdentity.xcconfig` | 通过 |
+| 18 | 更新事务与执行器测试 | `REPO=$PWD sh /private/tmp/piweb-testkit/run.sh UpdateVerifierTests.swift PiPackageUpdateAdapterTests.swift UpdateTransactionTests.swift PiWebUpdateAdapterTests.swift PiCLIUpdateAdapterTests.swift` | `UpdateVerifierTests` 9、`PiPackageUpdateAdapterTests` 56、`UpdateTransactionTests` 35、`PiWebUpdateAdapterTests` 44、`PiCLIUpdateAdapterTests` 44，共 **188 passed、0 failed** | 通过（本机没有完整 Xcode：用 `/private/tmp/piweb-testkit` 的 XCTest shim 逐文件运行；权威结果是 CI 的 `xcodebuild test`） |
+
+本节的边界：第 13–16 项是**本机演练**（打包时 `COMMIT=c4f26a1`，发布提交尚未创建），不是发布资产；
+`xcodebuild build` / `xcodebuild test`、GUI 手工验收、真实更新执行仍不在本机范围（本机
+`xcode-select -p` 指向 Command Line Tools，没有 Xcode）。第 18 项是本地 shim 的结果。
+
+### 发布说明中 #119 / #120 / #121 / #124 的覆盖方式
+
+| issue | 本版改的内容 | 发布说明里的位置 | 证据 |
+| --- | --- | --- | --- |
+| [#119](https://github.com/Su-luoya/pi-web-desktop/issues/119) | 日志尾句改成「本次没有执行任何回滚动作」；`detectedVersion == nil` 不再句内自相矛盾；Pi CLI 的「更新进行中」拒绝补上恢复提示 | 摘要第 1 条、第 1 节 | `Sources/PiCLIUpdateAdapter.swift`、`Sources/PiWebUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、`Sources/PiWebApp.swift`；`PiWebDesktopTests/PiWebUpdateAdapterTests.swift` 的旧断言同步更新 |
+| [#121](https://github.com/Su-luoya/pi-web-desktop/issues/121) | `F1` 完成回调改走专用投递队列；`F2` UTF-8 分块解码在 EOF 冲刷；`F4` 只在常规文件上读取；`F5` 取消落在收尾窗口时被记录；`F6` 失败输出先脱敏；`F3` 信任边界写入文档 | 摘要第 2 条、第 2 节、第 5 节 | `Sources/PiPackageUpdateAdapter.swift`、`Sources/UpdateVerifier.swift`、`Sources/PiWebUpdateAdapter.swift`、`docs/security-ownership.md`、`docs/architecture.md`；测试：`UpdateVerifierTests` 9 例 + 包执行器两个用例 |
+| [#124](https://github.com/Su-luoya/pi-web-desktop/issues/124) | npm `integrity` 的基准版本固定为本次更新的目标版本（同一条 `node_modules` 路径、同一个包名） | 摘要第 3 条、第 3 节 | `Sources/UpdateVerifier.swift`、`Sources/UpdateTransaction.swift`；`UpdateTransactionTests.testIdentityWordingFollowsTheEvidenceSource` |
+| [#120](https://github.com/Su-luoya/pi-web-desktop/issues/120) | 测试面 `T-1` / `T-2` / `T-3` | 摘要第 4 条、第 4 节 | 新增 `PiWebDesktopTests/UpdateVerifierTests.swift`（9 个对抗用例，`PiWebDesktop.xcodeproj/project.pbxproj` 四处登记）+ 三个行为用例 |
+
+### 本版本的安全审查结论（alpha.7 → alpha.8 delta）
+
+- 范围：`git diff 3ed1a09..c4f26a1`（本版唯一的提交，PR #125）。
+- 报告：`docs/security-review-alpha.8.md`（本版新增，只读评审）。
+- 结论：阻断项 **0 条**，非阻断项 **5 条**（`L-1` 四条 nil 版本日志行仍写「旧版本保持不变」；`L-2` 本文档关于 `integrity` 基准的措辞——本版已按代码实际语义「更新前已安装的版本」改正；`L-3` `openRegularFile` 的类型检查与打开之间的 TOCTOU 窗口；`L-4` 排水宽限到期结束时不冲刷增量解码器暂存；`L-5` 既有的「已放弃等待」日志行）。评审确认 `#121` / `#120` 的修法与测试按主张落实、`#124` 的代码语义正确，给出**不阻断发布**的结论；未在本版处理的四项登记在 [#127](https://github.com/Su-luoya/pi-web-desktop/issues/127)。
+
+### 还需 CI / 发布 workflow 完成
+
+| # | 检查 | 实测输出摘要 | 判定 |
+| --- | --- | --- | --- |
+| C1 | PR CI（候选提交 `c4f26a1`） | `build.yml` run `35501956085` | **success** |
+| C2 | 发布提交的 CI | run {{CI_RELEASE_RUN}} | {{待回填}} |
+| C3 | `git tag -a v0.1.0-alpha.8` 指向发布提交 | tag `v0.1.0-alpha.8` | {{待回填}} |
+| C4 | `release.yml`（tag push 触发） | run {{RELEASE_RUN}} | {{待回填}} |
+| C5 | 草稿 prerelease 的正文与真机表 | `{{ZIP_NAME}}` / `{{SHA256}}` | {{待回填}} |
+| C6 | 真机 macOS 与 Node / pi / pi-web 版本 | {{MACHINE_TABLE}} | {{待回填}} |
+| C7 | `gh release edit --draft=false`（prerelease） | 发布时间 {{RELEASE_DATE}} | {{待回填}} |
+| C8 | 回退路径（上一版资产仍在 Releases） | `v0.1.0-alpha.7`（`2026-09-20T08:30:20Z`，3 个资产：ZIP / `.sha256` / `.evidence.md`） | 已核实 |
+| C9 | 回填 Release issue 的 run 链接与 SHA-256、关闭 issue | issue #126 | {{待回填}} |
+
+本节的边界：C1–C6 与 C9 的检查在 CI / workflow / 维护者操作里完成，本机没有对应的实测输出；表格里
+`{{…}}` 的回填结果来自 workflow 产物与维护者操作，不要写成已在本机验证。
+
+### 本版同时做的文档一致性改动
+
+- `Configuration/AppIdentity.xcconfig`（本版唯一版本来源）：`MARKETING_VERSION` → `0.1.0-alpha.8`、
+  `CURRENT_PROJECT_VERSION` → `8`。
+- `docs/release-notes-v0.1.0-alpha.8.md`（本版新增）：四条修复逐条成节；“更新检查与自动更新的边界”
+  一节沿写本版没有改动域名、频率、开关与自动更新前置条件；“校验值”一节区分演练值与 `release.yml`
+  的发布值（发布后回填）；“已知问题”把上一版列出的 `L-1` / `L-2` / `L-3`、`T-1` / `T-2` / `T-3`、
+  `F1` … `F6` 与 #124 移到“已修”，保留 `L-4` / `L-5` 两条按设计保留的有界窗口。
+- `docs/security-review-alpha.8.md`（本版新增）：alpha.7 → alpha.8 的只读 delta 安全评审。
+- `docs/security-ownership.md`：`PATH` 即信任边界（不固定可执行文件位置、不校验签名）由
+  #121 / `F3` 记录。
+- `docs/architecture.md`：更新适配器的结果投递与收尾窗口由 #121 / `F1`、`F2`、`F5` 同步（专用投递
+  队列、管道 EOF 冲刷、取消落在收尾窗口时的记录）。
+- `docs/alpha-release-checklist.md`（本文件）：新增本节（alpha.8 执行记录、覆盖方式、安全审查结论、
+  C 项与文档一致性清单）。

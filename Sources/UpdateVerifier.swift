@@ -68,6 +68,8 @@ struct UpdateArtifactProbe {
 
     /// 内容哈希的读取上限（16 MiB）。超过上限不读取内容，只退回元数据证据。
     static let contentHashSizeLimitBytes = 16 * 1024 * 1024
+    static let packageJSONSizeLimitBytes = 512 * 1024
+    static let lockfileSizeLimitBytes = 4 * 1024 * 1024
 
     /// 未注入探针：所有文件层检查记为“未验证”。
     static let disabled = UpdateArtifactProbe(
@@ -152,15 +154,56 @@ struct UpdateArtifactProbe {
         return size.intValue
     }
 
-    /// 读取 `package.json` 的 `name`。有界读取（上限 512 KiB），解析失败返回 nil。
-    static func readPackageName(atPackageJSONPath path: String) -> String? {
-        guard path.hasSuffix("package.json") else { return nil }
-        guard let data = FileManager.default.contents(atPath: path), !data.isEmpty else { return nil }
-        guard data.count <= 512 * 1024 else { return nil }
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+    /// 先检查文件属性，再通过句柄做有界读取；超限文件不会打开，读取期间增长也不会越界。
+    static func readBoundedData(
+        atPath path: String,
+        maximumSize: Int,
+        fileSize: (String) -> Int? = { UpdateArtifactProbe.fileSize(atPath: $0) },
+        openFile: (String) -> FileHandle? = { FileHandle(forReadingAtPath: $0) }
+    ) -> Data? {
+        guard maximumSize >= 0,
+              let size = fileSize(path),
+              size >= 0,
+              size <= maximumSize else { return nil }
+        guard let handle = openFile(path) else { return nil }
+        defer { try? handle.close() }
+
+        var data = Data()
+        while data.count <= maximumSize {
+            let remaining = min(64 * 1024, maximumSize + 1 - data.count)
+            guard remaining > 0 else { return nil }
+            let chunk: Data
+            do {
+                guard let read = try handle.read(upToCount: remaining), !read.isEmpty else { break }
+                chunk = read
+            } catch {
+                return nil
+            }
+            data.append(chunk)
+        }
+        guard !data.isEmpty, data.count <= maximumSize else { return nil }
+        return data
+    }
+
+    private struct PackageIdentity {
+        var name: String
+        var version: String?
+    }
+
+    /// 读取 `package.json` 的包身份。有界读取（上限 512 KiB），解析失败返回 nil。
+    private static func readPackageIdentity(atPackageJSONPath path: String) -> PackageIdentity? {
+        guard path.hasSuffix("package.json"),
+              let data = readBoundedData(atPath: path, maximumSize: packageJSONSizeLimitBytes),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let name = object["name"] as? String,
               ComponentInstallationDetector.isPackageName(name) else { return nil }
-        return name
+        let version = (object["version"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return PackageIdentity(name: name, version: version?.isEmpty == false ? version : nil)
+    }
+
+    /// 读取 `package.json` 的 `name`。有界读取（上限 512 KiB），解析失败返回 nil。
+    static func readPackageName(atPackageJSONPath path: String) -> String? {
+        return readPackageIdentity(atPackageJSONPath: path)?.name
     }
 
     /// npm 记录的完整性值形状校验：`<算法>-<base64 形状>`，长度有上限。
@@ -186,8 +229,10 @@ struct UpdateArtifactProbe {
     /// 不读取 npm 凭据。取不到时返回 nil，调用方必须标注“未获取”。
     static func readNpmIntegrity(executablePath: String, packageName: String?) -> String? {
         guard executablePath.hasPrefix("/") else { return nil }
-        let expectedName = packageName ?? readPackageName(near: executablePath)
+        let installedIdentity = readPackageIdentity(near: executablePath)
+        let expectedName = packageName ?? installedIdentity?.name
         guard let expectedName, !expectedName.isEmpty else { return nil }
+        let expectedVersion = installedIdentity?.name == expectedName ? installedIdentity?.version : nil
         var directory = (executablePath as NSString).deletingLastPathComponent
         var depth = 0
         while !directory.isEmpty, directory != "/", depth < 6 {
@@ -196,7 +241,11 @@ struct UpdateArtifactProbe {
                 (directory as NSString).appendingPathComponent(".package-lock.json"),
                 (directory as NSString).appendingPathComponent("node_modules/.package-lock.json")
             ] {
-                if let integrity = readIntegrityValue(atLockfilePath: candidate, packageName: expectedName) {
+                if let integrity = readIntegrityValue(
+                    atLockfilePath: candidate,
+                    packageName: expectedName,
+                    packageVersion: expectedVersion
+                ) {
                     return integrity
                 }
             }
@@ -206,44 +255,69 @@ struct UpdateArtifactProbe {
         return nil
     }
 
-    /// 从单个锁文件里取指定包名的 `integrity`。有界读取；解析失败返回 nil。
-    static func readIntegrityValue(atLockfilePath path: String, packageName: String) -> String? {
-        guard let data = FileManager.default.contents(atPath: path), !data.isEmpty else { return nil }
-        guard data.count <= 4 * 1024 * 1024 else { return nil }
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+    /// 从单个锁文件里取指定包名的 `integrity`。精确路径优先；版本不符或候选歧义返回 nil。
+    static func readIntegrityValue(
+        atLockfilePath path: String,
+        packageName: String,
+        packageVersion: String? = nil
+    ) -> String? {
+        guard let data = readBoundedData(atPath: path, maximumSize: lockfileSizeLimitBytes),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+
+        func integrity(from value: Any) -> String? {
+            guard let entry = value as? [String: Any] else { return nil }
+            if let entryVersionValue = entry["version"] {
+                guard let entryVersion = entryVersionValue as? String,
+                      let packageVersion,
+                      entryVersion == packageVersion else { return nil }
+            }
+            guard let integrity = entry["integrity"] as? String,
+                  isIntegrityValue(integrity) else { return nil }
+            return integrity
+        }
+
         if let packages = object["packages"] as? [String: Any] {
-            for (key, value) in packages {
-                guard let entry = value as? [String: Any],
-                      let integrity = entry["integrity"] as? String,
-                      isIntegrityValue(integrity) else { continue }
+            let exactKey = "node_modules/\(packageName)"
+            if let exactEntry = packages[exactKey] {
+                return integrity(from: exactEntry)
+            }
+
+            let matchingKeys = packages.keys.sorted().filter { key in
                 let suffix = key.components(separatedBy: "node_modules/").last ?? key
-                if suffix == packageName { return integrity }
+                return suffix == packageName
+            }
+            guard matchingKeys.count <= 1 else { return nil }
+            if let key = matchingKeys.first {
+                return integrity(from: packages[key] as Any)
             }
         }
         if let dependencies = object["dependencies"] as? [String: Any],
-           let entry = dependencies[packageName] as? [String: Any],
-           let integrity = entry["integrity"] as? String,
-           isIntegrityValue(integrity) {
-            return integrity
+           let entry = dependencies[packageName] {
+            return integrity(from: entry)
         }
         return nil
     }
 
-    /// 从 `path` 向上最多 6 层找最近的 `package.json` 并读 `name`。
+    /// 从 `path` 向上最多 6 层找最近的 `package.json` 并读包身份。
     /// 只做有界目录向上遍历，不递归、不列目录内容。
-    static func readPackageName(near path: String) -> String? {
+    private static func readPackageIdentity(near path: String) -> PackageIdentity? {
         guard path.hasPrefix("/") else { return nil }
         var directory = (path as NSString).deletingLastPathComponent
         var depth = 0
         while !directory.isEmpty, directory != "/", depth < 6 {
             let candidate = (directory as NSString).appendingPathComponent("package.json")
-            if let name = readPackageName(atPackageJSONPath: candidate) {
-                return name
+            if let identity = readPackageIdentity(atPackageJSONPath: candidate) {
+                return identity
             }
             directory = (directory as NSString).deletingLastPathComponent
             depth += 1
         }
         return nil
+    }
+
+    /// 从 `path` 向上最多 6 层找最近的 `package.json` 并读 `name`。
+    static func readPackageName(near path: String) -> String? {
+        return readPackageIdentity(near: path)?.name
     }
 }
 
@@ -410,7 +484,8 @@ enum UpdateVerifier {
     /// - 版本无法解析或检测不到：失败。
     static func versionReached(detected: String?, old: String, target: String?) -> Bool {
         guard let detected, let detectedVersion = SemanticVersion(detected) else { return false }
-        if let target, let targetVersion = SemanticVersion(target) {
+        if let target {
+            guard let targetVersion = SemanticVersion(target) else { return false }
             return detectedVersion >= targetVersion
         }
         guard let oldVersion = SemanticVersion(old) else { return false }
@@ -558,6 +633,13 @@ enum UpdateVerifier {
     static func versionCheck(detected: String?, previous: String?, target: String?) -> UpdateVerificationCheckResult {
         let previousText = previous ?? "未知"
         let targetText = target ?? "由上游更新命令决定"
+        if let target, SemanticVersion(target) == nil {
+            return UpdateVerificationCheckResult(
+                check: .versionReached,
+                status: .failed,
+                detail: "目标版本不可解析"
+            )
+        }
         guard let detected, SemanticVersion(detected) != nil else {
             return UpdateVerificationCheckResult(
                 check: .versionReached,

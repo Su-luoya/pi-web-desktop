@@ -1179,9 +1179,10 @@ squash 合入 main → `fba1f12`（CI run `35499346342`，`build` success）；t
 
 本版候选：PR #136（`09f1264`，功能「最近工作目录与快速切换」，关闭
 [#134](https://github.com/Su-luoya/pi-web-desktop/issues/134)）之后的 main，加上本版发布提交的版本
-bump 与三份文档。本节的脚本输出在**非同步目录**的候选副本里采集：
-`/tmp/piweb-alpha10-rehearsal2`（`ditto --norsrc --noextattr` 的干净副本，`HEAD = 09f1264`，工作区含本版
-版本 bump 与发布文档、尚未提交），原因是 iCloud 同步目录会在打包后把 `com.apple.FinderInfo` /
+bump 与四份文档（发布说明、安全评审、本次执行记录、`docs/architecture.md` 注记）。本节的脚本输出在
+**非同步目录**的候选副本里采集：`/tmp/piweb-alpha10-rehearsal2`（`ditto --norsrc --noextattr` 的干净
+副本，`HEAD = 09f1264`，工作区只有未提交的版本 bump `Configuration/AppIdentity.xcconfig`；发布文档
+写于这次演练之后，没有进入该副本），原因是 iCloud 同步目录会在打包后把 `com.apple.FinderInfo` /
 `com.apple.fileprovider.fpfs#P` 贴回临时包，导致 `codesign --verify` 与
 `package-release.sh --self-test` 失败（alpha.1 记录的 `#15` 现象）。
 
@@ -1192,7 +1193,7 @@ bump 与三份文档。本节的脚本输出在**非同步目录**的候选副�
 | 1 | 脚本语法 | `sh -n Scripts/*.sh` | 无输出 | 退出 0，通过 |
 | 2 | 空白与补丁格式 | `git diff --check` | 无输出 | 退出 0，通过 |
 | 3 | 构建 | `./Scripts/build.sh` | `Built: build/Pi-Web-Desktop.app`；`Contents/MacOS/PiWebDesktop: Mach-O 64-bit executable arm64` | 退出 0，通过 |
-| 4 | 身份与版本一致性 | `./Scripts/check-identity.sh` | `check-identity: PASSED (45 checks)`；bundle `CFBundleShortVersionString=0.1.0-alpha.10`、`CFBundleVersion=10`、`LSMinimumSystemVersion=14.0`、`CFBundleIdentifier=io.github.su-luoya.pi-web-desktop`、`CFBundleIconFile=ApplicationIcon` | 退出 0，通过（本版新增的发布文档已 `git add` 后再跑，避免未跟踪文件不进文本扫描造成假失败） |
+| 4 | 身份与版本一致性 | `./Scripts/check-identity.sh` | `check-identity: PASSED (45 checks)`；bundle `CFBundleShortVersionString=0.1.0-alpha.10`、`CFBundleVersion=10`、`LSMinimumSystemVersion=14.0`、`CFBundleIdentifier=io.github.su-luoya.pi-web-desktop`、`CFBundleIconFile=ApplicationIcon` | 退出 0，通过（该副本无未跟踪文件，文本扫描覆盖完整） |
 | 5 | tag 与 bundle 版本一致 | `sh Scripts/check-release-version.sh v0.1.0-alpha.10` | `check-release-version: PASSED (tag v0.1.0-alpha.10, MARKETING_VERSION 0.1.0-alpha.10, CURRENT_PROJECT_VERSION 10)` | 退出 0，通过（脚本只做字符串比对，**不检查 tag 是否存在**；本次 tag 尚未创建） |
 | 6 | 签名校验 | `codesign --verify --deep --strict build/Pi-Web-Desktop.app` | 无输出（`valid on disk` / `satisfies its Designated Requirement`） | 退出 0，通过 |
 | 7 | 签名身份与公证状态 | `codesign -dv --verbose=4 build/Pi-Web-Desktop.app` | `Identifier=io.github.su-luoya.pi-web-desktop`、`Format=app bundle with Mach-O thin (arm64)`、`flags=0x2(adhoc)`、`Signature=adhoc`、`TeamIdentifier=not set`、`Sealed Resources version=2 rules=13 files=1` | 预期结果：ad-hoc、未公证 |
@@ -1218,7 +1219,7 @@ bump 与三份文档。本节的脚本输出在**非同步目录**的候选副�
 
 ### 本版本的安全审查结论（alpha.9 → alpha.10 delta）
 
-- 范围：`git diff 21ce459..09f1264`（本版的代码提交 PR #136，加上一个纯文档提交 PR #133）。
+- 范围：`git diff 21ce459..09f1264`（基点 `21ce459` 是 PR #133 的纯文档提交，不在 diff 内；区间内容只有本版的代码提交 PR #136）。
 - 报告：`docs/security-review-alpha.10.md`（本版新增，只读评审）。
 - 结论：阻断项 **0 条**，非阻断项 **4 条**（`F1` / `F2` / `F3` / `F4`，已登记
   [#135](https://github.com/Su-luoya/pi-web-desktop/issues/135)，其中文案与加固类不构成安全边界）；

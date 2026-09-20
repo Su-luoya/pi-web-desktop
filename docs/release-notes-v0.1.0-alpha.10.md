@@ -5,7 +5,8 @@
 Pi Web Desktop `0.1.0-alpha.10` 是面向 **Apple Silicon（arm64）、macOS 14 或更高版本** 的第十个
 alpha 预览。它启动、监控并显示本机已安装的 Pi Web 服务，默认只监听 loopback。相对
 `0.1.0-alpha.9`，本版本只有 **1 个代码提交**（PR #136：一个新功能，连同它的用户可见文档与用例，
-关闭 1 个 issue），除此之外只有发布提交本身（版本 bump 与本文档），没有修复面变化：
+关闭 1 个 issue），除此之外只有发布提交本身（版本 bump 与四份文档：发布说明、安全评审、本次执行
+记录、`docs/architecture.md` 注记），没有修复面变化：
 
 1. **最近工作目录与快速切换**（#134 / PR #136）：服务菜单新增「最近工作目录」子菜单，按最近使用
    排序、按标准化路径去重、最多 10 条，当前目录打勾，另有「在 Finder 中打开当前工作目录」与
@@ -175,7 +176,8 @@ signatures, does not confirm the official source, and does not compare installer
 | 发布提交 | 〈待回填〉（tag `v0.1.0-alpha.10` 指向该提交） |
 
 **本机演练值（不是发布资产）** —— 在候选工作区 `/tmp/piweb-alpha10-rehearsal2`（`ditto --norsrc
---noextattr` 副本，`HEAD = 09f1264`，工作区含本版版本 bump 与本文档、尚未提交）用
+--noextattr` 副本，`HEAD = 09f1264`，工作区只有未提交的版本 bump
+`Configuration/AppIdentity.xcconfig`；本文件与安全评审写于这次演练之后，没有进入该演练产物）用
 `Scripts/package-release.sh --tag v0.1.0-alpha.10` 打包，用来验证打包链路与记录产物形态：
 
 | 项 | 值 |
@@ -186,7 +188,7 @@ signatures, does not confirm the official source, and does not compare installer
 | 演练提交 | `09f12646a0129fe355bbd4ab6d84159076dc594d`（`dist/release-metadata.env` 的 `COMMIT`；工作区 dirty，所以这只是演练值） |
 | 校验 | `shasum -a 256 -c` 通过 |
 
-发布用的 ZIP 由 `release.yml` 在 tag 上重新打包（同一条 `Scripts/package-release.sh`），大小与校验值以 Release 上的 `.zip.sha256` 与本节的回填值为准。
+这些数值**不可复现**，只记录那一次产物：同一条命令在本机重跑会得到不同的大小与 SHA-256（可执行文件里的 ad-hoc 签名 blob、`LC_UUID` 与编译期代码字节都会变；演练产物自带的 `dist/*.evidence.md` 也写明这一点）。发布用的 ZIP 由 `release.yml` 在 tag 上重新打包（同一条 `Scripts/package-release.sh`），大小与校验值以 Release 上的 `.zip.sha256` 与本节的回填值为准。
 
 ## 构建与签名验证记录（本机演练）
 

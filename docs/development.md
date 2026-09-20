@@ -242,7 +242,7 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 ./Scripts/smoke.sh
 ```
 
-`./Scripts/check-identity.sh` 退出 0 表示身份、版本与服务默认值一致，仓库文本扫描通过，且工作区没有落在扫描范围内的未跟踪文件。`./Scripts/scan-secrets.sh --self-test` 必须证明每条规则都会命中、抑制标记只跳过带标记的那一行且计数正确，以及未跟踪文件门禁（默认退出 3、加 `--include-untracked` 能扫到未跟踪文件里的样例凭据、没有未跟踪文件时行为不变）；`./Scripts/scan-secrets.sh` 必须退出 0（没有已跟踪文件命中，且工作区没有未跟踪文件：有未跟踪文件时它如实退出 3，先 `git add` 或删除后再重跑）。`xcodebuild build` / `xcodebuild test` 需要完整 Xcode：`xcode-select -p` 指向 Command Line Tools 时这两条命令会失败，此时以上面的脚本链替代（脚本链不运行 XCTest），并在 PR 中说明 XCTest 由 CI 的 `macos-14` job 覆盖。
+`./Scripts/check-identity.sh` 退出 0 表示身份、版本与服务默认值一致，仓库文本扫描通过，且工作区没有落在扫描范围内的未跟踪文件。`./Scripts/scan-secrets.sh --self-test` 必须证明每条凭据规则都有一个会命中的样本、误报边界的样本（占位符与模板值、示例 URL、camelCase 标识符值）不会被报告、`scan-secrets: allow(reason=…)` 的理由门槛（裸标记、空理由和过短理由都不抑制、该行照常上报且计入 rejected、被抑制的行仍打印并计数），以及未跟踪文件门禁（默认退出 3、加 `--include-untracked` 能扫到未跟踪文件里的样例凭据、没有未跟踪文件时行为不变）；`./Scripts/scan-secrets.sh` 必须退出 0（没有已跟踪文件命中，且工作区没有未跟踪文件：有未跟踪文件时它如实退出 3，先 `git add` 或删除后再重跑）。`xcodebuild build` / `xcodebuild test` 需要完整 Xcode：`xcode-select -p` 指向 Command Line Tools 时这两条命令会失败，此时以上面的脚本链替代（脚本链不运行 XCTest），并在 PR 中说明 XCTest 由 CI 的 `macos-14` job 覆盖。
 
 ### personal-data 与 secret 扫描能力
 
@@ -250,7 +250,8 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 
 - **CI 的 personal-data 步骤**（`.github/workflows/build.yml` 的 `Check for accidental personal data` 步骤）：一条 `git grep -nE`，匹配几个固定字面量（一个私有 VPN 厂商名的小写形式、一个固定本地代理端点、以 `/Users` 开头的主目录路径），并排除 `*.icns`、该 workflow 自身和 `Scripts/check-identity.sh`。它只覆盖 checkout 出来的已跟踪提交；CI 上不存在未跟踪文件，所以这条门禁不受本节的未跟踪问题影响。
 - **`Scripts/check-identity.sh` 的仓库文本扫描**（脚本里 `# --- 6. repository text scan ---` 一节）：用另一组模式：小写的私有 VPN 主机名、tailnet DNS 后缀、CGNAT 私网地址段、以 `/Users` 开头的路径、固定本地代理端点，再加 `MARKETING_VERSION` 字面值（限 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/`）。扫描前它用 `git ls-files --others --exclude-standard` 检查未跟踪文件：落在上述扫描范围内的未跟踪文件直接判失败（无法为未扫描的文本担保），被 pathspec 排除的 `*.icns` 只输出 info 行。
-- **`Scripts/scan-secrets.sh`**（#11 新增；CI 的 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 两步）：按形状扫描**已跟踪文件**里的高信号凭据：AWS access key ID（`AKIA` + 16 位大写字母/数字）、GitHub token（`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_` + 长后缀）、PEM 私钥头、JWT（三段 base64url，`eyJ` 开头）、以及 `password=`/`passwd=`/`secret=`/`api_key=`/`access_token=`/`auth_token=`/`token=` 这类**紧贴等号且值至少 12 个字符**的赋值。规则、样本和匹配器本身也受同一条扫描约束。命中行只在同一行带 `scan-secrets: allow` 内联标记时才被跳过。默认的仓库级扫描在发现未跟踪且未被 `.gitignore` 忽略的文件时**拒绝给出结论并退出 3**，消息列出前 5 条并提示 `git add <path>` 或 `--include-untracked`；`--include-untracked` 把未跟踪文件就地一并扫描，仅用于本地排查（未 `git add` 的文件 CI 永远看不到）。每次实际执行的扫描在结尾输出 `scan-secrets: suppressed N lines`（退出 3 的拒绝在扫描前结束，不打印该行）。
+- **`Scripts/scan-secrets.sh`**（#11 新增；CI 的 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 两步）：按形状扫描**已跟踪文件**里的高信号凭据，规则分两类。结构形状：AWS access key ID（`AKIA`/`ASIA` + 16 位大写字母/数字）、GitHub token（`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_` + 长后缀）、Slack token（`xox` 家族）、Stripe 与 provider key（`sk_live_`/`sk_test_`/`rk_live_`、`sk-proj-`/`sk-ant-`/`sk-or-`/`sk-` + 长后缀）、age secret key（`AGE-SECRET-KEY-1` + Base32）、PEM/OpenSSH/SSH2/PGP 私钥头、JWT（三段 base64url，`eyJ` 开头）、`Authorization: Bearer <token>`、带凭据的连接串（`scheme://user:password@host`）。键值形状：键名大小写不敏感，覆盖 `password`/`passwd`/`passphrase`/`secret`/`token`/`apikey`/`api_key`/`private_key`/`access_key`/`credential` 以及中文 `密码`/`口令`/`密钥`/`私钥`/`令牌`/`凭据`，允许前后缀（`AWS_SECRET_ACCESS_KEY` 因此命中），键必须出现在配置位置（行首、`{`/`,` 之后，或 `export`/`ENV`/`ARG`/`declare` 之后），`=`/`:` 两侧允许空白，值至少 12 个可打印 ASCII 字符（带引号时可含空格），JSON/YAML/TOML/.env/`export` 形态因此都覆盖。规则、样本和匹配器本身也受同一条扫描约束。三类“形状像但不是”的行被整行丢弃：占位符与模板值（`YOUR_TOKEN_HERE`、`<redacted>`、`${VAR}`、`...`、`REPLACE_ME` 等）、文档主机与无凭据 URL（以 `.invalid`/`.test`/`.example`/`.local`/`localhost` 结尾的主机、`example.com`/`example.net`/`example.org`、无点主机）、以及 camelCase 标识符值；这条边界的代价见本节的“能力边界”。命中行只在同一行带 `scan-secrets: allow(reason=…)` 内联标记（理由至少 8 个字符）时才被跳过；裸标记、空理由和过短理由**不生效**：该行照常上报，脚本打印 `scan-secrets: warning:`，并在结尾计入 `scan-secrets: rejected N suppression marker(s) without a reason of at least 8 characters`。默认的仓库级扫描在发现未跟踪且未被 `.gitignore` 忽略的文件时**拒绝给出结论并退出 3**，消息列出前 5 条并提示 `git add <path>` 或 `--include-untracked`；`--include-untracked` 把未跟踪文件就地一并扫描，仅用于本地排查（未 `git add` 的文件 CI 永远看不到）。每次实际执行的扫描在结尾输出 `scan-secrets: suppressed N lines`，被抑制的行本身仍逐行打印（`scan-secrets: suppressed: <path>:<line>:…`）以供审计（退出 3 的拒绝在扫描前结束，不打印这两行）。
+- **`Scripts/scan-secrets.sh` 与运行期日志脱敏 `LogRedactor`（`Sources/LogRedactor.swift`）的一致性**：两侧用同一套键名（`password`/`passwd`/`secret`/`token`/`api_key`/`apikey`/`private_key`，均大小写不敏感），扫描器另外覆盖 `access_key`/`credential` 与中文键名。差别是刻意的：`LogRedactor` 处理运行期日志文本，不限值长度，还处理 `key:` 之后的续行、`--password <value>` 命令行形态、`Authorization:` 头的任意值与 URL 查询串；扫描器只看仓库里的固定形状，因此要求配置位置与 12 个字符以上的值，**不**合并续行、不扫命令行参数与查询串、也不看非 ASCII 值。改任一侧的键名集合时应同时检查另一侧。
 
 ```bash
 ./Scripts/scan-secrets.sh --self-test         # 在临时目录里证明每条规则都会命中、误报不会被报告、抑制标记与计数正确，并在临时 Git 仓库里验证未跟踪文件门禁（因此需要 git）
@@ -261,15 +262,17 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 
 退出码 0 表示没有命中，1 表示至少命中一处，2 表示用法/环境错误（例如不在 Git work tree 里），3 表示工作区存在未跟踪且未被 `.gitignore` 忽略的文件、仓库级扫描因此拒绝给出结论（消息里列出前 5 条，并给出 `git add` 与 `--include-untracked` 两条出路）。退出 3 是刻意的：`git grep` 只读已跟踪内容，直接通过就会把从未扫描过的文件说成“没问题”（安全审查 R-11）；`--self-test` 在临时 Git 仓库里断言这条契约（默认拒绝、加开关后能扫到未跟踪文件里的样例凭据、没有未跟踪文件时行为不变）。显式传入 FILE 时不检查未跟踪状态：扫描命名文件本来就只覆盖这些文件，单个未跟踪文件也可以直接指定。自检和仓库扫描在 CI 上是两个独立步骤，所以“规则失效”与“仓库里真有凭据”不会互相掩盖。
 
-内联抑制（`scan-secrets: allow`）：
+内联抑制（`scan-secrets: allow(reason=…)`）：
 
 - 只对**匹配行自身**生效：同一行里既有命中形状又有标记才跳过；标记出现在同文件的其他行、其他文件或注释段落里都不生效。脚本没有按文件、目录或 pathspec 整体放行的开关。
+- 标记必须带理由（`allow(reason=…)`，至少 8 个字符）。裸标记、空理由与纯空白理由、过短理由都不构成抑制：该行照常上报，脚本打印 `scan-secrets: warning:`，并在结尾计入 `scan-secrets: rejected N suppression marker(s)…`；N 不为 0 时扫描必然非 0 退出。`--self-test` 对这四种情况各有一个样本并断言计数。
+- 被抑制的行仍然**逐行打印**（`scan-secrets: suppressed: <path>:<line>:…`）并计入结尾的 `scan-secrets: suppressed N lines`，不会静默消失。
+- 标记只对命中行生效，所以仓库里的标记数与 `suppressed N` 不一定相等：落在不再命中行上的标记既不打印也不计数（保留它们是为了标明该行本来就是样例数据）。
 - 只用于**样例数据**：脱敏测试夹具（例如 `PiWebDesktopTests/LogRedactorTests.swift`、`PiWebDesktopTests/LogWriterTests.swift` 里的假 token/JWT/私钥）这类“形状像凭据但本来就不是”的行。真实凭据、疑似凭据和来源不明的字面值不得加标记。
 - 多行字符串里的夹具（Swift `"""` 块）把标记写在夹具行尾；单行字面量把标记写在语句行尾。标记只作为代码注释或夹具文本出现，不参与被断言的内容。
-- 每次实际执行的扫描都在结尾打印 `scan-secrets: suppressed N lines`（没有抑制时为 0），CI 日志里能直接看到；未跟踪文件导致的退出 3 在扫描前结束，不打印这一行。`--self-test` 额外断言“带标记的行不报错、同一行去掉标记后报错、标记在别的行不影响、计数不多不少”。
-- 评审要求：把 N 与本次 diff 新增的标记数量对照，并逐条确认加标记的行确实是样例数据；标记出现在夹具之外（`Sources/`、`Scripts/`、`docs/` 等）时先质疑再合并。
+- 评审要求：把 `suppressed N` 和 `rejected N` 都与本次 diff 对照，并逐条确认加标记的行确实是样例数据；标记出现在夹具之外（`Sources/`、`Scripts/`、`docs/` 等）时先质疑再合并。
 
-三层检查都只看文本模式；CI 的 personal-data `git grep` 仍然只覆盖 checkout 出来的已跟踪内容（CI 上不存在未跟踪文件，所以不涉及假绿）。本地运行不再静默跳过未跟踪文件：`./Scripts/scan-secrets.sh` 默认退出 3 并要求先 `git add`（或显式用 `--include-untracked` 做本地排查），`./Scripts/check-identity.sh` 对落在扫描范围内的未跟踪文件判失败、对本来就排除的 `*.icns` 只输出 info 行。三层都不做熵分析、扫描 Git 历史、检查二进制/加密载荷或未列出的凭据类型；命中不等于一定泄漏（例如文档里的示例形状），漏报也不等于安全。凭据泄漏防线仍然是评审和作者自查，不要把“scan-secrets 通过”写成“没有秘密”。
+三层检查都只看文本模式；CI 的 personal-data `git grep` 仍然只覆盖 checkout 出来的已跟踪内容（CI 上不存在未跟踪文件，所以不涉及假绿）。本地运行不再静默跳过未跟踪文件：`./Scripts/scan-secrets.sh` 默认退出 3 并要求先 `git add`（或显式用 `--include-untracked` 做本地排查），`./Scripts/check-identity.sh` 对落在扫描范围内的未跟踪文件判失败、对本来就排除的 `*.icns` 只输出 info 行。三层都不做熵分析、扫描 Git 历史、检查二进制/加密载荷或未列出的凭据类型；命中不等于一定泄漏（例如文档里的示例形状），漏报也不等于安全。键值规则只看**一行之内**的文本：键必须出现在配置位置（`store.password = …` 这类带成员访问前缀的键、`line1: password=…` 这类带散文前缀的行都不命中），值必须与键同一行且至少 12 个可打印 ASCII 字符（`key:` 之后的续行值、非 ASCII 值与更短的值不命中）。凭据泄漏防线仍然是评审和作者自查，不要把“scan-secrets 通过”写成“没有秘密”。
 
 本地复现 CI 的 personal-data 那条命令时，从工作流里取出再执行，避免在文档、注释或脚本里复制模式字面值：
 

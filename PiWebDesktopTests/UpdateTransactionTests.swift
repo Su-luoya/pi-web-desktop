@@ -826,7 +826,7 @@ final class UpdateTransactionTests: XCTestCase {
             baseEnvironment: [
                 "PATH": "/usr/bin:/bin",
                 "HOME": self.fixtureHome,
-                "PI_WEB_PASSWORD": "super-secret-value",
+                "PI_WEB_PASSWORD": "super-secret-value",  // scan-secrets: allow(reason=test fixture environment)
                 "AWS_SECRET_ACCESS_KEY": "aws-secret",
                 "NODE_OPTIONS": "--require /tmp/evil.js"
             ]

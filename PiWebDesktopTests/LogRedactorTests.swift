@@ -45,15 +45,15 @@ final class LogRedactorTests: XCTestCase {
 
     func testSensitiveKeyValuesAreRedactedInEveryForm() {
         let values = [
-            "token=token-value-1",  // scan-secrets: allow
-            "password=hunter2-password",  // scan-secrets: allow
+            "token=token-value-1",  // scan-secrets: allow(reason=redaction fixture)
+            "password=hunter2-password",  // scan-secrets: allow(reason=redaction fixture)
             "secret: secret-value-3",
-            "api_key=api-key-value-4",  // scan-secrets: allow
-            "apikey=apikey-value-5",  // scan-secrets: allow
+            "api_key=api-key-value-4",  // scan-secrets: allow(reason=redaction fixture)
+            "apikey=apikey-value-5",  // scan-secrets: allow(reason=redaction fixture)
             "\"token\": \"json-secret-6\"",
             "PI_WEB_PASSWORD=env-secret-7",
             "--password cli-secret-8",
-            "access_token=access-secret-9"  // scan-secrets: allow
+            "access_token=access-secret-9"  // scan-secrets: allow(reason=redaction fixture)
         ]
         for line in values {
             let redacted = redactor.redact(line)
@@ -73,14 +73,14 @@ final class LogRedactorTests: XCTestCase {
     }
 
     func testJWTShapedStringIsRedacted() {
-        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N"  // scan-secrets: allow
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N"  // scan-secrets: allow(reason=redaction fixture)
         let text = redactor.redact("credential \(jwt) end")
         XCTAssertEqual(text, "credential \(LogRedactor.marker) end")
     }
 
     func testPrivateKeyHeaderAndBodyAreRedacted() {
         let key = """
-        -----BEGIN OPENSSH PRIVATE KEY-----  // scan-secrets: allow
+        -----BEGIN OPENSSH PRIVATE KEY-----  // scan-secrets: allow(reason=redaction fixture)
         b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
         QyNTUxOQAAACD1234567890abcdefghijklmnopqrstuvwxyz
         -----END OPENSSH PRIVATE KEY-----
@@ -123,7 +123,7 @@ final class LogRedactorTests: XCTestCase {
     func testEveryLineOfMultiLineInputIsProcessed() {
         let input = """
         line 1 ok
-        token=first-secret  // scan-secrets: allow
+        token=first-secret  // scan-secrets: allow(reason=redaction fixture)
         line 3 ok
         Authorization: Bearer second-secret
         line 5 ok

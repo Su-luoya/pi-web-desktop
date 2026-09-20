@@ -493,7 +493,7 @@ final class KeychainStoreTests: XCTestCase {
             configuration: .default,
             piWebPath: executable,
             appConfiguration: appConfiguration,
-            baseEnvironment: ["BASE": "1", "PI_WEB_PASSWORD": "inherited-secret"],
+            baseEnvironment: ["BASE": "1", "PI_WEB_PASSWORD": "inherited-secret"],  // scan-secrets: allow(reason=test fixture environment)
             remoteAccessPassword: secret
         )
         XCTAssertNil(loopbackSpecification.environment["PI_WEB_PASSWORD"])

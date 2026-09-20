@@ -187,6 +187,9 @@ protocol ServiceProcessHandle: AnyObject {
 /// tested without spawning a real process.
 protocol ServiceLaunching: AnyObject {
     /// Launches `specification` with stdout/stderr redirected to `logHandle`.
+    /// Since GitHub #73 that handle is the write end of a pipe owned by
+    /// `LogWriter`; the app-side reader redacts and appends the output, so
+    /// rotation never invalidates what the child writes to.
     /// `onTermination` is installed before the process runs so a fast exit is
     /// never missed; it may be called on any thread.
     func launch(
@@ -204,7 +207,8 @@ protocol ServiceLaunching: AnyObject {
 /// so helper processes of the service are covered and a single recycled PID is
 /// never signalled on its own.
 ///
-/// stdin is `/dev/null`; stdout and stderr are the rotated log file; the child
+/// stdin is `/dev/null`; stdout and stderr are the write end of the
+/// `LogWriter` pipe (the log file itself is only written by the app); the child
 /// environment and working directory match the previous `Process` behaviour.
 final class SystemServiceLauncher: ServiceLaunching {
     func launch(
@@ -969,6 +973,8 @@ final class ServiceManager {
                 onPageMessage?("正在启动 Pi Web…")
                 pollUntilReady()
             } catch {
+                // 子进程没有起来：管道写端也要关掉，读端随后收到 EOF 并退出。
+                closeLog()
                 reportStartupFailure("无法启动 pi-web：\(error.localizedDescription)")
             }
         }
@@ -1174,10 +1180,17 @@ final class ServiceManager {
     /// "退出但保持服务运行": keep the child alive and keep its ownership
     /// record. The next app instance will fail the instance check, clean the
     /// record and treat the service as external.
+    ///
+    /// 子进程的 stdout/stderr 是应用侧持有的管道（GitHub #73）。应用退出后读端必须
+    /// 由还活着的进程持有，否则服务的下一次 stdout/stderr 写入会收到 `EPIPE`，Node
+    /// 的 `process.stdout` 会把它变成未处理的 `error` 事件并让服务退出。所以这里
+    /// 把读端交给一个只做排空的 `/bin/cat`（内容丢弃），服务自身的运行行为不变。
+    /// 关闭写端在前：孩子的写端是它自己 `dup2` 出来的，不受影响。
     func keepRunningOnQuit() {
         beginQuitting()
         isStoppingService = false
         closeLog()
+        logWriter.handOffChildOutputToDrainer()
     }
 
     // MARK: - Health monitoring
@@ -1257,8 +1270,13 @@ final class ServiceManager {
 
     /// Opens the log file for the child process via the unified `LogWriter`:
     /// directory creation, in-place redaction of the existing log, size-based
-    /// rotation and opening all live there (GitHub #10).
+    /// rotation and opening all live there (GitHub #10). The returned handle is
+    /// the write end of the `LogWriter` child-output pipe (GitHub #73), not the
+    /// log file: rotation can only affect the fd the app writes through.
     private func openLogForWriting() throws -> FileHandle {
+        // 上一次启动的管道写端（如果有）先关掉：否则重启会让旧读端一直等不到 EOF。
+        // 正常路径上 `closeLog()` 已经关过一次，这里兜底。
+        closeLog()
         // 工作目录可用性由启动前的 `prepareWorkspaceBeforeLaunch()` 保证（GitHub #9
         // 复审）。只有应用默认工作目录才允许在这里创建：用户自选目录缺失时不应该
         // 被静默重建，而是已经作为不可用被门控拒绝。

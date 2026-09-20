@@ -1067,17 +1067,18 @@ squash 合入 main → `fba1f12`（CI run `35499346342`，`build` success）；t
 | # | 检查 | 实测输出摘要 | 判定 |
 | --- | --- | --- | --- |
 | C1 | PR CI（候选提交 `c4f26a1`） | `build.yml` run `35501956085` | **success** |
-| C2 | 发布提交的 CI | run {{CI_RELEASE_RUN}} | {{待回填}} |
-| C3 | `git tag -a v0.1.0-alpha.8` 指向发布提交 | tag `v0.1.0-alpha.8` | {{待回填}} |
-| C4 | `release.yml`（tag push 触发） | run {{RELEASE_RUN}} | {{待回填}} |
-| C5 | 草稿 prerelease 的正文与真机表 | `{{ZIP_NAME}}` / `{{SHA256}}` | {{待回填}} |
-| C6 | 真机 macOS 与 Node / pi / pi-web 版本 | {{MACHINE_TABLE}} | {{待回填}} |
-| C7 | `gh release edit --draft=false`（prerelease） | 发布时间 {{RELEASE_DATE}} | {{待回填}} |
+| C2 | 发布提交的 CI | `build.yml` run `35502904190`（`5f8f38b`） | **success** |
+| C3 | `git tag -a v0.1.0-alpha.8` 指向发布提交 | tag `v0.1.0-alpha.8` → `5f8f38b`（PR #128 squash 合入 `main`） | 已推送（`git push origin v0.1.0-alpha.8`） |
+| C4 | `release.yml`（tag push 触发） | run `35502909886` | **success**（`2026-09-20T09:39:25Z` → `09:42:39Z`） |
+| C5 | 草稿 prerelease 的正文与真机表 | `Pi-Web-Desktop-0.1.0-alpha.8+build.8.zip`（1,594,019 字节）/ SHA-256 `f90df492376aed022356b74f48e1e47140566e55d07dc3f809b3b873beb88c76`；正文已填真机表与已知问题 | 已完成（本机重新下载三个资产复核：`shasum -a 256 -c` → `OK`、ZIP 内 9 项无 `__MACOSX`、包内 `0.1.0-alpha.8` / `8`、`codesign --verify` 退出 0） |
+| C6 | 真机 macOS 与 Node / pi / pi-web 版本 | Apple M4（`Mac16,10`）/ macOS 27.0（`26A428`）arm64 / Node v24.21.0 / pi 0.86.0 / `@agegr/pi-web` 0.9.1；`smoke.sh` 双模式通过（`items=6 blockers=3`） | 已写入 Release 正文 |
+| C7 | `gh release edit --draft=false`（prerelease） | 发布时间 `2026-09-20T09:43:25Z`（prerelease） | 已完成 |
 | C8 | 回退路径（上一版资产仍在 Releases） | `v0.1.0-alpha.7`（`2026-09-20T08:30:20Z`，3 个资产：ZIP / `.sha256` / `.evidence.md`） | 已核实 |
-| C9 | 回填 Release issue 的 run 链接与 SHA-256、关闭 issue | issue #126 | {{待回填}} |
+| C9 | 回填 Release issue 的 run 链接与 SHA-256、关闭 issue | issue #126（回填评论 + 关闭） | 已完成 |
 
-本节的边界：C1–C6 与 C9 的检查在 CI / workflow / 维护者操作里完成，本机没有对应的实测输出；表格里
-`{{…}}` 的回填结果来自 workflow 产物与维护者操作，不要写成已在本机验证。
+本节的边界：C2–C4 与 C9 在 CI / workflow / 维护者操作里完成，本机没有对应的实测输出；C5–C7 的正文
+与真机表由维护者在本机填写，其中 C5 的资产已在本机重新下载复核（表格内的 `OK` 与包内版本都来自
+那次复核，不是 workflow 日志）。
 
 ### 本版同时做的文档一致性改动
 

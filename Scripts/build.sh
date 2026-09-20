@@ -107,6 +107,7 @@ swiftc "$ROOT/Sources/PiWebApp.swift" \
   "$ROOT/Sources/LogWriter.swift" \
   "$ROOT/Sources/ProcessInspector.swift" \
   "$ROOT/Sources/QuitPolicy.swift" \
+  "$ROOT/Sources/QuitCoordinator.swift" \
   "$ROOT/Sources/ServiceConfiguration.swift" \
   "$ROOT/Sources/ServiceManager.swift" \
   "$ROOT/Sources/ServiceOwnership.swift" \

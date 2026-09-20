@@ -526,13 +526,35 @@ final class ServiceManager {
     private let remoteAccessPassword: () -> String?
 
     private var serviceProcess: ServiceProcessHandle?
-    private var launchGeneration = 0
+
+    // MARK: - 生命周期代次与启动会话（W3 M1/M2/M3/L1）
+
+    /// 生命周期代次（generation）：每次真实启动、每次停止、每次放弃半托管启动都
+    /// 递增。所有异步回调（启动/健康检查探测、就绪轮询、进程退出、停止轮询）在
+    /// 调度时捕获当前代次，执行前先比对；过期回调只写日志，不改状态、不加载页面、
+    /// 不弹提示（M2）。
+    private var lifecycleGeneration = 0
+    /// 当前活动启动会话的编号（nil = 没有轮询链在跑）。同一个代次里只允许一条链：
+    /// 重复的启动入口复用它，而不是各挂一条并共享同一个预算（M3）。
+    private var activeStartupSession: Int?
+    /// 活动会话所属的代次；代次变化（新的启动/停止）后旧链一律作废。
+    private var activeStartupSessionGeneration = 0
+    /// 启动会话编号，单调递增（0 保留给“未开始”）。
+    private var nextStartupSessionID = 0
+    /// 一次启动会话的轮询预算：每次开启新会话都清零，超时/成功/进程退出时结束会话。
+    /// 因此“重试”总是重新开始轮询与预算，绝不会复用上一轮的失败结论（M1）。
+    private var startupAttempts = 0
+    /// 已经报过启动失败提示的会话号：同一会话只提示一次，避免弹窗循环（M1/M3）。
+    private var startupFailureReportedSession: Int?
+    /// 停止中标志按代次记账：只有它仍等于当前代次时才算“有停止在途”。任何一次
+    /// 代次递增都会自动作废旧标志，因此停止路径的任何提前返回都不可能把应用永久
+    /// 锁在“停止中”（L1）。
+    private var stoppingGeneration: Int?
+
     private var logHandle: FileHandle?
     private var healthToken: RepeatingTimerToken?
-    private var startupAttempts = 0
     private var didLaunchService = false
     private var restartAttempts = 0
-    private var isStoppingService = false
 
     init(
         configuration: ServiceConfiguration,
@@ -589,6 +611,19 @@ final class ServiceManager {
     func setState(_ state: ServiceState) {
         currentState = state
         onStateChange?(state)
+    }
+
+    /// 是否有一次停止正在进行。
+    ///
+    /// 停止状态不保存为独立布尔量，而是记住“这次停止的代次”：只有它仍等于当前代次
+    /// 时才表示停止中。任何一次代次递增（新启动、放弃半托管启动、下一次停止）都会
+    /// 让旧标志自动失效，所以不存在“提前返回分支漏清零、启动入口永久被拒”的路径
+    /// （L1）。
+    var isStoppingService: Bool { stoppingGeneration == lifecycleGeneration }
+
+    /// 收回“停止中”标志。停止路径的每个提前返回分支都必须调用它（L1）。
+    private func clearStopping() {
+        stoppingGeneration = nil
     }
 
     /// 与凭证无关的启动前置条件：依赖门控打开，工作目录可用，不在停止/退出
@@ -833,9 +868,14 @@ final class ServiceManager {
         if configuration.autoStart || forceStart {
             ensureServerIsRunning()
         } else {
+            let generation = lifecycleGeneration
             checkServer { [weak self] ready in
                 guard let self else { return }
                 self.scheduler.onMain {
+                    guard self.lifecycleGeneration == generation else {
+                        self.discardStaleCallback("启动探测", generation: generation)
+                        return
+                    }
                     // 与 autoStart 分支一致：探测期间门控关闭就不能再改状态或加载页面。
                     guard self.isStartPermitted else { return }
                     if ready {
@@ -856,9 +896,14 @@ final class ServiceManager {
             reportStartRequirementIfNeeded()
             return
         }
+        let generation = lifecycleGeneration
         checkServer { [weak self] ready in
             guard let self else { return }
             self.scheduler.onMain {
+                guard self.lifecycleGeneration == generation else {
+                    self.discardStaleCallback("启动探测", generation: generation)
+                    return
+                }
                 // 门控可能在探测期间被关掉（例如重新检测），回调必须再确认。
                 guard self.isStartPermitted else { return }
                 if ready {
@@ -879,9 +924,14 @@ final class ServiceManager {
             reportStartRequirementIfNeeded()
             return
         }
+        let generation = lifecycleGeneration
         checkServer { [weak self] ready in
             guard let self else { return }
             self.scheduler.onMain {
+                guard self.lifecycleGeneration == generation else {
+                    self.discardStaleCallback("启动探测", generation: generation)
+                    return
+                }
                 guard self.isStartPermitted else { return }
                 if ready {
                     self.setState(.running)
@@ -922,7 +972,10 @@ final class ServiceManager {
         case .ignored:
             return
         case .existingProcess:
-            pollUntilReady()
+            // 同一次启动只允许一条轮询链：已有活动会话时直接复用它（M3）；上一轮
+            // 已经结束（超时、进程退出或成功）时开启新会话并清零预算，使“重试”
+            // 真的重新开始轮询，而不是复用上一轮的失败结论（M1）。
+            beginOrReuseStartupSession()
             return
         case .missingExecutable:
             reportStartupFailure("找不到 pi-web。请确认已执行 npm install -g @agegr/pi-web@latest。")
@@ -942,12 +995,15 @@ final class ServiceManager {
                 let handle = try openLogForWriting()
                 // Token for this launch: a late termination callback from an
                 // earlier process must not clear the replacement or close its log.
-                launchGeneration &+= 1
-                let generation = launchGeneration
+                lifecycleGeneration &+= 1
+                let generation = lifecycleGeneration
                 let process = try launcher.launch(specification, logHandle: handle) { [weak self] in
                     guard let self else { return }
                     self.scheduler.onMain {
-                        guard self.launchGeneration == generation else { return }
+                        guard self.lifecycleGeneration == generation else {
+                            self.discardStaleCallback("进程退出", generation: generation)
+                            return
+                        }
                         self.serviceProcess = nil
                         self.closeLog()
                         self.logWriter.record("服务进程已退出")
@@ -959,7 +1015,6 @@ final class ServiceManager {
                 // 应用侧事件行也走同一个 LogWriter/LogRedactor。
                 logWriter.record("服务已启动：PID \(process.processIdentifier)")
                 serviceProcess = process
-                startupAttempts = 0
                 // A process without a verifiable ownership record can never be
                 // managed: kill the fresh group and report the startup failure
                 // instead of leaving an unmanageable service behind.
@@ -971,7 +1026,9 @@ final class ServiceManager {
                 didLaunchService = true
                 setState(.starting)
                 onPageMessage?("正在启动 Pi Web…")
-                pollUntilReady()
+                // 真正开始等待服务：开启属于本次启动的新会话（预算清零）。
+                let session = beginStartupSession()
+                pollUntilReady(session: session, generation: generation)
             } catch {
                 // 子进程没有起来：管道写端也要关掉，读端随后收到 EOF 并退出。
                 closeLog()
@@ -1040,20 +1097,25 @@ final class ServiceManager {
     /// Terminates a launch whose ownership record was not written or did not
     /// verify immediately after the launch.
     ///
-    /// This path owns the cleanup of that launch (`launchGeneration` is bumped
+    /// This path owns the cleanup of that launch (`lifecycleGeneration` is bumped
     /// so its termination callback is ignored), signals only the fresh process
     /// group and reports a startup failure. A child that survives the kill is
     /// kept as the current handle, so `startDecision()` still sees a live child
     /// and refuses to launch a second service.
     private func abandonUnhostedLaunch(process: ServiceProcessHandle) {
-        launchGeneration &+= 1
+        lifecycleGeneration &+= 1
+        let generation = lifecycleGeneration
+        stoppingGeneration = generation
         didLaunchService = false
-        isStoppingService = true
         let processGroupID = process.processIdentifier
         scheduler.onBackground { [weak self] in
             guard let self else { return }
             self.terminate(processGroupID: processGroupID)
             self.scheduler.onMain {
+                guard self.lifecycleGeneration == generation else {
+                    self.discardStaleCallback("放弃半托管启动", generation: generation)
+                    return
+                }
                 // The launch is gone and its record (if one was written before
                 // the immediate verification failed) must not linger.
                 self.ownershipStore.removeRecord(at: self.appConfiguration.serviceOwnerURL)
@@ -1061,7 +1123,7 @@ final class ServiceManager {
                 if self.serviceProcess === process, !process.isRunning {
                     self.serviceProcess = nil
                 }
-                self.isStoppingService = false
+                self.clearStopping()
                 self.reportStartupFailure(
                     "无法登记 pi-web 的所有权信息，已终止本次启动的进程。请查看日志：\(self.appConfiguration.logURL.path)"
                 )
@@ -1069,26 +1131,102 @@ final class ServiceManager {
         }
     }
 
-    private func pollUntilReady() {
+    // MARK: - 启动会话与就绪轮询
+
+    /// 开启或复用启动轮询链。
+    ///
+    /// 同一个代次里只允许一条链：重复的启动入口（菜单、配置变更重载、健康恢复、
+    /// 弹窗“重试”）复用现有链，不再各挂一条并共享同一个预算（M3）。上一轮已经
+    /// 结束（超时、进程退出或成功）时开启新会话并清零预算（M1）。
+    private func beginOrReuseStartupSession() {
+        if let session = activeStartupSession, activeStartupSessionGeneration == lifecycleGeneration {
+            logWriter.record("启动轮询已在进行中，复用现有轮询链（会话 \(session)）")
+            return
+        }
+        let generation = lifecycleGeneration
+        let session = beginStartupSession()
+        pollUntilReady(session: session, generation: generation)
+    }
+
+    /// 开启一次启动会话：分配新编号、清零本次会话的轮询预算，并记录它所属的代次。
+    @discardableResult
+    private func beginStartupSession() -> Int {
+        nextStartupSessionID &+= 1
+        startupAttempts = 0
+        activeStartupSession = nextStartupSessionID
+        activeStartupSessionGeneration = lifecycleGeneration
+        return nextStartupSessionID
+    }
+
+    /// 结束当前启动会话（成功、失败或进程退出）。下一次启动入口会开启新会话并
+    /// 重新获得完整预算。
+    private func endStartupSession() {
+        activeStartupSession = nil
+    }
+
+    /// 回调是否属于当前活动的启动会话：代次与会话号必须同时匹配。
+    private func isCurrentStartupSession(_ session: Int, generation: Int) -> Bool {
+        lifecycleGeneration == generation && activeStartupSession == session
+    }
+
+    /// 过期异步回调的统一处理：只写日志，不改状态、不加载页面、不弹提示。
+    private func discardStaleCallback(_ name: String, generation: Int) {
+        logWriter.record("忽略过期的\(name)回调（回调代次 \(generation)，当前代次 \(lifecycleGeneration)）")
+    }
+
+    /// 同一启动会话只提示一次启动失败（M1/M3）：重复结论只写日志，不再弹第二个
+    /// 模态框，也不再重复覆盖页面消息。
+    private func reportStartupFailureOnce(_ message: String, session: Int) {
+        guard startupFailureReportedSession != session else {
+            logWriter.record("启动失败提示已发出，忽略本会话的重复提示：\(redactor.redact(message))")
+            return
+        }
+        startupFailureReportedSession = session
+        reportStartupFailure(message)
+    }
+
+    /// 启动轮询的唯一实现。
+    ///
+    /// 预算按一次启动会话记账：每次调用消耗一次（150 × 0.2 秒 ≈ 30 秒）；耗尽
+    /// 时结束会话并只报一次失败，下一次启动入口以新会话重新开始。所有延迟回调与
+    /// 探测回调都先校验代次与会话号，过期回调只写日志（M1/M2/M3）。
+    private func pollUntilReady(session: Int, generation: Int) {
         startupAttempts += 1
         guard startupAttempts <= Self.maxStartupAttempts else {
-            reportStartupFailure("Pi Web 在 30 秒内未能启动。请查看日志：\(appConfiguration.logURL.path)")
+            endStartupSession()
+            reportStartupFailureOnce(
+                "Pi Web 在 30 秒内未能启动。请查看日志：\(appConfiguration.logURL.path)",
+                session: session
+            )
             return
         }
         scheduler.after(Self.startupPollInterval) { [weak self] in
             guard let self else { return }
+            guard self.isCurrentStartupSession(session, generation: generation) else {
+                self.discardStaleCallback("启动轮询", generation: generation)
+                return
+            }
             self.checkServer { ready in
                 self.scheduler.onMain {
+                    guard self.isCurrentStartupSession(session, generation: generation) else {
+                        self.discardStaleCallback("启动就绪探测", generation: generation)
+                        return
+                    }
                     // 启动轮询是异步的：门控在轮询期间关闭时不再改状态或加载页面。
                     guard self.isStartPermitted else { return }
                     if ready {
+                        self.endStartupSession()
                         self.restartAttempts = 0
                         self.setState(.running)
                         self.requestLoad()
                     } else if let process = self.serviceProcess, !process.isRunning {
-                        self.reportStartupFailure("pi-web 进程已退出。请查看日志：\(self.appConfiguration.logURL.path)")
+                        self.endStartupSession()
+                        self.reportStartupFailureOnce(
+                            "pi-web 进程已退出。请查看日志：\(self.appConfiguration.logURL.path)",
+                            session: session
+                        )
                     } else {
-                        self.pollUntilReady()
+                        self.pollUntilReady(session: session, generation: generation)
                     }
                 }
             }
@@ -1108,16 +1246,29 @@ final class ServiceManager {
         // Verification happens before the stopping flag is set: an external
         // service must leave the state machine exactly as it was.
         guard let record = verifiedOwnershipRecord() else {
+            // 提前返回也要收回停止标志（L1）：调用方可能在调用前预置过它，留成
+            // true 会让之后所有启动入口被永久拒绝。
+            clearStopping()
             completion?()
             return
         }
-        isStoppingService = true
+        lifecycleGeneration &+= 1
+        let generation = lifecycleGeneration
+        stoppingGeneration = generation
         scheduler.onBackground { [weak self] in
             guard let self else { return }
             self.terminate(processGroupID: record.processGroupID)
             self.scheduler.onMain {
+                guard self.lifecycleGeneration == generation else {
+                    // 停止期间发生的新生命周期转换拥有当前状态：不重复改状态、
+                    // 不删除可能已属于新启动的记录；完成回调仍要送达，否则
+                    // 重启/退出流程会挂住。
+                    self.discardStaleCallback("停止服务", generation: generation)
+                    completion?()
+                    return
+                }
                 self.ownershipStore.removeRecord(at: self.appConfiguration.serviceOwnerURL)
-                self.finishStopping(completion: completion)
+                self.finishStopping(generation: generation, completion: completion)
             }
         }
     }
@@ -1140,10 +1291,13 @@ final class ServiceManager {
     /// Shared end of a stop: clear the child state, reset the flag and report
     /// the stopped state. The ownership record is removed by the caller only
     /// after it was verified.
-    private func finishStopping(completion: (() -> Void)?) {
+    private func finishStopping(generation: Int, completion: (() -> Void)?) {
         serviceProcess = nil
         didLaunchService = false
-        isStoppingService = false
+        // 停止之后进程不再写日志：应用侧的管道写端在这里关掉（进程退出回调
+        // 因代次已变而不会再来做这件事）。
+        closeLog()
+        if stoppingGeneration == generation { stoppingGeneration = nil }
         setState(.stopped)
         completion?()
     }
@@ -1159,11 +1313,11 @@ final class ServiceManager {
     /// 服务、任何无法验证的进程）在任何退出行为下都不被停止。
     func stopManagedServiceOnQuit(completion: @escaping () -> Void) {
         beginQuitting()
-        isStoppingService = true
+        // 停止标志由 `stopService` 统一拥有：找不到可验证记录时它自己收回标志
+        // （L1），调用方不再预置后自行清理。
         if managedServicePID() != nil {
             stopService(completion: completion)
         } else {
-            isStoppingService = false
             completion()
         }
     }
@@ -1188,7 +1342,7 @@ final class ServiceManager {
     /// 关闭写端在前：孩子的写端是它自己 `dup2` 出来的，不受影响。
     func keepRunningOnQuit() {
         beginQuitting()
-        isStoppingService = false
+        clearStopping()
         closeLog()
         logWriter.handOffChildOutputToDrainer()
     }
@@ -1207,8 +1361,13 @@ final class ServiceManager {
             // 关闭（GitHub #8 复审）。
             if self.closeRemoteAccessIfCredentialsAreUnavailable() != nil { return }
             guard self.isStartPermitted else { return }
+            let generation = self.lifecycleGeneration
             self.checkServer { ready in
                 self.scheduler.onMain {
+                    guard self.lifecycleGeneration == generation else {
+                        self.discardStaleCallback("健康检查", generation: generation)
+                        return
+                    }
                     // 门控 blocked 时不得改变状态或加载服务页，覆盖诊断页。
                     guard self.isStartPermitted else { return }
                     if ready {
@@ -1249,9 +1408,14 @@ final class ServiceManager {
             reportStartRequirementIfNeeded()
             return
         }
+        let generation = lifecycleGeneration
         checkServer { [weak self] ready in
             guard let self else { return }
             self.scheduler.onMain {
+                guard self.lifecycleGeneration == generation else {
+                    self.discardStaleCallback("配置变更探测", generation: generation)
+                    return
+                }
                 guard self.isStartPermitted else { return }
                 if ready {
                     self.setState(.running)

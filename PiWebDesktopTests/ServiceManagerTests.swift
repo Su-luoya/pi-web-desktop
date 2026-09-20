@@ -145,13 +145,30 @@ private final class ManagerFakeTimerToken: RepeatingTimerToken {
 
 private final class ManagerFakeProbe: ServiceProbing {
     var ready = true
+    /// 为 true 时把本次探测的 completion 暂存起来，由测试显式交付。用来构造
+    /// “停止完成后才到达的 ready=true”这类迟到回调（W3 M2），不需要真实时钟。
+    var defersCompletions = false
     private(set) var probedURLs: [URL] = []
     private(set) var timeouts: [TimeInterval] = []
+    private(set) var pendingCompletions: [(Bool) -> Void] = []
 
     func probe(url: URL, timeout: TimeInterval, completion: @escaping (Bool) -> Void) {
         probedURLs.append(url)
         timeouts.append(timeout)
-        completion(ready)
+        if defersCompletions {
+            pendingCompletions.append(completion)
+        } else {
+            completion(ready)
+        }
+    }
+
+    /// 交付所有暂存的探测结果（按探测顺序），返回交付条数。
+    @discardableResult
+    func deliverPendingCompletions(_ result: Bool) -> Int {
+        let pending = pendingCompletions
+        pendingCompletions = []
+        for completion in pending { completion(result) }
+        return pending.count
     }
 }
 
@@ -2194,5 +2211,186 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(harness.closedRemoteConfigurations.count, 1)
         XCTAssertEqual(harness.manager.currentState, .failed(RemoteAccessPolicy.revokedPasswordMessage))
         XCTAssertEqual(harness.launcher.launchCount, 1, "收敛后不得静默重启")
+    }
+
+    // MARK: - 服务状态机代次与启动预算（W3 M1/M2/M3/L1）
+
+    /// M1：一次“30 秒未就绪”超时之后，下一次启动入口必须重新开始轮询与预算，
+    /// 而不是立刻复用上一轮的失败结论（0 次轮询）。探针随后就绪时必须成功。
+    func testRetryAfterStartupTimeoutPollsAgainAndSucceeds() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = false
+
+        harness.manager.startManagedService()
+        for _ in 0..<ServiceManager.maxStartupAttempts {
+            XCTAssertTrue(harness.scheduler.runNextDelayedWork())
+        }
+        XCTAssertEqual(harness.startupFailures.count, 1, "第一轮会话超时只报一次失败")
+        XCTAssertEqual(harness.probe.probedURLs.count, ServiceManager.maxStartupAttempts)
+
+        // 用户点“启动服务”或弹窗“重试”：进程还活着，但必须重新开始轮询。
+        harness.manager.startService()
+        XCTAssertEqual(
+            harness.scheduler.delayedWork.count,
+            ServiceManager.maxStartupAttempts + 1,
+            "重试必须重新挂上轮询链，而不是立刻复用上一轮失败结论"
+        )
+        XCTAssertEqual(harness.startupFailures.count, 1, "重试本身不得再弹一次失败")
+
+        let probesBeforeRetry = harness.probe.probedURLs.count
+        harness.probe.ready = true
+        XCTAssertTrue(harness.scheduler.runNextDelayedWork())
+        XCTAssertGreaterThan(harness.probe.probedURLs.count, probesBeforeRetry, "重试后必须真的再次探测")
+        XCTAssertEqual(harness.manager.currentState, .running)
+        XCTAssertEqual(harness.startupFailures.count, 1)
+        XCTAssertEqual(harness.loadRequests, 1)
+    }
+
+    /// M2：停止完成后才到达的 ready=true 启动轮询回调不得把状态改回 `.running`，
+    /// 也不得加载服务页。
+    func testLateReadyStartupProbeAfterStopDoesNotRestoreRunningState() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = false
+        harness.manager.startManagedService()
+        XCTAssertEqual(harness.manager.currentState, .starting)
+
+        // 启动轮询发出探测后把它挂起：结果在停止完成之后才交付。
+        harness.probe.defersCompletions = true
+        XCTAssertTrue(harness.scheduler.runNextDelayedWork())
+        XCTAssertEqual(harness.probe.pendingCompletions.count, 1)
+
+        harness.manager.stopService()
+        harness.scheduler.runAllBackgroundWork()
+        XCTAssertEqual(harness.manager.currentState, .stopped)
+
+        XCTAssertEqual(harness.probe.deliverPendingCompletions(true), 1)
+        XCTAssertEqual(harness.manager.currentState, .stopped, "迟到的 ready 回调不得把状态改回 running")
+        XCTAssertEqual(harness.loadRequests, 0, "迟到的 ready 回调不得加载已停止服务的页面")
+    }
+
+    /// M2（健康检查变体）：健康探测在停止完成后交付 ready=true，同样不得改状态、
+    /// 不得加载页面。
+    func testLateHealthCheckReadyCallbackAfterStopDoesNotRestoreRunningState() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = false
+        harness.manager.startManagedService()
+        harness.manager.startHealthMonitor()
+
+        harness.probe.defersCompletions = true
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.probe.pendingCompletions.count, 1)
+
+        harness.manager.stopService()
+        harness.scheduler.runAllBackgroundWork()
+        XCTAssertEqual(harness.manager.currentState, .stopped)
+        XCTAssertEqual(harness.loadRequests, 0)
+
+        XCTAssertEqual(harness.probe.deliverPendingCompletions(true), 1)
+        XCTAssertEqual(harness.manager.currentState, .stopped, "迟到的健康检查 ready 不得把状态改回 running")
+        XCTAssertEqual(harness.loadRequests, 0, "迟到的健康检查 ready 不得加载页面")
+    }
+
+    /// M3：连续触发启动入口只产生一条轮询链、只报一次失败：预算不再被 N 倍速
+    /// 耗尽，也不再产生 N 份重复的启动失败提示。
+    func testRepeatedStartEntriesShareOnePollingChainAndOneFailure() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = false
+
+        harness.manager.startManagedService()
+        harness.manager.startService()
+        harness.manager.ensureServerIsRunning()
+        harness.manager.startManagedService()
+        harness.manager.reloadAfterConfigurationChange()
+
+        XCTAssertEqual(harness.scheduler.delayedWork.count, 1, "同一次启动只允许一条轮询链")
+
+        for _ in 0..<ServiceManager.maxStartupAttempts {
+            XCTAssertTrue(harness.scheduler.runNextDelayedWork())
+        }
+        XCTAssertEqual(harness.startupFailures.count, 1, "同一次启动只允许一次失败提示")
+        XCTAssertEqual(
+            harness.manager.currentState,
+            .failed("Pi Web 在 30 秒内未能启动。请查看日志：\(harness.logURL.path)")
+        )
+    }
+
+    /// L1：停止路径的不可验证分支必须收回停止标志。退出路径先确认“有可验证
+    /// 记录”，`stopService()` 内部第二次校验失败时提前返回：这条路径不得把
+    /// `isStoppingService` 永久留在 true，否则之后所有启动入口都被拒绝。
+    func testUnverifiableStopOnQuitClearsTheStoppingFlag() throws {
+        var aliveChecks = 0
+        let harness = try makeHarness(
+            alive: { pid in
+                // 第一次校验（退出路径判断是否有托管进程）时进程还活着，
+                // 第二次校验（`stopService` 内部）时已经不可验证。
+                aliveChecks += 1
+                return aliveChecks == 1 && pid == 5150
+            },
+            processOutput: processOutput(for: 5150)
+        )
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        try harness.writeOwnershipRecord(harness.makeOwnershipRecord())
+        harness.manager.setState(.running)
+
+        var completionRan = false
+        harness.manager.stopManagedServiceOnQuit { completionRan = true }
+        harness.scheduler.runAllBackgroundWork()
+
+        XCTAssertTrue(completionRan)
+        XCTAssertTrue(harness.signaler.groupSignals.isEmpty, "不可验证的进程不发信号")
+        XCTAssertNotEqual(harness.manager.startDecision(), .ignored, "停止标志不得永久拒绝后续启动")
+    }
+
+    /// 代次也覆盖进程退出回调：上一次启动的进程退出回调迟到时，不得清空替换它的
+    /// 新进程、也不得把状态改成 stopped。
+    func testLateTerminationCallbackOfAnEarlierLaunchIsIgnored() throws {
+        let harness = try makeHarness(
+            alive: { $0 == 5150 || $0 == 5300 },
+            processOutput: processOutput(for: 5150)
+        )
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        let first = ManagerFakeProcess(processIdentifier: 5150)
+        harness.launcher.result = .success(first)
+        harness.probe.ready = false
+        harness.manager.startManagedService()
+        XCTAssertEqual(harness.launcher.terminationHandlers.count, 1)
+
+        // 重启：先停止（记录被删除），再启动一个新进程（新代次）。
+        harness.signaler.aliveProcessGroups = [5150]
+        harness.manager.stopService()
+        harness.scheduler.runAllBackgroundWork()
+        let second = ManagerFakeProcess(processIdentifier: 5300)
+        harness.launcher.result = .success(second)
+        harness.runner.handler = processOutput(for: 5300)
+        harness.probe.ready = true
+        harness.manager.startManagedService()
+        XCTAssertEqual(harness.manager.managedServicePID(), 5300)
+        // 旧启动轮询的延迟回调先执行：代次已过期，不得采纳新服务。
+        XCTAssertTrue(harness.scheduler.runNextDelayedWork())
+        XCTAssertEqual(harness.manager.currentState, .starting, "过期的轮询回调不得采纳新服务")
+        XCTAssertEqual(harness.loadRequests, 0)
+        // 新会话的轮询回调才真正就绪。
+        XCTAssertTrue(harness.scheduler.runNextDelayedWork())
+        XCTAssertEqual(harness.manager.currentState, .running)
+        XCTAssertEqual(harness.loadRequests, 1)
+
+        // 旧进程的退出回调迟到：不得影响替换它的新进程。
+        harness.launcher.terminationHandlers[0](first)
+        XCTAssertEqual(harness.manager.currentState, .running)
+        XCTAssertEqual(harness.manager.managedServicePID(), 5300)
     }
 }

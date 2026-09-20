@@ -1236,14 +1236,14 @@ bump 与四份文档（发布说明、安全评审、本次执行记录、`docs/
 | # | 检查 | 实测输出摘要 | 判定 |
 | --- | --- | --- | --- |
 | C1 | PR CI（候选提交 `09f1264` 的 PR head `f441cd6`） | `build.yml` run `35514128406`，job `build` | **success** |
-| C2 | 发布提交的 CI | 〈待发布后回填〉 | 〈待回填〉 |
-| C3 | `git tag -a v0.1.0-alpha.10` 指向发布提交 | 〈待发布后回填〉 | 〈待回填〉 |
-| C4 | `release.yml`（tag push 触发） | 〈待发布后回填：run 链接、ZIP 字节数、草稿 prerelease 创建时间〉 | 〈待回填〉 |
-| C5 | 草稿 prerelease 的正文与真机表 | 〈待发布后回填：正文行数、发布 SHA-256、已知问题列表〉 | 〈待回填〉 |
+| C2 | 发布提交的 CI | `build.yml` run [`35516260159`](https://github.com/Su-luoya/pi-web-desktop/actions/runs/35516260159)（`e5ff919`），job `build` | **success** |
+| C3 | `git tag -a v0.1.0-alpha.10` 指向发布提交 | tag `v0.1.0-alpha.10` → `e5ff919f6cd44625668dbfa161bf484f110e351a` | 已核实 |
+| C4 | `release.yml`（tag push 触发） | run [`35516264609`](https://github.com/Su-luoya/pi-web-desktop/actions/runs/35516264609)，**success**；ZIP `1599906` 字节；草稿 prerelease 创建于 `2026-09-20T14:21:59Z` | 已核实 |
+| C5 | 草稿 prerelease 的正文与真机表 | 正文 `170` 行；发布 SHA-256 `e8209950…`；已知问题 `8` 条（功能面真机验收未做、`F1`–`F4` 见 [#135](https://github.com/Su-luoya/pi-web-desktop/issues/135)、`O-1` 未改、更新与远程访问边界沿用 alpha.9）；真机表与已知问题在发布前按模板的 `<待填写>` 字段从本 issue 填入 | 已核实 |
 | C6 | 真机 macOS 与 Node / pi / pi-web 版本 | Apple M4（`Mac16,10`）/ macOS 27.0（`26A428`）arm64 / Node v24.21.0 / pi 0.86.1 / `@agegr/pi-web` 0.9.1；`smoke.sh` 双模式通过（`items=6 blockers=3`） | 已实测（本版记录到 `pi` 从 0.86.0 升到 0.86.1） |
-| C7 | `gh release edit --draft=false`（prerelease） | 〈待发布后回填〉 | 〈待回填〉 |
+| C7 | `gh release edit --draft=false`（prerelease） | 发布于 `2026-09-20T14:26:07Z`：<https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.10> | 已发布（prerelease） |
 | C8 | 回退路径（上一版资产仍在 Releases） | `v0.1.0-alpha.9`（3 个资产：ZIP / `.sha256` / `.evidence.md`） | 已核实 |
-| C9 | 回填 Release issue 的 run 链接与 SHA-256、关闭 issue | issue [#137](https://github.com/Su-luoya/pi-web-desktop/issues/137)：〈待回填评论链接与关闭时间〉 | 〈待回填〉 |
+| C9 | 回填 Release issue 的 run 链接与 SHA-256、关闭 issue | issue [#137](https://github.com/Su-luoya/pi-web-desktop/issues/137)：[回填评论](https://github.com/Su-luoya/pi-web-desktop/issues/137#issuecomment-5750406086)，关闭于 `2026-09-20T14:26:46Z` | 已关闭 |
 
 本节的边界：C2–C5、C7 与 C9 的输出来自 CI / workflow / 维护者操作，不是本机脚本的直接输出；这些行
 在发布与回填提交里补齐（与 alpha.9 的 #133 回填同一流程）。C6 来自本机实测，已写入 Release 正文。

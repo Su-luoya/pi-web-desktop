@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
 
-/// Unhosted tests: `Sources/DiagnosticsCollector.swift` is compiled directly
+/// Unhosted tests: `Sources/Diagnostics/DiagnosticsCollector.swift` is compiled directly
 /// into this target. Every value below is fake, so the assembled text must not
 /// contain a real user path or any secret — and it must still carry the failure
 /// context (versions, status, port, confidence) that makes the export useful.
@@ -629,7 +629,7 @@ final class DiagnosticsCollectorTests: XCTestCase {
     /// `AppDelegate`/窗口控制器，因此用与仓库既有做法一致的源码级断言
     /// （见 `UpdateAbandonedAttemptTests`），保证修复不会被悄悄改回去。
     func testAppWiringKeepsTheWindowAndExportFixesInPlace() throws {
-        let app = try sourceText(relativePath: "Sources/PiWebApp.swift")
+        let app = try SourceScan.text(ofFamily: "AppDelegate")
         XCTAssertTrue(app.contains("preferencesWindowStore.reuse"), "设置窗口必须复用单例存储")
         XCTAssertTrue(
             app.contains("controller.update(configuration: serviceManager.configuration)"),
@@ -644,26 +644,13 @@ final class DiagnosticsCollectorTests: XCTestCase {
         )
         XCTAssertTrue(app.contains("if window.isVisible"), "退出确认在窗口不可见时必须改用应用级模态")
 
-        let window = try sourceText(relativePath: "Sources/DiagnosticsWindowController.swift")
+        let window = try SourceScan.text(named: "DiagnosticsWindowController.swift")
         XCTAssertTrue(window.contains("onExportDiagnostics"), "诊断窗口必须转发到 AppDelegate 的导出路径")
         XCTAssertFalse(window.contains("diagnosticsTextProvider"), "旧同步 provider 接线不得保留")
 
-        let clipboard = try sourceText(relativePath: "Sources/DiagnosticsClipboard.swift")
+        let clipboard = try SourceScan.text(named: "DiagnosticsClipboard.swift")
         XCTAssertTrue(clipboard.contains("confirmExport"), "提醒与采集必须拆成两步")
         XCTAssertTrue(clipboard.contains("window.isVisible"), "不可见窗口上不得挂 sheet")
     }
 
-    private func sourceText(relativePath: String) throws -> String {
-        let repoRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let candidate = repoRoot.appendingPathComponent(relativePath)
-        if FileManager.default.fileExists(atPath: candidate.path) {
-            return try String(contentsOf: candidate, encoding: .utf8)
-        }
-        return try String(
-            contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(relativePath),
-            encoding: .utf8
-        )
-    }
 }

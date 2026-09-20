@@ -1,6 +1,6 @@
 # 服务所有权与外部服务只读策略
 
-本文说明 Pi Web Desktop 如何证明一个 `pi-web` 进程确实由自己启动，从而只对可验证的托管进程组执行停止操作；以及这套机制覆盖和未覆盖的威胁。实现见 `Sources/ServiceOwnership.swift`、`Sources/ServiceManager.swift` 和 `Sources/ProcessInspector.swift`。
+本文说明 Pi Web Desktop 如何证明一个 `pi-web` 进程确实由自己启动，从而只对可验证的托管进程组执行停止操作；以及这套机制覆盖和未覆盖的威胁。实现见 `Sources/Services/ServiceOwnership.swift`、`Sources/Services/ServiceManager.swift` 和 `Sources/Services/ProcessInspector.swift`。
 
 ## 保证
 

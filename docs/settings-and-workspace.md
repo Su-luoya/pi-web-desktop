@@ -1,6 +1,6 @@
 # 设置、工作目录与退出行为
 
-本文说明三件事：普通设置、运行状态与日志分别存在哪里；服务工作目录如何选择以及不可写时应用做什么；退出应用时服务如何处置。实现见 `Sources/AppConfiguration.swift`、`Sources/AppPaths.swift`、`Sources/WorkspaceDirectory.swift`、`Sources/QuitPolicy.swift`、`Sources/ServiceManager.swift` 与 `Sources/PiWebApp.swift`。
+本文说明三件事：普通设置、运行状态与日志分别存在哪里；服务工作目录如何选择以及不可写时应用做什么；退出应用时服务如何处置。实现见 `Sources/App/AppConfiguration.swift`、`Sources/App/AppPaths.swift`、`Sources/App/WorkspaceDirectory.swift`、`Sources/App/QuitPolicy.swift`、`Sources/Services/ServiceManager.swift` 与 `Sources/App/AppDelegate.swift`。
 
 ## 设置分层
 
@@ -23,7 +23,7 @@
 
 ### 监听地址校验
 
-监听地址（`service.hostname`）的校验只有一处实现：`RemoteAccessPolicy.addressVerdict(hostname:)`（`Sources/KeychainStore.swift`，结果类型 `ServiceAddressVerdict`）。同一判定同时作用于三个入口（GitHub #39 / 安全审查 R-3）：
+监听地址（`service.hostname`）的校验只有一处实现：`RemoteAccessPolicy.addressVerdict(hostname:)`（`Sources/Services/KeychainStore.swift`，结果类型 `ServiceAddressVerdict`）。同一判定同时作用于三个入口（GitHub #39 / 安全审查 R-3）：
 
 - 偏好窗口保存：`PreferencesWindowController` 保存前调用 `hostnameValidationMessage`，`RemoteAccessSetup.apply` 也先拒绝非法地址（先于密码写入），配置与 Keychain 都不会被写入。
 - 配置加载：`ServiceConfiguration.load` 执行同一判定，`[::1]` 规范化为 `::1`；非法值原样保留并由 `ServiceConfiguration.hostnameProblem` 标记为不可用，不会静默回退到 loopback 或其他地址。
@@ -85,7 +85,7 @@
 
 菜单「服务 → 最近工作目录」列出最近用过的目录（完整绝对路径，当前目录带勾选标记），空列表显示一条禁用的「无最近工作目录」，末尾是「清除历史记录」。
 
-- 记录与上限：`RecentWorkspaceStore`（`Sources/RecentWorkspace.swift`）在 UserDefaults 的 `workspace.recentPaths` 里按最近使用顺序保存最多 10 条路径（`maximumCount`），按标准化后的字符串去重；启动时记录当前工作目录，切换成功或配置未变化时也会记录。
+- 记录与上限：`RecentWorkspaceStore`（`Sources/App/RecentWorkspace.swift`）在 UserDefaults 的 `workspace.recentPaths` 里按最近使用顺序保存最多 10 条路径（`maximumCount`），按标准化后的字符串去重；启动时记录当前工作目录，切换成功或配置未变化时也会记录。
 - 路径标准化只做两端空白/换行裁剪加 `standardizedFileURL`，不做其它重写；保存的是绝对路径，所以菜单项与确认框展示的是用户自己的目录名（隐私影响见 [隐私说明](privacy.md)）。
 - 切换入口：子菜单选择、把文件夹拖到应用图标或窗口、`open -a "Pi Web Desktop" <目录>`、Finder 的「打开方式」。拖放没有单独的剪贴板代码：Finder 的拖放由 Launch Services 转成 open 事件，`application(_:open:)` 只取第一个 URL。
 - 校验：`WorkspaceSwitchDecision.decide(requestedPath:currentPath:probe:)` 要求绝对路径（相对路径与 `~` 都不展开，一律拒绝），再用 `WorkspaceDirectory.validate` 要求“存在、是目录、可写”。任一不通过都不写任何状态，只给可读提示。
@@ -104,7 +104,7 @@
 | 退出但保持服务运行 | 直接退出 | 否 |
 | 退出并停止服务 | 直接退出并停止托管服务 | 是（仅托管服务） |
 
-决策逻辑是两层纯值类型（GitHub #72）：`QuitPlan`（`Sources/QuitPolicy.swift`）把配置取值映射成 `NextStep` + `ServiceDisposition`；`QuitCoordinator`（`Sources/QuitCoordinator.swift`）是退出状态机，把请求、用户选择、超时与服务状态变成需要执行的副作用（弹确认框 / 停止托管服务 / 退出应用）。`AppDelegate` 只负责执行副作用（`presentQuitDecisionAlert()` / `stopManagedServiceOnQuit(completion:)` / 异步重新发起 `NSApp.terminate(nil)`）。因此三种行为、三种确认选择、“取消不停止任何服务”、重复触发与超时兜底都可以在 unhosted 测试里直接断言。
+决策逻辑是两层纯值类型（GitHub #72）：`QuitPlan`（`Sources/App/QuitPolicy.swift`）把配置取值映射成 `NextStep` + `ServiceDisposition`；`QuitCoordinator`（`Sources/App/QuitCoordinator.swift`）是退出状态机，把请求、用户选择、超时与服务状态变成需要执行的副作用（弹确认框 / 停止托管服务 / 退出应用）。`AppDelegate` 只负责执行副作用（`presentQuitDecisionAlert()` / `stopManagedServiceOnQuit(completion:)` / 异步重新发起 `NSApp.terminate(nil)`）。因此三种行为、三种确认选择、“取消不停止任何服务”、重复触发与超时兜底都可以在 unhosted 测试里直接断言。
 
 - 退出决策在 AppKit 终止序列之外完成：菜单/⌘Q 先弹普通确认框，决策完成后才重新发起退出（`DispatchQueue.main.async` 里的 `NSApp.terminate(nil)`）。`applicationShouldTerminate` 只返回 `.terminateNow`（已决策）或 `.terminateCancel`（未决策/正在停止服务），**从不返回 `.terminateLater`**，因此不需要也不存在漏掉的 `reply(toApplicationShouldTerminate:)`（GitHub #72 / W4 G1），也不在 sheet 回调里重入退出序列（W4 M4）。
 - 确认框的呈现方式与窗口可见性一致（W4 L5）：主窗口可见时挂 sheet；主窗口被 ⌘W（`windowShouldClose` → `orderOut`，应用继续运行）隐藏时改用应用级模态（`NSAlert.runModal`），窗口保持隐藏。`beginSheetModal` 挂在不可见窗口上会让 AppKit 把窗口重新显示出来，与“窗口已被隐藏”的用户状态不一致；主动恢复窗口则会打断用户刚做的隐藏动作，因此选择应用级模态（取舍：确认框不再锚定在主窗口上，但窗口可见性不受影响；两种模式下确认结果与超时行为完全相同）。

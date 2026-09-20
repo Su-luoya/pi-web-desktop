@@ -620,10 +620,10 @@ final class UpdateAbandonedAttemptTests: XCTestCase {
 
         // 诊断页/偏好设置里的这段文本与展示函数是同一个来源（源码级断言，
         // 保证接线不会被悄悄删掉）。
-        let app = try sourceText(relativePath: "Sources/PiWebApp.swift")
+        let app = try SourceScan.text(ofFamily: "AppDelegate")
         XCTAssertTrue(app.contains("UpdateAbandonedAttemptPresenter.block("))
         XCTAssertTrue(app.contains("abandonedStatus: updateAbandonedStatusBlockText()"))
-        let settingsWindow = try sourceText(relativePath: "Sources/UpdateSettingsWindowController.swift")
+        let settingsWindow = try SourceScan.text(named: "UpdateSettingsWindowController.swift")
         XCTAssertTrue(settingsWindow.contains("abandonedStatusLabel"))
     }
 
@@ -1134,20 +1134,16 @@ final class UpdateAbandonedAttemptTests: XCTestCase {
 
     func testOnlyThePiWebPathCanCarryASignalCall() throws {
         let forbidden = ["kill(", "killpg(", "SIGTERM", "SIGKILL", "signal(", "posix_spawn", ".terminate(", "killall"]
-        for path in [
-            "Sources/PiCLIUpdateAdapter.swift",
-            "Sources/PiPackageUpdateAdapter.swift",
-            "Sources/UpdateAbandonedAttempt.swift"
-        ] {
-            let code = codeText(of: try sourceText(relativePath: path))
-            for token in forbidden {
-                XCTAssertFalse(code.contains(token), "\(path) 里不得出现 \(token)")
-            }
+        let code = SourceScan.codeText(of: try SourceScan.text(matching: [
+            "PiCLIUpdate", "PiPackageUpdate", "UpdateAbandonedAttempt"
+        ]))
+        for token in forbidden {
+            XCTAssertFalse(code.contains(token), "源码里不得出现 \(token)")
         }
 
         // Pi Web 适配器是唯一允许出现信号调用的地方：恰好一次 `killpg`，且只对
         // 句柄里的进程组；不得出现按 pid 的 `kill(`、进程名匹配或 `sudo`。
-        let piWeb = codeText(of: try sourceText(relativePath: "Sources/PiWebUpdateAdapter.swift"))
+        let piWeb = SourceScan.codeText(of: try SourceScan.text(matching: ["PiWebUpdate", "PiWebChildProcess"]))
         XCTAssertEqual(
             piWeb.components(separatedBy: "killpg(").count - 1,
             1,
@@ -1167,32 +1163,4 @@ final class UpdateAbandonedAttemptTests: XCTestCase {
 
     // MARK: - 源码定位
 
-    /// 仓库根目录（测试文件位于 `<root>/PiWebDesktopTests/`）；在无 Xcode 的
-    /// 独立运行器里回退到当前工作目录。
-    private func repositoryRoot() -> URL {
-        let derived = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        if FileManager.default.fileExists(atPath: derived.appendingPathComponent("Sources/PiWebApp.swift").path) {
-            return derived
-        }
-        return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-    }
-
-    private func sourceText(relativePath: String) throws -> String {
-        try String(contentsOf: repositoryRoot().appendingPathComponent(relativePath), encoding: .utf8)
-    }
-
-    /// 去掉注释后的代码文本：注释里提到被禁止的 API 名字是允许的。
-    private func codeText(of source: String) -> String {
-        source
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map { line -> String in
-                let trimmed = line.drop { $0 == " " || $0 == "\t" }
-                guard !trimmed.hasPrefix("//") else { return "" }
-                guard let range = line.range(of: "//") else { return String(line) }
-                return String(line[line.startIndex..<range.lowerBound])
-            }
-            .joined(separator: "\n")
-    }
 }

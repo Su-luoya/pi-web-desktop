@@ -1587,31 +1587,6 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
 
     // MARK: - 9. 源码负向断言（没有信号、没有 shell、没有 sudo）
 
-    /// 仓库根目录（测试文件位于 `<root>/PiWebDesktopTests/`）。
-    private func repositoryRoot() -> URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
-
-    private func sourceText(relativePath: String) throws -> String {
-        try String(contentsOf: repositoryRoot().appendingPathComponent(relativePath), encoding: .utf8)
-    }
-
-    /// 去掉 `//` 行注释与行尾注释后的代码文本：注释里提到被禁止的 API 名字是允许的，
-    /// 真正要断言的是代码里没有这些调用。
-    private func codeText(of source: String) -> String {
-        source
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map { line -> String in
-                let trimmed = line.drop { $0 == " " || $0 == "\t" }
-                guard !trimmed.hasPrefix("//") else { return "" }
-                guard let range = line.range(of: "//") else { return String(line) }
-                return String(line[line.startIndex..<range.lowerBound])
-            }
-            .joined(separator: "\n")
-    }
-
     /// 适配器与执行器的代码里不得出现任何“向进程发送信号 / 终止进程”的调用，也不得调用
     /// shell 或 `sudo`：扩展包更新只允许 `pi` 自身以参数数组执行。
     func testSourcesContainNoSignalOrShellAPIs() throws {
@@ -1620,21 +1595,18 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
             ".terminate(", ".interrupt(", "posix_spawn", "/bin/sh", "/bin/bash", "shellPath",
             "sudo(", "sudo -", "Process.arguments"
         ]
-        for relativePath in [
-            "Sources/PiPackageUpdateAdapter.swift",
-            "Sources/PiProcessInspector.swift"
-        ] {
-            let code = codeText(of: try sourceText(relativePath: relativePath))
-            for token in forbidden {
-                XCTAssertFalse(code.contains(token), "\(relativePath) 的代码里不得出现 \(token)")
-            }
+        // 适配器在重构里被拆成 ``PiPackageUpdate*``，执行器拆成 ``PiProcess*``：
+        // 断言按文件名前缀覆盖整族。
+        let code = SourceScan.codeText(of: try SourceScan.text(matching: ["PiPackageUpdate", "PiProcess"]))
+        for token in forbidden {
+            XCTAssertFalse(code.contains(token), "源码里不得出现 \(token)")
         }
     }
 
     /// 命令执行只经由参数数组：执行器设置 `process.arguments`，参数安全校验的禁止 token 表
     /// 里确实包含 `sudo` 与各种 shell。
     func testExecutableIsOnlyStartedThroughTheArgumentArray() throws {
-        let text = try sourceText(relativePath: "Sources/PiPackageUpdateAdapter.swift")
+        let text = try SourceScan.text(matching: ["PiPackageUpdate"])
         XCTAssertTrue(text.contains("process.arguments = plan.arguments"))
         XCTAssertTrue(text.contains("static let forbiddenTokens: Set<String> = [\"sudo\", \"sh\""))
         XCTAssertFalse(text.contains("shellPath"))

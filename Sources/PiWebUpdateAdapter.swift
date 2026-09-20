@@ -965,6 +965,12 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
         stateQueue.sync { attempt != nil || abandonedChildrenInFlight > 0 }
     }
 
+    /// 已经放弃等待、但子进程退出还没确认（W3B F3）：这种窗口下的拒绝必须给出
+    /// 「重启应用即可恢复」的可见提示，而不是一句「正在运行」之后静默置灰。
+    var abandonedChildrenUnconfirmed: Bool {
+        stateQueue.sync { abandonedChildrenInFlight > 0 }
+    }
+
     init(
         clock: @escaping () -> Date = { Date() },
         spawner: PiWebUpdateChildSpawning = POSIXPiWebUpdateChildSpawner(),
@@ -1325,8 +1331,35 @@ final class PiWebUpdateCoordinator {
     /// 默认安装超时：5 分钟。有界，应用启动不会因为安装无上限地卡住。
     static let defaultTimeout: TimeInterval = 300
 
-    /// 是否有一次安装正在进行（供 UI 门控：手动入口与菜单项）。
-    var isUpdateInProgress: Bool { environment.installer.isRunning }
+    /// 整轮更新事务是否在进行中：安装、重新检测版本、启动服务与健康检查都算
+    /// （W3B F2：安装子进程一结束就放行，事务尾段的几秒到几十秒里还能再叠加一次
+    /// 安装）。标志由协调器自己持有，组件之间互不影响（W3B F3）。
+    private let transactionLock = NSLock()
+    private var transactionInFlight = false
+
+    /// 事务级「更新进行中」：只在 `runInstall` 的事务期间为真。
+    var isRunning: Bool {
+        transactionLock.lock()
+        defer { transactionLock.unlock() }
+        return transactionInFlight
+    }
+
+    /// 是否有一次更新正在进行（供 UI 门控：手动入口与菜单项）。既覆盖整轮事务
+    /// （安装 + 重检测 + 服务启动 + 健康检查，W3B F2），也覆盖安装器自己的
+    /// 「已放弃等待、子进程退出未确认」窗口。
+    var isUpdateInProgress: Bool { isRunning || environment.installer.isRunning }
+
+    private func beginTransaction() {
+        transactionLock.lock()
+        transactionInFlight = true
+        transactionLock.unlock()
+    }
+
+    private func endTransaction() {
+        transactionLock.lock()
+        transactionInFlight = false
+        transactionLock.unlock()
+    }
 
     private let environment: Environment
 
@@ -1366,16 +1399,25 @@ final class PiWebUpdateCoordinator {
     private func runInstall(
         plan: PiWebUpdateInstallPlan,
         installation: ComponentInstallation?,
-        completion: @escaping (PiWebUpdateRunOutcome) -> Void
+        completion originalCompletion: @escaping (PiWebUpdateRunOutcome) -> Void
     ) {
-        // 同一时间只允许一次安装（W2A A-2/A-4）：已经有一次在跑时直接按「跳过」
-        // 返回，给出可见文案，而不是排队等第二次回调。
-        guard !environment.installer.isRunning else {
+        // 同一时间只允许一次更新事务（W2A A-2/A-4 + W3B F2）：不只安装子进程在跑
+        // 时算，安装之后的重新检测/服务启动/健康检查还在跑时同样按「跳过」返回，
+        // 给出可见文案，而不是排队等第二次回调。
+        guard !isUpdateInProgress else {
             environment.log("Pi Web 更新跳过：\(PiWebUpdateRefusal.updateAlreadyInProgress.text)")
             environment.deliver {
-                completion(.skipped(reason: .updateAlreadyInProgress, commandText: nil))
+                originalCompletion(.skipped(reason: .updateAlreadyInProgress, commandText: nil))
             }
             return
+        }
+        // 事务级门控（W3B F2）：从第二次触发直到结果真正投递给调用方为止，
+        // 整个事务（安装 + 重检测 + 服务启动 + 健康检查）都算「更新进行中」。
+        // 包装一次完成回调，事务里的每个结束分支都会先解除门控再投递。
+        beginTransaction()
+        let completion: (PiWebUpdateRunOutcome) -> Void = { [weak self] outcome in
+            self?.endTransaction()
+            originalCompletion(outcome)
         }
         // 共享事务（GitHub #23）：准备阶段记录更新前指纹，安装/验证/提交/降级
         // 四个阶段的结果都进入同一份更新历史。

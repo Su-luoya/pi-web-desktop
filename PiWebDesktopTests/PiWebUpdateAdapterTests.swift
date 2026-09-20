@@ -71,6 +71,16 @@ final class PiWebUpdateAdapterTests: XCTestCase {
         var healthResults: [Bool] = []
         private(set) var startCallCount = 0
         private(set) var healthCheckCallCount = 0
+        /// W3B F2：为 true 时健康检查不立即回调（模拟“安装已结束、事务还在尾段”），
+        /// 由测试显式放行。
+        var parksHealthCheck = false
+        private var parkedHealthCompletion: ((Bool) -> Void)?
+
+        func releaseParkedHealthCheck(_ ready: Bool = true) {
+            let completion = parkedHealthCompletion
+            parkedHealthCompletion = nil
+            completion?(ready)
+        }
 
         init(homeDirectory: String) {
             self.homeDirectory = homeDirectory
@@ -86,6 +96,10 @@ final class PiWebUpdateAdapterTests: XCTestCase {
                 startServiceAndCheckHealth: { completion in
                     self.startCallCount += 1
                     self.healthCheckCallCount += 1
+                    if self.parksHealthCheck {
+                        self.parkedHealthCompletion = completion
+                        return
+                    }
                     let ready = self.healthResults.isEmpty ? true : self.healthResults.removeFirst()
                     completion(ready)
                 },
@@ -1069,6 +1083,86 @@ final class PiWebUpdateAdapterTests: XCTestCase {
         coordinator.runManual(plan) { outcome = $0 }
         XCTAssertEqual(outcome, .skipped(reason: .updateAlreadyInProgress, commandText: nil))
         XCTAssertTrue(world.installer.plans.isEmpty, "已有安装在跑时不能再调用安装器（W2A A-4）")
+    }
+
+    // MARK: - W3B F2/F3：事务级门控与组件隔离
+
+    /// 安装子进程已经结束、事务还在尾段（重新检测版本 / 启动服务 / 健康检查）时，
+    /// 手动入口必须被拒绝且不调用安装器；尾段走完后必须能再次更新（W3B F2）。
+    func testCoordinatorRejectsManualInstallDuringTransactionTail() throws {
+        let world = CoordinatorWorld(homeDirectory: fixtureHome)
+        world.detectedInstallation = installation(version: "0.9.2")
+        world.parksHealthCheck = true
+        let coordinator = world.makeCoordinator()
+        let plan = try makePlan()
+
+        var firstOutcome: PiWebUpdateRunOutcome?
+        coordinator.runManual(plan) { firstOutcome = $0 }
+        XCTAssertEqual(world.installer.plans.count, 1)
+        XCTAssertNil(firstOutcome, "事务尾段还没走完，结果尚未投递")
+        XCTAssertTrue(coordinator.isRunning, "事务尾段仍须算「更新进行中」（W3B F2）")
+        XCTAssertTrue(coordinator.isUpdateInProgress)
+
+        // 尾段里的第二次手动入口：必须被拒绝，且不能再调用安装器。
+        var rejectedOutcome: PiWebUpdateRunOutcome?
+        coordinator.runManual(plan) { rejectedOutcome = $0 }
+        XCTAssertEqual(
+            rejectedOutcome,
+            .skipped(reason: .updateAlreadyInProgress, commandText: nil),
+            "事务尾段里的第二次手动更新必须被拒绝（W3B F2）"
+        )
+        XCTAssertEqual(world.installer.plans.count, 1, "被拒绝的那一次不能调用安装器")
+
+        world.releaseParkedHealthCheck(true)
+        XCTAssertEqual(firstOutcome, .succeeded(plan: plan, oldVersion: "0.9.0", newVersion: "0.9.2"))
+        XCTAssertFalse(coordinator.isUpdateInProgress, "尾段结束后事务门控必须解除")
+
+        // 事务结束之后必须能再次更新：门控不能变成一发式状态。
+        world.parksHealthCheck = false
+        world.healthResults = [true]
+        var secondOutcome: PiWebUpdateRunOutcome?
+        coordinator.runManual(plan) { secondOutcome = $0 }
+        XCTAssertEqual(secondOutcome, .succeeded(plan: plan, oldVersion: "0.9.0", newVersion: "0.9.2"))
+        XCTAssertEqual(world.installer.plans.count, 2)
+    }
+
+    /// W3B F3：被挡住时必须有可见原因；「子进程退出未确认」窗口必须给出重启恢复路径；
+    /// 入口闸控只由本组件自己的状态合成，构建时看不到另一个组件。
+    func testUpdateEntryStateExposesReasonAndRecoveryPath() {
+        XCTAssertFalse(UpdateEntryState.free.isBlocked)
+        XCTAssertNil(UpdateEntryState.free.menuTitleSuffix)
+
+        let installing = UpdateEntryState.component(
+            transactionInProgress: false, childInFlight: true, abandonedChildrenUnconfirmed: false
+        )
+        XCTAssertTrue(installing.isBlocked)
+        XCTAssertEqual(installing.menuTitleSuffix, "（正在更新）", "位住时必须给出可见原因（W3B F3 (b)）")
+
+        let tail = UpdateEntryState.component(
+            transactionInProgress: true, childInFlight: false, abandonedChildrenUnconfirmed: false
+        )
+        XCTAssertTrue(tail.isBlocked, "事务尾段（没有子进程在飞）也必须挡住入口（W3B F2）")
+
+        let awaiting = UpdateEntryState.component(
+            transactionInProgress: false, childInFlight: true, abandonedChildrenUnconfirmed: true
+        )
+        XCTAssertTrue(awaiting.isBlocked)
+        XCTAssertEqual(awaiting.menuTitleSuffix, "（上一次更新未确认退出，重启应用可恢复）")
+        XCTAssertTrue(
+            awaiting.rejectionDetail.contains("重启应用即可恢复"),
+            "卡住的子进程窗口必须给出可恢复路径（W3B F3 (c)）"
+        )
+
+        // 组件隔离（W3B F3 (a)）：Pi Web 的子进程永不退出时，Pi CLI 的状态仍然
+        // 只由 Pi CLI 自己的输入合成，不会被跨组件输入影响。
+        let webStuck = UpdateEntryState.component(
+            transactionInProgress: false, childInFlight: true, abandonedChildrenUnconfirmed: false
+        )
+        let cliIdle = UpdateEntryState.component(
+            transactionInProgress: false, childInFlight: false, abandonedChildrenUnconfirmed: false
+        )
+        XCTAssertTrue(webStuck.isBlocked)
+        XCTAssertFalse(cliIdle.isBlocked, "Pi Web 卡住不得挡住 Pi CLI 入口（W3B F3 (a)）")
     }
 
     // MARK: - 持久警告存储

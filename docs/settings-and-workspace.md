@@ -19,6 +19,8 @@
 
 菜单“设置…”/⌘, 是单例（W4 M2）：同一时刻只存在一个能写回配置的设置窗口。重复打开复用同一个控制器/窗口：窗口已经打开时只置前（不拿已保存值覆盖用户正在编辑的内容）；关闭/取消后再打开前，用当前生效配置刷新控件——上一次取消后留下的未保存输入、外部改动与刚输入的新密码都不会残留。旧实现每次新建控制器并覆盖引用，旧窗口（`isReleasedWhenClosed = false` 且不 close）会留在屏幕上、用打开时的配置快照写回，出现“两个窗口都能保存、后写覆盖前写”。需要显式丢弃时用 `ReusableControllerStore.discard`（先 close 再释放，旧实例不再被保留）。
 
+窗口可自由缩放并记住尺寸与位置（`setFrameAutosaveName`，只有第一次打开时才居中）：表单列最小 520pt，变宽时每一行、输入框与说明文字一起变宽，多行说明按新宽度重新折行（`WrappingLabel` 在每次布局后把 `preferredMaxLayoutWidth` 更新为实际宽度；窗口最小宽度由这一列宽加两侧 24pt 边距决定，与表单列同源，不再由某一行或单行文字的内在宽度决定）。表单放在 `NSScrollView` 里且文档只受宽度约束，窗口缩得比表单矮时从顶部开始滚动，不会裁掉说明文字或底部按钮；错误提示与「恢复默认/取消/保存」固定在窗口底部、不随表单滚动，因此窗口很矮时也能直接保存或取消。
+
 ### 监听地址校验
 
 监听地址（`service.hostname`）的校验只有一处实现：`RemoteAccessPolicy.addressVerdict(hostname:)`（`Sources/KeychainStore.swift`，结果类型 `ServiceAddressVerdict`）。同一判定同时作用于三个入口（GitHub #39 / 安全审查 R-3）：

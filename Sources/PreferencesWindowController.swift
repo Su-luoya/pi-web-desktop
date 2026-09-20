@@ -1,5 +1,37 @@
 import Cocoa
 
+/// 表单列最小宽度；窗口最小宽度 = 该值 + 两侧 24pt 边距（见 `windowMinimumContentSize`）。
+private let formMinimumWidth: CGFloat = 520
+/// 行内输入控件的最小宽度；窗口变宽时输入控件跟着变宽，不改变行的结构。
+///
+/// 这个值只决定「行能多窄」，不决定输入框平时多宽（平时是撑满整行的）。取 200 是为了让带
+/// 尾部按钮的行（工作目录那一行）在表单最小宽度 520 里也能放下，从而由表单宽度而不是某一行
+/// 决定窗口的最小宽度。
+private let rowFieldMinimumWidth: CGFloat = 200
+/// 设置窗口的最小内容尺寸：可以缩到比表单矮，靠滚动查看其余内容。
+private let windowMinimumContentSize = NSSize(width: formMinimumWidth + 48, height: 320)
+
+/// `NSScrollView` 的文档视图默认不翻转：内容比视口矮时会贴着底部。
+/// 设置窗口的表单需要始终从顶部开始排列。
+private final class FlippedDocumentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+/// 多行说明标签：按当前宽度重新折行。
+///
+/// AppKit 只按 `preferredMaxLayoutWidth` 计算多行标签的内在高度；写死一个值后，
+/// 窗口变宽时文字仍按窄宽度折行，右边留一大片空白。这里在每次布局后把该值更新为
+/// 实际宽度，高度和折行位置就都跟着窗口走。
+private final class WrappingLabel: NSTextField {
+    override func layout() {
+        super.layout()
+        let width = bounds.width
+        guard width > 0, preferredMaxLayoutWidth != width else { return }
+        preferredMaxLayoutWidth = width
+        invalidateIntrinsicContentSize()
+    }
+}
+
 final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate {
     var onSave: ((ServiceConfiguration) -> Void)?
     var onCancel: (() -> Void)?
@@ -23,10 +55,10 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     private let savePasswordButton = NSButton(title: "保存密码", target: nil, action: nil)
     private let generatePasswordButton = NSButton(title: "生成高强度密码", target: nil, action: nil)
     private let deletePasswordButton = NSButton(title: "删除密码", target: nil, action: nil)
-    private let remoteAccessHintLabel = NSTextField(labelWithString: "")
+    private let remoteAccessHintLabel = WrappingLabel(labelWithString: "")
     private let autoStartButton = NSButton(checkboxWithTitle: "应用启动时自动启动服务", target: nil, action: nil)
     private let quitBehaviorPopup = NSPopUpButton()
-    private let errorLabel = NSTextField(labelWithString: "")
+    private let errorLabel = WrappingLabel(labelWithString: "")
 
     private var configuration: ServiceConfiguration
     private let keychain: KeychainStoring
@@ -57,7 +89,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     private func buildWindow() {
-        let content = NSView()
+        let content = FlippedDocumentView()
         content.translatesAutoresizingMaskIntoConstraints = false
 
         let title = NSTextField(labelWithString: "Pi Web Desktop 设置")
@@ -116,15 +148,18 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         autoStartButton.target = self
         autoStartButton.action = #selector(autoStartChanged(_:))
 
-        for hint in [remoteAccessHintLabel, passwordHintLabel, workspaceHintLabel] {
+        for hint in [remoteAccessHintLabel, passwordHintLabel, workspaceHintLabel, errorLabel] {
             hint.lineBreakMode = .byWordWrapping
             hint.maximumNumberOfLines = 0
+            // 允许被宽度约束压窄：否则单行内在宽度会反过来把窗口的最小宽度抬到
+            // 1100pt 左右，窗口就再也变不窄了。
+            hint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
+        for hint in [remoteAccessHintLabel, passwordHintLabel, workspaceHintLabel] {
             hint.textColor = .secondaryLabelColor
         }
         errorLabel.textColor = .systemRed
         errorLabel.isHidden = true
-        errorLabel.lineBreakMode = .byWordWrapping
-        errorLabel.maximumNumberOfLines = 0
 
         let buttons = NSStackView(views: [resetButton, NSView(), cancelButton, saveButton])
         buttons.orientation = .horizontal
@@ -137,8 +172,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
             remoteHeader, hostnameRow, passwordStatusRow, newPasswordRow, passwordActionsRow,
             passwordHintLabel, remoteAccessHintLabel,
             networkHeader, allowedHostsRow, httpProxyRow, httpsProxyRow, noProxyRow,
-            behaviorHeader, autoStartButton, quitRow,
-            errorLabel, buttons
+            behaviorHeader, autoStartButton, quitRow
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -146,17 +180,18 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         stack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(stack)
 
+        // 窗口可自由缩放：整列最小 520pt，变宽时每一行、按钮和说明文字一起变宽，
+        // 文字按新的宽度重新折行。
+        stack.widthAnchor.constraint(greaterThanOrEqualToConstant: formMinimumWidth).isActive = true
         for rowView in [
             pathRow, workspaceRow, portRow, hostnameRow, passwordStatusRow, newPasswordRow, passwordActionsRow,
             allowedHostsRow, httpProxyRow, httpsProxyRow, noProxyRow, quitRow
         ] {
-            rowView.widthAnchor.constraint(equalToConstant: 520).isActive = true
+            rowView.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
-        buttons.widthAnchor.constraint(equalToConstant: 520).isActive = true
-        errorLabel.widthAnchor.constraint(equalToConstant: 520).isActive = true
-        passwordHintLabel.widthAnchor.constraint(equalToConstant: 520).isActive = true
-        remoteAccessHintLabel.widthAnchor.constraint(equalToConstant: 520).isActive = true
-        workspaceHintLabel.widthAnchor.constraint(equalToConstant: 520).isActive = true
+        passwordHintLabel.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        remoteAccessHintLabel.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        workspaceHintLabel.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
 
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
@@ -167,23 +202,65 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
             autoStartButton.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
 
-        // 新增“远程访问”分区后内容变高（密码状态、新密码、密码按钮和两段说明）；
-        // 再加入“工作目录”行与说明后，860 覆盖带两行错误提示时的实测高度，
-        // 因此固定高度的窗口不会裁掉说明文字或底部按钮。
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 568, height: 860), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        // 错误提示与底部按钮固定在窗口底部：窗口缩得很矮时表单在中间滚动，取消/保存
+        // 始终看得见，不需要先滚到底。
+        let footer = NSStackView(views: [errorLabel, buttons])
+        footer.orientation = .vertical
+        footer.alignment = .leading
+        footer.spacing = 12
+        footer.translatesAutoresizingMaskIntoConstraints = false
+        buttons.widthAnchor.constraint(equalTo: footer.widthAnchor).isActive = true
+        errorLabel.widthAnchor.constraint(equalTo: footer.widthAnchor).isActive = true
+
+        // 表单放进滚动视图：窗口缩小到表单装不下时出现滚动条，而不是裁掉说明文字；
+        // 窗口变宽时表单列跟着变宽。
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.horizontalScrollElasticity = .none
+        scrollView.documentView = content
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        let container = NSView()
+        container.addSubview(scrollView)
+        container.addSubview(footer)
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 568, height: 860), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "Pi Web Desktop 设置"
-        window.contentView = content
+        window.contentView = container
         window.isReleasedWhenClosed = false
-        window.center()
+        window.contentMinSize = windowMinimumContentSize
+        // 记住用户调整过的尺寸；第一次打开时才居中。
+        if !window.setFrameUsingName(Self.frameAutosaveName) {
+            window.center()
+        }
+        window.setFrameAutosaveName(Self.frameAutosaveName)
         self.window = window
+
+        NSLayoutConstraint.activate([
+            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: container.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -12),
+            footer.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 24),
+            footer.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -24),
+            footer.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -24),
+            content.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            content.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            content.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor)
+        ])
     }
 
+    /// 记录用户调整过的窗口尺寸与位置（NSWindow 自动保存到用户默认值）。
+    private static let frameAutosaveName = "PiWebDesktopPreferencesWindow"
+
     /// 远程访问密码与传输加密的区别：界面必须明确说明密码认证不等于加密。
-    private let passwordHintLabel = NSTextField(labelWithString:
+    private let passwordHintLabel = WrappingLabel(labelWithString:
         "密码认证只验证访问者身份，不等于 HTTPS 或加密隧道。远程访问请自行配置受信任的加密隧道（例如 WireGuard、SSH 端口转发）或 HTTPS 反向代理。")
 
     /// 工作目录说明：默认目录、首次使用时创建、必须可写。
-    private let workspaceHintLabel = NSTextField(labelWithString: "")
+    private let workspaceHintLabel = WrappingLabel(labelWithString: "")
 
     private func row(label: String, field: NSView, trailing: NSView? = nil, isReadOnly: Bool = false) -> NSView {
         let labelView = NSTextField(labelWithString: label)
@@ -199,9 +276,11 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         if let textField = field as? NSTextField {
             textField.isEditable = true
             textField.translatesAutoresizingMaskIntoConstraints = false
-            textField.widthAnchor.constraint(equalToConstant: 300).isActive = true
+            textField.widthAnchor.constraint(greaterThanOrEqualToConstant: rowFieldMinimumWidth).isActive = true
+            textField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         } else if let popup = field as? NSPopUpButton {
-            popup.widthAnchor.constraint(equalToConstant: 300).isActive = true
+            popup.widthAnchor.constraint(greaterThanOrEqualToConstant: rowFieldMinimumWidth).isActive = true
+            popup.setContentHuggingPriority(.defaultLow, for: .horizontal)
         }
         return row
     }

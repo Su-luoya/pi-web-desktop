@@ -123,17 +123,6 @@ enum PiWebUpdateArgumentPolicy {
 enum PiWebUpdateEnvironment {
     static let allowedKeys: Set<String> = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"]
 
-    /// 兜底的 PATH 目录（与 `ServiceLaunchSpecification` 的固定 PATH 一致）。
-    static let fallbackPathDirectories = [
-        "/opt/homebrew/bin",
-        "/opt/homebrew/sbin",
-        "/usr/local/bin",
-        "/usr/bin",
-        "/bin",
-        "/usr/sbin",
-        "/sbin"
-    ]
-
     /// 只保留白名单键，空值也丢弃。
     static func sanitized(_ base: [String: String]) -> [String: String] {
         var result: [String: String] = [:]
@@ -146,22 +135,19 @@ enum PiWebUpdateEnvironment {
 
     /// 白名单化后把 npm 所在目录放到 PATH 最前：npm 是带 `#!/usr/bin/env node`
     /// shebang 的脚本，GUI 应用的默认 PATH 里通常没有 Node.js 的目录。
+    ///
+    /// PATH 合并本身复用 `ToolPathBuilder`（GitHub #89）：`base` 里的 PATH 通常
+    /// 已经来自应用级工具 PATH 构建器（登录 shell PATH、已知目录、node 目录），
+    /// 这里只保证“npm 自己所在目录优先”与已知目录兜底——只增路径，不增变量。
     static func environment(base: [String: String], npmExecutablePath: String) -> [String: String] {
         var result = sanitized(base)
-        var directories: [String] = []
-        let npmDirectory = (npmExecutablePath as NSString).deletingLastPathComponent
-        if !npmDirectory.isEmpty, npmDirectory != "/" {
-            directories.append(npmDirectory)
-        }
-        for directory in (result["PATH"] ?? "").split(separator: ":") {
-            let text = String(directory)
-            guard !text.isEmpty, !directories.contains(text) else { continue }
-            directories.append(text)
-        }
-        for directory in fallbackPathDirectories where !directories.contains(directory) {
-            directories.append(directory)
-        }
-        result["PATH"] = directories.joined(separator: ":")
+        let builder = ToolPathBuilder(
+            appEnvironment: result,
+            homeDirectory: result["HOME"] ?? ""
+        )
+        result["PATH"] = builder.path(prioritizing: [
+            (npmExecutablePath as NSString).deletingLastPathComponent
+        ])
         return result
     }
 

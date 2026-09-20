@@ -479,12 +479,25 @@ private final class IntegrationCommandRunner: CommandRunning {
         return base.run(arguments)
     }
 
-    /// 不交给真实二叉的只读命令（#6 的 npm 前缀与 #16 的 npm/pnpm 全局 root）。
-    static let shortCircuitedInvocations: [[String]] = [
-        ["/usr/bin/env", "npm", "prefix", "-g"],
-        ["/usr/bin/env", "npm", "root", "-g"],
-        ["/usr/bin/env", "pnpm", "root", "-g"]
-    ]
+    /// 不交给真实二进制的只读命令（#6 的 npm 前缀与 #16 的 npm/pnpm 全局 root；
+    /// #89 的登录 shell PATH 查询也不执行真实 shell）。两个变体都要列：登录查询与
+    /// 拿不到值时的交互式兜底查询。
+    static var shortCircuitedInvocations: [[String]] {
+        let shells = [
+            LoginShellResolver.shellPath(environment: ProcessInfo.processInfo.environment),
+            LoginShellResolver.fallbackShellPath
+        ]
+        var invocations = [
+            ["/usr/bin/env", "npm", "prefix", "-g"],
+            ["/usr/bin/env", "npm", "root", "-g"],
+            ["/usr/bin/env", "pnpm", "root", "-g"]
+        ]
+        for shell in shells {
+            invocations.append([shell, "-lc", LoginShellPathQuery.command])
+            invocations.append([shell, "-ilc", LoginShellPathQuery.command])
+        }
+        return invocations
+    }
 }
 
 /// 真实文件系统探针 + 两个测试接缝：Home 指向 fixture，可执行文件只认 fixture
@@ -838,6 +851,12 @@ final class ServiceLifecycleIntegrationTests: XCTestCase {
         XCTAssertEqual(
             launch.environment["cwd"].map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path },
             fixture.workspaceURL.resolvingSymlinksInPath().path
+        )
+        // #89：启动 PATH 不再硬编码，而是与探测同源的构建器结果（没有注入登录
+        // shell 查询时，就是应用环境 + 已知目录的确定性兜底）。
+        XCTAssertEqual(
+            launch.environment["PATH"],
+            ToolPathBuilder(appEnvironment: fixture.baseEnvironment, homeDirectory: "").path()
         )
         XCTAssertTrue(launch.environment["PATH"]?.hasPrefix("/opt/homebrew/bin:") == true)
     }

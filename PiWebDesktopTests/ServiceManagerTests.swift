@@ -827,7 +827,12 @@ final class ServiceManagerTests: XCTestCase {
 
         let environment = specification.environment
         XCTAssertEqual(environment["PI_WEB_NO_OPEN"], "1")
-        XCTAssertEqual(environment["PATH"], "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+        // #89：不再硬编码 PATH 列表；没有登录 shell 查询与注入构建器时，构建器
+        // 的确定结果就是“应用 PATH（这里为空）+ 已知目录”。
+        XCTAssertEqual(
+            environment["PATH"],
+            "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/opt/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        )
         XCTAssertEqual(environment["BASE"], "1")
         XCTAssertNil(environment["PI_WEB_ALLOWED_HOSTS"])
         // Empty proxy settings remove inherited values instead of forwarding them.

@@ -208,8 +208,10 @@ struct DependencyFinding: Equatable {
     /// pi-web 的 package.json 证据；其他类型为 nil。
     var packageName: String?
     var packageVersion: String?
-    /// 状态不是 `ok` 时的可读补充原因（例如“依赖探测超时”）。默认 nil，因此旧调用点
-    /// 与旧断言不受影响。
+    /// 状态不是 `ok` 时的可读补充原因：既解释“探针超时”（GitHub #85），也解释
+    /// “命令无法执行 / 版本输出不可用”（GitHub #89，例如合并后的工具 PATH 里
+    /// 找不到 node）。默认 nil，因此旧调用点与旧断言不受影响；只包含静态文案，
+    /// 不含路径与凭据。
     var detail: String? = nil
 }
 
@@ -472,6 +474,16 @@ private final class TimedProbeCommandRunner: CommandRunning {
         return result
     }
 
+    func run(_ arguments: [String], environment: [String: String]?) -> String? {
+        run(arguments, environment: environment, timeout: timeout).output
+    }
+
+    func run(_ arguments: [String], environment: [String: String]?, timeout: TimeInterval) -> CommandRunResult {
+        let result = base.run(arguments, environment: environment, timeout: timeout)
+        if result.timedOut { timedOutArguments.append(arguments) }
+        return result
+    }
+
     func cancelRunningProbe() {
         base.cancelRunningProbe()
     }
@@ -521,6 +533,13 @@ struct DependencyChecker {
     private let portProbe: DependencyPortProbing
     private let environment: [String: String]
     private let applicationInstallation: ApplicationInstallationProbe
+    /// 应用级工具 PATH（GitHub #89）：注入时与 `ServiceManager` 的启动环境、
+    /// 更新子进程共用同一个实例；未注入时按本次检查的注入探针自建（每个
+    /// 检查实例最多执行一次登录 shell 查询与一次 npm prefix 查询）。
+    private let toolPathProvider: ToolPathProvider?
+    /// 登录 shell PATH 查询器（注入用）；nil 时用注入的 `commandRunner` 执行
+    /// `/bin/zsh -lc 'printf %s "$PATH"'`（超时 + 单次缓存）。
+    private let loginShellPath: (() -> String?)?
 
     init(
         commandRunner: CommandRunning = SystemCommandRunner(),
@@ -532,7 +551,9 @@ struct DependencyChecker {
         portProbe: DependencyPortProbing = SystemDependencyPortProbe(),
         environment: [String: String] = ProcessInfo.processInfo.environment,
         applicationInstallation: ApplicationInstallationProbe = .none,
-        probeTimeout: TimeInterval = SystemCommandRunner.defaultTimeout
+        probeTimeout: TimeInterval = SystemCommandRunner.defaultTimeout,
+        toolPathProvider: ToolPathProvider? = nil,
+        loginShellPath: (() -> String?)? = nil
     ) {
         let probeRunner = TimedProbeCommandRunner(base: commandRunner, timeout: probeTimeout)
         self.commandRunner = probeRunner
@@ -545,23 +566,31 @@ struct DependencyChecker {
         self.portProbe = portProbe
         self.environment = environment
         self.applicationInstallation = applicationInstallation
+        self.toolPathProvider = toolPathProvider
+        self.loginShellPath = loginShellPath
     }
 
     /// 运行全部检查。顺序固定：系统、Node.js、Pi CLI、Pi Web、默认端口、Pi 配置目录，
     /// 最后附上组件安装识别（GitHub #16；复用同一组探针与已解析的版本）。
+    ///
+    /// 所有命令探测与版本解析都用同一个 `ToolPathProvider` 构建出来的子进程环境
+    /// （GitHub #89）：应用 PATH + 登录 shell PATH + 已知目录 + node 目录 +
+    /// npm prefix/bin，因此 `#!/usr/bin/env node` 脚本不会再因为应用从 Finder
+    /// 启动时 PATH 最小而 exit 127。
     func run() -> DependencyReport {
         // 每次检查都重新累计超时探针，避免上一次检查的结论影响这一次。
         commandRunner.reset()
         let redactor = DependencyPathRedactor(homeDirectory: fileSystem.homeDirectoryPath())
-        let npmPrefix = localNPMPrefix()
-        let piPath = resolvePiExecutable()
-        let piWebPath = resolvePiWebExecutable()
-        let piFinding = makePiFinding(path: piPath, npmPrefix: npmPrefix, redactor: redactor)
-        let piWebFinding = makePiWebFinding(path: piWebPath, npmPrefix: npmPrefix, redactor: redactor)
+        let context = probeContext()
+        let npmPrefix = context.npmPrefix
+        let piPath = resolvePiExecutable(in: context)
+        let piWebPath = resolvePiWebExecutable(in: context)
+        let piFinding = makePiFinding(path: piPath, npmPrefix: npmPrefix, redactor: redactor, context: context)
+        let piWebFinding = makePiWebFinding(path: piWebPath, npmPrefix: npmPrefix, redactor: redactor, context: context)
         return DependencyReport(
             findings: [
                 makeSystemFinding(),
-                makeNodeFinding(npmPrefix: npmPrefix, redactor: redactor),
+                makeNodeFinding(npmPrefix: npmPrefix, redactor: redactor, context: context),
                 piFinding,
                 piWebFinding,
                 makePortFinding(),
@@ -573,8 +602,52 @@ struct DependencyChecker {
                 piPath: piPath,
                 piWebPath: piWebPath,
                 piFinding: piFinding,
-                piWebFinding: piWebFinding
+                piWebFinding: piWebFinding,
+                context: context
             )
+        )
+    }
+
+    // MARK: - 工具 PATH（GitHub #89）
+
+    /// 一次检查共用的探测上下文：PATH 只构建一次，命令探测与版本解析都用同一份
+    /// 子进程环境，候选路径也从同一份目录列表推导。
+    private struct ProbeContext {
+        var provider: ToolPathProvider
+        var environment: [String: String]
+        var toolDirectories: [String]
+        var npmPrefix: String?
+    }
+
+    private func probeContext() -> ProbeContext {
+        let provider = toolPathProvider ?? makeToolPathProvider()
+        return ProbeContext(
+            provider: provider,
+            environment: provider.probeEnvironment(),
+            toolDirectories: provider.directories(),
+            npmPrefix: provider.resolvedNPMPrefix()
+        )
+    }
+
+    /// 未注入应用级 provider 时，用本次检查的探针自建一个：登录 shell 与 node /
+    /// npm 解析都走注入的 `commandRunner` 与文件系统探针，因此测试不会碰真实命令。
+    private func makeToolPathProvider() -> ToolPathProvider {
+        let shellQuery: () -> String?
+        if let loginShellPath {
+            shellQuery = loginShellPath
+        } else {
+            let query = LoginShellPathQuery(runner: commandRunner, environment: environment)
+            shellQuery = { query.path() }
+        }
+        return ToolPathProvider(
+            environment: environment,
+            homeDirectory: fileSystem.homeDirectoryPath(),
+            commandRunner: commandRunner,
+            directoryIsUsable: { fileSystem.directoryExists(atPath: $0) },
+            fileIsExecutable: { fileSystem.isExecutableFile(atPath: $0) },
+            loginShellPath: shellQuery,
+            nodePathResolver: { bootstrap in self.resolveNodePath(using: bootstrap) },
+            npmPrefixResolver: { bootstrap in self.localNPMPrefix(environment: bootstrap.environment) }
         )
     }
 
@@ -591,12 +664,12 @@ struct DependencyChecker {
             return PiWebIdentityEvidence(isExecutable: false, version: nil, packageName: nil)
         }
         let metadata = packageMetadata(resolvedPath: fileSystem.resolvedPath(atPath: path))
-        let version = trimmed(commandRunner.run([path, "--version"]))
+        let resolvedVersion: String? = trimmed(commandRunner.run([path, "--version"], environment: probeContext().environment))
             .flatMap { SemanticVersion.firstVersion(in: $0) }?
             .description
         return PiWebIdentityEvidence(
             isExecutable: true,
-            version: version,
+            version: resolvedVersion,
             packageName: metadata.name
         )
     }
@@ -604,8 +677,11 @@ struct DependencyChecker {
     // MARK: - 探针
 
     /// 本地 `npm prefix -g`（只读、不联网）；npm 不存在时返回 nil。
-    private func localNPMPrefix() -> String? {
-        trimmed(commandRunner.run([Self.runnerPath, "npm", "prefix", "-g"])).map(normalizedDirectory)
+    /// 子进程环境由工具 PATH 构建器提供，否则 GUI 启动的应用里 `env npm` 也会
+    /// exit 127（npm 同样是 `#!/usr/bin/env node` 脚本）。
+    private func localNPMPrefix(environment: [String: String]? = nil) -> String? {
+        trimmed(commandRunner.run([Self.runnerPath, "npm", "prefix", "-g"], environment: environment))
+            .map(normalizedDirectory)
     }
 
     private func trimmed(_ text: String?) -> String? {
@@ -623,20 +699,38 @@ struct DependencyChecker {
     }
 
     /// 已知安装位置的候选路径，最后退回登录 shell 的 `command -v`。
-    private func defaultCandidates(named name: String) -> [String] {
-        var candidates = ["/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)"]
-        let home = normalizedDirectory(fileSystem.homeDirectoryPath())
-        if !home.isEmpty {
-            candidates.append("\(home)/.npm-global/bin/\(name)")
-        }
-        return candidates
+    ///
+    /// `toolDirectories` 是工具 PATH 构建器的合并结果（登录 shell PATH、应用 PATH、
+    /// 其它已知目录、node 目录、npm prefix/bin）；它只作为候选“追加”在既有的
+    /// Homebrew → `/usr/local` → `~/.npm-global` 优先级之后，因此顺序不会倒退。
+    /// 可执行文件候选路径（GitHub #89 追加要求）：顺序固定、不重复。
+    ///
+    /// 1. 经典三处保持最优先（回归基线）：`/opt/homebrew/bin`、`/usr/local/bin`、
+    ///    `~/.npm-global/bin`；
+    /// 2. 其余已知安装目录按 `ToolPath.knownDirectories` 的固定顺序补齐：
+    ///    Homebrew 的 `sbin`（arm64 / Intel）、`/usr/local/sbin`、MacPorts
+    ///    `/opt/local/bin`、`~/.local/bin`、`~/.bun/bin`、`~/.cargo/bin`，最后系统目录；
+    /// 3. 工具 PATH（应用 PATH + 登录 shell PATH + node 目录 + npm prefix/bin）里的目录。
+    private func defaultCandidates(named name: String, toolDirectories: [String] = []) -> [String] {
+        // 单一来源在 `ToolPath`（GitHub #89 追加要求）：固定顺序、不重复，
+        // 已包含 Homebrew（arm64/Intel）、MacPorts、用户级前缀与系统目录。
+        ToolPath.executableCandidates(
+            named: name,
+            homeDirectory: fileSystem.homeDirectoryPath(),
+            additionalDirectories: toolDirectories
+        )
     }
 
-    private func resolveExecutable(named name: String, candidates: [String]) -> String? {
+    private func resolveExecutable(named name: String, candidates: [String], environment: [String: String]? = nil) -> String? {
         for candidate in candidates where fileSystem.isExecutableFile(atPath: candidate) {
             return candidate
         }
-        let shellResult = trimmed(commandRunner.run(Self.shellLookupArguments(named: name)))
+        // 查找走登录 shell（与用户 shell 的 PATH 一致），并带上合并后的工具
+        // 环境：`command -v` 本身是 shell 内建，不需要 node，但让同一次查找的
+        // 子进程环境与后续 `--version` 探测一致，避免“找得到却跑不起来”。
+        let shellResult = trimmed(
+            commandRunner.run(Self.shellLookupArguments(named: name), environment: environment)
+        )
         guard let path = shellResult, fileSystem.isExecutableFile(atPath: path) else { return nil }
         return path
     }
@@ -659,6 +753,14 @@ struct DependencyChecker {
     /// 探针超时的统一可读原因；写进诊断项的 `detail` 与“下一步”。
     private var probeTimeoutDetail: String {
         "依赖探测超时：命令在 \(Int(probeTimeout)) 秒上限内没有返回"
+    }
+
+    /// 状态不是 `ok` 时的可读原因：超时解释优先，其次是工具 PATH / 版本输出诊断。
+    /// 两者都没有时返回 nil（不制造噪声）。
+    private func probeDetail(timedOut: Bool, diagnosis: String?) -> String? {
+        if timedOut { return probeTimeoutDetail }
+        guard let diagnosis, !diagnosis.isEmpty else { return nil }
+        return diagnosis
     }
 
     /// 符号链接目标与完整真实路径。`resolvedPath` 与 `path` 相同表示没有符号链接。
@@ -717,8 +819,9 @@ struct DependencyChecker {
                let object = try? JSONSerialization.jsonObject(with: data),
                let dictionary = object as? [String: Any] {
                 let name = (dictionary["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let version = (dictionary["version"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                return (name?.isEmpty == false ? name : nil, version?.isEmpty == false ? version : nil)
+                // 局部名避开方法名 `version(of:environment:)`（同一类型内的名子遮蔽）。
+                let packageVersion = (dictionary["version"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                return (name?.isEmpty == false ? name : nil, packageVersion?.isEmpty == false ? packageVersion : nil)
             }
             directory = (directory as NSString).deletingLastPathComponent
             depth += 1
@@ -757,38 +860,41 @@ struct DependencyChecker {
         )
     }
 
-    /// Node 探针结果：路径与版本必须同源（版本必须由该路径自己产出）。
-    private struct NodeProbe {
-        var path: String?
-        var version: SemanticVersion?
-    }
-
-    /// 解析 node，并只采信“该路径自己”报告的版本。
+    /// 解析 node 可执行文件（不查版本）。
     ///
-    /// 候选路径（含登录 shell 的 `command -v`）存在时只使用它的 `--version`：
-    /// 如果它不可运行，就不允许用另一个 node 的版本把它放行。候选路径完全不存在
-    /// 时，才按进程 PATH 重新解析（`/usr/bin/env node -p process.execPath`），并
-    /// 把真正产出该版本的可执行路径记入报告；解析不出路径就不采信版本。
-    private func resolveNode() -> NodeProbe {
-        if let path = resolveExecutable(named: "node", candidates: defaultCandidates(named: "node")) {
-            return NodeProbe(path: path, version: version(of: path))
+    /// 候选路径（含登录 shell 的 `command -v`）存在时只使用它；候选路径完全不存在
+    /// 时，才按 bootstrap 的进程 PATH 重新解析（`/usr/bin/env node -p process.execPath`）
+    /// 并确认可执行位。版本只在 `makeNodeFinding` 里对最终路径查一次，保证
+    /// 路径与版本同源；解析不出路径就不采信任何版本。
+    private func resolveNodePath(using bootstrap: ToolPathProvider.Bootstrap) -> String? {
+        if let path = resolveExecutable(
+            named: "node",
+            candidates: defaultCandidates(named: "node", toolDirectories: bootstrap.directories),
+            environment: bootstrap.environment
+        ) {
+            return path
         }
-        guard let path = trimmed(commandRunner.run([Self.runnerPath, "node", "-p", "process.execPath"])),
+        guard let path = trimmed(commandRunner.run([Self.runnerPath, "node", "-p", "process.execPath"], environment: bootstrap.environment)),
               fileSystem.isExecutableFile(atPath: path) else {
-            return NodeProbe(path: nil, version: nil)
+            return nil
         }
-        return NodeProbe(path: path, version: version(of: path))
+        return path
     }
 
-    private func version(of executablePath: String) -> SemanticVersion? {
-        trimmed(commandRunner.run([executablePath, "--version"]))
+    private func version(of executablePath: String, environment: [String: String]? = nil) -> SemanticVersion? {
+        trimmed(commandRunner.run([executablePath, "--version"], environment: environment))
             .flatMap { SemanticVersion.firstVersion(in: $0) }
     }
 
-    private func makeNodeFinding(npmPrefix: String?, redactor: DependencyPathRedactor) -> DependencyFinding {
-        let probe = resolveNode()
-        let path = probe.path
-        let version = probe.version
+    private func makeNodeFinding(npmPrefix: String?, redactor: DependencyPathRedactor, context: ProbeContext) -> DependencyFinding {
+        // 路径来自工具 PATH 的解析（候选优先，其次进程 PATH 回退）；版本只由该
+        // 路径自己产出——不可运行就不允许用另一个 node 的版本把它放行。
+        let path = context.provider.resolvedNodePath()
+        // 显式写 `self.` 与显式类型：局部变量名不得遮蔽方法名 `version(of:environment:)`，
+        // 否则 Xcode（SWIFT_VERSION 5.0）会报 “type of expression is ambiguous”。
+        let resolvedVersion: SemanticVersion? = path.flatMap {
+            self.version(of: $0, environment: context.environment)
+        }
         let source = installSource(
             path: path ?? "",
             resolvedPath: path.flatMap { fileSystem.resolvedPath(atPath: $0) },
@@ -799,8 +905,8 @@ struct DependencyChecker {
         let status: DependencyFinding.Status
         let statusEvidence: DependencyFinding.Confidence
         let remediationID: String?
-        if let version {
-            if version < Self.minimumNodeVersion {
+        if let resolvedVersion {
+            if resolvedVersion < Self.minimumNodeVersion {
                 status = .outdated
                 remediationID = InstallCommandManifest.node.id
             } else {
@@ -825,43 +931,66 @@ struct DependencyChecker {
             sourceEvidence = source.verified ? .verified : (source.source == .unknown ? .unknown : .inferred)
         }
 
+        var diagnosis: String?
+        if resolvedVersion == nil {
+            if path == nil {
+                diagnosis = "命令无法执行：PATH 中找不到 node（已尝试合并后的工具 PATH、已知目录与登录 shell）"
+            } else {
+                diagnosis = "`node --version` 无输出或非零退出；路径存在但版本无法作为证据"
+            }
+        }
+
         return DependencyFinding(
             kind: .node,
             status: status,
             path: path.map { redactor.redact($0) },
             resolvedPath: path.flatMap { fileSystem.resolvedPath(atPath: $0) }.map { redactor.redact($0) },
             symlinkTarget: path.flatMap { fileSystem.symlinkDestination(atPath: $0) }.map { redactor.redact($0) },
-            version: version?.description,
+            version: resolvedVersion?.description,
             installSource: source.source,
             confidence: .weakest([statusEvidence, sourceEvidence]),
             remediationID: remediationID,
             packageName: nil,
             packageVersion: nil,
-            // 只有“确实发生了超时”才写原因；否则保持 nil，不制造噪声。
-            detail: status != .ok && didTimeOut(named: "node", paths: [path], includesNodePathProbe: true)
-                ? probeTimeoutDetail
-                : nil
+            // 状态不是 ok 时给原因：超时优先（它解释了失败的机制），否则是
+            // GitHub #89 的“命令无法执行 / 版本输出不可用”诊断。
+            detail: status == .ok
+                ? nil
+                : probeDetail(
+                    timedOut: didTimeOut(named: "node", paths: [path], includesNodePathProbe: true),
+                    diagnosis: diagnosis
+                )
         )
     }
 
-    /// Pi CLI 的可执行文件路径（只读解析；找不到时 nil）。
-    private func resolvePiExecutable() -> String? {
-        resolveExecutable(named: "pi", candidates: defaultCandidates(named: "pi"))
+    /// Pi CLI 的可执行文件路径（只读解析；找不到时 nil）。候选列表来自工具 PATH。
+    private func resolvePiExecutable(in context: ProbeContext) -> String? {
+        resolveExecutable(
+            named: "pi",
+            candidates: defaultCandidates(named: "pi", toolDirectories: context.toolDirectories),
+            environment: context.environment
+        )
     }
 
     /// Pi Web 的候选路径：用户显式配置的路径优先，否则退回默认候选与
     /// 登录 shell 的 `command -v`。
-    private func piWebCandidates() -> [String] {
+    private func piWebCandidates(in context: ProbeContext) -> [String] {
         let configured = configuredPiWebPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        return configured.isEmpty ? defaultCandidates(named: "pi-web") : [configured]
+        return configured.isEmpty
+            ? defaultCandidates(named: "pi-web", toolDirectories: context.toolDirectories)
+            : [configured]
     }
 
     /// Pi Web 的可执行文件路径。用户显式配置的路径不可执行时按缺失报告，
     /// 不悄悄改用其它副本。
-    private func resolvePiWebExecutable() -> String? {
+    private func resolvePiWebExecutable(in context: ProbeContext) -> String? {
         let configured = configuredPiWebPath.trimmingCharacters(in: .whitespacesAndNewlines)
         if configured.isEmpty {
-            return resolveExecutable(named: "pi-web", candidates: defaultCandidates(named: "pi-web"))
+            return resolveExecutable(
+                named: "pi-web",
+                candidates: defaultCandidates(named: "pi-web", toolDirectories: context.toolDirectories),
+                environment: context.environment
+            )
         }
         return fileSystem.isExecutableFile(atPath: configured) ? configured : nil
     }
@@ -869,7 +998,8 @@ struct DependencyChecker {
     private func makePiFinding(
         path: String?,
         npmPrefix: String?,
-        redactor: DependencyPathRedactor
+        redactor: DependencyPathRedactor,
+        context: ProbeContext
     ) -> DependencyFinding {
         guard let path else {
             // 路径没解析出来也可能是登录 shell 探测超时；把可读原因写进该项，
@@ -881,8 +1011,8 @@ struct DependencyChecker {
             )
         }
         let evidence = executableEvidence(at: path)
-        let version = trimmed(commandRunner.run([path, "--version"]))
-            .flatMap { SemanticVersion.firstVersion(in: $0) }
+        // 显式调用 + 显式类型：避免局部名 `version` 遮蔽方法名（同 #89 的 Xcode 报错）。
+        let resolvedVersion: SemanticVersion? = self.version(of: path, environment: context.environment)
         let source = installSource(
             path: path,
             resolvedPath: evidence.resolvedPath,
@@ -893,24 +1023,30 @@ struct DependencyChecker {
             source.verified ? .verified : (source.source == .unknown ? .unknown : .inferred)
         return DependencyFinding(
             kind: .piCLI,
-            status: version == nil ? .unknown : .ok,
+            status: resolvedVersion == nil ? .unknown : .ok,
             path: redactor.redact(path),
             resolvedPath: evidence.resolvedPath.map { redactor.redact($0) },
             symlinkTarget: evidence.symlinkTarget.map { redactor.redact($0) },
-            version: version?.description,
+            version: resolvedVersion?.description,
             installSource: source.source,
-            confidence: .weakest([version == nil ? .inferred : .verified, sourceEvidence]),
-            remediationID: version == nil ? InstallCommandManifest.piCLI.id : nil,
+            confidence: .weakest([resolvedVersion == nil ? .inferred : .verified, sourceEvidence]),
+            remediationID: resolvedVersion == nil ? InstallCommandManifest.piCLI.id : nil,
             packageName: nil,
             packageVersion: nil,
-            detail: version == nil && didTimeOut(named: "pi", paths: [path]) ? probeTimeoutDetail : nil
+            detail: resolvedVersion == nil
+                ? probeDetail(
+                    timedOut: didTimeOut(named: "pi", paths: [path]),
+                    diagnosis: versionProbeDiagnosis(name: "pi", context: context)
+                )
+                : nil
         )
     }
 
     private func makePiWebFinding(
         path: String?,
         npmPrefix: String?,
-        redactor: DependencyPathRedactor
+        redactor: DependencyPathRedactor,
+        context: ProbeContext
     ) -> DependencyFinding {
         guard let path else {
             return missingFinding(
@@ -922,10 +1058,11 @@ struct DependencyChecker {
 
         let evidence = executableEvidence(at: path)
         let metadata = packageMetadata(resolvedPath: evidence.resolvedPath)
-        let cliVersion = trimmed(commandRunner.run([path, "--version"]))
-            .flatMap { SemanticVersion.firstVersion(in: $0) }
+        // 显式调用 + 显式类型：`version` 不能作为局部名（它与方法名 `version(of:environment:)`
+        // 同名，Xcode 在 789/893 行的等价写法上报 type of expression is ambiguous）。
+        let cliVersion: SemanticVersion? = self.version(of: path, environment: context.environment)
         let packageVersion = metadata.version.flatMap { SemanticVersion($0) }
-        let version = cliVersion ?? packageVersion
+        let resolvedVersion: SemanticVersion? = cliVersion ?? packageVersion
         let source = installSource(
             path: path,
             resolvedPath: evidence.resolvedPath,
@@ -935,24 +1072,45 @@ struct DependencyChecker {
         let sourceEvidence: DependencyFinding.Confidence =
             source.verified ? .verified : (source.source == .unknown ? .unknown : .inferred)
         // package.json 缺失不影响结论；name 与预期不符时身份证据只能算推断。
-        var evidences: [DependencyFinding.Confidence] = [version == nil ? .inferred : .verified, sourceEvidence]
+        var evidences: [DependencyFinding.Confidence] = [resolvedVersion == nil ? .inferred : .verified, sourceEvidence]
         if let packageName = metadata.name {
             evidences.append(packageName == Self.piWebPackageName ? .verified : .inferred)
         }
+        var diagnosis: String?
+        // 只在版本真的拿不到时记录原因：pi-web 不支持 `--version`（以退出码 1
+        // 结束）是已知行为，package.json 能补上版本时不算失败，否则会在健康的
+        // 机器上白噪声一条诊断。
+        if resolvedVersion == nil {
+            diagnosis = versionProbeDiagnosis(name: "pi-web", context: context)
+        }
         return DependencyFinding(
             kind: .piWeb,
-            status: version == nil ? .unknown : .ok,
+            status: resolvedVersion == nil ? .unknown : .ok,
             path: redactor.redact(path),
             resolvedPath: evidence.resolvedPath.map { redactor.redact($0) },
             symlinkTarget: evidence.symlinkTarget.map { redactor.redact($0) },
-            version: version?.description,
+            version: resolvedVersion?.description,
             installSource: source.source,
             confidence: .weakest(evidences),
-            remediationID: version == nil ? InstallCommandManifest.piWeb.id : nil,
+            remediationID: resolvedVersion == nil ? InstallCommandManifest.piWeb.id : nil,
             packageName: metadata.name,
             packageVersion: metadata.version,
-            detail: version == nil && didTimeOut(named: "pi-web", paths: [path]) ? probeTimeoutDetail : nil
+            detail: resolvedVersion == nil
+                ? probeDetail(
+                    timedOut: didTimeOut(named: "pi-web", paths: [path]),
+                    diagnosis: diagnosis
+                )
+                : nil
         )
+    }
+
+    /// 版本探测失败的可读原因（GitHub #89）：不再只留一个 `.unknown`。
+    /// 文本只由静态文案与工具名组成，不含路径、凭据、`sudo` 或 URL。
+    private func versionProbeDiagnosis(name: String, context: ProbeContext) -> String {
+        if context.provider.resolvedNodePath() == nil {
+            return "命令无法执行：合并后的工具 PATH 里找不到 node；`\(name)` 是 `#!/usr/bin/env node` 脚本，没有 node 时会以 127 退出"
+        }
+        return "`\(name) --version` 无输出或非零退出；已经找到 node，但版本输出不能作为身份证据"
     }
 
     // MARK: - 组件安装识别（GitHub #16）
@@ -966,14 +1124,18 @@ struct DependencyChecker {
         piPath: String?,
         piWebPath: String?,
         piFinding: DependencyFinding,
-        piWebFinding: DependencyFinding
+        piWebFinding: DependencyFinding,
+        context: ProbeContext
     ) -> [ComponentInstallation] {
         let detector = ComponentInstallationDetector(
             commandRunner: commandRunner,
             fileSystem: fileSystem,
             environment: environment,
             homeDirectory: fileSystem.homeDirectoryPath(),
-            knownNPMPrefix: npmPrefix
+            knownNPMPrefix: npmPrefix,
+            // `npm root -g` / `pnpm root -g` / `pi list` 都是 `#!/usr/bin/env node`
+            // 脚本：用同一份工具 PATH，否则组件识别也会因为找不到 node 而降级。
+            commandEnvironment: context.environment
         )
         // 候选路径直接用已经解析出的可执行文件；`probesShellPath: false` 表示
         // 不再重复执行 `command -v`（`resolveExecutable` 已经做过）。
@@ -982,7 +1144,7 @@ struct DependencyChecker {
                 kind: .piCLI,
                 packageName: InstallCommandManifest.piCLIPackageName,
                 executableNames: ["pi"],
-                candidates: piPath.map { [$0] } ?? defaultCandidates(named: "pi"),
+                candidates: piPath.map { [$0] } ?? defaultCandidates(named: "pi", toolDirectories: context.toolDirectories),
                 knownVersion: piFinding.version,
                 probesShellPath: false
             ),
@@ -990,7 +1152,7 @@ struct DependencyChecker {
                 kind: .piWeb,
                 packageName: Self.piWebPackageName,
                 executableNames: ["pi-web"],
-                candidates: piWebPath.map { [$0] } ?? piWebCandidates(),
+                candidates: piWebPath.map { [$0] } ?? piWebCandidates(in: context),
                 knownVersion: piWebFinding.version,
                 probesShellPath: false
             )
@@ -1127,6 +1289,8 @@ enum DependencyReportPresenter {
         let version: String
         let source: String
         let confidence: String
+        /// 命令探测失败时的可读原因（GitHub #89）；没有失败时是空串。
+        var note: String = ""
     }
 
     static func title(for kind: DependencyFinding.Kind) -> String {
@@ -1239,9 +1403,22 @@ enum DependencyReportPresenter {
                 path: pathText(for: finding),
                 version: versionText(for: finding),
                 source: sourceText(for: finding.installSource),
-                confidence: confidenceText(for: finding.confidence)
+                confidence: confidenceText(for: finding.confidence),
+                note: finding.detail ?? ""
             )
         }
+    }
+
+    /// 命令探测失败原因块（GitHub #85 / #89）；每行都只来自
+    /// `DependencyFinding.detail`，只含静态文案与工具名，不含路径、凭据或 URL。
+    /// 没有原因时返回空串。
+    static func diagnosisText(for report: DependencyReport) -> String {
+        let lines = report.findings.compactMap { finding -> String? in
+            guard let detail = finding.detail, !detail.isEmpty else { return nil }
+            return "· \(title(for: finding.kind))：\(detail)"
+        }
+        guard !lines.isEmpty else { return "" }
+        return (["命令探测的原因（只读探测，不会安装任何东西）："] + lines).joined(separator: "\n")
     }
 
     static func summaryText(for report: DependencyReport) -> String {
@@ -1261,7 +1438,7 @@ enum DependencyReportPresenter {
             lines.append("  版本：\(versionText(for: finding))")
             lines.append("  安装来源：\(sourceText(for: finding.installSource))")
             lines.append("  可信度：\(confidenceText(for: finding.confidence))")
-            if let detail = finding.detail {
+            if let detail = finding.detail, !detail.isEmpty {
                 lines.append("  原因：\(detail)")
             }
             if finding.kind == .piWeb {
@@ -1365,6 +1542,7 @@ enum DependencyReportPresenter {
                 fields.append("原因：\(detail)")
             }
             lines.append(fields.joined(separator: "  "))
+
         }
 
         let componentLines = componentSummaryLines(for: report)

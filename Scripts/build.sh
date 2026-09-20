@@ -170,6 +170,7 @@ swiftc $OPTIMIZATION_FLAGS "$ROOT/Sources/PiWebApp.swift" \
   "$ROOT/Sources/LogRedactor.swift" \
   "$ROOT/Sources/LogWriter.swift" \
   "$ROOT/Sources/ProcessInspector.swift" \
+  "$ROOT/Sources/ToolPath.swift" \
   "$ROOT/Sources/QuitPolicy.swift" \
   "$ROOT/Sources/QuitCoordinator.swift" \
   "$ROOT/Sources/ServiceConfiguration.swift" \

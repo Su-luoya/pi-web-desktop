@@ -115,6 +115,35 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 - **不死锁**：stdout 在等待循环里用非阻塞读排空，子进程输出超过管道缓冲（64 KiB）也不会把双方锁死。
 - 测试向 `spawn` 注入 `ProbeProcess` 替身，因此“超时后先 SIGTERM、宽限后 SIGKILL”“取消只终止本次子进程且不粘住后续探测”“主线程不阻塞（`CommandProbeDispatch` 的工作不在调用线程执行、结果只经注入的交付点送达）”都在不启动真实命令的前提下可断言。
 
+## 子进程环境与工具 PATH（GitHub #89）
+
+应用可能由 Finder / Dock 启动，此时进程继承的 `PATH` 只有系统目录（典型值 `/usr/bin:/bin:/usr/sbin:/sbin`）。`pi`、`pi-web`、`npm` 都是 `#!/usr/bin/env node` 脚本，没有 `node` 的 `PATH` 会让它们的 `--version` 以 127 退出，诊断因此只能给出 `unknown` 并把启动门控关掉。从 GitHub #89 起，子进程的工具 PATH 只有一个来源，并且探测、组件识别、更新子进程与服务启动共用同一个实例。
+
+`Sources/ToolPath.swift` 提供三层：
+
+- `ToolPath`：纯静态常量与纯函数（已知目录、候选路径、PATH 字符串解析/去重、凭据键判定、登录 shell 解析、`printf` 输出解析）。
+- `ToolPathBuilder`：值类型构建器，输入是应用环境、Home、`leadingDirectories`、登录 shell PATH 查询闭包、目录可用性探针、已解析的 node 可执行文件与 npm 全局 prefix；输出只有目录列表、PATH 字符串与子进程环境，纯函数、可在测试里注入。
+- `ToolPathProvider`：应用级组合根，进程内单例式实例，负责“解析一次、缓存一次”：登录 shell 查询最多两次（登录 shell，拿不到值时再试一次交互式）、`npm prefix -g` 一次、node 路径一次。`PiWebApp` 在初始化时创建一个，注入给 `ServiceManager`、`DependencyChecker`、更新适配器与诊断导出。
+
+合并顺序固定（遇到重复目录保留第一次出现的位置）：
+
+1. `leadingDirectories`（需要抢占优先级的目录，例如工具自己所在目录）；
+2. 应用进程环境里的 `PATH`；
+3. 登录 shell 报告的 `PATH`；
+4. 已知目录（探针回答“不存在”的会被丢掉，只增不减）：`/opt/homebrew/bin`、`/opt/homebrew/sbin`、`/usr/local/bin`、`/usr/local/sbin`、`/opt/local/bin`（MacPorts）、`~/.local/bin`、`~/.npm-global/bin`、`~/.bun/bin`、`~/.cargo/bin`、`/usr/bin`、`/bin`、`/usr/sbin`、`/sbin`；
+5. 解析出的 node 可执行文件所在目录；
+6. npm 全局 prefix 的 `bin` 目录。
+
+可执行文件候选路径由同一份目录规则生成（`ToolPath.executableCandidates`）：先“经典三处”`/opt/homebrew/bin`、`/usr/local/bin`、`~/.npm-global/bin`，再按上面的固定顺序补齐其余已知目录，最后是工具 PATH 里的目录；顺序确定、去重，仍保留登录 shell `command -v` 作为最后兜底。
+
+登录 shell 查询不写死 `zsh`：优先用户数据库里的登录 shell（`getpwuid(getuid()).pw_shell`，与 `dscl . -read ~ UserShell` 同一个数据源，不需要额外子进程），取不到时用应用环境里的 `$SHELL`，再退回 `/bin/zsh`、`/bin/sh`；只有绝对路径且可执行的值会被采用。查询命令是 `<shell> -lc 'printf '__PI_WEB_TOOL_PATH__%s' "$PATH"'`，输出用固定标记解析，用户 shell 自己打印的内容不会污染 PATH 值；等待上限 3 秒，结果单次缓存。登录查询拿不到值时，再尝试一次交互式查询（`-ilc`），覆盖“PATH 只配在 `~/.zshrc` 这类非登录 shell 的 rc 里”的情况：交互式 rc 可能有副作用或很慢，所以只试一次、同样受超时约束，并且子进程的 stdin 固定为 `/dev/null`，不会因为 rc 读 stdin 而卡住诊断。
+
+`DependencyChecker` 用同一份 PATH 执行所有只读探测（`--version`、`npm prefix -g`、`command -v`），`ComponentInstallation` 用同一份环境执行 `pi list`、`npm/pnpm root -g`；只读约束不变：不安装、不联网、不写配置、不执行 `sudo`。`PiCLIUpdateEnvironment`、`PiPackageUpdateEnvironment`、`PiWebUpdateEnvironment` 的白名单（`PATH`、`HOME`、`TMPDIR`、`LANG`、`LC_ALL`、`LC_CTYPE`）保持不变，构建器只替换 `PATH` 的值、不新增任何键；`ServiceManager` 的启动环境同样用注入的 Provider 生成 PATH（没有 Provider 的纯单元测试场景退化为“应用环境 + 已知目录”的静态构建器，不执行任何命令），`PI_WEB_NO_OPEN`、`PI_WEB_PASSWORD`、`PI_WEB_ALLOWED_HOSTS` 与代理变量的语义不变。
+
+拿不到版本时不再只留一个 `unknown`：`DependencyFinding.diagnosis` 记录可读原因（例如“命令无法执行：合并后的工具 PATH 里找不到 node；`pi` 是 `#!/usr/bin/env node` 脚本，没有 node 时会以 127 退出”），诊断页的行内备注、摘要文本的“诊断：…”、`DependencyReportPresenter.diagnosisText` 诊断块与日志（`依赖诊断：<条目> <原因>`）都读这一个字段，文案只由静态字符串与工具名组成，不含路径、凭据或 URL。
+
+探测子进程的环境会去掉凭据类键（`token`/`password`/`secret`/`api_key`/`private_key`/`credential` 等词，与 `LogRedactor` 同一组词表），因此构建器既不会引入新变量，也不会把凭据转发给工具子进程。
+
 ## 服务所有权
 
 应用只对“由本应用实例启动、并且所有权记录仍能通过全部校验”的服务进程组发送信号。外部服务（用户手动启动的 pi-web、上一次运行留下的服务、任何无法验证的进程）对本应用只读：不发送任何 `TERM`/`KILL`，不把状态改成“已停止”，只保留原有的外部服务警告文案。完整威胁模型见 [docs/security-ownership.md](security-ownership.md)。

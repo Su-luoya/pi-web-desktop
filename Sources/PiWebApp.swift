@@ -127,6 +127,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private let appConfiguration: AppConfiguration
     private let commandRunner: CommandRunning
+    /// 应用级工具 PATH（GitHub #89）：依赖探测、组件识别、更新子进程与服务启动
+    /// 共用同一个实例，因此 PATH 只有一份来源（应用 PATH + 登录 shell + 已知
+    /// 目录 + node 目录 + npm prefix/bin）。应用从 Finder 启动时 PATH 最小，
+    /// `#!/usr/bin/env node` 脚本靠它才能找到 node。
+    private let toolPathProvider: ToolPathProvider
     private let processInspector: ProcessInspector
     private let serviceManager: ServiceManager
     /// 统一脱敏器（GitHub #10）：日志、诊断导出、错误消息、环境变量/命令行展示
@@ -152,23 +157,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         logRedactor: LogRedactor = LogRedactor()
     ) {
         self.appConfiguration = appConfiguration
-        self.commandRunner = commandRunner
         self.keychain = keychain
         self.workspaceProbe = workspaceProbe
         self.logRedactor = logRedactor
+        // 先用「继承应用环境」的 runner 解析工具 PATH（登录 shell 查询、node、
+        // npm prefix），再把解析结果交给主 runner：探测与工具调用因此共用同一份
+        // PATH。注入 runner 时（smoke / 测试）解析仍然只走注入的 runner。
+        let toolPathProvider = ToolPathProvider(
+            environment: ProcessInfo.processInfo.environment,
+            homeDirectory: NSHomeDirectory(),
+            commandRunner: commandRunner
+        )
+        self.toolPathProvider = toolPathProvider
+        let toolCommandRunner = ToolEnvironmentCommandRunner(
+            base: commandRunner,
+            environment: toolPathProvider.probeEnvironment()
+        )
+        self.commandRunner = toolCommandRunner
         let logWriter = LogWriter(logFileURL: appConfiguration.logURL, redactor: logRedactor)
         self.logWriter = logWriter
-        let processInspector = ProcessInspector(runner: commandRunner)
+        let processInspector = ProcessInspector(runner: toolCommandRunner)
         self.processInspector = processInspector
         self.serviceManager = ServiceManager(
             configuration: appConfiguration.serviceConfiguration,
             appConfiguration: appConfiguration,
             processInspector: processInspector,
-            commandRunner: commandRunner,
+            commandRunner: toolCommandRunner,
             // 远程模式的门控与环境变量都读这一个闭包：读取失败即“无密码”。
             remoteAccessPassword: { RemoteAccessPassword.load(from: keychain) },
             // ServiceManager 的日志与错误消息共用 AppDelegate 的脱敏器实例。
-            logWriter: logWriter
+            logWriter: logWriter,
+            // 服务启动环境与依赖探测共用同一个 PATH 构建器（GitHub #89）。
+            toolPathProvider: toolPathProvider
         )
         // 更新检查设置（GitHub #18）：策略与忽略版本都存在同一个注入的
         // UserDefaults domain 里；旧版布尔键经迁移函数回退，诊断行进日志。
@@ -196,10 +216,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             recordAbandonedAttempt: recordAbandonedAttempt
         )
         self.piCLIUpdateRunner = ProcessPiCLIUpdateCommand(
+            // 更新子进程的 PATH 也来自同一个构建器（GitHub #89）；白名单在
+            // `PiCLIUpdateEnvironment` 里保持不变。
+            baseEnvironment: toolPathProvider.probeEnvironment(),
             redact: { text in logRedactor.redact(text) },
             recordAbandonedAttempt: recordAbandonedAttempt
         )
         self.piPackageUpdateRunner = ProcessPiPackageUpdateCommand(
+            baseEnvironment: toolPathProvider.probeEnvironment(),
             redact: { text in logRedactor.redact(text) },
             recordAbandonedAttempt: recordAbandonedAttempt
         )
@@ -789,11 +813,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             servicePort: configuration.port,
             // 组件安装识别（GitHub #16）：只读运行中的应用包信息；unhosted 测试
             // 与 smoke 用默认 `.none`，因此不会读到真实 bundle 路径。
-            applicationInstallation: .current
+            applicationInstallation: .current,
+            // 与启动环境、更新子进程共用同一个工具 PATH（GitHub #89）。
+            toolPathProvider: toolPathProvider
         )
         CommandProbeDispatch.runOffMain(work: { checker.run() }) { [weak self] report in
             guard let self, generation == self.dependencyCheckGeneration else { return }
             self.applyDependencyReport(report, triggeredByUser: triggeredByUser)
+        }
+    }
+
+    /// 命令探测失败原因进日志（GitHub #89）：只写已脱敏的报告字段，文本里只有
+    /// 工具名与静态说明，不含 Home 路径、凭据或 URL。没有原因时不写任何东西。
+    private func logDependencyDiagnoses(_ report: DependencyReport) {
+        for finding in report.findings {
+            guard let diagnosis = finding.detail, !diagnosis.isEmpty else { continue }
+            _ = logWriter.append(logRedactor.redact(
+                "依赖诊断：\(DependencyReportPresenter.title(for: finding.kind)) \(diagnosis)"
+            ))
         }
     }
 
@@ -818,6 +855,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         firstLaunchSetupJustCompleted: Bool = false
     ) {
         dependencyReport = report
+        // 命令探测失败的原因（GitHub #89）进日志：不再只留一个 `.unknown`。
+        logDependencyDiagnoses(report)
         // 本机版本清单（GitHub #17 的检查输入）来自同一份 #16 识别结果。
         startUpdateChecking(with: UpdateCheckInventory(components: report.components))
         // 工作目录是独立的启动前置：每次报告落地前重新校验（首次使用会创建默认
@@ -957,9 +996,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 校验会执行 `--version`（同步阻塞、有超时上限），因此不在主线程做：
     /// 后台队列校验，主队列写配置与提示（与依赖检查同一条线程约定）。
     /// 参数探测失败时保留原配置，提示的可读文案与原同步实现一致。
+    /// 校验用的 `DependencyChecker` 与其它探测共用同一个 `toolPathProvider`
+    /// （GitHub #89）：`pi-web` 同样是 `#!/usr/bin/env node` 脚本，没有合并后的
+    /// 工具 PATH 时 `--version` 会以 127 退出。
     private func applySelectedPiWebPath(_ path: String) {
         let configuration = serviceManager.configuration
-        let checker = DependencyChecker(commandRunner: commandRunner)
+        let checker = DependencyChecker(commandRunner: commandRunner, toolPathProvider: toolPathProvider)
         CommandProbeDispatch.runOffMain(work: {
             PiWebPathSelection.apply(
                 selectedPath: path,
@@ -1107,7 +1149,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let installation = (report ?? dependencyReport)?.components.first { $0.kind == .piWeb }
         let piWebTarget = UpdateCheckTarget(category: .piWeb, packageName: nil)
         let result = updateChecker?.summary.result(for: piWebTarget.id)
-        let environment = ProcessInfo.processInfo.environment
+        // 同一份工具 PATH（GitHub #89）：npm 解析与安装子进程都靠它找到 node。
+        let environment = toolPathProvider.probeEnvironment()
         let npmPath = PiWebUpdateNPMResolver(environment: environment).resolve(installation: installation)
         return PiWebUpdatePlanningInput(
             preferences: updateChecker?.preferences ?? appConfiguration.updateCheckPreferences(),
@@ -2410,7 +2453,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 piWebPath: piWebPath,
                 appConfiguration: appConfiguration,
                 baseEnvironment: [:],
-                remoteAccessPassword: hasRemotePassword ? LogRedactor.marker : nil
+                remoteAccessPassword: hasRemotePassword ? LogRedactor.marker : nil,
+                // 展示的启动环境与真实启动用同一个 PATH 构建器（GitHub #89）。
+                toolPathProvider: toolPathProvider
             ).environment
         )
         return DiagnosticsExportSnapshot(

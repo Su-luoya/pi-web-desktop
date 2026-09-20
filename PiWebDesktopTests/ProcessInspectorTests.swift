@@ -330,7 +330,7 @@ final class ProcessInspectorTests: XCTestCase {
     func testSuccessfulProbeReturnsOutputWithoutSignalling() {
         let process = FakeProbeProcess(waitAnswers: [true])
         process.standardOutput = Data("v22.19.0\n".utf8)
-        let runner = SystemCommandRunner(timeout: 1, spawn: { _ in process })
+        let runner = SystemCommandRunner(timeout: 1, spawn: { _, _ in process })
 
         let result = runner.run(["/bin/echo"], timeout: 1)
         XCTAssertEqual(result, CommandRunResult(output: "v22.19.0\n"))
@@ -344,7 +344,7 @@ final class ProcessInspectorTests: XCTestCase {
     /// （不是普通不可用），调用方因此能写出“依赖探测超时”。
     func testTimedOutProbeTerminatesItsOwnChildAndReportsTimeout() {
         let process = FakeProbeProcess(waitAnswers: [false, false])
-        let runner = SystemCommandRunner(timeout: 0.01, terminationGrace: 0.25, spawn: { _ in process })
+        let runner = SystemCommandRunner(timeout: 0.01, terminationGrace: 0.25, spawn: { _, _ in process })
 
         let result = runner.run(["/bin/echo"], timeout: 0.01)
         XCTAssertEqual(result, CommandRunResult(output: nil, timedOut: true))
@@ -358,7 +358,7 @@ final class ProcessInspectorTests: XCTestCase {
     /// SIGTERM 生效时不再补 SIGKILL。
     func testTimedOutProbeThatExitsDuringGraceIsNotForceKilled() {
         let process = FakeProbeProcess(waitAnswers: [false, true])
-        let runner = SystemCommandRunner(timeout: 0.01, terminationGrace: 0.25, spawn: { _ in process })
+        let runner = SystemCommandRunner(timeout: 0.01, terminationGrace: 0.25, spawn: { _, _ in process })
 
         XCTAssertEqual(runner.run(["/bin/echo"], timeout: 0.01).timedOut, true)
         XCTAssertEqual(process.terminateCount, 1)
@@ -372,7 +372,7 @@ final class ProcessInspectorTests: XCTestCase {
         let later = FakeProbeProcess(waitAnswers: [true])
         later.standardOutput = Data("ok".utf8)
         var spawned: [ProbeProcess] = [blocking, later]
-        let runner = SystemCommandRunner(timeout: 5, terminationGrace: 0.01, spawn: { _ in spawned.removeFirst() })
+        let runner = SystemCommandRunner(timeout: 5, terminationGrace: 0.01, spawn: { _, _ in spawned.removeFirst() })
 
         var firstResult: CommandRunResult?
         let finished = expectation(description: "probe finished")
@@ -396,7 +396,7 @@ final class ProcessInspectorTests: XCTestCase {
     /// 没有正在进行的探针时取消是安全的（不崩溃、不发信号）；启动失败既不是超时
     /// 也不是取消。
     func testCancelWithoutActiveProbeIsSafeAndLaunchFailureIsPlainUnavailable() {
-        let runner = SystemCommandRunner(timeout: 1, spawn: { _ in throw ProbeProcessError.missingExecutable })
+        let runner = SystemCommandRunner(timeout: 1, spawn: { _, _ in throw ProbeProcessError.missingExecutable })
         runner.cancelRunningProbe()
 
         XCTAssertEqual(runner.run([], timeout: 1), CommandRunResult(output: nil))

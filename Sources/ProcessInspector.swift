@@ -27,6 +27,13 @@ protocol CommandRunning {
     /// 带超时上限的探测。默认实现退回 `run(_:)`（不提供超时能力），因此不会
     /// 把“没有超时”伪装成“有超时保证”。
     func run(_ arguments: [String], timeout: TimeInterval) -> CommandRunResult
+    /// 带显式子进程环境的探测（GitHub #89）：调用方传入 `ToolPath` 合并后的
+    /// 工具 PATH，让 `pi` 这类 `#!/usr/bin/env node` 脚本在应用由 Finder 启动、
+    /// 进程 PATH 只有系统目录时也能找到 `node`。`nil` 表示沿用本 runner 自己的
+    /// 环境（默认实现忽略该参数并转调 `run(_:)`，只关心参数的测试替身不必实现）。
+    func run(_ arguments: [String], environment: [String: String]?) -> String?
+    /// 环境与超时同时给出的探测（依赖诊断的常规入口）。
+    func run(_ arguments: [String], environment: [String: String]?, timeout: TimeInterval) -> CommandRunResult
     /// 取消正在进行的探测（若还有）：只终止**本次启动的**子进程，不阻塞等待。
     func cancelRunningProbe()
 }
@@ -34,6 +41,17 @@ protocol CommandRunning {
 extension CommandRunning {
     func run(_ arguments: [String], timeout: TimeInterval) -> CommandRunResult {
         CommandRunResult(output: run(arguments))
+    }
+
+    func run(_ arguments: [String], environment: [String: String]?) -> String? {
+        run(arguments)
+    }
+
+    func run(_ arguments: [String], environment: [String: String]?, timeout: TimeInterval) -> CommandRunResult {
+        // 没有专门实现“环境 + 超时”的 runner（例如只模拟超时的测试替身）带回退到
+        // 不带环境的超时入口：忽略环境也必须保留超时语义，否则“挂住的探针”会被
+        // 静默当成普通失败。生产 runner 自己实现了这一条。
+        run(arguments, timeout: timeout)
     }
 
     func cancelRunningProbe() {}
@@ -94,13 +112,17 @@ final class ProcessProbeProcess: ProbeProcess {
     private let readHandle: FileHandle
     private var collected = Data()
 
-    init(arguments: [String]) throws {
+    init(arguments: [String], environment: [String: String]? = nil) throws {
         guard let executable = arguments.first, !executable.isEmpty else {
             throw ProbeProcessError.missingExecutable
         }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = Array(arguments.dropFirst())
+        if let environment { process.environment = environment }
+        // 子进程的 stdin 固定为 /dev/null：交互式登录 shell 的 rc 文件即使读
+        // stdin 也不会阻塞应用（GitHub #89 的 PATH 查询）。
+        process.standardInput = FileHandle.nullDevice
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
@@ -179,7 +201,9 @@ final class SystemCommandRunner: CommandRunning {
 
     private let timeout: TimeInterval
     private let terminationGrace: TimeInterval
-    private let spawn: ([String]) throws -> ProbeProcess
+    /// 默认的子进程环境；nil 表示继承应用进程环境（旧行为）。
+    let environment: [String: String]?
+    private let spawn: ([String], [String: String]?) throws -> ProbeProcess
     private let lock = NSLock()
     /// 最近一次正在进行的探针与它的取消标记；取消只针对这一次子进程。
     private var activeProcess: ProbeProcess?
@@ -188,21 +212,33 @@ final class SystemCommandRunner: CommandRunning {
     init(
         timeout: TimeInterval = SystemCommandRunner.defaultTimeout,
         terminationGrace: TimeInterval = SystemCommandRunner.terminationGrace,
-        spawn: (([String]) throws -> ProbeProcess)? = nil
+        environment: [String: String]? = nil,
+        spawn: (([String], [String: String]?) throws -> ProbeProcess)? = nil
     ) {
         self.timeout = timeout
         self.terminationGrace = terminationGrace
-        self.spawn = spawn ?? { arguments in try ProcessProbeProcess(arguments: arguments) }
+        self.environment = environment
+        self.spawn = spawn ?? { arguments, environment in
+            try ProcessProbeProcess(arguments: arguments, environment: environment)
+        }
     }
 
     func run(_ arguments: [String]) -> String? {
-        run(arguments, timeout: timeout).output
+        run(arguments, environment: environment, timeout: timeout).output
+    }
+
+    func run(_ arguments: [String], environment explicitEnvironment: [String: String]?) -> String? {
+        run(arguments, environment: explicitEnvironment, timeout: timeout).output
     }
 
     func run(_ arguments: [String], timeout: TimeInterval) -> CommandRunResult {
+        run(arguments, environment: environment, timeout: timeout)
+    }
+
+    func run(_ arguments: [String], environment explicitEnvironment: [String: String]?, timeout: TimeInterval) -> CommandRunResult {
         let process: ProbeProcess
         do {
-            process = try spawn(arguments)
+            process = try spawn(arguments, explicitEnvironment)
         } catch {
             return CommandRunResult(output: nil)
         }

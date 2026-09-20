@@ -411,6 +411,14 @@ private final class ServiceManagerHarness {
     var legacyPIDFileURL: URL { appConfiguration.legacyServicePIDURL }
     var logURL: URL { appConfiguration.logURL }
 
+    /// 等日志写入队列排空再读日志文件（GitHub #88）。GitHub #73 起应用侧写入都在
+    /// `LogWriter` 的后台串行队列上，`startManagedService()` 返回不代表文件内容已
+    /// 可见；`flush()` 是确定性的排空屏障（返回时此前提交的写入/轮转均已完成）。
+    /// 读日志的断言一律先过这里，不用固定 sleep 猜时间。
+    func drainLogWrites() {
+        manager.logWriter.flush()
+    }
+
     func cleanUp() {
         try? FileManager.default.removeItem(at: root)
     }
@@ -1778,6 +1786,7 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(specification.arguments, ["--hostname", "pi.example.invalid", "--port", "30141", "--no-open"])
         let recordText = try String(contentsOf: harness.ownerFileURL, encoding: .utf8)
         XCTAssertFalse(recordText.contains(Self.remoteSecret))
+        harness.drainLogWrites()
         let logText = (try? String(contentsOf: harness.logURL, encoding: .utf8)) ?? ""
         XCTAssertFalse(logText.contains(Self.remoteSecret))
         XCTAssertEqual(harness.manager.currentState, .starting)
@@ -1806,6 +1815,9 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertFalse(message.contains(secret))
         XCTAssertTrue(message.contains("~/Library/Logs"), message)
         XCTAssertEqual(harness.manager.currentState, .failed(message))
+        // GitHub #88：“启动失败”这行经 `logWriter.record` 排队写入；先把队列排空
+        // 再读日志，否则断言的是“后台写入还没落地”时的空文件。
+        harness.drainLogWrites()
         let log = (try? String(contentsOf: harness.logURL, encoding: .utf8)) ?? ""
         XCTAssertTrue(log.contains("启动失败"), log)
         XCTAssertFalse(log.contains(secret))

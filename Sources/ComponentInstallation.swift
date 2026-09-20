@@ -548,19 +548,24 @@ struct ComponentInstallationDetector {
     /// 调用方已经解析出来的 `npm prefix -g`（#6 的诊断已执行过一次）；
     /// nil 表示本类型在需要时自行查询。
     private let knownNPMPrefix: String?
+    /// 命令探测的子进程环境（GitHub #89）：由 `ToolPathProvider` 构建，含登录
+    /// shell / 已知目录 / node 目录的 PATH。nil 表示按 runner 自己的选择执行。
+    private let commandEnvironment: [String: String]?
 
     init(
         commandRunner: CommandRunning = SystemCommandRunner(),
         fileSystem: DependencyFileSystemProbing = SystemDependencyFileSystemProbe(),
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: String? = nil,
-        knownNPMPrefix: String? = nil
+        knownNPMPrefix: String? = nil,
+        commandEnvironment: [String: String]? = nil
     ) {
         self.commandRunner = commandRunner
         self.fileSystem = fileSystem
         self.environment = environment
         self.homeDirectory = Self.normalizedDirectory(homeDirectory ?? fileSystem.homeDirectoryPath())
         self.knownNPMPrefix = knownNPMPrefix
+        self.commandEnvironment = commandEnvironment
     }
 
     // MARK: - 请求
@@ -614,9 +619,9 @@ struct ComponentInstallationDetector {
         guard let piExecutablePath, fileSystem.isExecutableFile(atPath: piExecutablePath) else {
             return []
         }
-        guard let output = commandRunner.run([piExecutablePath, "list"]) else {
+        guard let output = commandRunner.run([piExecutablePath, "list"], environment: commandEnvironment) else {
             return [Self.unknownPiPackage(evidence: [
-                "`pi list` 执行失败（无输出或非零退出）",
+                "`pi list` 执行失败（无输出或非零退出；命令无法执行时先确认合并后的工具 PATH 里能找到 node）",
                 "未验证原因：没有可解析的包列表，降级为 unknown（不猜测包名与版本）"
             ])]
         }
@@ -693,13 +698,13 @@ struct ComponentInstallationDetector {
         if let known = request.knownVersion {
             evidence.append("版本 \(known)：由调用方已解析（依赖诊断或 Info.plist），本识别器不重复执行命令")
         } else if request.runsVersionCommand, probe.isPresent, let executablePath = probe.executablePath {
-            if let output = trimmed(commandRunner.run([executablePath, "--version"])),
+            if let output = trimmed(commandRunner.run([executablePath, "--version"], environment: commandEnvironment)),
                let parsed = SemanticVersion.firstVersion(in: output) {
                 version = parsed.description
                 versionConfidence = .verified
                 evidence.append("`--version` 输出可解析：\(parsed.description)")
             } else {
-                evidence.append("`--version` 没有可解析的版本输出")
+                evidence.append("`--version` 没有可解析的版本输出（命令可能无法执行：PATH 里缺少 node）")
             }
         }
         if version == nil, let packageVersion = metadata?.version {
@@ -898,7 +903,7 @@ struct ComponentInstallationDetector {
     private func packageManagerRoots() -> PackageManagerRoots {
         var roots = PackageManagerRoots()
 
-        let npmRootOutput = trimmed(commandRunner.run([Self.runnerPath, "npm", "root", "-g"]))
+        let npmRootOutput = trimmed(commandRunner.run([Self.runnerPath, "npm", "root", "-g"], environment: commandEnvironment))
             .map(Self.normalizedDirectory)
         let prefix = knownNPMPrefix.map(Self.normalizedDirectory)
         if let npmRootOutput, !npmRootOutput.isEmpty {
@@ -909,16 +914,16 @@ struct ComponentInstallationDetector {
             roots.npmRoot = derived
             roots.npmRootEvidence = "npm root -g 无输出；由已解析的 npm prefix -g → \(prefix) 推定为 \(derived)"
         } else {
-            roots.npmRootEvidence = "npm root -g 无输出，也没有已知的 npm 全局前缀"
+            roots.npmRootEvidence = "npm root -g 无输出，也没有已知的 npm 全局前缀（命令无法执行时：合并后的工具 PATH 里找不到 npm 或 node）"
         }
 
-        let pnpmRootOutput = trimmed(commandRunner.run([Self.runnerPath, "pnpm", "root", "-g"]))
+        let pnpmRootOutput = trimmed(commandRunner.run([Self.runnerPath, "pnpm", "root", "-g"], environment: commandEnvironment))
             .map(Self.normalizedDirectory)
         if let pnpmRootOutput, !pnpmRootOutput.isEmpty {
             roots.pnpmRoot = pnpmRootOutput
             roots.pnpmRootEvidence = "pnpm root -g → \(pnpmRootOutput)"
         } else {
-            roots.pnpmRootEvidence = "pnpm root -g 无输出（未安装或未配置全局目录）"
+            roots.pnpmRootEvidence = "pnpm root -g 无输出（未安装、未配置全局目录，或工具 PATH 里找不到 node）"
         }
         return roots
     }
@@ -946,7 +951,7 @@ struct ComponentInstallationDetector {
         }
         if probesShellPath {
             for name in names {
-                guard let path = trimmed(commandRunner.run([Self.shellPath, "-lc", "command -v \(name) 2>/dev/null"])) else { continue }
+                guard let path = trimmed(commandRunner.run([Self.shellPath, "-lc", "command -v \(name) 2>/dev/null"], environment: commandEnvironment)) else { continue }
                 if fileSystem.isExecutableFile(atPath: path) {
                     return makeProbe(path: path)
                 }

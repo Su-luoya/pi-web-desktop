@@ -123,7 +123,8 @@ struct ServiceLaunchSpecification: Equatable {
         piWebPath: String,
         appConfiguration: AppConfiguration,
         baseEnvironment: [String: String],
-        remoteAccessPassword: String? = nil
+        remoteAccessPassword: String? = nil,
+        toolPathProvider: ToolPathProvider? = nil
     ) -> ServiceLaunchSpecification {
         var environment = baseEnvironment
         environment["PI_WEB_NO_OPEN"] = "1"
@@ -142,7 +143,10 @@ struct ServiceLaunchSpecification: Equatable {
         } else {
             environment.removeValue(forKey: "PI_WEB_ALLOWED_HOSTS")
         }
-        environment["PATH"] = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        // PATH 不再硬编码（GitHub #89）：由应用级工具 PATH 构建器给出——应用 PATH
+        // → 登录 shell PATH → 已知目录 → node 目录 → npm prefix/bin，与依赖探测、
+        // 组件识别、更新子进程共用同一个实例，因此三处 PATH 完全一致。
+        environment["PATH"] = resolvedToolPath(toolPathProvider, baseEnvironment: baseEnvironment)
         let proxyURL = configuration.httpProxy
         let httpsProxyURL = configuration.httpsProxy
         for (key, value) in [("HTTP_PROXY", proxyURL), ("http_proxy", proxyURL), ("HTTPS_PROXY", httpsProxyURL), ("https_proxy", httpsProxyURL)] {
@@ -161,6 +165,21 @@ struct ServiceLaunchSpecification: Equatable {
             workingDirectory: appConfiguration.workspaceDirectory(for: configuration),
             environment: environment
         )
+    }
+
+    /// 启动环境的 PATH：注入的构建器优先，其次是纯静态兜底（应用环境 + 已知目录）。
+    /// 两条路径都只产出目录列表，不引入任何新变量，也不执行任何命令。
+    private static func resolvedToolPath(
+        _ provider: ToolPathProvider?,
+        baseEnvironment: [String: String]
+    ) -> String {
+        if let provider { return provider.path() }
+        return ToolPathBuilder(
+            appEnvironment: baseEnvironment,
+            // Home 只从传入的环境推断：调用方没给 HOME 时不猜真实用户目录，
+            // 仍然保留 Homebrew / `/usr/local` / 系统目录兜底。
+            homeDirectory: baseEnvironment["HOME"] ?? ""
+        ).path()
     }
 
     /// Canonical argument list for a configuration. The launcher and the
@@ -514,6 +533,9 @@ final class ServiceManager {
     private let probe: ServiceProbing
     private let scheduler: ServiceScheduling
     private let environment: () -> [String: String]
+    /// 服务启动环境用的工具 PATH 构建器（GitHub #89）：注入时与依赖探测、更新
+    /// 子进程共用同一个实例（应用从 Finder 启动的 PATH 最小场景靠它补齐 node）。
+    private let toolPathProvider: ToolPathProvider?
     private let fileManager: FileManager
     private let ownershipStore: ServiceOwnershipStoring
     private let signaler: ServiceSignaling
@@ -571,7 +593,8 @@ final class ServiceManager {
         remoteAccessPassword: @escaping () -> String? = { nil },
         workspaceProbe: WorkspaceDirectoryProbe? = nil,
         instanceID: String = UUID().uuidString,
-        logWriter: LogWriter? = nil
+        logWriter: LogWriter? = nil,
+        toolPathProvider: ToolPathProvider? = nil
     ) {
         self.configuration = configuration
         self.appConfiguration = appConfiguration
@@ -581,6 +604,7 @@ final class ServiceManager {
         self.probe = probe
         self.scheduler = scheduler
         self.environment = environment
+        self.toolPathProvider = toolPathProvider
         self.fileManager = fileManager
         self.ownershipStore = ownershipStore
         self.signaler = signaler
@@ -839,12 +863,14 @@ final class ServiceManager {
             return .missingExecutable
         }
         // 同一个 `credentials` 值同时用于校验和启动规格：启动路径不会二次读取。
+        // PATH 来自注入的工具 PATH 构建器（未注入时 `make` 用纯静态兜底）。
         return .launch(ServiceLaunchSpecification.make(
             configuration: configuration,
             piWebPath: piWebPath,
             appConfiguration: appConfiguration,
             baseEnvironment: environment(),
-            remoteAccessPassword: credentials
+            remoteAccessPassword: credentials,
+            toolPathProvider: toolPathProvider
         ))
     }
 

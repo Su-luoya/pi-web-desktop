@@ -339,20 +339,15 @@ enum PiPackageUpdateArgumentPolicy {
 enum PiPackageUpdateEnvironment {
     static func environment(base: [String: String], piExecutablePath: String) -> [String: String] {
         var result = PiWebUpdateEnvironment.sanitized(base)
-        var directories: [String] = []
-        let directory = (piExecutablePath as NSString).deletingLastPathComponent
-        if !directory.isEmpty, directory != "/", !directories.contains(directory) {
-            directories.append(directory)
-        }
-        for entry in (result["PATH"] ?? "").split(separator: ":") {
-            let text = String(entry)
-            guard !text.isEmpty, !directories.contains(text) else { continue }
-            directories.append(text)
-        }
-        for entry in PiWebUpdateEnvironment.fallbackPathDirectories where !directories.contains(entry) {
-            directories.append(entry)
-        }
-        result["PATH"] = directories.joined(separator: ":")
+        // PATH 合并复用 `ToolPathBuilder`（GitHub #89）：pi 自己所在目录排在最前，
+        // 其余目录由构建器给出（登录 shell PATH、已知目录、node 目录、npm prefix/bin）。
+        let builder = ToolPathBuilder(
+            appEnvironment: result,
+            homeDirectory: result["HOME"] ?? ""
+        )
+        result["PATH"] = builder.path(prioritizing: [
+            (piExecutablePath as NSString).deletingLastPathComponent
+        ])
         return result
     }
 

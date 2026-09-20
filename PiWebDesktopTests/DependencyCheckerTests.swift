@@ -835,6 +835,9 @@ final class DependencyCheckerTests: XCTestCase {
         _ = harness.checker().run()
 
         // #16 的组件识别只多了这些只读查询：npm/pnpm 全局 root 与 `pi list`。
+        // #89 的输出 PATH 构建额外做只读的登录 shell PATH 查询：优先用户自己的
+        // 登录 shell（`-lc`），拿不到值时再试一次交互式查询（`-ilc`）。
+        let shell = LoginShellResolver.shellPath(environment: ProcessInfo.processInfo.environment)
         XCTAssertEqual(
             Set(harness.runner.invocationLines),
             Set([
@@ -844,7 +847,9 @@ final class DependencyCheckerTests: XCTestCase {
                 "/opt/homebrew/bin/node --version",
                 "/opt/homebrew/bin/pi --version",
                 "/opt/homebrew/bin/pi list",
-                "/opt/homebrew/bin/pi-web --version"
+                "/opt/homebrew/bin/pi-web --version",
+                "\(shell) -lc \(LoginShellPathQuery.command)",
+                "\(shell) -ilc \(LoginShellPathQuery.command)"
             ])
         )
         for line in harness.runner.invocationLines {

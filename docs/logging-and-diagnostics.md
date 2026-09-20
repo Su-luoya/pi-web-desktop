@@ -124,6 +124,35 @@ Pi Web 安装超时或取消、Pi CLI 与扩展包的更新命令超时或放弃
 
 统一的更新历史（`updateChecks.updateHistory`）只存时间、组件、来源、从/到版本、每个阶段的固定结论、固定原因文案与降级结论；写入前逐条校验，非法版本号、非法包名与未知枚举直接丢弃，不写绝对路径、环境值或子进程输出。诊断页的“最近一次更新”行只展示完成阶段、阶段结论与建议动作，手动命令文本来自静态清单，仅展示、不执行。验证阶段的探针结果（文件是否存在、是否可执行、`package.json` 名称、可选的大小/mtime）只在内存中参与判定，不写入历史也不进入诊断导出。
 
+## 命令探测失败的原因（GitHub #89）
+
+依赖探测只在只读的子进程里跑版本查询。拿不到版本时不再只报“无法确定/未知”，原因会写入 `DependencyFinding.diagnosis`，并出现在三个地方：
+
+- 诊断页/摘要：每个条目下多一行 `诊断：…`；
+- 诊断页的「命令探测的原因（只读探测，不会安装任何东西）」块（`DependencyReportPresenter.diagnosisText`），每条一行；
+- 日志与会话记录：`依赖诊断：<条目> <原因>`。
+
+常见原因与含义：
+
+- `命令无法执行：合并后的工具 PATH 里找不到 node；\`pi\` 是 \`#!/usr/bin/env node\` 脚本，没有 node 时会以 127 退出`：node 既不在应用 `PATH`、登录 shell 报告的 `PATH`、已知目录里，也不在 npm 全局 prefix 下。
+- `命令无法执行：PATH 中找不到 node（已尝试合并后的工具 PATH、已知目录与登录 shell）`：同一条原因在 Node.js 条目上的说法，两个条目都是阻止启动的硬性前提。
+- `\`pi-web --version\` 无输出或非零退出；已经找到 node，但版本输出不能作为身份证据`：node 能跑，但 `pi-web` 自己没有可用版本输出（`pi-web` 不支持 `--version` 时，版本会从安装目录的 `package.json` 补上；两者都拿不到才会出现在这里）。
+
+诊断文案只由静态字符串和工具名组成，不含路径、凭据、URL，也不需要用户提供任何信息。
+
+### 手动兜底（FAQ）
+
+绝大多数情况不需要任何手工配置：应用按固定顺序探测应用 `PATH`、登录 shell 报告的 `PATH`（并会在拿不到值时再试一次交互式查询）、已安装包管理器常用的默认目录（`/opt/homebrew/bin`、`/opt/homebrew/sbin`、`/usr/local/bin`、`/usr/local/sbin`、`/opt/local/bin`、`~/.local/bin`、`~/.npm-global/bin`、`~/.bun/bin`、`~/.cargo/bin`）以及解析出的 node/npm prefix。Finder 里双击打开、没有终端使用习惯的机器也能通过检测。
+
+如果确实有应用无法自动覆盖的情况（例如 `PATH` 只在某个屏幕会话或 `launchctl` 会话里），按需要选一种兜底（均在本机完成，不涉及联网）：
+
+1. **把 `PATH` 写进 shell 配置**（最普遍）：在登录 shell 的配置（如 `~/.zprofile`）或交互式配置（如 `~/.zshrc`）里 `export PATH=…`，然后完全退出并重新打开应用。“重新检测”会重新解析。
+2. **手动指定 pi-web 路径**：诊断页的「选择 pi-web 路径…」可以指定任意位置的可执行文件；应用会核对身份（`--version` 可解析，或沿真实路径向上找到的 `package.json` 的 `name` 是 `@agegr/pi-web`），不匹配的文件会被拒绝。
+3. **给 GUI 会话设 `PATH`**：`launchctl setenv PATH "…"` 后完全退出并重启应用；只建议作为临时兜底，注销/重登后失效。
+4. **把工具装到默认位置**：Homebrew（`/opt/homebrew/bin` 或 Intel 前缀 `/usr/local/bin`）、MacPorts（`/opt/local/bin`）、或 npm 全局默认 prefix（`~/.npm-global/bin` 等）——这些目录不需要任何环境变量就会被探测到。
+
+确认修复的两种方式：看日志里的 `依赖诊断：…` 行（修好后不再出现），或在诊断页重新检测后看到对应条目变成“已安装”/“就绪”与 `诊断：` 行消失。应用自身永远不会为了修好前置而安装、删除或修改任何东西：不跑 `sudo`、不执行安装命令、不写 shell 配置、不改 `launchctl` 环境。
+
 ## 诊断导出内容
 
 `DiagnosticsCollector.text(for:redactor:)` 组装以下字段（顺序即导出顺序），最后整段交给 `LogRedactor`：

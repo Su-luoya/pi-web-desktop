@@ -235,6 +235,9 @@ enum PiPackageUpdateRefusal: Equatable {
     case abandonedAttemptPending(UpdateAbandonedAttempt)
     /// 执行器上还有一次命令没结束（B-1）：本次没有执行，也没有任何状态改动。
     case executorBusy
+    /// 执行器上还有一次命令已放弃等待、但退出尚未确认（B-1/W3）：本次没有执行，
+    /// 也没有任何状态改动；这种窗口只能靠重启应用可靠恢复。
+    case executorBusyAwaitingAbandonedChildExit
 
     /// 单行原因文案（固定文本 + 已脱敏的进程记录摘要）。
     var text: String {
@@ -280,6 +283,9 @@ enum PiPackageUpdateRefusal: Equatable {
             return UpdateAbandonedAttemptPresenter.automaticRefusalText(attempt)
         case .executorBusy:
             return "执行器上还有一次更新命令没有结束：本次不执行、不改状态，也不向任何进程发送信号"
+        case .executorBusyAwaitingAbandonedChildExit:
+            return "上一次更新命令已放弃等待，但还不能确认它已经退出，因此不会启动第二次更新。"
+                + "如果长时间没有变化，重启应用即可恢复（重启后这个未确认窗口不会保留）"
         }
     }
 }
@@ -1001,6 +1007,9 @@ struct PiPackageUpdateCommandResult: Equatable {
     var exitCode: Int32?
     /// 本次运行没有执行（执行器忙）：`exitCode` 为 nil，`failure` 为 `.notAttempted`。
     var notAttempted: Bool
+    /// 没执行的原因是「上一次命令已放弃等待、退出仍未确认」（B-1/W3）：调用方据此
+    /// 给出「重启应用可恢复」的可见原因，而不是笼统的“执行器忙”。
+    var awaitingAbandonedChildExit: Bool
     var launchFailed: Bool
     var timedOut: Bool
     var abandoned: Bool
@@ -1012,6 +1021,7 @@ struct PiPackageUpdateCommandResult: Equatable {
     init(
         exitCode: Int32?,
         notAttempted: Bool = false,
+        awaitingAbandonedChildExit: Bool = false,
         launchFailed: Bool = false,
         timedOut: Bool = false,
         abandoned: Bool = false,
@@ -1022,6 +1032,7 @@ struct PiPackageUpdateCommandResult: Equatable {
     ) {
         self.exitCode = exitCode
         self.notAttempted = notAttempted
+        self.awaitingAbandonedChildExit = awaitingAbandonedChildExit
         self.launchFailed = launchFailed
         self.timedOut = timedOut
         self.abandoned = abandoned
@@ -1144,6 +1155,10 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
     func abandon() {
         stateQueue.async { [weak self] in
             guard let self, self.running, !self.finished else { return }
+            // B-3：放弃等待落在「进程已结束、只是在等管道读到 EOF」的宽限窗口里时，
+            // 并不算放弃等待：子进程已经退出、结果会照常投递。此时写一条
+            // `finishedAt == nil` 的「已放弃」记录是失实的历史，登记也永远无人结清。
+            guard self.pendingFinish == nil, self.process?.isRunning != false else { return }
             self.abandoned = true
             self.recordAbandonedAttemptLocked(reason: .abandonedWaiting)
             self.finishLocked(exitCode: nil)
@@ -1166,6 +1181,9 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
             completion(PiPackageUpdateCommandResult(
                 exitCode: nil,
                 notAttempted: true,
+                // B-1/W3：旧子进程已放弃等待但退出还没确认时，拒绝的理由不是笼统的
+                // “执行器忙”，而是「重启应用可恢复」的未确认窗口。
+                awaitingAbandonedChildExit: !abandonedProcesses.isEmpty,
                 startedAt: now,
                 finishedAt: now
             ))
@@ -1684,7 +1702,9 @@ final class PiPackageUpdateCoordinator {
             // B-1：执行器拒绝执行时（同一实例上还有一次运行没结束）也必须回调。
             // 这里如实记录「未执行」：不写安装失败，也不断言旧版本是否还在原位。
             if result.notAttempted {
-                let reason = PiPackageUpdateRefusal.executorBusy
+                let reason = result.awaitingAbandonedChildExit
+                    ? PiPackageUpdateRefusal.executorBusyAwaitingAbandonedChildExit
+                    : PiPackageUpdateRefusal.executorBusy
                 self.logOutcome(
                     "Pi 扩展包更新（\(plan.packageName)）：未执行（\(reason.text)）；"
                         + "当前版本 \(plan.installedVersion)，目标版本 \(plan.targetVersion ?? "未知")。"

@@ -510,13 +510,20 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
     /// 进程结束后等两条管道读到 EOF 的宽限时间（有界；超时后照常结束）。
     /// `readabilityHandler` 是异步投递的，不等就可能丢掉最后一段输出（正是失败
     /// 原因所在）；但也不能无限等（子进程可能留下持有写端的孩子）。
-    static let pipeDrainGrace: TimeInterval = 0.5
+    static let defaultPipeDrainGrace: TimeInterval = 0.5
+    /// 超时落在「进程已结束、只是结束回调还没轮到」窗口里时的有界让出次数与间隔
+    /// （与扩展包执行器同一处理，B-2）。
+    static let timeoutRetryDelay: TimeInterval = 0.2
+    static let maxTimeoutRetries = 5
 
     private let stateQueue = DispatchQueue(label: "io.github.su-luoya.pi-web-desktop.pi-cli-update-command")
     private let clock: () -> Date
     private let baseEnvironment: [String: String]
     private let redact: (String) -> String
     private let recordAbandonedAttempt: (UpdateAbandonedAttempt) -> Void
+    /// 等两条管道读到 EOF 的宽限时间；可注入，让「放弃等待落在排水窗口里」的
+    /// 场景能在测试里确定地复现（B-3）。
+    private let pipeDrainGrace: TimeInterval
 
     /// 当前正在执行的一轮；nil 表示空闲。每次 `run` 新建一份，后来者不能覆盖它
     /// （W2A A-1/A-2），上一轮彻底结束后也必须能换成新的一份（W3B F1）。只在
@@ -567,6 +574,8 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
         var exitNotified = false
         /// 本轮是否已经走到终态（结果已经或即将投递）。
         var finished = false
+        /// 超时落在「进程已结束、退出通知还没到」窗口里的让出次数（B-2，有界）。
+        var timeoutRetries = 0
 
         init(
             plan: PiCLIUpdatePlan,
@@ -585,12 +594,14 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
         clock: @escaping () -> Date = { Date() },
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         redact: @escaping (String) -> String = { LogRedactor().redact($0) },
-        recordAbandonedAttempt: @escaping (UpdateAbandonedAttempt) -> Void = { _ in }
+        recordAbandonedAttempt: @escaping (UpdateAbandonedAttempt) -> Void = { _ in },
+        pipeDrainGrace: TimeInterval = ProcessPiCLIUpdateCommand.defaultPipeDrainGrace
     ) {
         self.clock = clock
         self.baseEnvironment = baseEnvironment
         self.redact = redact
         self.recordAbandonedAttempt = recordAbandonedAttempt
+        self.pipeDrainGrace = pipeDrainGrace
     }
 
     func run(
@@ -606,6 +617,11 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
     func abandon() {
         stateQueue.async { [weak self] in
             guard let self, let attempt = self.attempt else { return }
+            // B-3：放弃等待落在「进程已结束、只是在等管道读到 EOF」的宽限窗口里时，
+            // 并不算放弃等待：子进程已经退出、结果会照常投递。此时写一条
+            // `finishedAt == nil` 的「已放弃」记录是失实的历史，登记也无人结清。
+            guard !attempt.finished, attempt.pendingFinish == nil,
+                  attempt.process?.isRunning != false else { return }
             attempt.abandoned = true
             self.markAbandonedUnconfirmedLocked(attempt)
             self.recordAbandonedAttemptLocked(attempt, reason: .abandonedWaiting)
@@ -697,12 +713,25 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
         scheduleTimeoutLocked(attempt)
     }
 
-    private func scheduleTimeoutLocked(_ attempt: Attempt) {
+    /// - Parameter delay: 非 nil 表示这是让出后的重排（用固定间隔），否则用本轮超时值。
+    private func scheduleTimeoutLocked(_ attempt: Attempt, after delay: TimeInterval? = nil) {
         let timer = DispatchSource.makeTimerSource(queue: stateQueue)
-        timer.schedule(deadline: .now() + max(0.05, attempt.timeout))
-        timer.setEventHandler { [weak self] in
-            // 只有这一轮仍是当前轮时才收尾：已结束或已被替换的旧定时器不会动别人。
-            guard let self, self.attempt === attempt, !attempt.finished else { return }
+        timer.schedule(deadline: .now() + max(0.05, delay ?? attempt.timeout))
+        timer.setEventHandler { [weak self, weak timer] in
+            // 只有这一轮仍是当前轮、且这个计时器还是本轮计时器时才收尾：已结束、
+            // 已被替换或已被重排的旧定时器不会动别人。
+            guard let self, let timer, self.attempt === attempt, attempt.timer === timer,
+                  !attempt.finished else { return }
+            // B-2：进程已经结束（只是在等管道读到 EOF 的宽限期）时超时计时不再算数，
+            // 否则会把正常退出的命令记成超时，并写下一条不实的「已放弃」记录。
+            guard attempt.pendingFinish == nil else { return }
+            // B-2 补充：进程已经不在运行、只是结束回调还没轮到状态队列时，先让出一小段
+            // 时间等退出码到达（有界）——否则会把已经退出的命令记成超时。
+            if attempt.process?.isRunning == false, attempt.timeoutRetries < Self.maxTimeoutRetries {
+                attempt.timeoutRetries += 1
+                self.scheduleTimeoutLocked(attempt, after: Self.timeoutRetryDelay)
+                return
+            }
             // 超时只放弃等待：不发送信号、不终止子进程；同时写一条「已放弃」记录。
             attempt.timedOut = true
             self.markAbandonedUnconfirmedLocked(attempt)
@@ -811,7 +840,7 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
     private func scheduleDrainDeadlineLocked(_ attempt: Attempt) {
         guard attempt.drainTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: stateQueue)
-        timer.schedule(deadline: .now() + Self.pipeDrainGrace)
+        timer.schedule(deadline: .now() + pipeDrainGrace)
         timer.setEventHandler { [weak self] in
             guard let self,
                   let pending = attempt.pendingFinish,
@@ -993,7 +1022,8 @@ enum PiCLIUpdateRunOutcome: Equatable {
                 oldVersion: oldVersion,
                 newVersion: plan.installedVersion,
                 targetVersion: targetVersion,
-                reason: "更新失败，仍在使用旧版本：\(failure.text)"
+                // B-6：命令失败不证明旧文件没被改动，不写“仍在使用旧版本”这类没有探针支撑的断言。
+                reason: "更新失败，没有执行任何回滚动作：\(failure.text)"
             )
         case .versionUnchanged(_, let detectedVersion, let oldVersion, let targetVersion):
             return PiCLIUpdateWarning(

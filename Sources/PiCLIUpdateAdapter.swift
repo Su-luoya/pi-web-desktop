@@ -562,6 +562,8 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
         var abandoned = false
         var stdoutTail = ""
         var stderrTail = ""
+        var stdoutDecoder = IncrementalUTF8Decoder()
+        var stderrDecoder = IncrementalUTF8Decoder()
         var stdoutDrained = false
         var stderrDrained = false
         /// 本轮是否已经写过「已放弃」记录（至多一条）。
@@ -776,20 +778,35 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
                 handle.readabilityHandler = nil
                 if toStdout {
                     attempt.stdoutDrained = true
+                    self.appendDecoded(
+                        attempt.stdoutDecoder.decode(Data(), final: true),
+                        toStdout: true,
+                        attempt: attempt
+                    )
                 } else {
                     attempt.stderrDrained = true
+                    self.appendDecoded(
+                        attempt.stderrDecoder.decode(Data(), final: true),
+                        toStdout: false,
+                        attempt: attempt
+                    )
                 }
                 self.completePendingLocked(attempt)
                 return
             }
-            // lossy 解码：一个分块不是完整 UTF-8 时不再整块丢弃（W2A A-6）。
-            let text = String(decoding: data, as: UTF8.self)
-            guard !text.isEmpty else { return }
-            if toStdout {
-                attempt.stdoutTail = Self.bounded(attempt.stdoutTail + text)
-            } else {
-                attempt.stderrTail = Self.bounded(attempt.stderrTail + text)
-            }
+            let text = toStdout
+                ? attempt.stdoutDecoder.decode(data)
+                : attempt.stderrDecoder.decode(data)
+            self.appendDecoded(text, toStdout: toStdout, attempt: attempt)
+        }
+    }
+
+    private func appendDecoded(_ text: String, toStdout: Bool, attempt: Attempt) {
+        guard !text.isEmpty else { return }
+        if toStdout {
+            attempt.stdoutTail = Self.bounded(attempt.stdoutTail + text)
+        } else {
+            attempt.stderrTail = Self.bounded(attempt.stderrTail + text)
         }
     }
 
@@ -859,6 +876,16 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
         attempt.timer = nil
         attempt.drainTimer?.cancel()
         attempt.drainTimer = nil
+        appendDecoded(
+            attempt.stdoutDecoder.decode(Data(), final: true),
+            toStdout: true,
+            attempt: attempt
+        )
+        appendDecoded(
+            attempt.stderrDecoder.decode(Data(), final: true),
+            toStdout: false,
+            attempt: attempt
+        )
         // 退出通知已经到过（例如放弃等待正好落在「进程已结束、还在等管道读完」的
         // 窗口里）就必须在这里结清「不确定」计数：那一刻不会再有第二次退出通知。
         if attempt.exitNotified {

@@ -86,7 +86,10 @@ final class PiWebUpdateAdapterTests: XCTestCase {
             self.homeDirectory = homeDirectory
         }
 
-        func makeCoordinator(timeout: TimeInterval = 60) -> PiWebUpdateCoordinator {
+        func makeCoordinator(
+            timeout: TimeInterval = 60,
+            transaction: UpdateTransactionEnvironment = .disabled
+        ) -> PiWebUpdateCoordinator {
             PiWebUpdateCoordinator(environment: PiWebUpdateCoordinator.Environment(
                 installer: installer,
                 detectInstallation: {
@@ -106,7 +109,8 @@ final class PiWebUpdateAdapterTests: XCTestCase {
                 redactor: LogRedactor(homeDirectory: self.homeDirectory),
                 log: { message in self.log.append(message) },
                 deliver: { work in work() },
-                timeout: timeout
+                timeout: timeout,
+                transaction: transaction
             ))
         }
     }
@@ -544,6 +548,31 @@ final class PiWebUpdateAdapterTests: XCTestCase {
         XCTAssertEqual(world.startCallCount, 0)
     }
 
+    func testSuccessfulUpdateHistoryRecordsPassedHealthCheck() throws {
+        let world = CoordinatorWorld(homeDirectory: fixtureHome)
+        world.detectedInstallation = installation(version: "0.9.2")
+        world.healthResults = [true]
+        var history: [UpdateHistoryEntry] = []
+        let transaction = UpdateTransactionEnvironment(
+            probe: .disabled,
+            recordHistory: { history.append($0) },
+            applyDegradation: { _ in },
+            now: { self.referenceDate }
+        )
+
+        var outcome: PiWebUpdateRunOutcome?
+        world.makeCoordinator(transaction: transaction)
+            .run(input(installation: installation())) { outcome = $0 }
+
+        XCTAssertTrue(try XCTUnwrap(outcome).isSucceeded)
+        let entry = try XCTUnwrap(history.first)
+        let verification = try XCTUnwrap(entry.phases.first { $0.phase == .verify })
+        XCTAssertEqual(verification.status, .succeeded)
+        XCTAssertTrue(verification.reason.contains("健康检查（既有路径）报告服务可用"))
+        XCTAssertFalse(verification.reason.contains("尚未启动服务"))
+        XCTAssertFalse(verification.reason.contains("健康检查未运行"))
+    }
+
     // MARK: - 5. 版本变化但健康检查失败 → 降级 + 持久警告
 
     func testHealthCheckFailureAfterSuccessfulUpdateKeepsOldVersionRecorded() throws {
@@ -766,6 +795,31 @@ final class PiWebUpdateAdapterTests: XCTestCase {
         )
         XCTAssertEqual(resolver.resolve(installation: nil), npm.path)
         XCTAssertTrue(resolver.candidates(installation: nil).count == 1)
+    }
+
+    func testRelativePATHEntryIsFilteredAndReportedPrecisely() {
+        let environment = ["PATH": "/usr/bin:relative-bin::/bin", "HOME": fixtureHome]
+        let resolver = PiWebUpdateNPMResolver(
+            fileSystem: SystemDependencyFileSystemProbe(),
+            environment: environment
+        )
+        XCTAssertEqual(
+            resolver.candidates(installation: nil),
+            ["/usr/bin/npm", "/bin/npm"],
+            "PATH 的相对项与空项不得被解释为当前工作目录下的候选"
+        )
+
+        let decision = PiWebUpdatePlanner.decide(input(
+            installation: installation(),
+            npmExecutablePath: nil,
+            baseEnvironment: environment
+        ))
+        guard case .unavailable(let reason) = decision else {
+            return XCTFail("相对 PATH 项且无法解析 npm 时必须明确拒绝，实际是 \(decision)")
+        }
+        XCTAssertEqual(reason, .unsafeExecutablePath)
+        XCTAssertTrue(reason.text.contains("PATH 中的相对项"))
+        XCTAssertFalse(reason.text.contains("参数安全校验失败"))
     }
 
     // MARK: - Process 安装器（只执行临时目录里的假脚本）
@@ -1034,6 +1088,101 @@ final class PiWebUpdateAdapterTests: XCTestCase {
 
         wait(for: [finished], timeout: 30)
         withExtendedLifetime(installer) {}
+    }
+
+    func testProcessInstallerPreservesUTF8SplitAcrossChunks() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = try makeScript(in: directory, body: """
+        printf '\\344\\270'
+        sleep 0.3
+        printf '\\255-tail'
+        """)
+        let plan = try makePlan(
+            npmExecutablePath: script,
+            baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": directory.path]
+        )
+
+        let box = ResultBox()
+        let finished = expectation(description: "installer preserves split UTF-8")
+        let installer = ProcessPiWebUpdateInstaller()
+        installer.install(plan, timeout: 30) { result in
+            box.value = result
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 30)
+        withExtendedLifetime(installer) {}
+
+        XCTAssertEqual(box.value?.failure, nil)
+        XCTAssertEqual(box.value?.outputTail, "中-tail")
+        XCTAssertFalse(box.value?.outputTail?.contains("�") ?? true)
+    }
+
+    func testProcessInstallerKeepsTailWrittenAfterParentExit() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = try makeScript(in: directory, body: """
+        (sleep 0.2; printf 'after-exit') &
+        exit 0
+        """)
+        let plan = try makePlan(
+            npmExecutablePath: script,
+            baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": directory.path]
+        )
+
+        let box = ResultBox()
+        let finished = expectation(description: "installer drains output after exit")
+        let installer = ProcessPiWebUpdateInstaller(pipeDrainGrace: 2)
+        installer.install(plan, timeout: 30) { result in
+            box.value = result
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 30)
+        withExtendedLifetime(installer) {}
+
+        XCTAssertEqual(box.value?.exitCode, 0)
+        XCTAssertEqual(box.value?.outputTail, "after-exit")
+    }
+
+    func testProcessInstallerAbandonDuringDrainGraceKeepsSuccessfulExit() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let marker = directory.appendingPathComponent("parent-exited")
+        let script = try makeScript(in: directory, body: """
+        sleep 5 &
+        printf 'done' > '\(marker.path)'
+        exit 0
+        """)
+        let plan = try makePlan(
+            npmExecutablePath: script,
+            baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": directory.path]
+        )
+        var abandoned: [UpdateAbandonedAttempt] = []
+        let installer = ProcessPiWebUpdateInstaller(
+            recordAbandonedAttempt: { abandoned.append($0) },
+            pipeDrainGrace: 5
+        )
+        let box = ResultBox()
+        let finished = expectation(description: "drain grace preserves exit")
+        installer.install(plan, timeout: 30) { result in
+            box.value = result
+            finished.fulfill()
+        }
+
+        let deadline = Date().addingTimeInterval(20)
+        while !FileManager.default.fileExists(atPath: marker.path), Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        installer.cancel()
+        wait(for: [finished], timeout: 20)
+        withExtendedLifetime(installer) {}
+
+        XCTAssertEqual(box.value?.exitCode, 0)
+        XCTAssertFalse(box.value?.cancelled ?? true)
+        XCTAssertNil(box.value?.failure)
+        XCTAssertTrue(abandoned.isEmpty, "排水窗口里的 cancel 不得写失实的「已放弃」记录")
     }
 
     func testProcessInstallerKeepsNonUTF8OutputChunk() throws {

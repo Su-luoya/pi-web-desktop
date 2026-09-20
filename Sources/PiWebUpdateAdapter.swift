@@ -1,6 +1,49 @@
 import Darwin
 import Foundation
 
+/// 管道分块的增量 UTF-8 解码器。只暂存“合法多字节序列但字节尚未收齐”的尾部；
+/// 真正非法的字节仍按 Swift 的 lossy 语义立即替换，EOF 时也会冲刷未完成尾部。
+struct IncrementalUTF8Decoder {
+    private var pending = Data()
+
+    mutating func decode(_ data: Data, final: Bool = false) -> String {
+        var combined = pending
+        combined.append(data)
+        pending.removeAll(keepingCapacity: true)
+
+        if !final {
+            let count = Self.incompleteSuffixLength(in: combined)
+            if count > 0 {
+                pending = combined.suffix(count)
+                combined.removeLast(count)
+            }
+        }
+        return String(decoding: combined, as: UTF8.self)
+    }
+
+    private static func incompleteSuffixLength(in data: Data) -> Int {
+        guard !data.isEmpty else { return 0 }
+        let bytes = [UInt8](data)
+        var continuationCount = 0
+        var index = bytes.count - 1
+        while continuationCount < 3, bytes[index] & 0xC0 == 0x80 {
+            continuationCount += 1
+            guard index > 0 else { return 0 }
+            index -= 1
+        }
+
+        let expectedCount: Int
+        switch bytes[index] {
+        case 0xC2...0xDF: expectedCount = 2
+        case 0xE0...0xEF: expectedCount = 3
+        case 0xF0...0xF4: expectedCount = 4
+        default: return 0
+        }
+        let availableCount = bytes.count - index
+        return availableCount < expectedCount ? availableCount : 0
+    }
+}
+
 // MARK: - 受限自动更新模型（GitHub #20）
 //
 // 本文件是唯一一处“应用自己执行安装命令”的实现。边界：
@@ -98,6 +141,8 @@ enum PiWebUpdateRefusal: Equatable {
     case npmExecutableUnresolved
     /// 包名不是预期的 Pi Web 包名（或不符合 npm 包名规范）。
     case invalidPackageName
+    /// npm 可执行文件路径不是绝对安全路径；PATH 的相对项不会参与解析。
+    case unsafeExecutablePath
     /// 构造出的命令未通过参数安全校验（含 shell 元字符或 `sudo`/shell 包装）。
     case unsafeCommand
     /// 同一时间只允许一次安装：已经有一次安装在进行（W2A A-2）。
@@ -130,6 +175,8 @@ enum PiWebUpdateRefusal: Equatable {
             return "无法确认可用于安装的 npm 可执行文件"
         case .invalidPackageName:
             return "包名不是预期的 Pi Web 包名"
+        case .unsafeExecutablePath:
+            return "npm 可执行文件路径不是绝对安全路径；PATH 中的相对项不会用于更新"
         case .unsafeCommand:
             return "构造出的安装命令未通过参数安全校验"
         case .updateAlreadyInProgress:
@@ -476,7 +523,13 @@ enum PiWebUpdatePlanner {
             return .unavailable(reason: .invalidPackageName)
         }
         guard let npmExecutablePath = input.npmExecutablePath, !npmExecutablePath.isEmpty else {
+            if PiWebUpdateNPMResolver.hasRelativePATHEntry(in: input.baseEnvironment["PATH"]) {
+                return .unavailable(reason: .unsafeExecutablePath)
+            }
             return .unavailable(reason: .npmExecutableUnresolved)
+        }
+        guard PiCLIUpdatePlan.isSafeExecutablePath(npmExecutablePath) else {
+            return .unavailable(reason: .unsafeExecutablePath)
         }
         guard let plan = PiWebUpdateInstallPlan.make(
             packageName: packageName,
@@ -546,11 +599,11 @@ struct PiWebUpdateNPMResolver {
         self.environment = environment
     }
 
-    /// 候选路径（按优先级）。只做推导，不判存在性。
+    /// 候选路径（按优先级）。只保留通过绝对路径安全校验的候选，不判存在性。
     func candidates(installation: ComponentInstallation?) -> [String] {
         var result: [String] = []
         func append(_ path: String) {
-            guard !path.isEmpty, !result.contains(path) else { return }
+            guard PiCLIUpdatePlan.isSafeExecutablePath(path), !result.contains(path) else { return }
             result.append(path)
         }
         if let installation {
@@ -560,11 +613,22 @@ struct PiWebUpdateNPMResolver {
                 }
             }
         }
-        for directory in (environment["PATH"] ?? "").split(separator: ":") {
-            guard !directory.isEmpty else { continue }
+        for directory in (environment["PATH"] ?? "").split(
+            separator: ":",
+            omittingEmptySubsequences: false
+        ) {
+            guard directory.hasPrefix("/") else { continue }
             append((String(directory) as NSString).appendingPathComponent("npm"))
         }
         return result
+    }
+
+    /// PATH 的空项与非 `/` 开头项都依赖当前工作目录，更新执行器明确拒绝。
+    static func hasRelativePATHEntry(in path: String?) -> Bool {
+        guard let path else { return false }
+        return path.split(separator: ":", omittingEmptySubsequences: false).contains {
+            !$0.hasPrefix("/")
+        }
     }
 
     /// 解析并确认可执行位；没有可执行候选时返回 nil。
@@ -955,6 +1019,8 @@ final class POSIXPiWebUpdateChildSpawner: PiWebUpdateChildSpawning {
 final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
     /// 保留的子进程输出上限（字符）。
     static let outputTailLimit = 2000
+    /// 进程退出后等待输出管道 EOF 的有界宽限；防止退出通知抢在最后一块输出前收尾。
+    static let defaultPipeDrainGrace: TimeInterval = 0.5
 
     private let stateQueue = DispatchQueue(label: "io.github.su-luoya.pi-web-desktop.pi-web-update-installer")
     private let waitQueue = DispatchQueue.global(qos: .utility)
@@ -962,6 +1028,7 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
     private let spawner: PiWebUpdateChildSpawning
     private let redact: (String) -> String
     private let recordAbandonedAttempt: (UpdateAbandonedAttempt) -> Void
+    private let pipeDrainGrace: TimeInterval
 
     /// 结果投递队列：`completion` 不在 `stateQueue` 上执行，回调里的长耗时工作
     /// （例如重新检测版本）就不会把 `cancel()` 排在后面（W2A A-5）。
@@ -990,9 +1057,15 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
         var handle: PiWebChildProcessHandle?
         var outputHandle: FileHandle?
         var timer: DispatchSourceTimer?
+        var drainTimer: DispatchSourceTimer?
         var timedOut = false
         var cancelled = false
         var outputTail = ""
+        var outputDecoder = IncrementalUTF8Decoder()
+        /// 没有输出管道时视为已经排空；建立管道后改为 false，读到 EOF 再置回 true。
+        var outputDrained = true
+        /// 已确认退出、但仍在等待输出管道 EOF 时暂存真实退出码。
+        var pendingFinish: (exitCode: Int32?, launchFailed: Bool)?
         /// 本次子进程是否已经发送过终止信号（至多一次）。
         var didSignalOwnProcessGroup = false
         var childProcessAction: UpdateAbandonedAttempt.ChildProcessAction?
@@ -1028,12 +1101,14 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
         clock: @escaping () -> Date = { Date() },
         spawner: PiWebUpdateChildSpawning = POSIXPiWebUpdateChildSpawner(),
         redact: @escaping (String) -> String = { LogRedactor().redact($0) },
-        recordAbandonedAttempt: @escaping (UpdateAbandonedAttempt) -> Void = { _ in }
+        recordAbandonedAttempt: @escaping (UpdateAbandonedAttempt) -> Void = { _ in },
+        pipeDrainGrace: TimeInterval = ProcessPiWebUpdateInstaller.defaultPipeDrainGrace
     ) {
         self.clock = clock
         self.spawner = spawner
         self.redact = redact
         self.recordAbandonedAttempt = recordAbandonedAttempt
+        self.pipeDrainGrace = pipeDrainGrace
     }
 
     func install(
@@ -1048,7 +1123,8 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
 
     func cancel() {
         stateQueue.async { [weak self] in
-            guard let self, let attempt = self.attempt else { return }
+            guard let self, let attempt = self.attempt,
+                  attempt.pendingFinish == nil else { return }
             attempt.cancelled = true
             self.stopWaitingLocked(attempt, reason: .abandonedWaiting)
             self.finishLocked(attempt, exitCode: nil)
@@ -1103,14 +1179,11 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
 
         if handle.outputDescriptor > STDERR_FILENO {
             let outputHandle = FileHandle(fileDescriptor: handle.outputDescriptor, closeOnDealloc: true)
+            attempt.outputDrained = false
             outputHandle.readabilityHandler = { [weak self, weak attempt] fileHandle in
                 let data = fileHandle.availableData
-                if data.isEmpty {
-                    fileHandle.readabilityHandler = nil
-                    return
-                }
                 guard let attempt else { return }
-                self?.appendOutput(data, to: attempt)
+                self?.receiveOutput(data, from: fileHandle, attempt: attempt)
             }
             attempt.outputHandle = outputHandle
         }
@@ -1130,7 +1203,8 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
         timer.setEventHandler { [weak self, weak attempt] in
             // 只有这一次尝试仍是当前尝试时才收尾：已结束或已被后来调用替换的旧
             // 定时器不会再去动别人的子进程组（W2A A-2）。
-            guard let self, let attempt, self.attempt === attempt else { return }
+            guard let self, let attempt, self.attempt === attempt,
+                  attempt.pendingFinish == nil else { return }
             attempt.timedOut = true
             self.stopWaitingLocked(attempt, reason: .timedOut)
             self.finishLocked(attempt, exitCode: nil)
@@ -1202,6 +1276,13 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
         // 退出确认要结清「不确定」计数：晚到的退出通知同样要清账。
         settleAbandonedChildLocked(attempt)
         guard self.attempt === attempt else { return }
+        attempt.timer?.cancel()
+        attempt.timer = nil
+        if !attempt.outputDrained {
+            attempt.pendingFinish = (exitCode, false)
+            scheduleDrainDeadlineLocked(attempt)
+            return
+        }
         finishLocked(attempt, exitCode: exitCode)
     }
 
@@ -1212,17 +1293,46 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
         abandonedChildrenInFlight = max(0, abandonedChildrenInFlight - 1)
     }
 
-    private func appendOutput(_ data: Data, to attempt: Attempt) {
-        // lossy 解码：不再因为一个分块不是完整 UTF-8 就整块丢弃（W2A A-6）。
-        let text = String(decoding: data, as: UTF8.self)
-        guard !text.isEmpty else { return }
-        stateQueue.async { [weak self, weak attempt] in
-            guard let self, let attempt, self.attempt === attempt else { return }
-            attempt.outputTail += text
-            if attempt.outputTail.count > Self.outputTailLimit {
-                attempt.outputTail = String(attempt.outputTail.suffix(Self.outputTailLimit))
+    private func receiveOutput(_ data: Data, from handle: FileHandle, attempt: Attempt) {
+        stateQueue.async { [weak self] in
+            guard let self, self.attempt === attempt else { return }
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                attempt.outputDrained = true
+                self.appendDecodedOutput(attempt.outputDecoder.decode(Data(), final: true), to: attempt)
+                self.completePendingLocked(attempt)
+                return
             }
+            self.appendDecodedOutput(attempt.outputDecoder.decode(data), to: attempt)
         }
+    }
+
+    private func appendDecodedOutput(_ text: String, to attempt: Attempt) {
+        guard !text.isEmpty else { return }
+        attempt.outputTail += text
+        if attempt.outputTail.count > Self.outputTailLimit {
+            attempt.outputTail = String(attempt.outputTail.suffix(Self.outputTailLimit))
+        }
+    }
+
+    private func completePendingLocked(_ attempt: Attempt) {
+        guard let pending = attempt.pendingFinish, attempt.outputDrained else { return }
+        attempt.pendingFinish = nil
+        finishLocked(attempt, exitCode: pending.exitCode, launchFailed: pending.launchFailed)
+    }
+
+    private func scheduleDrainDeadlineLocked(_ attempt: Attempt) {
+        guard attempt.drainTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: stateQueue)
+        timer.schedule(deadline: .now() + pipeDrainGrace)
+        timer.setEventHandler { [weak self] in
+            guard let self, let pending = attempt.pendingFinish,
+                  self.attempt === attempt else { return }
+            attempt.pendingFinish = nil
+            self.finishLocked(attempt, exitCode: pending.exitCode, launchFailed: pending.launchFailed)
+        }
+        timer.resume()
+        attempt.drainTimer = timer
     }
 
     private func finishLocked(_ attempt: Attempt, exitCode: Int32?, launchFailed: Bool = false) {
@@ -1230,6 +1340,9 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
         guard self.attempt === attempt else { return }
         attempt.timer?.cancel()
         attempt.timer = nil
+        attempt.drainTimer?.cancel()
+        attempt.drainTimer = nil
+        appendDecodedOutput(attempt.outputDecoder.decode(Data(), final: true), to: attempt)
         self.attempt = nil
         // 放弃等待不关闭读端：把管道交给排空逻辑读到 EOF，子进程继续跑时写
         // stdout/stderr 不会收到 SIGPIPE / EPIPE（W2A A-3）。
@@ -1600,6 +1713,9 @@ final class PiWebUpdateCoordinator {
                         : .failed(reason: "既有健康检查路径报告服务不可用")
                 )
                 if ready {
+                    // 成功历史也必须用健康检查后的最终报告覆盖 verify 阶段；否则会把
+                    // 已实际通过的检查持久化成“尚未启动服务”。
+                    journal.recordVerification(finalReport, detectedVersion: newVersion)
                     journal.recordDegradationNotNeeded()
                     journal.recordCommit(version: newVersion)
                     self.recordTransaction(

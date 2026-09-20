@@ -1095,6 +1095,12 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
     private var finished = false
     /// 是否有一次运行正在进行：忙时拒绝新的 `run`，但必须如实回调结果。
     private var running = false
+    /// 已经放弃等待（超时 / `abandon()`）、但退出尚未确认的子进程：`count` 就是「在飞」
+    /// 计数。放弃路径不发送任何信号，子进程可能在放弃之后继续运行，因此在它的退出被
+    /// 确认之前，新的 `run` 一律按「忙」拒绝（否则两个 `npm i -g` 会并发写同一个 prefix）。
+    /// 按身份登记，保证同一条退出通知恰好结清一次；跨轮次保留，`resetRunStateLocked()`
+    /// 不得清空（清空会让门控失效）。
+    private var abandonedProcesses: [Process] = []
     private var timedOut = false
     private var abandoned = false
     private var startedAt: Date?
@@ -1153,7 +1159,9 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
     ) {
         // B-1：同一实例一次只跑一个命令。忙时拒绝本次运行，但拒绝也必须回调
         // 结果（`.notAttempted`）——绝不能静默 return 让调用方永远等不到 completion。
-        guard !running else {
+        // W3：放弃等待（超时/abandon）之后旧子进程可能还活着，在它的退出被确认之前
+        // 同样按「忙」拒绝，不新增子进程、也不覆盖旧回调与计时器。
+        guard !running, abandonedProcesses.isEmpty else {
             let now = clock()
             completion(PiPackageUpdateCommandResult(
                 exitCode: nil,
@@ -1195,8 +1203,12 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
         }
         process.terminationHandler = { [weak self] finishedProcess in
             self?.stateQueue.async {
+                guard let self else { return }
+                // 退出确认要结清「放弃等待」登记：晚到的退出通知同样要清账，否则门控会
+                // 永久拒绝后续运行（W3）。
+                self.settleAbandonedChildLocked(finishedProcess)
                 // 上一轮运行残留的结束回调不得替本轮收尾（B-1：状态按轮次隔离）。
-                guard let self, finishedProcess === self.process else { return }
+                guard finishedProcess === self.process else { return }
                 self.finishLocked(exitCode: finishedProcess.terminationStatus)
             }
         }
@@ -1216,7 +1228,11 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
         process = nil
         plan = nil
         timeout = 0
+        // 防御性：先取消再释放。当前调用点都在 `completeLocked` 之后（计时器已取消并
+        // 置空），但顺序反了会让「cancel 过的计时器还持有 handler」这类问题不可见。
+        timer?.cancel()
         timer = nil
+        drainTimer?.cancel()
         drainTimer = nil
         completion = nil
         finished = false
@@ -1237,9 +1253,11 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
     private func scheduleTimeoutLocked(_ timeout: TimeInterval) {
         let timer = DispatchSource.makeTimerSource(queue: stateQueue)
         timer.schedule(deadline: .now() + max(0.05, timeout))
-        timer.setEventHandler { [weak self] in
+        // 弱捕获计时器自身：身份判定不能靠强引用自己（timer → handler → timer 会形成
+        // 引用环，`cancel()` 后计时器永不析构）。触发时计时器必然还活着，比较身份即可。
+        timer.setEventHandler { [weak self, weak timer] in
             // 只认本轮运行的计时器：上一轮残留的触发不得影响本轮。
-            guard let self, self.timer === timer, !self.finished else { return }
+            guard let self, let timer, self.timer === timer, !self.finished else { return }
             // B-2：进程已经结束（只是在等管道读到 EOF 的宽限期）时超时计时不再算数，
             // 否则会把正常退出的命令记成超时，并写下一条不实的「已放弃」记录。
             guard self.pendingFinish == nil else { return }
@@ -1325,7 +1343,29 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
             scheduleDrainDeadlineLocked()
             return
         }
+        // 放弃等待（exitCode == nil 且不是启动失败）：子进程可能还在运行，先登记，
+        // 等它的退出通知到达时结清；这期间新 `run` 走「忙」拒绝路径。
+        // 登记点必须在这里而不是调用点：排水宽限窗口里 `abandon()` 会在这里提前
+        // return（其实并不算放弃等待），那种情况子进程已经退出，登记就永远无人结清。
+        if exitCode == nil, !launchFailed {
+            registerAbandonedChildLocked()
+        }
         completeLocked(exitCode: exitCode, launchFailed: launchFailed)
+    }
+
+    /// 放弃等待时登记子进程：在它的退出被确认之前，新的 `run` 一律按「忙」拒绝。
+    /// 这是有意的保守取舍：放弃路径不发送任何信号，若子进程永不退出（或不理 TERM），
+    /// 门控会一直关闭——宁可让后续批次记为「未执行」，也不并发写同一个 prefix。
+    private func registerAbandonedChildLocked() {
+        guard let process, !finished else { return }
+        guard !abandonedProcesses.contains(where: { $0 === process }) else { return }
+        abandonedProcesses.append(process)
+    }
+
+    /// 子进程退出已确认：把「放弃等待」登记恰好结清一次（晚到的退出通知同样清账）。
+    private func settleAbandonedChildLocked(_ finishedProcess: Process) {
+        guard let index = abandonedProcesses.firstIndex(where: { $0 === finishedProcess }) else { return }
+        abandonedProcesses.remove(at: index)
     }
 
     /// 管道读完且进程已结束时，用暂存的结果完成。
@@ -1340,8 +1380,9 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
         guard drainTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: stateQueue)
         timer.schedule(deadline: .now() + pipeDrainGrace)
-        timer.setEventHandler { [weak self] in
-            guard let self, self.drainTimer === timer, let pending = self.pendingFinish, !self.finished else { return }
+        // 与超时计时器同理：弱捕获避免 timer → handler → timer 引用环。
+        timer.setEventHandler { [weak self, weak timer] in
+            guard let self, let timer, self.drainTimer === timer, let pending = self.pendingFinish, !self.finished else { return }
             self.pendingFinish = nil
             self.completeLocked(exitCode: pending.exitCode, launchFailed: pending.launchFailed)
         }

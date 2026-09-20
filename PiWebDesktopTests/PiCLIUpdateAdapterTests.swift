@@ -977,6 +977,23 @@ final class PiCLIUpdateAdapterTests: XCTestCase {
         XCTAssertEqual(abandonedCount.value ?? 0, 0, "成功退出不得写「已放弃」记录")
     }
 
+    func testRealExecutorPreservesUTF8SplitAcrossChunks() throws {
+        let directory = try tempDirectory()
+        let script = try makeFakePi(
+            in: directory,
+            body: "printf '\\344\\270'\nsleep 0.3\nprintf '\\255-tail'\nexit 0"
+        )
+        let command = ProcessPiCLIUpdateCommand(
+            baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome]
+        )
+        let box = Locked<PiCLIUpdateCommandResult>()
+        command.run(try plan(forScript: script), timeout: 30) { box.value = $0 }
+        let result = try XCTUnwrap(waitForValue(box, timeout: 20))
+        XCTAssertNil(result.failure)
+        XCTAssertEqual(result.stdoutTail, "中-tail")
+        XCTAssertFalse(result.stdoutTail?.contains("�") ?? true)
+    }
+
     /// 非 UTF-8 分块 lossy 保留，而不是整块丢弃（W2A A-6）。
     func testRealExecutorKeepsNonUTF8OutputChunk() throws {
         let directory = try tempDirectory()

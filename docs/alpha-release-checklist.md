@@ -763,3 +763,131 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
 `docs: 让 SECURITY.md 与 issue 模板的版本引用不再写死具体 alpha 版本`
 （内容：把 `SECURITY.md` 的示例改为“见 `Configuration/AppIdentity.xcconfig`”或当前版本占位，
 把 bug 模板的 `placeholder` 改为不带具体版本的写法，避免每次发布都要改两处）。
+
+## 本次发布执行记录（v0.1.0-alpha.6）
+
+本节记录 `v0.1.0-alpha.6` 候选提交上**实际执行过**的本地门槛与输出摘要，供 Release Issue 与草稿
+Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不要把它们写成已实测。
+
+- 被测候选提交：本记录所在的发布提交（`chore(release): v0.1.0-alpha.6 版本 bump、发布说明、安全评审与门槛执行记录 (#111)`）；
+  功能/加固代码的最后一个提交是 `8b591c9`（#104，README 重写），此前依次是 `a47dd46`（#102，更新
+  失败文案与放弃等待记录）与 `3306398`（#100，设置窗口可缩放）。
+- 执行环境：Apple M4（`Mac16,10`）、macOS 27.0（`26A428`）、arm64；Node.js v24.21.0、
+  npm 11.19.0、Pi CLI（`@earendil-works/pi-coding-agent`）0.86.0、`@agegr/pi-web` 0.9.1；
+  `xcode-select -p` 指向 `/Library/Developer/CommandLineTools`
+- 版本与 build 的唯一来源仍是 `Configuration/AppIdentity.xcconfig`（`0.1.0-alpha.6` / `6`）；
+  下面所有命令都在候选提交上执行，输出摘要为本次实际输出
+- 同一批事实也写在 [v0.1.0-alpha.6 Release 说明](release-notes-v0.1.0-alpha.6.md) 的
+  “本机实测环境与版本”与“构建与签名验证记录”两节
+- 本地演练的 SHA-256 每次都不同（见 [发布流程](releasing.md#可复现性与诚实的边界)）；
+  Release 说明的校验值必须从 workflow 产出的资产复制，不能使用本节的本机值
+- **本机边界**：本次演练在 `~/Documents`（iCloud 同步目录）**之外**的 worktree
+  （`~/orca/workspaces/Pi-Web/release-alpha-6`，分支 `HaotianDeng/release-alpha-6`）里执行，
+  因此没有再遇到 alpha.5 记录的 iCloud File Provider 把 `com.apple.FinderInfo` 贴回 bundle 的问题
+  （与 alpha.1 的 #15 同类）；发布流程不变，CI runner 在干净 checkout 上运行
+- 本机打包发生在“版本 bump 已写入工作区、但发布提交尚未创建”的状态下，
+  `dist/release-metadata.env` 的 `COMMIT` 记的是打包时的工作区 `HEAD`（`8b591c9`）；因此演练 ZIP
+  **不等于**发布资产，发布资产由 `release.yml` 在 tag 上重新打包
+
+### 已在候选提交上实测
+
+| # | 门槛 | 命令 | 实测输出摘要 | 判定 |
+| --- | --- | --- | --- | --- |
+| 1 | 脚本语法 | `sh -n Scripts/*.sh` | 无输出 | 退出 0，通过 |
+| 2 | 空白与补丁格式 | `git diff --check` | 无输出 | 退出 0，通过 |
+| 3 | 构建 | `./Scripts/build.sh` | `Built: build/Pi-Web-Desktop.app`；`Contents/MacOS/PiWebDesktop: Mach-O 64-bit executable arm64` | 退出 0，通过（本次没有 iCloud 扩展属性问题） |
+| 4 | 身份与版本一致性 | `./Scripts/check-identity.sh` | `check-identity: PASSED (45 checks)`；bundle `CFBundleShortVersionString=0.1.0-alpha.6`、`CFBundleVersion=6`、`LSMinimumSystemVersion=14.0`、`CFBundleIdentifier=io.github.su-luoya.pi-web-desktop`、`CFBundleIconFile=ApplicationIcon` | 退出 0，通过 |
+| 5 | tag 与 bundle 版本一致 | `sh Scripts/check-release-version.sh v0.1.0-alpha.6` | `check-release-version: PASSED (tag v0.1.0-alpha.6, MARKETING_VERSION 0.1.0-alpha.6, CURRENT_PROJECT_VERSION 6)` | 退出 0，通过（脚本只做字符串比对，**不检查 tag 是否存在**；本次 tag 尚未创建） |
+| 6 | 签名校验 | `codesign --verify --deep --strict build/Pi-Web-Desktop.app` | 无输出（`valid on disk` / `satisfies its Designated Requirement`） | 退出 0，通过（与 alpha.5 不同：本次在同步目录之外，不需要 `/tmp` 演练 worktree） |
+| 7 | 签名身份与公证状态 | `codesign -dv --verbose=4 build/Pi-Web-Desktop.app` | `Identifier=io.github.su-luoya.pi-web-desktop`、`Format=app bundle with Mach-O thin (arm64)`、`flags=0x2(adhoc)`、`Signature=adhoc`、`TeamIdentifier=not set`、`Sealed Resources version=2 rules=13 files=1` | 预期结果：ad-hoc、未公证 |
+| 8 | Gatekeeper 行为 | `spctl -a -vv build/Pi-Web-Desktop.app` | 输出 `rejected`（退出 3）：未公证 ad-hoc 产物的预期结果 | 退出 3，预期 |
+| 9 | smoke 启动模式 | `./Scripts/smoke.sh`（脚本内含两种模式） | app exit 0 after 1s；标记 `smoke: ready` | 通过 |
+| 10 | smoke 诊断模式 | `./Scripts/smoke.sh` | app exit 0 after 0s；标记 `smoke: diagnostics items=6 blockers=3` 与 `smoke: diagnostics ready` | 通过（脚本整体退出 0，两种模式都断言） |
+| 11 | 扫描器自检 | `./Scripts/scan-secrets.sh --self-test` | 各条 `self-test: ok: …` 全部打印后：`self-test: PASS (all rules fired, look-alikes stayed clean, suppression and rejection verified, untracked-file gate verified, samples cleaned up)` | 退出 0，通过 |
+| 12 | 仓库 secret 扫描 | `./Scripts/scan-secrets.sh` | `scan-secrets: suppressed 15 lines`、`scan-secrets: PASS (no matches in tracked files; no untracked files)` | 退出 0，通过；N=15 与 alpha.5 记录一致（本版没有新增抑制标记，逐行清单见 alpha.5 记录） |
+| 13 | 本地打包与证据 | `./Scripts/package-release.sh --tag v0.1.0-alpha.6` | `package-release: OK`，产出 `Pi-Web-Desktop-0.1.0-alpha.6+build.6.zip`（1,510,257 字节，SHA-256 `febf404bfe90…`）、`.zip.sha256`、`.evidence.md`、`release-metadata.env`（`VERSION=0.1.0-alpha.6`、`BUILD=6`、`COMMIT=8b591c966e05a5f9b37de76f0fb11abc37be56fa`）；脚本同时复验“包内条目固定修改时间”“归一化时间后签名仍通过”“白名单条目集合一致（无 `__MACOSX/`）” | 通过（演练值；发布产物由 workflow 在 tag 上生成） |
+| 14 | ZIP 内容清单 | `unzip -l dist/Pi-Web-Desktop-0.1.0-alpha.6+build.6.zip` | 9 项：`Pi-Web-Desktop.app/` 与 `Contents/{,_CodeSignature,MacOS,Resources}` 四个目录，加 `Contents/Info.plist`、`Contents/MacOS/PiWebDesktop`、`Contents/Resources/ApplicationIcon.icns`、`Contents/_CodeSignature/CodeResources`；无 `__MACOSX/`、无源码/测试/日志/个人路径 | 通过 |
+| 15 | checksum 复验 | `shasum -a 256 -c Pi-Web-Desktop-0.1.0-alpha.6+build.6.zip.sha256` | `Pi-Web-Desktop-0.1.0-alpha.6+build.6.zip: OK` | 退出 0，通过 |
+| 16 | 包内版本与签名复验 | `ditto -x -k <zip> <mktemp -d>` + `plutil -p .../Info.plist` + `codesign --verify --deep --strict .../Pi-Web-Desktop.app` | `CFBundleShortVersionString=0.1.0-alpha.6`、`CFBundleVersion=6`、`LSMinimumSystemVersion=14.0`、`CFBundleIdentifier=io.github.su-luoya.pi-web-desktop`、`CFBundleIconFile=ApplicationIcon`；解压出的 bundle 签名校验退出 0 | 通过（临时目录已删除） |
+| 17 | 版本字面值门禁（回归） | `./Scripts/check-identity.sh` 第 6 节 | `ok   no hardcoded MARKETING_VERSION outside Configuration/AppIdentity.xcconfig` | 通过 |
+
+本节的边界：第 13–16 项是**本机演练**（`COMMIT=8b591c9`、版本 bump 尚未提交时打包），不是发布
+资产；`xcodebuild build` / `xcodebuild test`、GUI 手工验收、真实更新执行仍不在本机范围（本机
+`xcode-select -p` 指向 Command Line Tools，没有 Xcode）。第 6、7 项的差异（alpha.5 需要
+`/tmp` 演练 worktree）只反映执行位置不同，不是代码或流程变化。
+
+### 发布说明中 #99–#104 的覆盖方式
+
+- `v0.1.0-alpha.6` 的 [Release 说明](release-notes-v0.1.0-alpha.6.md) 把本版三组改动逐条成节：
+  #99 / PR #100（设置窗口可自由缩放、表单滚动、底部按钮固定）、#101 / PR #102（更新失败文案、
+  扩展包门闩的「已放弃等待、退出未确认」区分、包与 CLI 在排水宽限窗口不再写不实的「已放弃」记录）、
+  #103 / PR #104（README 重写为面向普通用户的说明）。
+- 发布说明同时写明**本版没有新增功能面**，并逐项写清边界：信号语义未变、三条路径仍不确认被放弃
+  进程是否结束、仍不保证所有来源都能回滚、更新检查的域名/频率/开关未变（沿用 alpha.5 说明的两节）。
+- 未修项写在“已知问题”节并指向本版新建的跟进 issue：#105（验证器边界 B-4/B-5/B-11）、
+  #106（降级状态与文案 B-8/B-10 与 `UpdateTransaction.swift:394`/`:513` 两套文案）、
+  #107（扩展包执行器 B-12/B-13 与 `PiPackageUpdateRunning` 缺 `isRunning`）、
+  #108（Web/CLI 输出与放弃等待窗口 B-9/F5/F6/F7，含 `PiWebUpdateAdapter.stopWaitingLocked`）。
+- 发布说明的“构建与签名验证记录”与“本机实测环境与版本”两节与本记录第 1 张表一致，不把演练值
+  当发布值。
+
+### 本版本的安全审查结论（alpha.5 → alpha.6 delta）
+
+- 审查报告：[docs/security-review-alpha.6.md](security-review-alpha.6.md)（本版新增，只读；没有修改仓库文件）。
+  审查范围 `git diff d6fa883..8b591c9`（3 个提交、10 个文件、+403 / −213 行），基线是
+  [alpha.5 安全评审](security-review-alpha.5.md)；alpha.1 已覆盖且本次未改动的部分沿用
+  [alpha.1 审查](security-review-alpha.1.md)。
+- **结论：阻断项 0**（中 1、低 5、信息 5）。中危 M-1：`Sources/UpdateTransaction.swift:394` 的
+  `displayName` 仍写「更新失败，仍在使用旧版本」，与同一弹窗里的 `:732-734`「没有执行任何回滚动作」互斥
+  ——该文件**不在本 delta 内**，是既有代码，本版登记为已知问题（#106），不阻断发布。
+- 低危：L-1 三路日志仍写「旧版本保持不变」；L-2 `detectedVersion == nil` 时「仍在使用更新前的版本」
+  句内不自洽；L-3 CLI 的 `.updateAlreadyInProgress` 文案缺「重启应用可恢复」；L-4 超时重试上限
+  （5 × 0.2 s）之后仍可能落一条有界的失实「已放弃」记录；L-5 扩展包 runner 退出时不 `abandon()`，重启
+  恢复可能与仍在运行的旧 `npm` 子进程重叠。信息级 I-1 … I-5 记录结论（新门闩只改文案、排水窗口守卫不会
+  漏结算、未引入新能力、设置窗口只改布局、README 安全表述一致）。
+- 非阻断项的处置：M-1 / L-1 / L-2 → #106；L-3 / L-4 → #108；L-5 → #107；I-1 … I-5 仅记录。
+- 报告自述的边界（不要写成已实测）：它是**自动化只读审查、不是人工审计**，未编译、未运行测试、未运行
+  GUI；M-1 的用户可见弹窗拼接与 L-4 的时序结论均为按代码路径的推断。本机未执行的验证由 CI 与维护者的
+  GUI 验收覆盖。
+
+### 还需 CI / 发布 workflow 完成
+
+| # | 门槛 | 覆盖位置 | 本机状态 |
+| --- | --- | --- | --- |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-14` job 覆盖。本版新增/改动的测试只有 `PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`（+94 行）与 `PiWebDesktopTests/PiCLIUpdateAdapterTests.swift`（+59 行），共 5 个确定性用例（#102） |
+| C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds`（`check-identity.sh --test-bundle …`） | 本机只检查了脚本产物（`check-identity: PASSED (45 checks)`），Xcode 产物与 `.xctest` 由 CI 覆盖 |
+| C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`（自检 + 仓库扫描）；该步骤由 CI 覆盖 |
+| C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；本版三个提交的 main run 均为 **success**：`3306398`（#100）run `35493841592`、`a47dd46`（#102）run `35494635211`、`8b591c9`（#104）run `35494836484` |
+| C5 | Release 资产校验：ZIP/`.sha256`/`.evidence.md` 上传、`sha256sum -c`、Release 说明渲染 | `release.yml` 的 `Package ZIP, checksum, signature evidence and identity checks`、`Render the release notes from the template`、`publish` job | 由 workflow 覆盖（tag push 时执行；`workflow_dispatch` 只产出 artifact）。本机演练产物在 `dist/`，不是发布资产 |
+| C6 | 草稿 prerelease 创建与发布前人工复核（assets 名称、checksum 与 Issue 一致、prerelease 勾选） | `release.yml` 的 `publish` job（`gh release create --prerelease --draft`） | 由 workflow + 维护者完成；workflow 渲染的是 [Release notes 模板](release-notes-template.md)，不读版本化的 [v0.1.0-alpha.6 Release 说明](release-notes-v0.1.0-alpha.6.md)。发布前需把该说明的正文、以及 workflow 产物的 ZIP 名/SHA-256/字节数填进草稿 |
+| C7 | 真机 smoke 的机器与依赖版本写入 Release Issue | 本版 Release Issue 的“真机 smoke 记录” | **本版已写入**：Apple M4（`Mac16,10`）、macOS 27.0（`26A428`）、arm64、Node.js v24.21.0、npm 11.19.0、Pi CLI 0.86.0、`@agegr/pi-web` 0.9.1；本机 `smoke.sh` 两种模式均已通过（见第 1 张表第 9、10 项） |
+| C8 | 上一版资产的回退路径确认 | Release Issue 的“回退路径确认” | 上一版是 `v0.1.0-alpha.5`；它是否仍作为 prerelease 公开可下载需由维护者确认后写进 Release Issue（不能写成本机已验证） |
+| C9 | tag 只能创建一次、且必须指向本发布提交 | 维护者操作 + `Scripts/check-release-version.sh`（CI 里由 `release.yml` 调用） | 由协调者执行；本机只验证了脚本在 `v0.1.0-alpha.6` 上退出 0（**未创建 tag、未 push**） |
+
+本节的边界：C1–C6 与 C9 只在 CI / workflow / 维护者操作里完成，本机没有对应的实测输出，
+不要写成已在本机验证。
+
+### 本版同时做的文档一致性改动
+
+- `docs/release-notes-v0.1.0-alpha.6.md`（本版新增）：三组改动逐条成节；“更新检查与自动更新的
+  边界”一节明确本版没有改动域名、频率、开关与自动更新前置条件，并链接 alpha.5 说明的两节；
+  “校验值”一节区分演练值与 `release.yml` 的发布值；文末“发布时需要补全的值清单”在发布前删除。
+- `Configuration/AppIdentity.xcconfig`（本版唯一版本来源）：`MARKETING_VERSION` → `0.1.0-alpha.6`、
+  `CURRENT_PROJECT_VERSION` → `6`。
+- `docs/security-review-alpha.6.md`（本版新增）：alpha.5 → alpha.6 的只读 delta 安全评审，结论为阻断项 0；
+  它同时是 Release Issue 里 S1–S8 复核命令与 M/L/I 发现的证据来源。
+- `Sources/UpdateTransaction.swift` **不在本 delta 内**，本版未改动它；M-1 指出的矛盾文案保留为已知问题（#106）。
+- 本文件：新增本节（alpha.6 执行记录、覆盖方式、C 项与文档一致性清单）。
+- 逐条复核后与实现一致、**未改动**：`README.md`（本版重写后的版本）、`docs/privacy.md`、
+  `docs/settings-and-workspace.md`、`docs/architecture.md`、`docs/logging-and-diagnostics.md`、
+  `docs/releasing.md`。其中 `docs/settings-and-workspace.md` 已由 #100 同步（窗口缩放与折行行为），
+  `docs/architecture.md` 已由 #102 同步。
+
+### 仍未处理的旧版本引用（超出本次写范围）
+
+- `.github/ISSUE_TEMPLATE/bug_report.yml:16` 的 `placeholder` 仍是 `0.1.0-alpha.1`。
+- `SECURITY.md:11` 的受影响版本示例仍是 `0.1.0-alpha.1` / build `1`；`SECURITY.md:28` 的“项目只承诺
+  评估最新 alpha 或最新稳定发行版。当前只有 alpha 基线（`0.1.0-alpha.1`）”也仍写 `0.1.0-alpha.1`。
+
+这两处从 alpha.2 起就被逐版记录为“超出本次写范围”。本版的处理是：把一直建议的 follow-up 落地成
+一个真实 issue（见本版 Release Issue 的关联项），而不是继续在每版记录里重复同一句建议。

@@ -57,7 +57,19 @@ OUT=$(mktemp "${TMPDIR:-/tmp}/pi-web-desktop-smoke.XXXXXX") || {
   printf 'error: cannot create a temporary output file under %s\n' "${TMPDIR:-/tmp}" >&2
   exit 1
 }
+
+# PIDs are cleared again once their process has been reaped, so the cleanup trap
+# never signals a PID that the system could have reused.
+SMOKE_PID=''
+WATCHDOG_PID=''
 cleanup() {
+  if [ -n "$WATCHDOG_PID" ]; then
+    kill "$WATCHDOG_PID" 2>/dev/null || true
+    wait "$WATCHDOG_PID" 2>/dev/null || true
+  fi
+  if [ -n "$SMOKE_PID" ]; then
+    kill "$SMOKE_PID" 2>/dev/null || true
+  fi
   rm -f "$OUT"
 }
 trap cleanup EXIT HUP INT TERM
@@ -78,15 +90,36 @@ run_smoke_mode() {
   # Watchdog: terminate the app when it exceeds the wall-clock budget. Waiting
   # on the app itself keeps the exit status available and avoids polling for
   # zombies.
-  ( sleep "$TIMEOUT_SECONDS"; kill -TERM "$SMOKE_PID" 2>/dev/null ) >/dev/null 2>&1 &
+  #
+  # The watchdog subshell sleeps as a child it can kill again: when this script
+  # kills the subshell, the trap below kills the sleep too. `sleep` directly in
+  # the subshell would be orphaned on every run (code review W4 / L2: two
+  # `sleep 60` processes were left behind after one smoke run) because killing
+  # the subshell does not signal its child.
+  (
+    watchdog_sleep_pid=''
+    stop_watchdog_sleep() {
+      if [ -n "$watchdog_sleep_pid" ]; then
+        kill "$watchdog_sleep_pid" 2>/dev/null || true
+        wait "$watchdog_sleep_pid" 2>/dev/null || true
+      fi
+    }
+    trap stop_watchdog_sleep EXIT HUP INT TERM
+    sleep "$TIMEOUT_SECONDS" &
+    watchdog_sleep_pid=$!
+    wait "$watchdog_sleep_pid" 2>/dev/null || exit 0
+    kill -TERM "$SMOKE_PID" 2>/dev/null || true
+  ) >/dev/null 2>&1 &
   WATCHDOG_PID=$!
 
   set +e
   wait "$SMOKE_PID"
   STATUS=$?
   set -e
+  SMOKE_PID=''
   kill "$WATCHDOG_PID" 2>/dev/null || true
   wait "$WATCHDOG_PID" 2>/dev/null || true
+  WATCHDOG_PID=''
 
   ELAPSED=$(( $(date +%s) - START ))
   printf 'smoke: %s mode app exit status %s after %ss\n' "$mode_label" "$STATUS" "$ELAPSED"

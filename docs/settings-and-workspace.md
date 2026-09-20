@@ -81,6 +81,19 @@
 - 已经运行的托管服务不会被这个门控停止：门控只阻止启动入口；停止与退出行为仍然只对通过所有权校验的进程组动作。
 - 目录修好后点击“重新检测”即可重新校验并打开门控，无需重启应用。
 
+## 最近工作目录与快速切换
+
+菜单「服务 → 最近工作目录」列出最近用过的目录（完整绝对路径，当前目录带勾选标记），空列表显示一条禁用的「无最近工作目录」，末尾是「清除历史记录」。
+
+- 记录与上限：`RecentWorkspaceStore`（`Sources/RecentWorkspace.swift`）在 UserDefaults 的 `workspace.recentPaths` 里按最近使用顺序保存最多 10 条路径（`maximumCount`），按标准化后的字符串去重；启动时记录当前工作目录，切换成功或配置未变化时也会记录。
+- 路径标准化只做两端空白/换行裁剪加 `standardizedFileURL`，不做其它重写；保存的是绝对路径，所以菜单项与确认框展示的是用户自己的目录名（隐私影响见 [隐私说明](privacy.md)）。
+- 切换入口：子菜单选择、把文件夹拖到应用图标或窗口、`open -a "Pi Web Desktop" <目录>`、Finder 的「打开方式」。拖放没有单独的剪贴板代码：Finder 的拖放由 Launch Services 转成 open 事件，`application(_:open:)` 只取第一个 URL。
+- 校验：`WorkspaceSwitchDecision.decide(requestedPath:currentPath:probe:)` 要求绝对路径（相对路径与 `~` 都不展开，一律拒绝），再用 `WorkspaceDirectory.validate` 要求“存在、是目录、可写”。任一不通过都不写任何状态，只给可读提示。
+- 确认与重启语义：切到与当前不同的目录时先确认（`NSAlert`），当前目录不弹。服务由应用托管且正在运行时，文案写明“确认后将重启服务。”、按钮为「切换并重启」；服务是外部进程时按钮只是「切换」，应用不会停止或重启它，因此新目录要等用户自己重启服务后才生效。
+- 生效路径：新目录写入 `service.workspacePath`，因此进入 `ServiceConfiguration.runtimeSignature`，托管服务按新目录重启。
+- 子菜单另有「在 Finder 中打开当前工作目录」（`NSWorkspace.shared.open`）；当前目录不可用时改用与切换失败相同的可读提示。
+- 代价：应用因此声明 `CFBundleDocumentTypes`（`public.folder`，role `Editor`），Finder 的「打开方式」会为任意文件夹列出本应用。
+
 ## 退出行为
 
 偏好窗口“行为 → 退出行为”提供三种取值（默认“每次退出时询问”）：
@@ -118,6 +131,7 @@ unhosted 测试（注入临时目录、假探针与假 Keychain，不触碰真�
 - `PiWebDesktopTests/ServiceConfigurationTests.swift`：默认退出行为与默认工作目录、既有键名、无法识别的退出行为回落为“询问”、工作目录进入运行时签名；直接写入 UserDefaults 的通配地址、空值、带空白/非法字符的值加载后被标记为不可用且不被静默替换，合法地址与 `[::1]` 规范化后仍可用。
 - `PiWebDesktopTests/KeychainStoreTests.swift`：地址判定与保存流程共用同一规则（通配地址即使有密码也被拒绝，且先于密码写入），加载与启动诊断包含非法值与允许范围，非 loopback 缺密码仍走 #8 的缺密码提示。
 - `PiWebDesktopTests/WorkspaceDirectoryTests.swift`：默认目录首次使用时创建、自选目录不被静默重建、不存在/不是目录/不可写三种原因的校验与可读修复提示、状态页文本、设置窗口选择（相对路径、缺失、不可写被拒绝且配置不变，留空回到默认目录）。
+- `PiWebDesktopTests/RecentWorkspaceTests.swift`：去重与置顶、10 条上限与路径标准化、跨 store 实例的持久化与清除、注入 defaults 的配置读取、`WorkspaceSwitchDecision.decide` 的各分支（当前目录 `.unchanged`、相对路径与不存在的目录 `.reject(.missing)`、文件 `.reject(.notDirectory)`、可用目录 `.confirm`），以及任何分支都不创建目录。
 - `PiWebDesktopTests/QuitPolicyTests.swift`：三种退出行为与三种确认选择的决策表、取消不停止服务、只有显式“退出并停止服务”才请求停止托管服务、任何行为都不停止外部服务。
 - `PiWebDesktopTests/QuitCoordinatorTests.swift`（GitHub #72）：三条退出路径（询问后保持运行 / 询问后停服务 / 设置直接退出）、显式菜单项不受设置影响、取消后回到 idle 且可再次正常退出、等待与停止期间的重复触发不叠加、迟到的按钮/停止回调被忽略、超时前继续等待与超时后保持服务并退出（超时可注入，默认 5 分钟）、服务未运行与外部服务不产生停止副作用、AppKit 终止请求只得到 `terminateNow` / `cancelPendingDecision` 且 `terminateNow` 不带退出副作用。
 - `PiWebDesktopTests/ServiceManagerTests.swift`：工作目录不可用时所有启动入口零启动零加载并给出可读提示、恢复后门控重新打开、启动前重新校验（自选目录被删后不重建且阻止启动；存在且可写的自选目录不被创建；默认目录缺失时仍创建；健康监控期间自选目录消失时受托管重启被拒绝）、三种退出行为（保持运行零信号、停止只对已验证进程组、外部服务零信号且状态不变）、关闭期间无后台轮询、校验失败的记录不被认领也不被发信号；非法监听地址（通配、空值、空白、非法字符）在所有启动入口零进程零探测并给出可读诊断，loopback 与“具体地址 + 密码”仍可启动，`0.0.0.0` 写入 UserDefaults 后无法进入启动流程。

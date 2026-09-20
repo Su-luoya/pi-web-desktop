@@ -1,0 +1,1061 @@
+/// Service lifecycle state machine: start, stop, restart and health checks.
+
+import Foundation
+
+/// Owns the service lifecycle: start, stop, restart, health polling, retries,
+/// log redirection, verified ownership bookkeeping and quit behaviour.
+///
+/// Ownership is defined by the on-disk `ServiceOwnershipRecord` written after a
+/// launch. A service is only ever stopped when that record still verifies
+/// against this app instance and the live process; an external service (or a
+/// record that fails any check) is read-only for this app and never receives a
+/// signal.
+///
+/// All UI presentation is delegated through the callbacks below; AppDelegate
+/// only coordinates and shows state. Every side effect (commands, process
+/// launch, HTTP probe, timers, sleep, signals) goes through an injected
+/// dependency so the state machine and the ownership checks are unit-testable.
+final class ServiceManager {
+    // MARK: - UI callbacks (AppDelegate owns presentation)
+
+    var onStateChange: ((ServiceState) -> Void)?
+    var onLoadPage: (() -> Void)?
+    var onPageMessage: ((String) -> Void)?
+    var onStartupFailure: ((String) -> Void)?
+
+    /// 远程访问被收敛（密码被删除或读取失败）后回调，参数是回落后的 loopback
+    /// 配置。调用方（`AppDelegate`）负责把它写回 UserDefaults；服务本身只改内存
+    /// 配置并停止已验证的托管进程。
+    var onRemoteAccessClosed: ((ServiceConfiguration) -> Void)?
+
+    // MARK: - Timing (unchanged from the pre-split implementation)
+
+    static let maxStartupAttempts = 150
+    static let startupPollInterval: TimeInterval = 0.2
+    static let healthCheckInterval: TimeInterval = 4
+    static let probeTimeout: TimeInterval = 1
+    static let stopPollAttempts = 40
+    static let stopPollInterval: TimeInterval = 0.1
+    // 日志上限/保留份数的唯一来源是 `LogRotationPolicy`（GitHub #10），这里不保留第二套常量。
+
+    private(set) var configuration: ServiceConfiguration
+    var currentState: ServiceState = .checking
+
+    /// 依赖诊断门控（GitHub #6）。
+    ///
+    /// 为 false 时任何启动入口（启动/重启、配置变更重载、启动重试、健康恢复）
+    /// 都不得启动子进程、加载服务页或把状态改成 running；异步回调执行前会再次
+    /// 确认这个门控。默认关闭：`AppDelegate` 在依赖诊断完成前保持关闭，
+    /// `DependencyReport.canStartService` 为 true 时打开、为 false 时重新关闭。
+    var isDependencyGateOpen = false
+
+    /// 工作目录不可用的原因（GitHub #9）。非 nil 时一切启动入口都被拒绝：
+    /// 目录不存在或不可写时 pi-web 无法在工作目录写入运行文件，启动只会得到
+    /// 难以理解的失败，因此应用先停在诊断状态并给出可读修复提示。
+    /// `AppDelegate` 负责探测与呈现，`ServiceManager` 只执行门控。
+    private(set) var workspaceProblem: WorkspaceDirectoryProblem?
+    /// 生效的工作目录路径（用于可读错误信息），与 `workspaceProblem` 同源。
+    private(set) var workspaceDirectoryPath = ""
+    /// 该路径是否为应用默认工作目录；可读提示据此区分“默认工作目录”与用户自选目录。
+    private(set) var workspaceUsesDefaultLocation = true
+
+    /// 启动入口在真正启动前发现工作目录不可用时的回调（GitHub #9 复审）。
+    /// 调用方据此进入诊断状态；`ServiceManager` 不自己重建自选目录。
+    var onWorkspaceProblem: ((WorkspaceDirectoryProblem, String) -> Void)?
+
+    /// True once a quit sequence started. AppDelegate drives this through
+    /// `beginQuitting()` / `keepRunningOnQuit()` / `stopManagedServiceOnQuit(completion:)`.
+    private(set) var isQuitting = false
+
+    /// Identifier of this app instance. It is part of every ownership record,
+    /// so a record written by an earlier launch can never be adopted again.
+    let instanceID: String
+
+    /// 统一日志写入器（GitHub #10）：按大小轮转，应用写入的每一行都经过它的
+    /// `redactor`。错误消息与诊断导出共用同一个实例，"同一实例脱敏"不是约定
+    /// 而是类型上的同一对象。
+    let logWriter: LogWriter
+
+    /// 与 `logWriter` 同一个实例：错误消息在进入状态机之前先脱敏。
+    private var redactor: LogRedactor { logWriter.redactor }
+
+    let appConfiguration: AppConfiguration
+    let processInspector: ProcessInspector
+    let commandRunner: CommandRunning
+    private let launcher: ServiceLaunching
+    private let probe: ServiceProbing
+    private let scheduler: ServiceScheduling
+    private let environment: () -> [String: String]
+    /// 服务启动环境用的工具 PATH 构建器（GitHub #89）：注入时与依赖探测、更新
+    /// 子进程共用同一个实例（应用从 Finder 启动的 PATH 最小场景靠它补齐 node）。
+    let toolPathProvider: ToolPathProvider?
+    private let fileManager: FileManager
+    private let ownershipStore: ServiceOwnershipStoring
+    private let signaler: ServiceSignaling
+    /// 工作目录探针（GitHub #9 复审）。启动入口在启动前重新校验一次工作目录，
+    /// 使健康监控运行期间被删除的自选目录不会被静默重建；默认复用注入的
+    /// `fileManager`，测试可以注入假探针。
+    let workspaceProbe: WorkspaceDirectoryProbe
+    /// 读取远程访问密码（Keychain）。默认返回 nil，即“无密码”：远程模式因此默认
+    /// 被拒绝，测试也绝不会碰到真实 Keychain；生产环境由 AppDelegate 注入。
+    private let remoteAccessPassword: () -> String?
+
+    private var serviceProcess: ServiceProcessHandle?
+
+    // MARK: - 生命周期代次与启动会话（W3 M1/M2/M3/L1）
+
+    /// 生命周期代次（generation）：每次真实启动、每次停止、每次放弃半托管启动都
+    /// 递增。所有异步回调（启动/健康检查探测、就绪轮询、进程退出、停止轮询）在
+    /// 调度时捕获当前代次，执行前先比对；过期回调只写日志，不改状态、不加载页面、
+    /// 不弹提示（M2）。
+    private var lifecycleGeneration = 0
+    /// 当前活动启动会话的编号（nil = 没有轮询链在跑）。同一个代次里只允许一条链：
+    /// 重复的启动入口复用它，而不是各挂一条并共享同一个预算（M3）。
+    private var activeStartupSession: Int?
+    /// 活动会话所属的代次；代次变化（新的启动/停止）后旧链一律作废。
+    private var activeStartupSessionGeneration = 0
+    /// 启动会话编号，单调递增（0 保留给“未开始”）。
+    private var nextStartupSessionID = 0
+    /// 一次启动会话的轮询预算：每次开启新会话都清零，超时/成功/进程退出时结束会话。
+    /// 因此“重试”总是重新开始轮询与预算，绝不会复用上一轮的失败结论（M1）。
+    private var startupAttempts = 0
+    /// 已经报过启动失败提示的会话号：同一会话只提示一次，避免弹窗循环（M1/M3）。
+    private var startupFailureReportedSession: Int?
+    /// 停止中标志按代次记账：只有它仍等于当前代次时才算“有停止在途”。任何一次
+    /// 代次递增都会自动作废旧标志，因此停止路径的任何提前返回都不可能把应用永久
+    /// 锁在“停止中”（L1）。
+    private var stoppingGeneration: Int?
+
+    private var logHandle: FileHandle?
+    private var healthToken: RepeatingTimerToken?
+    private var didLaunchService = false
+    private var restartAttempts = 0
+
+    init(
+        configuration: ServiceConfiguration,
+        appConfiguration: AppConfiguration,
+        processInspector: ProcessInspector,
+        commandRunner: CommandRunning = SystemCommandRunner(),
+        launcher: ServiceLaunching = SystemServiceLauncher(),
+        probe: ServiceProbing = URLSessionServiceProbe(),
+        scheduler: ServiceScheduling = DispatchServiceScheduler(),
+        environment: @escaping () -> [String: String] = { ProcessInfo.processInfo.environment },
+        fileManager: FileManager = .default,
+        ownershipStore: ServiceOwnershipStoring = FileServiceOwnershipStore(),
+        signaler: ServiceSignaling = POSIXServiceSignaler(),
+        remoteAccessPassword: @escaping () -> String? = { nil },
+        workspaceProbe: WorkspaceDirectoryProbe? = nil,
+        instanceID: String = UUID().uuidString,
+        logWriter: LogWriter? = nil,
+        toolPathProvider: ToolPathProvider? = nil
+    ) {
+        self.configuration = configuration
+        self.appConfiguration = appConfiguration
+        self.processInspector = processInspector
+        self.commandRunner = commandRunner
+        self.launcher = launcher
+        self.probe = probe
+        self.scheduler = scheduler
+        self.environment = environment
+        self.toolPathProvider = toolPathProvider
+        self.fileManager = fileManager
+        self.ownershipStore = ownershipStore
+        self.signaler = signaler
+        self.remoteAccessPassword = remoteAccessPassword
+        self.workspaceProbe = workspaceProbe ?? .live(fileManager: fileManager)
+        self.instanceID = instanceID
+        self.logWriter = logWriter ?? LogWriter(logFileURL: appConfiguration.logURL, fileManager: fileManager)
+    }
+
+    // MARK: - Configuration
+
+    func updateConfiguration(_ configuration: ServiceConfiguration) {
+        self.configuration = configuration
+    }
+
+    /// 更新工作目录门控（GitHub #9）。`problem` 为 nil 表示目录可用；路径与
+    /// 来源一起保存，使可读提示不需要重新探测。
+    func setWorkspaceAvailability(
+        problem: WorkspaceDirectoryProblem?,
+        path: String,
+        usesDefaultLocation: Bool = true
+    ) {
+        workspaceProblem = problem
+        workspaceDirectoryPath = path
+        workspaceUsesDefaultLocation = usesDefaultLocation
+    }
+
+    func setState(_ state: ServiceState) {
+        currentState = state
+        onStateChange?(state)
+    }
+
+    /// 是否有一次停止正在进行。
+    ///
+    /// 停止状态不保存为独立布尔量，而是记住“这次停止的代次”：只有它仍等于当前代次
+    /// 时才表示停止中。任何一次代次递增（新启动、放弃半托管启动、下一次停止）都会
+    /// 让旧标志自动失效，所以不存在“提前返回分支漏清零、启动入口永久被拒”的路径
+    /// （L1）。
+    var isStoppingService: Bool { stoppingGeneration == lifecycleGeneration }
+
+    /// 收回“停止中”标志。停止路径的每个提前返回分支都必须调用它（L1）。
+    private func clearStopping() {
+        stoppingGeneration = nil
+    }
+
+    /// 与凭证无关的启动前置条件：依赖门控打开，工作目录可用，不在停止/退出
+    /// 流程中。供 `startManagedService()` 使用：那里自己读一次凭证，避免二次
+    /// 读取。
+    private var isBaseStartPermitted: Bool {
+        isDependencyGateOpen && workspaceProblem == nil && !isStoppingService && !isQuitting
+    }
+
+    /// 允许启动服务与加载服务页的前置条件：依赖门控打开，工作目录可用，监听地址
+    /// 可用（GitHub #39 / R-3），不在停止/退出流程中，并且远程访问的前置条件满足
+    /// （非 loopback hostname 必须有非空密码）。
+    /// 密码读取失败按“无密码”处理，因此远程模式不会在认证不可用时启动。
+    private var isStartPermitted: Bool {
+        isBaseStartPermitted && isListeningAddressUsable && hasRequiredRemoteAccessCredentials
+    }
+
+    /// 监听地址是否可用（统一判定，不含凭证）。非法地址不进入任何启动入口，
+    /// 也不会被静默替换成其他地址。
+    private var isListeningAddressUsable: Bool {
+        configuration.hostnameProblem == nil
+    }
+
+    /// 远程 hostname 是否具备可用的非空密码；loopback 恒为 true。
+    /// 地址本身是否合法由 `isListeningAddressUsable` 单独判定。
+    private var hasRequiredRemoteAccessCredentials: Bool {
+        RemoteAccessPolicy.allowsRemoteListening(hostname: configuration.hostname, password: remoteAccessPassword())
+    }
+
+    /// 依赖门控已就绪、但远程模式缺密码时给出可读失败提示；其它拒绝（诊断未通过、
+    /// 正在停止或退出）保持静默，避免诊断页被启动失败提示覆盖。
+    ///
+    /// 若仍有本应用管理的远程进程在运行，先走 `closeRemoteAccessIfCredentialsAreUnavailable()`
+    /// 收敛（停止进程 + 关闭远程模式），不再另发一条“缺少密码”提示。
+    /// 返回是否已经给出可读提示。
+    @discardableResult
+    private func reportRemoteAccessRequirementIfNeeded() -> Bool {
+        guard isDependencyGateOpen, !isStoppingService, !isQuitting, !hasRequiredRemoteAccessCredentials else { return false }
+        if closeRemoteAccessIfCredentialsAreUnavailable() != nil { return true }
+        // 地址本身不合法时先给地址诊断（非法值 + 允许范围），而不是只报“缺密码”
+        // （GitHub #39 / R-3）。
+        if reportUnusableHostnameIfNeeded() { return true }
+        reportStartupFailure(RemoteAccessPolicy.missingPasswordMessage)
+        return true
+    }
+
+    /// 监听地址不可用时的可读诊断（GitHub #39 / R-3）。只在不处于停止/退出流程
+    /// 时给出，避免退出过程中的回调把诊断页覆盖成启动失败。
+    @discardableResult
+    private func reportUnusableHostnameIfNeeded() -> Bool {
+        guard let problem = configuration.hostnameProblem, !isStoppingService, !isQuitting else { return false }
+        reportStartupFailure(problem)
+        return true
+    }
+
+    /// 工作目录不可用时的可读失败提示。只在不处于停止/退出流程时给出，避免
+    /// 退出过程中的回调把诊断页覆盖成启动失败。
+    @discardableResult
+    private func reportWorkspaceRequirementIfNeeded() -> Bool {
+        guard let problem = workspaceProblem, !isStoppingService, !isQuitting else { return false }
+        reportStartupFailure(
+            problem.message(path: workspaceDirectoryPath, isDefaultLocation: workspaceUsesDefaultLocation)
+        )
+        return true
+    }
+
+    /// 启动入口的统一前置提示：#8 的远程凭证收敛优先（可能仍在运行的远程进程
+    /// 必须先停止并收回 loopback），其次是监听地址诊断（GitHub #39 / R-3），最后
+    /// 是工作目录诊断。
+    @discardableResult
+    private func reportStartRequirementIfNeeded() -> Bool {
+        if reportRemoteAccessRequirementIfNeeded() { return true }
+        if reportUnusableHostnameIfNeeded() { return true }
+        return reportWorkspaceRequirementIfNeeded()
+    }
+
+    /// 远程访问凭证不可用（密码被删除、为空或读取失败）时的收敛入口
+    /// （GitHub #8 复审）。
+    ///
+    /// loopback 配置不需要密码，直接返回 nil。只有“配置是远程 + 取不到凭证 +
+    /// 存在本应用启动、且仍能验证所有权的进程”时才收敛：
+    /// 1. 把 hostname 收回默认 loopback（配置回落，调用方通过
+    ///    `onRemoteAccessClosed` 持久化）；
+    /// 2. 走既有 `stopService()` 路径停止已验证的进程组（只对验证通过的
+    ///    process group 发信号；外部服务、无法验证的记录一律零信号）。
+    /// 3. 状态改为 `.failed(可读提示)` 并显示在页面上。
+    ///
+    /// 没有可验证的托管进程时不改动用户配置：那里只需在启动入口给出可读的
+    /// 缺密码提示，静默改配置没有意义（我们也停不了别人的进程）。
+    /// 返回关闭后的 loopback 配置；没有可收敛的状态时返回 nil，重复调用幂等。
+    @discardableResult
+    func closeRemoteAccessIfCredentialsAreUnavailable() -> ServiceConfiguration? {
+        guard !RemoteAccessPolicy.isLoopbackHostname(configuration.hostname) else { return nil }
+        guard !hasRequiredRemoteAccessCredentials else { return nil }
+        guard !isStoppingService, !isQuitting, managedServicePID() != nil else { return nil }
+        let closed = RemoteAccessPolicy.disablingRemoteAccess(in: configuration)
+        updateConfiguration(closed)
+        stopService { [weak self] in
+            guard let self else { return }
+            self.reportRemoteAccessClosure(closed)
+        }
+        return closed
+    }
+
+    private func reportRemoteAccessClosure(_ closed: ServiceConfiguration) {
+        let message = RemoteAccessPolicy.revokedPasswordMessage
+        setState(.failed(message))
+        onPageMessage?(message)
+        onRemoteAccessClosed?(closed)
+    }
+
+    // MARK: - Ownership and dependency lookup
+
+    /// PID of a service this app instance launched and can still verify.
+    ///
+    /// External services and unverifiable records return nil. No signal path
+    /// may run in that case. The record itself is the only authority: a child
+    /// handle without a record is unhosted as well.
+    func managedServicePID() -> pid_t? {
+        verifiedOwnershipRecord()?.pid
+    }
+
+    /// Expectation a stored record must satisfy for the current configuration.
+    func ownershipExpectation() -> ServiceOwnershipExpectation {
+        ServiceOwnershipExpectation(
+            port: configuration.port,
+            instanceID: instanceID
+        )
+    }
+
+    /// The stored ownership record, but only when it verifies against this app
+    /// instance and the live process.
+    ///
+    /// Mismatched records are removed without sending any signal, and the
+    /// process they point at counts as external. A record that cannot be
+    /// checked right now (for example because `ps` failed) is kept for a later
+    /// check, but the answer is still "not managed", so no signal is sent.
+    func verifiedOwnershipRecord() -> ServiceOwnershipRecord? {
+        guard let record = ownershipStore.loadRecord(from: appConfiguration.serviceOwnerURL) else { return nil }
+        let verdict = ServiceOwnershipVerifier.verify(
+            record: record,
+            expectation: ownershipExpectation(),
+            processIsAlive: { self.processInspector.isProcessAlive($0) },
+            facts: { self.processInspector.processFacts(of: $0) }
+        )
+        if verdict.shouldRemoveRecord {
+            ownershipStore.removeRecord(at: appConfiguration.serviceOwnerURL)
+        }
+        // 重启认领（GitHub #9）：只有通过逐项校验的记录才能继续被管理；
+        // 任何失败都只把进程当作外部服务，不认领也不发信号。
+        return ServiceOwnershipVerifier.adoption(record: record, verdict: verdict).adoptedRecord
+    }
+
+    /// Startup reconciliation for records left behind by an earlier run.
+    ///
+    /// The legacy single-PID file is removed immediately: a PID alone is not
+    /// ownership. A `service-owner.json` from an earlier app instance also
+    /// fails verification (the instance identifier differs), so it is dropped
+    /// and the still-running service is treated as external. Nothing is
+    /// signalled in either case.
+    func reconcileOwnershipRecord() {
+        try? fileManager.removeItem(at: appConfiguration.legacyServicePIDURL)
+        _ = verifiedOwnershipRecord()
+    }
+
+    func resolvePiWebPath() -> String? {
+        if let configured = configuration.piWebPath.nilIfEmpty {
+            return fileManager.isExecutableFile(atPath: configured) ? configured : nil
+        }
+        let candidates = [
+            "/opt/homebrew/bin/pi-web",
+            "/usr/local/bin/pi-web",
+            "\(fileManager.homeDirectoryForCurrentUser.path)/.npm-global/bin/pi-web"
+        ]
+        if let path = candidates.first(where: { fileManager.isExecutableFile(atPath: $0) }) {
+            return path
+        }
+        return commandRunner.run(["/bin/zsh", "-lc", "command -v pi-web 2>/dev/null"])?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
+    }
+
+    /// 便捷入口：读一次凭证后交给 `startDecision(credentials:)`。
+    /// 只读查询和测试可以用它；真正的启动路径请自己读一次并传进来。
+    func startDecision() -> ServiceStartDecision {
+        startDecision(credentials: remoteAccessPassword())
+    }
+
+    /// 启动决策。`credentials` 由调用方在本次操作中读取一次并传入，决策本身不再
+    /// 读 Keychain；校验用的凭证和 `ServiceLaunchSpecification` 里的
+    /// `PI_WEB_PASSWORD` 是同一个值，因此不存在“校验时有效、构造启动环境时二次
+    /// 读取失效却仍然 .launch”的 fail-open 窗口（GitHub #8 复审）。
+    ///
+    /// 监听地址先经统一判定（GitHub #39 / R-3）：通配地址、空值、前后空白与非法
+    /// 字符一律返回 `.invalidAddress`，不会被静默替换成其他地址。
+    func startDecision(credentials: String?) -> ServiceStartDecision {
+        guard !isStoppingService else { return .ignored }
+        // 与保存路径、`ServiceConfiguration.load` 共用同一个判定函数。
+        if let message = RemoteAccessPolicy.addressVerdict(hostname: configuration.hostname).diagnosisMessage {
+            return .invalidAddress(message)
+        }
+        // 远程监听的前置条件：Keychain 中必须存在非空密码。条目被删除、内容为空
+        // 或读取失败时一律按“无密码”处理，绝不启动去掉认证的服务。
+        guard RemoteAccessPolicy.allowsRemoteListening(hostname: configuration.hostname, password: credentials) else {
+            return .missingRemotePassword
+        }
+        if managedServicePID() != nil { return .existingProcess }
+        // A launch that has not produced a record yet is still in flight (or is
+        // an unrecorded child that survived cleanup). Starting another one
+        // would leave two services competing for the same port.
+        if let process = serviceProcess, process.isRunning { return .existingProcess }
+        guard let piWebPath = configuration.piWebPath.nilIfEmpty ?? resolvePiWebPath() else {
+            return .missingExecutable
+        }
+        // 同一个 `credentials` 值同时用于校验和启动规格：启动路径不会二次读取。
+        // PATH 来自注入的工具 PATH 构建器（未注入时 `make` 用纯静态兜底）。
+        return .launch(ServiceLaunchSpecification.make(
+            configuration: configuration,
+            piWebPath: piWebPath,
+            appConfiguration: appConfiguration,
+            baseEnvironment: environment(),
+            remoteAccessPassword: credentials,
+            toolPathProvider: toolPathProvider
+        ))
+    }
+
+    // MARK: - Startup
+
+    /// Initial startup path used by `applicationDidFinishLaunching`.
+    ///
+    /// `forceStart` is passed as `true` only when the first-launch diagnostics just
+    /// completed: the user has just fixed the prerequisites, so the service must be
+    /// started explicitly even when `autoStart` is off (otherwise the app would show
+    /// “Pi Web 服务未运行。” right after a successful setup). A normal launch keeps
+    /// the stored `autoStart` setting.
+    func startAtLaunch(forceStart: Bool = false) {
+        // Records from earlier runs are evaluated (and cleaned) before any new
+        // launch decision, so a leftover file can never be adopted.
+        reconcileOwnershipRecord()
+        guard isStartPermitted else {
+            reportStartRequirementIfNeeded()
+            return
+        }
+        if configuration.autoStart || forceStart {
+            ensureServerIsRunning()
+        } else {
+            let generation = lifecycleGeneration
+            checkServer { [weak self] ready in
+                guard let self else { return }
+                self.scheduler.onMain {
+                    guard self.lifecycleGeneration == generation else {
+                        self.discardStaleCallback("启动探测", generation: generation)
+                        return
+                    }
+                    // 与 autoStart 分支一致：探测期间门控关闭就不能再改状态或加载页面。
+                    guard self.isStartPermitted else { return }
+                    if ready {
+                        self.setState(.running)
+                        self.requestLoad()
+                    } else {
+                        self.setState(.stopped)
+                        self.onPageMessage?("Pi Web 服务未运行。")
+                    }
+                }
+            }
+        }
+        startHealthMonitor()
+    }
+
+    func ensureServerIsRunning() {
+        guard isStartPermitted else {
+            reportStartRequirementIfNeeded()
+            return
+        }
+        let generation = lifecycleGeneration
+        checkServer { [weak self] ready in
+            guard let self else { return }
+            self.scheduler.onMain {
+                guard self.lifecycleGeneration == generation else {
+                    self.discardStaleCallback("启动探测", generation: generation)
+                    return
+                }
+                // 门控可能在探测期间被关掉（例如重新检测），回调必须再确认。
+                guard self.isStartPermitted else { return }
+                if ready {
+                    self.setState(.running)
+                    self.requestLoad()
+                } else {
+                    self.startManagedService()
+                }
+            }
+        }
+    }
+
+    /// Menu action "启动服务": connect to a ready service, otherwise start the
+    /// managed one. The dependency gate is enforced again inside the async
+    /// callback and in `startManagedService()`.
+    func startService() {
+        guard isStartPermitted else {
+            reportStartRequirementIfNeeded()
+            return
+        }
+        let generation = lifecycleGeneration
+        checkServer { [weak self] ready in
+            guard let self else { return }
+            self.scheduler.onMain {
+                guard self.lifecycleGeneration == generation else {
+                    self.discardStaleCallback("启动探测", generation: generation)
+                    return
+                }
+                guard self.isStartPermitted else { return }
+                if ready {
+                    self.setState(.running)
+                    self.requestLoad()
+                } else {
+                    self.startManagedService()
+                }
+            }
+        }
+    }
+
+    /// 唯一的受托管启动入口：启动、重启、配置变更、重试和健康恢复都收敛到这里，
+    /// 依赖门控关闭时直接返回，不产生任何进程或页面副作用。
+    func startManagedService() {
+        guard isBaseStartPermitted else { return }
+        // 监听地址判定（GitHub #39 / R-3）：非法地址在凭证读取与工作目录探测之前
+        // 就被拒绝，既不构造启动规格也不产生进程；诊断顺序（#8 收敛 → 地址诊断）
+        // 由 `reportStartRequirementIfNeeded()` 统一给出。
+        guard isListeningAddressUsable else {
+            reportStartRequirementIfNeeded()
+            return
+        }
+        // 启动前的最后一次工作目录校验（GitHub #9 复审）：门控是上一次探测的
+        // 结果，健康监控运行期间用户自选目录可能已被删除。只有默认工作目录允许
+        // 被自动创建；自选目录缺失/不可写时一律不可用：阻止启动、回调调用方进入
+        // 诊断状态，不静默重建目录。
+        guard prepareWorkspaceBeforeLaunch() else { return }
+        // 本次启动只读一次凭证，校验与启动规格共用它：校验通过后不再触碰 Keychain
+        // （GitHub #8 复审：二次读取失败不能退化成无认证的远程启动）。
+        let credentials = remoteAccessPassword()
+        guard RemoteAccessPolicy.allowsRemoteListening(hostname: configuration.hostname, password: credentials) else {
+            if !reportRemoteAccessRequirementIfNeeded() {
+                reportStartupFailure(RemoteAccessPolicy.missingPasswordMessage)
+            }
+            return
+        }
+        switch startDecision(credentials: credentials) {
+        case .ignored:
+            return
+        case .existingProcess:
+            // 同一次启动只允许一条轮询链：已有活动会话时直接复用它（M3）；上一轮
+            // 已经结束（超时、进程退出或成功）时开启新会话并清零预算，使“重试”
+            // 真的重新开始轮询，而不是复用上一轮的失败结论（M1）。
+            beginOrReuseStartupSession()
+            return
+        case .missingExecutable:
+            reportStartupFailure("找不到 pi-web。请确认已执行 npm install -g @agegr/pi-web@latest。")
+            return
+        case .missingRemotePassword:
+            // 与上面传入的凭证同源，正常不可达；保留分支是为了任何未来改动都不会
+            // 静默启动一个缺认证的远程监听。
+            reportStartupFailure(RemoteAccessPolicy.missingPasswordMessage)
+            return
+        case .invalidAddress(let message):
+            // 与 `isListeningAddressUsable` 守卫同源，正常不可达；保留分支是为了
+            // 任何未来改动都不会静默启动一个监听地址非法的服务。
+            reportStartupFailure(message)
+            return
+        case .launch(let specification):
+            do {
+                let handle = try openLogForWriting()
+                // Token for this launch: a late termination callback from an
+                // earlier process must not clear the replacement or close its log.
+                lifecycleGeneration &+= 1
+                let generation = lifecycleGeneration
+                let process = try launcher.launch(specification, logHandle: handle) { [weak self] in
+                    guard let self else { return }
+                    self.scheduler.onMain {
+                        guard self.lifecycleGeneration == generation else {
+                            self.discardStaleCallback("进程退出", generation: generation)
+                            return
+                        }
+                        self.serviceProcess = nil
+                        self.closeLog()
+                        self.logWriter.record("服务进程已退出")
+                        if !self.isStoppingService && !self.isQuitting {
+                            self.setState(.stopped)
+                        }
+                    }
+                }
+                // 应用侧事件行也走同一个 LogWriter/LogRedactor。
+                logWriter.record("服务已启动：PID \(process.processIdentifier)")
+                serviceProcess = process
+                // A process without a verifiable ownership record can never be
+                // managed: kill the fresh group and report the startup failure
+                // instead of leaving an unmanageable service behind.
+                let recorded = writeOwnershipRecord(for: specification, process: process)
+                guard recorded, verifiedOwnershipRecord() != nil else {
+                    abandonUnhostedLaunch(process: process)
+                    return
+                }
+                didLaunchService = true
+                setState(.starting)
+                onPageMessage?("正在启动 Pi Web…")
+                // 真正开始等待服务：开启属于本次启动的新会话（预算清零）。
+                let session = beginStartupSession()
+                pollUntilReady(session: session, generation: generation)
+            } catch {
+                // 子进程没有起来：管道写端也要关掉，读端随后收到 EOF 并退出。
+                closeLog()
+                reportStartupFailure("无法启动 pi-web：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// 启动前重新校验工作目录，并同步门控状态（GitHub #9 复审）。
+    ///
+    /// `WorkspaceDirectory.prepare` 只会创建默认工作目录；自选目录缺失时返回
+    /// `problem`，因此这里不会把用户删掉的目录静默重建。返回 false 表示本次启动
+    /// 必须被拒绝，调用方（`AppDelegate`）已经通过 `onWorkspaceProblem` 得到通知。
+    private func prepareWorkspaceBeforeLaunch() -> Bool {
+        let validation = WorkspaceDirectory.prepare(
+            configuredPath: configuration.workspacePath,
+            defaultPath: appConfiguration.defaultWorkspaceDirectory.path,
+            probe: workspaceProbe
+        )
+        workspaceProblem = validation.problem
+        workspaceDirectoryPath = validation.path
+        workspaceUsesDefaultLocation = WorkspaceDirectory.usesDefaultLocation(configured: configuration.workspacePath)
+        guard let problem = validation.problem else { return true }
+        onWorkspaceProblem?(problem, redactor.redact(validation.path))
+        return false
+    }
+
+    /// Records the process this launch created.
+    ///
+    /// A PID that is not a process group leader, unreadable `ps` facts, or a
+    /// failed write all mean "unhosted": the caller terminates the fresh
+    /// process group, because an unverifiable service must never survive as a
+    /// half-managed child. The digest is over the normalized command text:
+    /// the live `ps -o args=` text when it is readable, otherwise the canonical
+    /// `executablePath + arguments` text (which a later verification then
+    /// rejects, since an empty live command line is a mismatch).
+    private func writeOwnershipRecord(for specification: ServiceLaunchSpecification, process: ServiceProcessHandle) -> Bool {
+        guard process.processIdentifier > 1,
+              let facts = processInspector.processFacts(of: process.processIdentifier),
+              facts.processGroupID == process.processIdentifier else { return false }
+        let commandText = facts.commandLine.isEmpty
+            ? ServiceOwnershipRecord.commandText(
+                executablePath: specification.executablePath,
+                arguments: specification.arguments
+            )
+            : facts.commandLine
+        let record = ServiceOwnershipRecord(
+            pid: process.processIdentifier,
+            processGroupID: facts.processGroupID,
+            launchedAt: facts.launchedAt,
+            resolvedExecutable: facts.resolvedExecutable,
+            resolvedExecutableSource: facts.resolvedExecutableSource,
+            argumentsDigest: ServiceOwnershipRecord.commandDigest(ofCommandText: commandText),
+            port: configuration.port,
+            instanceID: instanceID,
+            recordedAt: ISO8601DateFormatter().string(from: Date())
+        )
+        do {
+            try ownershipStore.save(record, to: appConfiguration.serviceOwnerURL)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Terminates a launch whose ownership record was not written or did not
+    /// verify immediately after the launch.
+    ///
+    /// This path owns the cleanup of that launch (`lifecycleGeneration` is bumped
+    /// so its termination callback is ignored), signals only the fresh process
+    /// group and reports a startup failure. A child that survives the kill is
+    /// kept as the current handle, so `startDecision()` still sees a live child
+    /// and refuses to launch a second service.
+    private func abandonUnhostedLaunch(process: ServiceProcessHandle) {
+        lifecycleGeneration &+= 1
+        let generation = lifecycleGeneration
+        stoppingGeneration = generation
+        didLaunchService = false
+        let processGroupID = process.processIdentifier
+        scheduler.onBackground { [weak self] in
+            guard let self else { return }
+            self.terminate(processGroupID: processGroupID)
+            self.scheduler.onMain {
+                guard self.lifecycleGeneration == generation else {
+                    self.discardStaleCallback("放弃半托管启动", generation: generation)
+                    return
+                }
+                // The launch is gone and its record (if one was written before
+                // the immediate verification failed) must not linger.
+                self.ownershipStore.removeRecord(at: self.appConfiguration.serviceOwnerURL)
+                self.closeLog()
+                if self.serviceProcess === process, !process.isRunning {
+                    self.serviceProcess = nil
+                }
+                self.clearStopping()
+                self.reportStartupFailure(
+                    "无法登记 pi-web 的所有权信息，已终止本次启动的进程。请查看日志：\(self.appConfiguration.logURL.path)"
+                )
+            }
+        }
+    }
+
+    // MARK: - 启动会话与就绪轮询
+
+    /// 开启或复用启动轮询链。
+    ///
+    /// 同一个代次里只允许一条链：重复的启动入口（菜单、配置变更重载、健康恢复、
+    /// 弹窗“重试”）复用现有链，不再各挂一条并共享同一个预算（M3）。上一轮已经
+    /// 结束（超时、进程退出或成功）时开启新会话并清零预算（M1）。
+    private func beginOrReuseStartupSession() {
+        if let session = activeStartupSession, activeStartupSessionGeneration == lifecycleGeneration {
+            logWriter.record("启动轮询已在进行中，复用现有轮询链（会话 \(session)）")
+            return
+        }
+        let generation = lifecycleGeneration
+        let session = beginStartupSession()
+        pollUntilReady(session: session, generation: generation)
+    }
+
+    /// 开启一次启动会话：分配新编号、清零本次会话的轮询预算，并记录它所属的代次。
+    @discardableResult
+    private func beginStartupSession() -> Int {
+        nextStartupSessionID &+= 1
+        startupAttempts = 0
+        activeStartupSession = nextStartupSessionID
+        activeStartupSessionGeneration = lifecycleGeneration
+        return nextStartupSessionID
+    }
+
+    /// 结束当前启动会话（成功、失败或进程退出）。下一次启动入口会开启新会话并
+    /// 重新获得完整预算。
+    private func endStartupSession() {
+        activeStartupSession = nil
+    }
+
+    /// 回调是否属于当前活动的启动会话：代次与会话号必须同时匹配。
+    private func isCurrentStartupSession(_ session: Int, generation: Int) -> Bool {
+        lifecycleGeneration == generation && activeStartupSession == session
+    }
+
+    /// 过期异步回调的统一处理：只写日志，不改状态、不加载页面、不弹提示。
+    private func discardStaleCallback(_ name: String, generation: Int) {
+        logWriter.record("忽略过期的\(name)回调（回调代次 \(generation)，当前代次 \(lifecycleGeneration)）")
+    }
+
+    /// 同一启动会话只提示一次启动失败（M1/M3）：重复结论只写日志，不再弹第二个
+    /// 模态框，也不再重复覆盖页面消息。
+    private func reportStartupFailureOnce(_ message: String, session: Int) {
+        guard startupFailureReportedSession != session else {
+            logWriter.record("启动失败提示已发出，忽略本会话的重复提示：\(redactor.redact(message))")
+            return
+        }
+        startupFailureReportedSession = session
+        reportStartupFailure(message)
+    }
+
+    /// 启动轮询的唯一实现。
+    ///
+    /// 预算按一次启动会话记账：每次调用消耗一次（150 × 0.2 秒 ≈ 30 秒）；耗尽
+    /// 时结束会话并只报一次失败，下一次启动入口以新会话重新开始。所有延迟回调与
+    /// 探测回调都先校验代次与会话号，过期回调只写日志（M1/M2/M3）。
+    private func pollUntilReady(session: Int, generation: Int) {
+        startupAttempts += 1
+        guard startupAttempts <= Self.maxStartupAttempts else {
+            endStartupSession()
+            reportStartupFailureOnce(
+                "Pi Web 在 30 秒内未能启动。请查看日志：\(appConfiguration.logURL.path)",
+                session: session
+            )
+            return
+        }
+        scheduler.after(Self.startupPollInterval) { [weak self] in
+            guard let self else { return }
+            guard self.isCurrentStartupSession(session, generation: generation) else {
+                self.discardStaleCallback("启动轮询", generation: generation)
+                return
+            }
+            self.checkServer { ready in
+                self.scheduler.onMain {
+                    guard self.isCurrentStartupSession(session, generation: generation) else {
+                        self.discardStaleCallback("启动就绪探测", generation: generation)
+                        return
+                    }
+                    // 启动轮询是异步的：门控在轮询期间关闭时不再改状态或加载页面。
+                    guard self.isStartPermitted else { return }
+                    if ready {
+                        self.endStartupSession()
+                        self.restartAttempts = 0
+                        self.setState(.running)
+                        self.requestLoad()
+                    } else if let process = self.serviceProcess, !process.isRunning {
+                        self.endStartupSession()
+                        self.reportStartupFailureOnce(
+                            "pi-web 进程已退出。请查看日志：\(self.appConfiguration.logURL.path)",
+                            session: session
+                        )
+                    } else {
+                        self.pollUntilReady(session: session, generation: generation)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Stopping
+
+    /// Stops the managed service.
+    ///
+    /// The verified process group gets SIGTERM, a bounded wait, then SIGKILL.
+    /// Nothing is signalled unless the ownership record verifies against the
+    /// live process: external services are read-only for this app, so a stop
+    /// request for them completes without a signal and without changing the
+    /// reported state.
+    func stopService(completion: (() -> Void)? = nil) {
+        // Verification happens before the stopping flag is set: an external
+        // service must leave the state machine exactly as it was.
+        guard let record = verifiedOwnershipRecord() else {
+            // 提前返回也要收回停止标志（L1）：调用方可能在调用前预置过它，留成
+            // true 会让之后所有启动入口被永久拒绝。
+            clearStopping()
+            completion?()
+            return
+        }
+        lifecycleGeneration &+= 1
+        let generation = lifecycleGeneration
+        stoppingGeneration = generation
+        scheduler.onBackground { [weak self] in
+            guard let self else { return }
+            self.terminate(processGroupID: record.processGroupID)
+            self.scheduler.onMain {
+                guard self.lifecycleGeneration == generation else {
+                    // 停止期间发生的新生命周期转换拥有当前状态：不重复改状态、
+                    // 不删除可能已属于新启动的记录；完成回调仍要送达，否则
+                    // 重启/退出流程会挂住。
+                    self.discardStaleCallback("停止服务", generation: generation)
+                    completion?()
+                    return
+                }
+                self.ownershipStore.removeRecord(at: self.appConfiguration.serviceOwnerURL)
+                self.finishStopping(generation: generation, completion: completion)
+            }
+        }
+    }
+
+    /// SIGTERM to a process group, bounded wait, then SIGKILL to the same
+    /// group. The wait is bounded by `stopPollAttempts`, so at most two signals
+    /// are ever sent, both to the group. PIDs and groups 0 and 1 are refused.
+    private func terminate(processGroupID: pid_t) {
+        guard processGroupID > 1 else { return }
+        signaler.sendGroupSignal(SIGTERM, toProcessGroup: processGroupID)
+        for _ in 0..<Self.stopPollAttempts {
+            guard signaler.isProcessGroupAlive(processGroupID) else { return }
+            scheduler.sleep(seconds: Self.stopPollInterval)
+        }
+        if signaler.isProcessGroupAlive(processGroupID) {
+            signaler.sendGroupSignal(SIGKILL, toProcessGroup: processGroupID)
+        }
+    }
+
+    /// Shared end of a stop: clear the child state, reset the flag and report
+    /// the stopped state. The ownership record is removed by the caller only
+    /// after it was verified.
+    private func finishStopping(generation: Int, completion: (() -> Void)?) {
+        serviceProcess = nil
+        didLaunchService = false
+        // 停止之后进程不再写日志：应用侧的管道写端在这里关掉（进程退出回调
+        // 因代次已变而不会再来做这件事）。
+        closeLog()
+        if stoppingGeneration == generation { stoppingGeneration = nil }
+        setState(.stopped)
+        completion?()
+    }
+
+    func restartManagedService() {
+        stopService { [weak self] in self?.startManagedService() }
+    }
+
+    /// Stops the verified managed service and then calls `completion` on the
+    /// main queue. AppDelegate terminates afterwards.
+    ///
+    /// 名字只说托管服务：外部服务（用户手动启动的 pi-web、上一次运行留下的
+    /// 服务、任何无法验证的进程）在任何退出行为下都不被停止。
+    func stopManagedServiceOnQuit(completion: @escaping () -> Void) {
+        beginQuitting()
+        // 停止标志由 `stopService` 统一拥有：找不到可验证记录时它自己收回标志
+        // （L1），调用方不再预置后自行清理。
+        if managedServicePID() != nil {
+            stopService(completion: completion)
+        } else {
+            completion()
+        }
+    }
+
+    // MARK: - Quit behaviour
+
+    /// Starts a quit sequence: no further health restarts, no state flicker from
+    /// a terminating child process.
+    func beginQuitting() {
+        isQuitting = true
+        stopHealthMonitor()
+    }
+
+    /// "退出但保持服务运行": keep the child alive and keep its ownership
+    /// record. The next app instance will fail the instance check, clean the
+    /// record and treat the service as external.
+    ///
+    /// 子进程的 stdout/stderr 是应用侧持有的管道（GitHub #73）。应用退出后读端必须
+    /// 由还活着的进程持有，否则服务的下一次 stdout/stderr 写入会收到 `EPIPE`，Node
+    /// 的 `process.stdout` 会把它变成未处理的 `error` 事件并让服务退出。所以这里
+    /// 把读端交给一个只做排空的 `/bin/cat`（内容丢弃），服务自身的运行行为不变。
+    /// 关闭写端在前：孩子的写端是它自己 `dup2` 出来的，不受影响。
+    func keepRunningOnQuit() {
+        beginQuitting()
+        clearStopping()
+        closeLog()
+        logWriter.handOffChildOutputToDrainer()
+    }
+
+    // MARK: - Health monitoring
+
+    func startHealthMonitor() {
+        healthToken?.invalidate()
+        healthToken = nil
+        // 门控关闭时不轮询：既不采纳外部服务，也不会触发受托管重启。
+        guard isStartPermitted else { return }
+        healthToken = scheduler.repeating(interval: Self.healthCheckInterval) { [weak self] in
+            guard let self else { return }
+            // 密码被删除或读取失败时先收敛：停止已经在运行的远程托管进程并把配置
+            // 收回 loopback。它优先于依赖门控判断，因为没有认证的远程监听必须立即
+            // 关闭（GitHub #8 复审）。
+            if self.closeRemoteAccessIfCredentialsAreUnavailable() != nil { return }
+            guard self.isStartPermitted else { return }
+            let generation = self.lifecycleGeneration
+            self.checkServer { ready in
+                self.scheduler.onMain {
+                    guard self.lifecycleGeneration == generation else {
+                        self.discardStaleCallback("健康检查", generation: generation)
+                        return
+                    }
+                    // 门控 blocked 时不得改变状态或加载服务页，覆盖诊断页。
+                    guard self.isStartPermitted else { return }
+                    if ready {
+                        if case .running = self.currentState {
+                            self.restartAttempts = 0
+                        } else {
+                            self.setState(.running)
+                            self.restartAttempts = 0
+                            self.requestLoad()
+                        }
+                    } else if case .running = self.currentState {
+                        self.setState(.stopped)
+                        self.onPageMessage?("Pi Web 服务已断开，正在尝试恢复…")
+                        if self.didLaunchService && self.restartAttempts < 1 {
+                            self.restartAttempts += 1
+                            self.startManagedService()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func stopHealthMonitor() {
+        healthToken?.invalidate()
+        healthToken = nil
+    }
+
+    func checkServer(completion: @escaping (Bool) -> Void) {
+        probe.probe(url: configuration.serviceURL, timeout: Self.probeTimeout, completion: completion)
+    }
+
+    /// Re-checks the (possibly changed) configuration after preferences were
+    /// saved. Gated like every other start entry: while the dependency gate is
+    /// closed only the state message is updated, never a launch or page load.
+    func reloadAfterConfigurationChange() {
+        guard isStartPermitted else {
+            reportStartRequirementIfNeeded()
+            return
+        }
+        let generation = lifecycleGeneration
+        checkServer { [weak self] ready in
+            guard let self else { return }
+            self.scheduler.onMain {
+                guard self.lifecycleGeneration == generation else {
+                    self.discardStaleCallback("配置变更探测", generation: generation)
+                    return
+                }
+                guard self.isStartPermitted else { return }
+                if ready {
+                    self.setState(.running)
+                    self.requestLoad()
+                } else if self.configuration.autoStart {
+                    self.startManagedService()
+                } else {
+                    self.setState(.stopped)
+                    self.onPageMessage?("设置已保存，服务尚未启动。")
+                }
+            }
+        }
+    }
+
+    // MARK: - Logs
+
+    /// Opens the log file for the child process via the unified `LogWriter`:
+    /// directory creation, in-place redaction of the existing log, size-based
+    /// rotation and opening all live there (GitHub #10). The returned handle is
+    /// the write end of the `LogWriter` child-output pipe (GitHub #73), not the
+    /// log file: rotation can only affect the fd the app writes through.
+    private func openLogForWriting() throws -> FileHandle {
+        // 上一次启动的管道写端（如果有）先关掉：否则重启会让旧读端一直等不到 EOF。
+        // 正常路径上 `closeLog()` 已经关过一次，这里兜底。
+        closeLog()
+        // 工作目录可用性由启动前的 `prepareWorkspaceBeforeLaunch()` 保证（GitHub #9
+        // 复审）。只有应用默认工作目录才允许在这里创建：用户自选目录缺失时不应该
+        // 被静默重建，而是已经作为不可用被门控拒绝。
+        if WorkspaceDirectory.usesDefaultLocation(configured: configuration.workspacePath) {
+            try fileManager.createDirectory(
+                at: appConfiguration.workspaceDirectory(for: configuration),
+                withIntermediateDirectories: true
+            )
+        }
+        let handle = try logWriter.openChildOutput()
+        logHandle = handle
+        return handle
+    }
+
+    func closeLog() {
+        try? logHandle?.close()
+        logHandle = nil
+    }
+
+    // MARK: - Presentation helpers
+
+    private func reportStartupFailure(_ message: String) {
+        // 错误消息可能内嵌路径或命令行（例如“无法创建日志目录：/Use…/…”），
+        // 展示给用户、写进日志之前先经过共用的脱敏器。
+        let redacted = redactor.redact(message)
+        logWriter.record("启动失败：\(redacted)")
+        setState(.failed(redacted))
+        onPageMessage?("启动失败")
+        onStartupFailure?(redacted)
+    }
+
+    private func requestLoad() {
+        onLoadPage?()
+    }
+}
+
+extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
+}

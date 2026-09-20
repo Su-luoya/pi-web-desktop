@@ -146,44 +146,22 @@ printf 'build: %s build with %s\n' "$BUILD_MODE" "$OPTIMIZATION_FLAGS"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-# $OPTIMIZATION_FLAGS is intentionally unquoted: it is a list of compiler
-# flags, never a single value, and it never contains shell metacharacters.
-swiftc $OPTIMIZATION_FLAGS "$ROOT/Sources/PiWebApp.swift" \
-  "$ROOT/Sources/AppConfiguration.swift" \
-  "$ROOT/Sources/RecentWorkspace.swift" \
-  "$ROOT/Sources/AppPaths.swift" \
-  "$ROOT/Sources/DiagnosticsCollector.swift" \
-  "$ROOT/Sources/DiagnosticsClipboard.swift" \
-  "$ROOT/Sources/ComponentInstallation.swift" \
-  "$ROOT/Sources/UpdateChecker.swift" \
-  "$ROOT/Sources/UpdateSettings.swift" \
-  "$ROOT/Sources/UpdateAbandonedAttempt.swift" \
-  "$ROOT/Sources/UpdateTransaction.swift" \
-  "$ROOT/Sources/UpdateVerifier.swift" \
-  "$ROOT/Sources/PiWebUpdateAdapter.swift" \
-  "$ROOT/Sources/PiProcessInspector.swift" \
-  "$ROOT/Sources/PiCLIUpdateAdapter.swift" \
-  "$ROOT/Sources/PiPackageUpdateAdapter.swift" \
-  "$ROOT/Sources/DependencyChecker.swift" \
-  "$ROOT/Sources/FirstLaunchDiagnostics.swift" \
-  "$ROOT/Sources/InstallCommandManifest.swift" \
-  "$ROOT/Sources/KeychainStore.swift" \
-  "$ROOT/Sources/LogRedactor.swift" \
-  "$ROOT/Sources/LogWriter.swift" \
-  "$ROOT/Sources/ProcessInspector.swift" \
-  "$ROOT/Sources/ToolPath.swift" \
-  "$ROOT/Sources/QuitPolicy.swift" \
-  "$ROOT/Sources/QuitCoordinator.swift" \
-  "$ROOT/Sources/ServiceConfiguration.swift" \
-  "$ROOT/Sources/ServiceManager.swift" \
-  "$ROOT/Sources/ServiceOwnership.swift" \
-  "$ROOT/Sources/WebViewController.swift" \
-  "$ROOT/Sources/WebViewNavigationPolicy.swift" \
-  "$ROOT/Sources/WorkspaceDirectory.swift" \
-  "$ROOT/Sources/PreferencesWindowController.swift" \
-  "$ROOT/Sources/UpdateSettingsWindowController.swift" \
-  "$ROOT/Sources/DiagnosticsWindowController.swift" \
-  "$ROOT/Sources/main.swift" \
+# Every Swift file under Sources/ belongs to the app target. Globbing keeps this
+# list correct when files move between the domain folders or get split further;
+# the loop drops patterns that matched nothing (an unmatched glob stays literal).
+# $OPTIMIZATION_FLAGS is intentionally unquoted: it is a list of compiler flags,
+# never a single value, and it never contains shell metacharacters.
+set --
+for candidate in "$ROOT"/Sources/*.swift "$ROOT"/Sources/*/*.swift "$ROOT"/Sources/*/*/*.swift; do
+  [ -f "$candidate" ] || continue
+  set -- "$@" "$candidate"
+done
+if [ "$#" -eq 0 ]; then
+  printf 'error: no Swift sources under %s/Sources\n' "$ROOT" >&2
+  exit 2
+fi
+
+swiftc $OPTIMIZATION_FLAGS "$@" \
   -target "arm64-apple-macosx$APP_MINIMUM_SYSTEM_VERSION" \
   -o "$BIN" \
   -framework Cocoa \

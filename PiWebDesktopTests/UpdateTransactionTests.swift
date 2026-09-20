@@ -928,60 +928,27 @@ final class UpdateTransactionTests: XCTestCase {
         }
     }
 
-    /// 仓库根目录（测试文件位于 `<root>/PiWebDesktopTests/`）。
-    /// 在仓库内运行时用 `#filePath` 推导；在本地无 Xcode 的独立运行器里则
-    /// 回退到当前工作目录，保证同一断言两种环境都能执行。
-    private func repositoryRoot() -> URL {
-        let derived = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        if FileManager.default.fileExists(atPath: derived.appendingPathComponent("Sources/UpdateTransaction.swift").path) {
-            return derived
-        }
-        return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-    }
-
-    private func codeText(of source: String) -> String {
-        source
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map { line -> String in
-                let trimmed = line.drop { $0 == " " || $0 == "\t" }
-                guard !trimmed.hasPrefix("//") else { return "" }
-                guard let range = line.range(of: "//") else { return String(line) }
-                return String(line[line.startIndex..<range.lowerBound])
-            }
-            .joined(separator: "\n")
-    }
-
     func testFrameworkAndCLIAndPackageSourcesContainNoSignalOrShellAPIs() throws {
         let forbidden = [
             "kill(", "killpg(", "raise(", "signal(", "SIGTERM", "SIGKILL", "SIGINT",
             ".terminate(", ".interrupt(", "posix_spawn", "/bin/sh", "/bin/bash", "shellPath",
             "sudo(", "sudo -"
         ]
-        for relativePath in [
-            "Sources/UpdateTransaction.swift",
-            "Sources/UpdateVerifier.swift",
-            "Sources/PiCLIUpdateAdapter.swift",
-            "Sources/PiPackageUpdateAdapter.swift"
-        ] {
-            let code = codeText(of: try String(
-                contentsOf: repositoryRoot().appendingPathComponent(relativePath),
-                encoding: .utf8
-            ))
-            for token in forbidden {
-                XCTAssertFalse(code.contains(token), "\(relativePath) 的代码里不得出现 \(token)")
-            }
+        let code = SourceScan.codeText(of: try SourceScan.text(matching: [
+            "UpdateTransaction", "UpdateArtifact", "UpdateRollback", "UpdateHistory",
+            "UpdateVerifier", "PiCLIUpdate", "PiPackageUpdate"
+        ]))
+        for token in forbidden {
+            XCTAssertFalse(code.contains(token), "源码里不得出现 \(token)")
         }
     }
 
     func testDegradationPlannerExecutionHasNoUninstallOrFileMutationAPIs() throws {
-        let code = codeText(of: try String(
-            contentsOf: repositoryRoot().appendingPathComponent("Sources/UpdateTransaction.swift"),
-            encoding: .utf8
-        ))
+        let code = SourceScan.codeText(of: try SourceScan.text(matching: [
+            "UpdateTransaction", "UpdateArtifact", "UpdateRollback", "UpdateHistory"
+        ]))
         for token in ["removeItem", "moveItem", "copyItem", "createFile", "uninstall", "sudo"] {
-            XCTAssertFalse(code.contains(token), "UpdateTransaction.swift 不得出现 \(token)")
+            XCTAssertFalse(code.contains(token), "事务源码里不得出现 \(token)")
         }
     }
 

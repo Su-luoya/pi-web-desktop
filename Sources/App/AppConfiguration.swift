@@ -1,0 +1,285 @@
+import Foundation
+
+/// App-owned filesystem locations and the UserDefaults-backed service settings.
+///
+/// Every path the app reads or writes is derived from `paths` (see `AppPaths`),
+/// so tests and the smoke launch can inject temporary directories instead of the
+/// user's real `Application Support` and `Logs` folders. Defaults stay unchanged
+/// for runtime state: `~/Library/Application Support/Pi Web Desktop`; logs live
+/// in `~/Library/Logs/Pi Web Desktop`, and service settings keep the loopback
+/// defaults from `ServiceConfiguration`.
+
+/// Layered user settings and defaults backed by UserDefaults.
+
+struct AppConfiguration {
+    /// Smoke 启动模式。两种模式都使用临时 support 目录、跳过单实例锁和服务
+    /// 自动启动，也都不写真实 UserDefaults。
+    enum SmokeLaunchMode: Equatable {
+        case none
+        /// `PI_WEB_DESKTOP_SMOKE=1`：建立主窗口后打印 `smoke: ready`。
+        case startup
+        /// `PI_WEB_DESKTOP_SMOKE=diagnostics`：打开诊断状态页后打印
+        /// `smoke: diagnostics ready`。不运行真实探针。
+        case diagnostics
+    }
+
+    /// Environment variable that switches the process into a smoke launch.
+    static let smokeLaunchEnvironmentKey = "PI_WEB_DESKTOP_SMOKE"
+    static let smokeLaunchEnvironmentValue = "1"
+    static let smokeDiagnosticsLaunchEnvironmentValue = "diagnostics"
+    /// Fixed marker the startup smoke launch prints once the main window exists.
+    static let smokeReadyMarker = "smoke: ready"
+    /// Fixed marker the diagnostics smoke launch prints once the status page exists.
+    static let smokeDiagnosticsReadyMarker = "smoke: diagnostics ready"
+
+    /// 运行状态、日志与默认工作目录的位置提供者（可注入）。
+    let paths: AppPaths
+
+    /// Which smoke launch (if any) this process is running.
+    let smokeLaunchMode: SmokeLaunchMode
+
+    /// True for any smoke launch mode.
+    var isSmokeLaunch: Bool { smokeLaunchMode != .none }
+
+    private let defaults: UserDefaults
+
+    private enum SetupKey {
+        /// Set once a first-launch diagnostics review passed (`canStartService`).
+        static let firstLaunchSetupCompleted = "firstLaunch.setupCompleted"
+    }
+
+    init(paths: AppPaths, defaults: UserDefaults = .standard, smokeLaunchMode: SmokeLaunchMode = .none) {
+        self.paths = paths
+        self.defaults = defaults
+        self.smokeLaunchMode = smokeLaunchMode
+    }
+
+    /// 便捷初始化：直接给出两个根目录（单元测试与 smoke 用）。
+    init(
+        supportURL: URL,
+        logsRootURL: URL,
+        defaults: UserDefaults = .standard,
+        smokeLaunchMode: SmokeLaunchMode = .none
+    ) {
+        self.init(
+            paths: AppPaths(supportDirectory: supportURL, logsDirectory: logsRootURL),
+            defaults: defaults,
+            smokeLaunchMode: smokeLaunchMode
+        )
+    }
+
+    /// Runtime state root: PID files, instance lock and the default workspace.
+    var supportURL: URL { paths.supportDirectory }
+
+    /// Log directory. Defaults to `~/Library/Logs/Pi Web Desktop`.
+    var logsDirectoryURL: URL { paths.logsDirectory }
+
+    var logURL: URL { paths.logFileURL }
+
+    /// 打开日志文件夹前的准备：确保日志目录存在（不创建日志文件）。
+    ///
+    /// 日志目录可能还不存在（从未启动过服务，或关闭了自动启动）；重复调用是
+    /// 幂等的。返回可读错误信息（已经过 `redactor` 脱敏）；`nil` 表示目录可用。
+    func prepareLogsDirectoryForOpening(
+        fileManager: FileManager = .default,
+        redactor: LogRedactor = LogRedactor()
+    ) -> String? {
+        let directory = paths.logsDirectory
+        do {
+            // 目录已存在时 `withIntermediateDirectories` 不会报错，所以这里不需要
+            // 先探测；目录位置被同名文件占据时会抛出可读错误。
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            return redactor.redact("无法创建日志目录：\(directory.path)（\(error.localizedDescription)）")
+        }
+        return nil
+    }
+
+    /// 打开日志前的准备：确保日志目录与日志文件存在。
+    ///
+    /// 日志位于 `~/Library/Logs/Pi Web Desktop/` 子目录（GitHub #9 的存储分层）。
+    /// 从未启动过服务、或关闭了自动启动时这个目录还不存在，直接
+    /// `createFile(atPath:)` 会因为父目录缺失而失败，所以这里先建目录再建文件。
+    /// 重复调用是幂等的。返回可读错误信息（已经过 `redactor` 脱敏）；`nil` 表示
+    /// 日志文件已经可以打开。
+    func prepareLogFileForOpening(
+        fileManager: FileManager = .default,
+        redactor: LogRedactor = LogRedactor()
+    ) -> String? {
+        if let error = prepareLogsDirectoryForOpening(fileManager: fileManager, redactor: redactor) {
+            return error
+        }
+        let logURL = self.logURL
+        if !fileManager.fileExists(atPath: logURL.path),
+           !fileManager.createFile(atPath: logURL.path, contents: nil) {
+            return redactor.redact("无法创建日志文件：\(logURL.path)")
+        }
+        return nil
+    }
+
+    /// 默认工作目录 `~/Library/Application Support/Pi Web Desktop/Workspace`。
+    /// 首次使用时创建；用户在偏好窗口选择其他目录后，`service.workspacePath`
+    /// 覆盖它（见 `workspaceDirectory(for:)`）。
+    var defaultWorkspaceDirectory: URL { paths.workspaceDirectory }
+
+    /// 生效的工作目录：配置里的绝对路径优先，空字符串表示使用默认目录。
+    func workspaceDirectory(for configuration: ServiceConfiguration) -> URL {
+        guard let configured = configuration.workspacePath.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty else {
+            return paths.workspaceDirectory
+        }
+        return URL(fileURLWithPath: configured, isDirectory: true)
+    }
+
+    /// Ownership record of the app-managed service. It is the only evidence
+    /// that allows the app to stop a process (see `ServiceOwnershipRecord`).
+    var serviceOwnerURL: URL { paths.serviceOwnerRecordURL }
+
+    /// Legacy single-PID record written by older builds. It is only removed on
+    /// startup and never used as an ownership proof again.
+    var legacyServicePIDURL: URL { paths.legacyServicePIDURL }
+
+    var appPIDURL: URL { paths.appPIDURL }
+    var instanceLockURL: URL { paths.instanceLockURL }
+
+    /// Service settings as stored in UserDefaults. The default values are the
+    /// safe ones from `ServiceConfiguration`: loopback host, empty proxies and a
+    /// loopback-only noProxy list.
+    var serviceConfiguration: ServiceConfiguration { ServiceConfiguration.load(from: defaults) }
+
+    /// 最近使用的工作目录（最近在前，自动去重并限制为 10 个）。
+    var recentWorkspaceStore: RecentWorkspaceStore { RecentWorkspaceStore(defaults: defaults) }
+
+    /// 更新检查策略（GitHub #18）。默认值与 `docs/privacy.md` 一致；旧版
+    /// （GitHub #17）的布尔键、未知值与非法值都经迁移函数回退到默认，并通过
+    /// `diagnostics` 报告一行日志（不包含原始值）。
+    func updateCheckPreferences(diagnostics: ((String) -> Void)? = nil) -> UpdateCheckPreferences {
+        UpdateCheckPreferences.load(from: defaults, diagnostics: diagnostics)
+    }
+
+    func save(_ preferences: UpdateCheckPreferences) {
+        preferences.save(to: defaults)
+    }
+
+    /// 每类组件的“忽略版本”（GitHub #18 第 2 项）：只含版本字符串与时间戳，
+    /// 不含安装来源或路径。
+    func updateCheckIgnoredVersions(diagnostics: ((String) -> Void)? = nil) -> UpdateIgnoredVersions {
+        UpdateIgnoredVersions.load(from: defaults, diagnostics: diagnostics)
+    }
+
+    func save(_ ignoredVersions: UpdateIgnoredVersions) {
+        ignoredVersions.save(to: defaults)
+    }
+
+    /// 最近一次失败的启动前自动更新的持久警告（GitHub #20）。只含类别、旧/新/
+    /// 目标版本、固定原因文案与时间戳；不含路径、环境变量值、凭据或子进程输出。
+    func piWebUpdateWarning() -> PiWebUpdateWarning? {
+        PiWebUpdateWarningStore.load(from: defaults)
+    }
+
+    /// 保存或清除持久警告（`nil` 表示更新成功，清除旧告警）。
+    func savePiWebUpdateWarning(_ warning: PiWebUpdateWarning?) {
+        PiWebUpdateWarningStore.save(warning, to: defaults)
+    }
+
+    /// 最近一次失败的 Pi CLI 更新的持久警告（GitHub #21）。字段与 #20 的警告
+    /// 同构：只含类别、旧/新/目标版本、固定原因文案与时间戳。
+    func piCLIUpdateWarning() -> PiCLIUpdateWarning? {
+        PiCLIUpdateWarningStore.load(from: defaults)
+    }
+
+    /// 保存或清除 Pi CLI 更新警告（`nil` 表示更新成功，清除旧告警）。
+    func savePiCLIUpdateWarning(_ warning: PiCLIUpdateWarning?) {
+        PiCLIUpdateWarningStore.save(warning, to: defaults)
+    }
+
+    /// 最近一次失败的 Pi 扩展包更新的持久警告（GitHub #22）。只含类别、包名（已
+    /// 通过 npm 包名校验）、旧/新/目标版本、固定原因文案与时间戳。
+    func piPackageUpdateWarning() -> PiPackageUpdateWarning? {
+        PiPackageUpdateWarningStore.load(from: defaults)
+    }
+
+    /// 保存或清除 Pi 扩展包更新警告（`nil` 表示更新成功，清除旧告警）。
+    func savePiPackageUpdateWarning(_ warning: PiPackageUpdateWarning?) {
+        PiPackageUpdateWarningStore.save(warning, to: defaults)
+    }
+
+    /// 统一更新历史（GitHub #23）：最近在前，单键 JSON；只含脱敏字段。
+    func updateHistory() -> [UpdateHistoryEntry] {
+        UpdateHistoryStore.load(from: defaults)
+    }
+
+    /// 追加一条更新历史（自动截断到上限）。
+    func recordUpdateHistory(_ entry: UpdateHistoryEntry) {
+        UpdateHistoryStore.record(entry, to: defaults)
+    }
+
+    /// 清除全部更新历史（只清除历史记录，不改动任何安装）。
+    func clearUpdateHistory() {
+        UpdateHistoryStore.clear(from: defaults)
+    }
+
+    /// 「已放弃」记录（GitHub #62）：超时或放弃等待之后“启动过但已停止等待”的
+    /// 命令。跨启动保留，直到用户显式清除或该组件成功完成一次更新。
+    func abandonedAttempts() -> [UpdateAbandonedAttempt] {
+        UpdateAbandonedAttemptStore.load(from: defaults)
+    }
+
+    /// 写入一条「已放弃」记录（同组件的旧记录被覆盖）。
+    func saveAbandonedAttempt(_ attempt: UpdateAbandonedAttempt) {
+        UpdateAbandonedAttemptStore.save(attempt, to: defaults)
+    }
+
+    /// 清除指定组件的「已放弃」记录（用户显式清除，或该组件成功完成一次更新）。
+    func clearAbandonedAttempt(for component: UpdateTransactionComponent) {
+        UpdateAbandonedAttemptStore.clear(component: component, from: defaults)
+    }
+
+    /// 清除全部「已放弃」记录。
+    func clearAllAbandonedAttempts() {
+        UpdateAbandonedAttemptStore.clearAll(from: defaults)
+    }
+
+    /// Persists service settings through the same injected UserDefaults.
+    func save(_ configuration: ServiceConfiguration) { configuration.save(to: defaults) }
+
+    /// True once a first-launch diagnostics review passed on this machine.
+    /// A fresh install (or a value written by an older build) starts as false,
+    /// so the first launch shows the diagnostics surface before the main window.
+    var hasCompletedFirstLaunchSetup: Bool { defaults.bool(forKey: SetupKey.firstLaunchSetupCompleted) }
+
+    /// Records that the first-launch review passed. Called only after a ready
+    /// `DependencyReport`; a blocked report never marks setup complete.
+    func markFirstLaunchSetupCompleted() { defaults.set(true, forKey: SetupKey.firstLaunchSetupCompleted) }
+
+    static func isSmokeLaunch(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        smokeLaunchMode(environment: environment) != .none
+    }
+
+    /// `1` → startup smoke, `diagnostics` → diagnostics smoke, anything else → none.
+    static func smokeLaunchMode(environment: [String: String] = ProcessInfo.processInfo.environment) -> SmokeLaunchMode {
+        switch environment[smokeLaunchEnvironmentKey] {
+        case smokeLaunchEnvironmentValue: return .startup
+        case smokeDiagnosticsLaunchEnvironmentValue: return .diagnostics
+        default: return .none
+        }
+    }
+
+    /// Configuration for the current process. A smoke launch gets a temporary
+    /// support/log root; every other launch keeps the real user directories.
+    static func forCurrentProcess(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        temporaryDirectory: URL = FileManager.default.temporaryDirectory,
+        processIdentifier: Int32 = ProcessInfo.processInfo.processIdentifier,
+        defaults: UserDefaults = .standard
+    ) -> AppConfiguration {
+        if isSmokeLaunch(environment: environment) {
+            return AppConfiguration(
+                paths: AppPaths.smoke(temporaryDirectory: temporaryDirectory, processIdentifier: processIdentifier),
+                defaults: defaults,
+                smokeLaunchMode: smokeLaunchMode(environment: environment)
+            )
+        }
+        return AppConfiguration(paths: AppPaths.standard(homeDirectory: homeDirectory), defaults: defaults)
+    }
+}

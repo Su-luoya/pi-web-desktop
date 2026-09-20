@@ -1,6 +1,6 @@
 # 日志与诊断导出
 
-本文说明统一日志写入与轮转（`Sources/LogWriter.swift`）、统一脱敏器（`Sources/LogRedactor.swift`）和“复制诊断”导出内容（`Sources/DiagnosticsCollector.swift`）的位置、规则与边界。实现入口：`Sources/AppPaths.swift`（路径）、`Sources/AppConfiguration.swift`（打开日志/日志文件夹前的准备）、`Sources/ServiceManager.swift`（写入器接线与错误消息脱敏）、`Sources/PiWebApp.swift`（菜单与导出装配）、`Sources/DiagnosticsWindowController.swift`（诊断窗口的复制按钮）。
+本文说明统一日志写入与轮转（`Sources/Diagnostics/LogWriter.swift`）、统一脱敏器（`Sources/Diagnostics/LogRedactor.swift`）和“复制诊断”导出内容（`Sources/Diagnostics/DiagnosticsCollector.swift`）的位置、规则与边界。实现入口：`Sources/App/AppPaths.swift`（路径）、`Sources/App/AppConfiguration.swift`（打开日志/日志文件夹前的准备）、`Sources/Services/ServiceManager.swift`（写入器接线与错误消息脱敏）、`Sources/App/AppDelegate.swift`（菜单与导出装配）、`Sources/Diagnostics/DiagnosticsWindowController.swift`（诊断窗口的复制按钮）。
 
 ## 日志位置与文件
 
@@ -178,7 +178,7 @@ Pi Web 安装超时或取消、Pi CLI 与扩展包的更新命令超时或放弃
 
 ### 采集方式与超时（W4 M3）
 
-诊断导出分两步：**先在主线程弹脱敏提醒，用户确认后才采集**，采集完成后回主线程组装文本并写入剪贴板。采集在一条专用串行后台队列（`Sources/DiagnosticsCollector.swift` 的 `DiagnosticsProbeCollector`）上依次执行 `pi-web --version`、`node --version`、`lsof`、`ps`；每个子进程由 `TimeoutCommandRunner` 保证有界返回：
+诊断导出分两步：**先在主线程弹脱敏提醒，用户确认后才采集**，采集完成后回主线程组装文本并写入剪贴板。采集在一条专用串行后台队列（`Sources/Diagnostics/DiagnosticsCollector.swift` 的 `DiagnosticsProbeCollector`）上依次执行 `pi-web --version`、`node --version`、`lsof`、`ps`；每个子进程由 `TimeoutCommandRunner` 保证有界返回：
 
 - 单个命令上限 3 秒（`TimeoutCommandRunner.defaultTimeout`）：超时先 `terminate()`（SIGTERM），宽限 1 秒（`defaultTerminationGrace`）内没退出再 `SIGKILL`；只对**本次启动的**子进程发信号，不按名字杀进程；已知边界：不保证清理该子进程自己派生的进程（诊断命令是 `pi-web --version`、`node --version`、`lsof`、`ps`，正常不会留下长命子进程）；
 - stdout 在后台线程读取，输出超过管道缓冲区时不会与子进程互等；stdout 读尽与进程退出共用同一个截止时间；

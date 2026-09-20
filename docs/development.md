@@ -81,7 +81,7 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 
 ## Xcode 工程构建与测试
 
-标准 Xcode 工程使用 Apple Silicon、macOS 14 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让测试在没有 host app 的情况下仍可编译，target 会把被测源码直接加入测试源：`Sources/ServiceConfiguration.swift`、`Sources/AppConfiguration.swift`、`Sources/AppPaths.swift`、`Sources/ProcessInspector.swift`、`Sources/DiagnosticsCollector.swift`、`Sources/DependencyChecker.swift`、`Sources/ToolPath.swift`、`Sources/ComponentInstallation.swift`、`Sources/UpdateChecker.swift`、`Sources/UpdateSettings.swift`、`Sources/PiWebUpdateAdapter.swift`、`Sources/FirstLaunchDiagnostics.swift`、`Sources/InstallCommandManifest.swift`、`Sources/ServiceManager.swift`、`Sources/ServiceOwnership.swift`、`Sources/WebViewNavigationPolicy.swift`、`Sources/KeychainStore.swift`、`Sources/WorkspaceDirectory.swift`、`Sources/QuitPolicy.swift`、`Sources/LogRedactor.swift`、`Sources/LogWriter.swift`；因此测试文件直接使用该 target 内编译的这些类型，不通过 `@testable import PiWebDesktop` 引入 app target。`Sources/WebViewController.swift` 与 `Sources/DiagnosticsWindowController.swift` 依赖 AppKit/WebKit 且需要真实窗口，只进 app target；依赖诊断的纯文本呈现（`DependencyReportPresenter`）与首次启动路由、控件映射、路径选择因此分别放在 `DependencyChecker.swift` 和 `FirstLaunchDiagnostics.swift` 里，可以在 unhosted 目标里测试。这些测试使用假的 `ps`/`lsof` 输出、注入的存活判定、假的进程启动器、即时执行的调度器、假依赖探针和临时目录，不访问真实进程、网络、Keychain、真实端口或 `~/.pi`。
+标准 Xcode 工程使用 Apple Silicon、macOS 14 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让测试在没有 host app 的情况下仍可编译，target 会把被测源码直接加入测试源：`Sources/App/ServiceConfiguration.swift`、`Sources/App/AppConfiguration.swift`、`Sources/App/AppPaths.swift`、`Sources/Services/ProcessInspector.swift`、`Sources/Diagnostics/DiagnosticsCollector.swift`、`Sources/Services/DependencyChecker.swift`、`Sources/Services/ToolPath.swift`、`Sources/Updates/ComponentInstallationModel.swift`、`Sources/Updates/UpdateChecker.swift`、`Sources/Updates/UpdateSettingsModel.swift`、`Sources/Updates/PiWebUpdateCoordinator.swift`、`Sources/Diagnostics/FirstLaunchDiagnostics.swift`、`Sources/Services/InstallCommandManifest.swift`、`Sources/Services/ServiceManager.swift`、`Sources/Services/ServiceOwnership.swift`、`Sources/App/WebViewNavigationPolicy.swift`、`Sources/Services/KeychainStore.swift`、`Sources/App/WorkspaceDirectory.swift`、`Sources/App/QuitPolicy.swift`、`Sources/Diagnostics/LogRedactor.swift`、`Sources/Diagnostics/LogWriter.swift`；因此测试文件直接使用该 target 内编译的这些类型，不通过 `@testable import PiWebDesktop` 引入 app target。`Sources/App/WebViewController.swift` 与 `Sources/Diagnostics/DiagnosticsWindowController.swift` 依赖 AppKit/WebKit 且需要真实窗口，只进 app target；依赖诊断的纯文本呈现（`DependencyReportPresenter`）与首次启动路由、控件映射、路径选择因此分别放在 `DependencyChecker.swift` 和 `FirstLaunchDiagnostics.swift` 里，可以在 unhosted 目标里测试。这些测试使用假的 `ps`/`lsof` 输出、注入的存活判定、假的进程启动器、即时执行的调度器、假依赖探针和临时目录，不访问真实进程、网络、Keychain、真实端口或 `~/.pi`。
 
 ```bash
 DERIVED_DATA_PATH="$(mktemp -d /tmp/PiWebDesktopDerivedData.XXXXXX)"
@@ -123,7 +123,7 @@ GitHub #73 起 `LogWriter` 的所有文件 I/O（追加、轮转、历史脱敏�
 - **不要用固定 `sleep`**：后台准备（例如 8 MB 级历史日志脱敏）在慢 runner 上可以远慢于任意固定时长，CI 上同一提交时通时不通就是这么来的；在快机器上固定等待又纯浪费。需要轮询时只允许“条件成立才继续、超时才失败”的有界轮询（`LogWriterTests.waitUntil`），并且超时信息必须带上现场（当前日志、已存在的轮转文件与 `failureDescription`），否则 CI 上只能看到一个裸断言。
 - 不允许用删除断言或放宽断言内容来消除这类失败：修掉的是竞态本身（先 drain/flush，再断言）。
 
-改动 `Sources/LogWriter.swift` 的队列语义时，同步复查 `PiWebDesktopTests/LogWriterTests.swift` 与 `PiWebDesktopTests/ServiceManagerTests.swift` 里所有读日志/断言后台写入结果的用例。
+改动 `Sources/Diagnostics/LogWriter.swift` 的队列语义时，同步复查 `PiWebDesktopTests/LogWriterTests.swift` 与 `PiWebDesktopTests/ServiceManagerTests.swift` 里所有读日志/断言后台写入结果的用例。
 
 新增集成测试时必须遵守同样的边界：fixture 写进临时目录并在失败路径上也清理、不继承真实环境、把外部命令换成 fixture 脚本或显式短路、只对恒定的 loopback 地址发起连接、用轮询加超时（不用固定 `sleep`）等待异步状态。
 
@@ -153,7 +153,7 @@ GitHub #73 起 `LogWriter` 的所有文件 I/O（追加、轮转、历史脱敏�
 - `CFBundleIconFile` 是条件断言：`Info.plist` 里存在该键时必须等于 `APP_ICON_NAME`；不存在时输出 info 行，说明 Xcode 生成的 plist 不产出该键、发布脚本产物会写入；
 - `CFBundleName` 只输出信息行，不参与成败判定；
 - 传入 `--test-bundle <X.xctest>` 时，额外断言该 bundle 的 `CFBundleIdentifier` 等于解析后的 `APP_TEST_BUNDLE_IDENTIFIER`，并断言其 `CFBundleShortVersionString`、`CFBundleVersion` 与 xcconfig 一致；不传该参数时行为与之前完全一致；
-- `Sources/ServiceConfiguration.swift` 默认 hostname 为 `127.0.0.1`、默认 proxy 为空、noProxy 只包含 loopback 条目；
+- `Sources/App/ServiceConfiguration.swift` 默认 hostname 为 `127.0.0.1`、默认 proxy 为空、noProxy 只包含 loopback 条目；
 - 仓库文本中不出现私人默认值：Tailscale 主机名（小写形式）、tailnet DNS 后缀、CGNAT 私网地址、`/Users` 下的绝对路径、固定本地代理端点；`MARKETING_VERSION` 的字面值也不得出现在 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/`；
 - 未跟踪文件不给出假绿：本节扫描基于 `git grep`，只读已跟踪内容，所以扫描前先用 `git ls-files --others --exclude-standard` 列出未跟踪且未被 `.gitignore` 忽略的文件。落在扫描范围内的未跟踪文件判定为**失败**（列出前 5 条，提示 `git add` 后重跑或删除），因为脚本不能为它没有读过的文本担保；扫描本来就排除的 `*.icns` 只输出 info 行，不改变退出码。CI 在干净 checkout 上运行，不存在未跟踪文件。
 
@@ -202,7 +202,7 @@ open "$HOME/Applications/Pi-Web-Desktop.app"
 
 默认端口被占用或 Pi 配置目录缺失都只提示，不阻塞启动：占用者可能就是已有的 Pi Web 服务（应用会直接复用），而 Pi 配置目录由 Pi CLI 首次运行时自行创建——应用不会创建目录，也不会读取目录内任何文件（认证内容永远不会进入诊断）。
 
-诊断窗口也可以随时从菜单“服务 → 依赖与环境诊断…”打开。窗口里的“复制安装命令”只把 `Sources/InstallCommandManifest.swift` 的静态命令写入剪贴板，“重新检测”只重新运行一次 `DependencyChecker`，“选择 pi-web 路径…”经 `NSOpenPanel` 选择可执行文件，先由 `DependencyChecker.piWebIdentityEvidence(atPath:)` 收集只读身份证据（`--version` 版本与 package.json `name`），再经 `AppConfiguration` 写回 `ServiceConfiguration.piWebPath` 并立即重新检测；不可执行、或可执行但既解析不出版本、package.json 名称也不是 `@agegr/pi-web`（例如 `/bin/echo`）时，窗口显示可读错误且配置不变。应用不会执行安装命令、不会调用 `sudo`、不联网，也不读取认证内容。手工排查时可以单独运行只读命令：
+诊断窗口也可以随时从菜单“服务 → 依赖与环境诊断…”打开。窗口里的“复制安装命令”只把 `Sources/Services/InstallCommandManifest.swift` 的静态命令写入剪贴板，“重新检测”只重新运行一次 `DependencyChecker`，“选择 pi-web 路径…”经 `NSOpenPanel` 选择可执行文件，先由 `DependencyChecker.piWebIdentityEvidence(atPath:)` 收集只读身份证据（`--version` 版本与 package.json `name`），再经 `AppConfiguration` 写回 `ServiceConfiguration.piWebPath` 并立即重新检测；不可执行、或可执行但既解析不出版本、package.json 名称也不是 `@agegr/pi-web`（例如 `/bin/echo`）时，窗口显示可读错误且配置不变。应用不会执行安装命令、不会调用 `sudo`、不联网，也不读取认证内容。手工排查时可以单独运行只读命令：
 
 ```bash
 node --version
@@ -238,7 +238,7 @@ smoke 变量只影响那一次启动：
 - 启动 smoke 跳过依赖门控：`applicationDidFinishLaunching` 在 smoke 分支直接返回，不运行 `DependencyChecker`、不等待后台结果、不显示诊断窗口；因此即使本机缺少 Node.js/Pi/Pi Web，仍然验证主窗口建立与退出路径。
 - 诊断 smoke 不运行真实探针：`DiagnosticsSmokeFixture` 用假命令 runner、空文件系统和固定端口探针生成确定性报告（系统项用 `DependencyChecker.minimumMacOSVersion` 而不是另一份版本字面值），但路由、诊断行、状态页和窗口都由真实代码生成；前置固定判定为缺失，所以它同时验证了门控路径。
 - 建立窗口/诊断页后向 stdout 打印标记并以 0 退出；临时目录创建失败、主窗口未建立或诊断夹具不再进入诊断页时向 stderr 报错并以 1 退出，不打印标记。
-- 不隔离 WebKit 数据：启动模式仍会创建默认数据存储的 `WKWebView`（`Sources/WebViewController.swift:37` 的 `.default()`，`Sources/` 里没有任何 `WKWebsiteDataStore` 删除调用）。实测跑一次 `./Scripts/smoke.sh` 会更新 `~/Library/WebKit/<bundle id>/WebsiteData/` 下已有文件的 mtime/size，所以临时目录只隔离应用自己的 support 目录、日志与 UserDefaults，**不**隔离 WebKit 的持久化网站数据；位置与删除方式见 [隐私说明](privacy.md#本地数据一览与删除)。
+- 不隔离 WebKit 数据：启动模式仍会创建默认数据存储的 `WKWebView`（`Sources/App/WebViewController.swift:40` 的 `.default()`，`Sources/` 里没有任何 `WKWebsiteDataStore` 删除调用）。实测跑一次 `./Scripts/smoke.sh` 会更新 `~/Library/WebKit/<bundle id>/WebsiteData/` 下已有文件的 mtime/size，所以临时目录只隔离应用自己的 support 目录、日志与 UserDefaults，**不**隔离 WebKit 的持久化网站数据；位置与删除方式见 [隐私说明](privacy.md#本地数据一览与删除)。
 
 变量未设置时行为完全不变。smoke 只验证窗口、诊断页与退出路径，不验证服务功能，也不替代 `xcodebuild` 的构建和 `xcodebuild test` 的单元测试：本机只有 Command Line Tools 时无法运行 XCTest，smoke 不声称覆盖测试用例。
 
@@ -264,7 +264,7 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 - **CI 的 personal-data 步骤**（`.github/workflows/build.yml` 的 `Check for accidental personal data` 步骤）：一条 `git grep -nE`，匹配几个固定字面量（一个私有 VPN 厂商名的小写形式、一个固定本地代理端点、以 `/Users` 开头的主目录路径），并排除 `*.icns`、该 workflow 自身和 `Scripts/check-identity.sh`。它只覆盖 checkout 出来的已跟踪提交；CI 上不存在未跟踪文件，所以这条门禁不受本节的未跟踪问题影响。
 - **`Scripts/check-identity.sh` 的仓库文本扫描**（脚本里 `# --- 6. repository text scan ---` 一节）：用另一组模式：小写的私有 VPN 主机名、tailnet DNS 后缀、CGNAT 私网地址段、以 `/Users` 开头的路径、固定本地代理端点，再加 `MARKETING_VERSION` 字面值（限 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/`）。扫描前它用 `git ls-files --others --exclude-standard` 检查未跟踪文件：落在上述扫描范围内的未跟踪文件直接判失败（无法为未扫描的文本担保），被 pathspec 排除的 `*.icns` 只输出 info 行。
 - **`Scripts/scan-secrets.sh`**（#11 新增；CI 的 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 两步）：按形状扫描**已跟踪文件**里的高信号凭据，规则分两类。结构形状：AWS access key ID（`AKIA`/`ASIA` + 16 位大写字母/数字）、GitHub token（`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_` + 长后缀）、Slack token（`xox` 家族）、Stripe 与 provider key（`sk_live_`/`sk_test_`/`rk_live_`、`sk-proj-`/`sk-ant-`/`sk-or-`/`sk-` + 长后缀）、age secret key（`AGE-SECRET-KEY-1` + Base32）、PEM/OpenSSH/SSH2/PGP 私钥头、JWT（三段 base64url，`eyJ` 开头）、`Authorization: Bearer <token>`、带凭据的连接串（`scheme://user:password@host`）。键值形状：键名大小写不敏感，覆盖 `password`/`passwd`/`passphrase`/`secret`/`token`/`apikey`/`api_key`/`private_key`/`access_key`/`credential` 以及中文 `密码`/`口令`/`密钥`/`私钥`/`令牌`/`凭据`，允许前后缀（`AWS_SECRET_ACCESS_KEY` 因此命中），键必须出现在配置位置（行首、`{`/`,` 之后，或 `export`/`ENV`/`ARG`/`declare` 之后），`=`/`:` 两侧允许空白，值至少 12 个可打印 ASCII 字符（带引号时可含空格），JSON/YAML/TOML/.env/`export` 形态因此都覆盖。规则、样本和匹配器本身也受同一条扫描约束。三类“形状像但不是”的行被整行丢弃：占位符与模板值（`YOUR_TOKEN_HERE`、`<redacted>`、`${VAR}`、`...`、`REPLACE_ME` 等）、文档主机与无凭据 URL（以 `.invalid`/`.test`/`.example`/`.local`/`localhost` 结尾的主机、`example.com`/`example.net`/`example.org`、无点主机）、以及 camelCase 标识符值；这条边界的代价见本节的“能力边界”。命中行只在同一行带 `scan-secrets: allow(reason=…)` 内联标记（理由至少 8 个字符）时才被跳过；裸标记、空理由和过短理由**不生效**：该行照常上报，脚本打印 `scan-secrets: warning:`，并在结尾计入 `scan-secrets: rejected N suppression marker(s) without a reason of at least 8 characters`。默认的仓库级扫描在发现未跟踪且未被 `.gitignore` 忽略的文件时**拒绝给出结论并退出 3**，消息列出前 5 条并提示 `git add <path>` 或 `--include-untracked`；`--include-untracked` 把未跟踪文件就地一并扫描，仅用于本地排查（未 `git add` 的文件 CI 永远看不到）。每次实际执行的扫描在结尾输出 `scan-secrets: suppressed N lines`，被抑制的行本身仍逐行打印（`scan-secrets: suppressed: <path>:<line>:…`）以供审计（退出 3 的拒绝在扫描前结束，不打印这两行）。
-- **`Scripts/scan-secrets.sh` 与运行期日志脱敏 `LogRedactor`（`Sources/LogRedactor.swift`）的一致性**：两侧用同一套键名（`password`/`passwd`/`secret`/`token`/`api_key`/`apikey`/`private_key`，均大小写不敏感），扫描器另外覆盖 `access_key`/`credential` 与中文键名。差别是刻意的：`LogRedactor` 处理运行期日志文本，不限值长度，还处理 `key:` 之后的续行、`--password <value>` 命令行形态、`Authorization:` 头的任意值与 URL 查询串；扫描器只看仓库里的固定形状，因此要求配置位置与 12 个字符以上的值，**不**合并续行、不扫命令行参数与查询串、也不看非 ASCII 值。改任一侧的键名集合时应同时检查另一侧。
+- **`Scripts/scan-secrets.sh` 与运行期日志脱敏 `LogRedactor`（`Sources/Diagnostics/LogRedactor.swift`）的一致性**：两侧用同一套键名（`password`/`passwd`/`secret`/`token`/`api_key`/`apikey`/`private_key`，均大小写不敏感），扫描器另外覆盖 `access_key`/`credential` 与中文键名。差别是刻意的：`LogRedactor` 处理运行期日志文本，不限值长度，还处理 `key:` 之后的续行、`--password <value>` 命令行形态、`Authorization:` 头的任意值与 URL 查询串；扫描器只看仓库里的固定形状，因此要求配置位置与 12 个字符以上的值，**不**合并续行、不扫命令行参数与查询串、也不看非 ASCII 值。改任一侧的键名集合时应同时检查另一侧。
 
 ```bash
 ./Scripts/scan-secrets.sh --self-test         # 在临时目录里证明每条规则都会命中、误报不会被报告、抑制标记与计数正确，并在临时 Git 仓库里验证未跟踪文件门禁（因此需要 git）

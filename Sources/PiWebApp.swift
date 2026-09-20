@@ -15,8 +15,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var screenFitWorkItem: DispatchWorkItem?
     private var isFullScreenTransition = false
     private var currentState: ServiceState = .checking
-    private var preferencesWindowController: PreferencesWindowController?
+    /// 设置窗口单例（W4 M2）：同一时刻最多一个设置窗口，重复打开复用同一个
+    /// 控制器并用当前生效配置刷新控件（`ReusableControllerStore`）。
+    private let preferencesWindowStore = ReusableControllerStore<PreferencesWindowController>()
     private var diagnosticsWindowController: DiagnosticsWindowController?
+    /// 诊断导出的后台探测器（W4 M3）：子进程调用在专用串行队列上执行，每个
+    /// 调用有超时；导出完成后回主线程组装文本并复制。
+    private let diagnosticsProbeCollector = DiagnosticsProbeCollector()
+    /// 导出进行中（提醒框已弹出或后台采集未结束）：忽略重复触发，菜单项置灰。
+    private var diagnosticsExportInProgress = false
     /// 依赖门控禁用的服务控件菜单项（启动/停止/重启）。
     private var serviceControlMenuItems: [NSMenuItem] = []
     private var dependencyReport: DependencyReport?
@@ -509,7 +516,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         alert.addButton(withTitle: "保持服务运行")
         alert.addButton(withTitle: "退出并停止服务")
         alert.addButton(withTitle: "取消")
-        alert.beginSheetModal(for: window) { [weak self] response in
+        let decide: (NSApplication.ModalResponse) -> Void = { [weak self] response in
             guard let self else { return }
             self.quitDecisionTimer?.invalidate()
             self.quitDecisionTimer = nil
@@ -520,6 +527,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             default: confirmation = .cancel
             }
             self.handleQuitEvent(.userChose(confirmation))
+        }
+        // W4 L5：⌘W 只是 `orderOut` 隐藏窗口；在不可见窗口上挂 sheet 会让 AppKit
+        // 把这个窗口重新显示出来（“刚隐藏的窗口自己回来了”，与用户状态不一致）。
+        // 因此窗口不可见时改用应用级模态（`runModal`），窗口保持隐藏。
+        if window.isVisible {
+            alert.beginSheetModal(for: window, completionHandler: decide)
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            decide(alert.runModal())
         }
     }
 
@@ -909,8 +925,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             controller.onContinue = { [weak self] in self?.completeFirstLaunchSetup() }
             controller.onSelectPiWebPath = { [weak self] path in self?.applySelectedPiWebPath(path) }
             controller.onUpdatePiCLI = { [weak self] in self?.updatePiCLINow(nil) }
-            // 与菜单“复制诊断”完全同一条导出路径与同一份文本。
-            controller.diagnosticsTextProvider = { [weak self] in self?.diagnosticsExportText() ?? "" }
+            // 与菜单“复制诊断”完全同一条导出路径（W4 M3：提醒 → 后台采集 → 复制）。
+            controller.onExportDiagnostics = { [weak self] in
+                guard let self else { return }
+                self.beginDiagnosticsExport(presentingIn: self.diagnosticsWindowController?.window)
+            }
             // 更新检查状态（GitHub #18）：诊断页只渲染同一份状态快照。
             controller.updateStatusTextProvider = { [weak self] in self?.updateCheckStatusBlockText() ?? "" }
             diagnosticsWindowController = controller
@@ -2141,7 +2160,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// “设置…”入口：单例窗口（W4 M2）。
+    ///
+    /// 同一时刻最多一个设置窗口：第一次请求创建控制器，之后每次请求复用同一个
+    /// 控制器/窗口。窗口已经打开时只置前（不拿已保存值覆盖用户正在编辑的内容）；
+    /// 取消/关闭后再打开时，先用当前生效配置刷新控件——上一次取消后残留的输入、
+    /// 外部改动与刚输入的新密码都不会留在窗口里。旧实现每次都新建控制器并覆盖
+    /// 引用，旧窗口（`isReleasedWhenClosed = false` 且不 close）会留在屏幕上，
+    /// 用打开时的配置快照写回，出现“两个都能写配置的窗口、后写覆盖前写”。
     @objc private func showPreferences(_ sender: Any?) {
+        let controller = preferencesWindowStore.reuse { makePreferencesWindowController() }
+        if controller.window?.isVisible != true {
+            controller.update(configuration: serviceManager.configuration)
+        }
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+        if !NSApp.isActive {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    /// 创建设置窗口控制器。只在单例存储为空时调用；回调接线只做一次。
+    private func makePreferencesWindowController() -> PreferencesWindowController {
         let controller = PreferencesWindowController(
             configuration: serviceManager.configuration,
             keychain: keychain,
@@ -2154,12 +2194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         controller.onRemoteAccessCredentialsChanged = { [weak self] newConfiguration in
             self?.applyPreferencesConfiguration(newConfiguration, credentialsChanged: true)
         }
-        preferencesWindowController = controller
-        controller.showWindow(nil)
-        controller.window?.makeKeyAndOrderFront(nil)
-        if !NSApp.isActive {
-            NSApp.activate(ignoringOtherApps: true)
-        }
+        return controller
     }
 
     /// 设置窗口保存后的统一入口。
@@ -2318,19 +2353,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             ?? "开发构建（Info.plist 缺少 CFBundleVersion）"
     }
 
-    /// 菜单“复制诊断”与诊断窗口共用的导出文本（GitHub #10）。所有字段——包括
-    /// 启动环境与 `ps` 命令行——统一交给 `logRedactor` 脱敏。
-    private func diagnosticsExportText() -> String {
-        let piWebPath = serviceManager.resolvePiWebPath() ?? "未找到"
-        let piWebVersion = shell([piWebPath, "--version"])?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "未知"
-        let nodeFinding = dependencyReport?.finding(for: .node)
-        let nodeVersion = nodeFinding?.version
-            ?? shell(["/usr/bin/env", "node", "--version"])?.trimmingCharacters(in: .whitespacesAndNewlines)
-            ?? "未知"
-        let piWebFinding = dependencyReport?.finding(for: .piWeb)
-        let piCLIFinding = dependencyReport?.finding(for: .piCLI)
-        let managedPID = serviceManager.managedServicePID()
+    /// 导出用的主线程快照：只读取已经在内存里的状态（配置、依赖报告、Keychain
+    /// 结论、进程记录），**不执行任何子进程**。子进程探测交给
+    /// `diagnosticsProbeCollector` 在后台串行队列上做（W4 M3）。
+    private struct DiagnosticsExportSnapshot {
+        var piWebPath: String
+        var piWebFinding: DependencyFinding?
+        var piCLIFinding: DependencyFinding?
+        var nodeFinding: DependencyFinding?
+        var managedPID: pid_t?
+        var port: Int
+        var serviceAddress: String
+        var status: String
+        var workspaceDirectory: String
+        var launchCommand: String
+        var launchEnvironment: String
+        var logPath: String
+        var logWriteStatus: String
+        var remoteAccessPasswordStatus: String
+        var componentInstallations: [ComponentInstallation]
+    }
 
+    /// 在主线程捕获一次导出快照；不发起任何子进程，也不阻塞。
+    private func diagnosticsExportSnapshot() -> DiagnosticsExportSnapshot {
+        let piWebPath = serviceManager.resolvePiWebPath() ?? "未找到"
         // 启动环境只展示应用显式设置的子进程变量；远程密码只以占位符进入展示路径，
         // 真实值不经过诊断代码。脱敏器仍会再检查一遍。
         let hasRemotePassword = RemoteAccessPassword.isSet(in: keychain)
@@ -2343,46 +2389,97 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 remoteAccessPassword: hasRemotePassword ? LogRedactor.marker : nil
             ).environment
         )
+        return DiagnosticsExportSnapshot(
+            piWebPath: piWebPath,
+            piWebFinding: dependencyReport?.finding(for: .piWeb),
+            piCLIFinding: dependencyReport?.finding(for: .piCLI),
+            nodeFinding: dependencyReport?.finding(for: .node),
+            managedPID: serviceManager.managedServicePID(),
+            port: serviceManager.configuration.port,
+            serviceAddress: startURL.absoluteString,
+            status: statusDescription(),
+            workspaceDirectory: appConfiguration.workspaceDirectory(for: serviceManager.configuration).path,
+            launchCommand: ([piWebPath] + ServiceLaunchSpecification.arguments(configuration: serviceManager.configuration))
+                .joined(separator: " "),
+            launchEnvironment: launchEnvironment,
+            logPath: appConfiguration.logURL.path,
+            logWriteStatus: serviceManager.logWriter.writeStatusDescription,
+            remoteAccessPasswordStatus: RemoteAccessPassword.statusText(isSet: hasRemotePassword),
+            // #16 的组件安装识别结果（已脱敏）直接进入导出文本。
+            componentInstallations: dependencyReport?.components ?? []
+        )
+    }
 
+    /// 组装导出文本：纯文本工作，不执行命令、不读磁盘（W4 M3）。
+    ///
+    /// 探测缺失（超时/失败）统一标注成 `DiagnosticsProbeText.failure`；仅当实时
+    /// 探测没值时，才回退到依赖报告里的缓存版本（否则报告里的旧版本会盖掉
+    /// “这次没读到”的事实）。外部监听进程命令行已经由探测器按更新路径的同一套
+    /// 遮罩处理过，这里再交给 `LogRedactor` 做整段兜底。
+    private func diagnosticsExportText(snapshot: DiagnosticsExportSnapshot, probes: DiagnosticsProbeResult) -> String {
+        let piWebVersion = probes.piWebVersion ?? snapshot.piWebFinding?.version
+        let nodeVersion = probes.nodeVersion ?? snapshot.nodeFinding?.version
         return DiagnosticsCollector.text(
             for: DiagnosticsInput(
                 appVersion: appVersionDescription,
                 appBuild: appBuildDescription,
-                piWebVersion: piWebVersion,
-                piWebVersionConfidence: piWebFinding?.confidence.rawValue ?? "unknown",
-                piWebPath: piWebFinding?.path ?? piWebPath,
-                piWebPathConfidence: piWebFinding?.confidence.rawValue ?? "unknown",
-                piCLIVersion: piCLIFinding?.version ?? "未知",
-                piCLIVersionConfidence: piCLIFinding?.confidence.rawValue ?? "unknown",
-                nodeVersion: nodeVersion,
-                nodeVersionConfidence: nodeFinding?.confidence.rawValue ?? "unknown",
-                serviceAddress: startURL.absoluteString,
-                port: String(serviceManager.configuration.port),
-                status: statusDescription(),
-                management: managedPID.map { DiagnosticsManagement.managed(pid: String($0)) } ?? .external,
-                listenerPID: processInspector.listenerPIDDescription(port: serviceManager.configuration.port),
-                listenerProcess: processInspector.listenerProcessDescription(port: serviceManager.configuration.port),
-                managedPID: managedPID.map(String.init) ?? "无（外部服务或未运行）",
-                workspaceDirectory: appConfiguration.workspaceDirectory(for: serviceManager.configuration).path,
+                piWebVersion: DiagnosticsCollector.probeValue(piWebVersion),
+                piWebVersionConfidence: snapshot.piWebFinding?.confidence.rawValue ?? "unknown",
+                piWebPath: snapshot.piWebFinding?.path ?? snapshot.piWebPath,
+                piWebPathConfidence: snapshot.piWebFinding?.confidence.rawValue ?? "unknown",
+                piCLIVersion: snapshot.piCLIFinding?.version ?? "未知",
+                piCLIVersionConfidence: snapshot.piCLIFinding?.confidence.rawValue ?? "unknown",
+                nodeVersion: DiagnosticsCollector.probeValue(nodeVersion),
+                nodeVersionConfidence: snapshot.nodeFinding?.confidence.rawValue ?? "unknown",
+                serviceAddress: snapshot.serviceAddress,
+                port: String(snapshot.port),
+                status: snapshot.status,
+                management: snapshot.managedPID.map { DiagnosticsManagement.managed(pid: String($0)) } ?? .external,
+                listenerPID: DiagnosticsCollector.probeValue(probes.listenerPID),
+                listenerProcess: DiagnosticsCollector.probeValue(probes.listenerProcess),
+                managedPID: snapshot.managedPID.map(String.init) ?? "无（外部服务或未运行）",
+                workspaceDirectory: snapshot.workspaceDirectory,
                 configurationDirectory: "~/.pi/agent",
-                launchCommand: ([piWebPath] + ServiceLaunchSpecification.arguments(configuration: serviceManager.configuration))
-                    .joined(separator: " "),
-                launchEnvironment: launchEnvironment,
-                logPath: appConfiguration.logURL.path,
-                logWriteStatus: serviceManager.logWriter.writeStatusDescription,
-                remoteAccessPasswordStatus: RemoteAccessPassword.statusText(
-                    isSet: RemoteAccessPassword.isSet(in: keychain)
-                ),
-                // #16 的组件安装识别结果（已脱敏）直接进入导出文本。
-                componentInstallations: dependencyReport?.components ?? []
+                launchCommand: snapshot.launchCommand,
+                launchEnvironment: snapshot.launchEnvironment,
+                logPath: snapshot.logPath,
+                logWriteStatus: snapshot.logWriteStatus,
+                remoteAccessPasswordStatus: snapshot.remoteAccessPasswordStatus,
+                componentInstallations: snapshot.componentInstallations
             ),
             redactor: logRedactor
         )
     }
 
-    /// 复制前先弹脱敏提醒（GitHub #10）：文本已按规则脱敏，但公开粘贴前仍需自查。
+    /// 菜单“复制诊断”入口：与诊断窗口的按钮完全同一条路径。
     @objc private func copyDiagnostics(_ sender: Any?) {
-        DiagnosticsClipboard.copyAfterConfirmation(diagnosticsExportText(), presentingIn: window)
+        beginDiagnosticsExport(presentingIn: window)
+    }
+
+    /// 诊断导出（GitHub #10 / W4 M3）：先在主线程弹脱敏提醒，用户确认后才到后台
+    /// 串行队列执行子进程探测（每个调用有超时），采集完成再回主线程组装文本并写入
+    /// 剪贴板。等待期间主线程不被子进程阻塞；取消则不跑任何子进程。
+    private func beginDiagnosticsExport(presentingIn window: NSWindow?) {
+        guard !diagnosticsExportInProgress else { return }
+        diagnosticsExportInProgress = true
+        DiagnosticsClipboard.confirmExport(presentingIn: window) { [weak self] approved in
+            guard let self else { return }
+            guard approved else {
+                self.diagnosticsExportInProgress = false
+                return
+            }
+            // 确认后才取快照：用户在提醒框上停留期间的状态变化不会让导出内容失真。
+            let snapshot = self.diagnosticsExportSnapshot()
+            self.diagnosticsProbeCollector.collect(piWebPath: snapshot.piWebPath, port: snapshot.port) { [weak self] probes in
+                guard let self else { return }
+                let text = self.diagnosticsExportText(snapshot: snapshot, probes: probes)
+                // 组装完回主线程写入剪贴板（不在后台线程碰 AppKit 之外的 UI 约定）。
+                DispatchQueue.main.async {
+                    self.diagnosticsExportInProgress = false
+                    DiagnosticsClipboard.copy(text)
+                }
+            }
+        }
     }
 
     private func statusDescription() -> String {
@@ -2836,10 +2933,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - Error and utility
 
-    @discardableResult private func shell(_ arguments: [String]) -> String? {
-        commandRunner.run(arguments)
-    }
-
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         let controls = ServiceControlState(gate: dependencyGate, workspaceIsReady: workspaceValidation.isUsable)
         switch menuItem.action {
@@ -2847,6 +2940,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return controls.canStart && serviceManager.managedServicePID() == nil
         case #selector(stopServiceAction(_:)): return controls.canStop
         case #selector(restartServiceAction(_:)): return controls.canRestart
+        // 诊断导出进行中（提醒框已弹出或后台采集未结束）：忽略重复触发。
+        case #selector(copyDiagnostics(_:)): return !diagnosticsExportInProgress
         case #selector(toggleFullScreen(_:)):
             menuItem.title = window.styleMask.contains(.fullScreen) ? "退出全屏幕" : "进入全屏幕"
             return true

@@ -15,6 +15,10 @@
 
 所有路径由可注入的 `AppPaths` 提供者派生（`supportDirectory` + `logsDirectory`），因此单元测试与 smoke 启动可以注入临时目录，不会写入真实 Home。`PI_WEB_DESKTOP_SMOKE=1|diagnostics` 使用 `$TMPDIR/pi-web-desktop-smoke-<pid>`，日志放在该目录的 `Logs/` 下。日志写入与轮转由 `LogWriter` 负责，写入的每一行都经过与诊断导出、错误消息、环境变量/命令行展示共用的 `LogRedactor`（见 [日志与诊断导出](logging-and-diagnostics.md)）。
 
+### 设置窗口（单例）
+
+菜单“设置…”/⌘, 是单例（W4 M2）：同一时刻只存在一个能写回配置的设置窗口。重复打开复用同一个控制器/窗口：窗口已经打开时只置前（不拿已保存值覆盖用户正在编辑的内容）；关闭/取消后再打开前，用当前生效配置刷新控件——上一次取消后留下的未保存输入、外部改动与刚输入的新密码都不会残留。旧实现每次新建控制器并覆盖引用，旧窗口（`isReleasedWhenClosed = false` 且不 close）会留在屏幕上、用打开时的配置快照写回，出现“两个窗口都能保存、后写覆盖前写”。需要显式丢弃时用 `ReusableControllerStore.discard`（先 close 再释放，旧实例不再被保留）。
+
 ### 监听地址校验
 
 监听地址（`service.hostname`）的校验只有一处实现：`RemoteAccessPolicy.addressVerdict(hostname:)`（`Sources/KeychainStore.swift`，结果类型 `ServiceAddressVerdict`）。同一判定同时作用于三个入口（GitHub #39 / 安全审查 R-3）：
@@ -88,6 +92,7 @@
 决策逻辑是两层纯值类型（GitHub #72）：`QuitPlan`（`Sources/QuitPolicy.swift`）把配置取值映射成 `NextStep` + `ServiceDisposition`；`QuitCoordinator`（`Sources/QuitCoordinator.swift`）是退出状态机，把请求、用户选择、超时与服务状态变成需要执行的副作用（弹确认框 / 停止托管服务 / 退出应用）。`AppDelegate` 只负责执行副作用（`presentQuitDecisionAlert()` / `stopManagedServiceOnQuit(completion:)` / 异步重新发起 `NSApp.terminate(nil)`）。因此三种行为、三种确认选择、“取消不停止任何服务”、重复触发与超时兜底都可以在 unhosted 测试里直接断言。
 
 - 退出决策在 AppKit 终止序列之外完成：菜单/⌘Q 先弹普通确认框，决策完成后才重新发起退出（`DispatchQueue.main.async` 里的 `NSApp.terminate(nil)`）。`applicationShouldTerminate` 只返回 `.terminateNow`（已决策）或 `.terminateCancel`（未决策/正在停止服务），**从不返回 `.terminateLater`**，因此不需要也不存在漏掉的 `reply(toApplicationShouldTerminate:)`（GitHub #72 / W4 G1），也不在 sheet 回调里重入退出序列（W4 M4）。
+- 确认框的呈现方式与窗口可见性一致（W4 L5）：主窗口可见时挂 sheet；主窗口被 ⌘W（`windowShouldClose` → `orderOut`，应用继续运行）隐藏时改用应用级模态（`NSAlert.runModal`），窗口保持隐藏。`beginSheetModal` 挂在不可见窗口上会让 AppKit 把窗口重新显示出来，与“窗口已被隐藏”的用户状态不一致；主动恢复窗口则会打断用户刚做的隐藏动作，因此选择应用级模态（取舍：确认框不再锚定在主窗口上，但窗口可见性不受影响；两种模式下确认结果与超时行为完全相同）。
 - 等待用户选择有上限：默认 5 分钟（`QuitCoordinator.defaultDecisionTimeout`，可注入）。超时后按最安全行为处理：保持服务运行并退出，并写入日志（不发信号、不删 `service-owner.json`），避免注销/关机被无限挂起。
 - 取消后应用继续正常运行，下一次 ⌘Q/菜单退出重新走完整决策；等待期间的重复触发不叠加确认框、不重复停服务，迟到的回调被忽略。
 - ⌘Q 与菜单“退出 Pi Web Desktop”走配置的退出行为（默认询问）；菜单里另有“退出 Pi Web Desktop（保持服务运行）”和“退出 Pi Web Desktop（停止服务）”两个显式入口，不受配置影响。
@@ -106,6 +111,7 @@
 
 unhosted 测试（注入临时目录、假探针与假 Keychain，不触碰真实用户目录、进程或网络）：
 
+- `PiWebDesktopTests/DiagnosticsCollectorTests.swift`（含 W4 M2/M3）：导出布局、脱敏上下文保留、可信度映射与组件安装区块之外，新增设置窗口控制器单例存储的复用与显式释放、探测收集器不阻塞调用方（阻塞替身 + 主线程计时）、超时终止子进程并降级、“没有监听者 ≠ 探测失败”、导出文本对外部 argv 复用更新路径遮罩（注入凭据不得出现）、失败项标注，以及 M2/M3/L5 的源码级接线断言。
 - `PiWebDesktopTests/AppConfigurationTests.swift`：三处存储位置、默认设置序列化后不含个人代理与远程 hostname、设置在重新读取后保留、smoke 使用临时目录、日志目录不存在时打开日志会先创建目录与文件（幂等、失败返回可读错误）。
 - `PiWebDesktopTests/ServiceConfigurationTests.swift`：默认退出行为与默认工作目录、既有键名、无法识别的退出行为回落为“询问”、工作目录进入运行时签名；直接写入 UserDefaults 的通配地址、空值、带空白/非法字符的值加载后被标记为不可用且不被静默替换，合法地址与 `[::1]` 规范化后仍可用。
 - `PiWebDesktopTests/KeychainStoreTests.swift`：地址判定与保存流程共用同一规则（通配地址即使有密码也被拒绝，且先于密码写入），加载与启动诊断包含非法值与允许范围，非 loopback 缺密码仍走 #8 的缺密码提示。

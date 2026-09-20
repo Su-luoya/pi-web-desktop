@@ -206,6 +206,18 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         return row
     }
 
+    /// 用当前生效配置刷新控件（W4 M2）。
+    ///
+    /// 设置窗口是单例：重复打开复用同一个控制器/窗口，因此每次展示前都要把控件
+    /// 重置为已保存的值——上一次被取消的输入、外部改动与刚输入的新密码都不会
+    /// 残留（已保存的密码本来就只以“已设置/未设置”呈现）。
+    func update(configuration: ServiceConfiguration) {
+        self.configuration = configuration
+        newPasswordField.stringValue = ""
+        errorLabel.isHidden = true
+        loadValues()
+    }
+
     private func loadValues() {
         pathField.stringValue = configuration.piWebPath
         workspaceField.stringValue = configuration.workspacePath

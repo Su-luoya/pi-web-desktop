@@ -27,6 +27,41 @@ private let piWebComponentFixture = ComponentInstallation(
 /// 组件摘要行的期望文本（导出布局与模型摘要共用一份字面值）。
 private let piWebComponentSummary = "Pi Web（pi-web）：路径 /opt/homebrew/bin/pi-web；包名 @agegr/pi-web@1.2.3；来源 npm 全局；可信度 已验证；建议命令 npm install -g @agegr/pi-web"
 
+/// W4 M2 的复用断言替身（只需要一个可被弱引用的实例）。
+private final class ProbeStubController: NSObject {}
+
+/// 假命令执行器（W4 M3）：第一次调用就进入阻塞并兑现 `started`，用来证明
+/// 探测确实跑在别的线程上、调用方没有被占用。
+private final class ProbeBlockingRunner: CommandRunning {
+    private let gate = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var signalled = false
+    private(set) var calls = 0
+    let started = XCTestExpectation(description: "probe runner started")
+
+    func run(_ arguments: [String]) -> String? {
+        lock.lock()
+        calls += 1
+        let isFirst = !signalled
+        if isFirst { signalled = true }
+        lock.unlock()
+        if isFirst { started.fulfill() }
+        _ = gate.wait(timeout: .now() + 30)
+        return nil
+    }
+
+    /// 释放全部阻塞中的调用（探测串行执行，最多几次）。
+    func release() {
+        for _ in 0..<8 { gate.signal() }
+    }
+}
+
+/// 假命令执行器：按参数返回夹具输出。
+private struct ProbeCannedRunner: CommandRunning {
+    let handler: ([String]) -> String?
+    func run(_ arguments: [String]) -> String? { handler(arguments) }
+}
+
 final class DiagnosticsCollectorTests: XCTestCase {
     private let input = DiagnosticsInput(
         appVersion: "9.9.9",
@@ -410,5 +445,225 @@ final class DiagnosticsCollectorTests: XCTestCase {
                 "多行值续行的标签必须可识别: \(label)"
             )
         }
+    }
+
+    // MARK: - W4 M2：设置窗口单例的复用语义
+
+    /// 两次请求复用同一个控制器实例；旧实例只有显式 `discard` 时才被
+    /// close + 释放，不允许出现两个都能写配置的设置窗口。
+    func testReusableControllerStoreReusesOneInstanceAndReleasesTheDiscardedOne() {
+        let store = ReusableControllerStore<ProbeStubController>()
+        var creations = 0
+        var first: ProbeStubController? = store.reuse {
+            creations += 1
+            return ProbeStubController()
+        }
+        var second: ProbeStubController? = store.reuse {
+            creations += 1
+            return ProbeStubController()
+        }
+        XCTAssertTrue(first === second, "重复请求必须复用同一个实例")
+        XCTAssertEqual(creations, 1, "第二次请求不得再创建控制器")
+        XCTAssertTrue(store.stored === first)
+
+        weak var released = first
+        var closed = false
+        var discardedIdentity = false
+        do {
+            let discarded = store.discard { _ in closed = true }
+            discardedIdentity = discarded === first
+        }
+        XCTAssertTrue(discardedIdentity, "discard 返回被放弃的旧实例")
+        XCTAssertTrue(closed, "discard 必须先 close 再释放")
+        XCTAssertNil(store.stored, "discard 后存储里不再保留旧控制器")
+        first = nil
+        second = nil
+        XCTAssertNil(released, "旧实例不再被任何引用保留")
+    }
+
+    // MARK: - W4 M3：诊断导出的后台采集、超时与降级
+
+    /// 探测在后台队列上执行：`collect` 在主线程立即返回；即使命令执行器一直
+    /// 阻塞，主线程也不被占用，释放后仍能拿到降级结果（nil 字段）。
+    func testProbeCollectorNeverBlocksTheCaller() {
+        let runner = ProbeBlockingRunner()
+        let collector = DiagnosticsProbeCollector(
+            queue: DispatchQueue(label: "test.diagnostics.probes"),
+            runner: runner
+        )
+        let finished = expectation(description: "probe completion")
+        var observed: DiagnosticsProbeResult?
+
+        let start = DispatchTime.now()
+        collector.collect(piWebPath: "/usr/bin/true", port: 30141) { result in
+            observed = result
+            finished.fulfill()
+        }
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000_000
+
+        XCTAssertTrue(Thread.isMainThread, "这条断言只有在主线程上才有意义")
+        XCTAssertLessThan(elapsed, 0.2, "collect 必须立即返回（实际 \(elapsed)s）")
+        XCTAssertNil(observed, "调用返回时探测尚未完成")
+        wait(for: [runner.started], timeout: 5)
+        XCTAssertTrue(runner.calls >= 1, "假执行器确实在别的线程上被执行")
+
+        runner.release()
+        wait(for: [finished], timeout: 10)
+        XCTAssertEqual(observed?.piWebVersion, nil, "阻塞的探测降级为 nil")
+        XCTAssertEqual(observed?.nodeVersion, nil, "阻塞的探测降级为 nil")
+        XCTAssertEqual(observed?.listenerPID, nil, "lsof 失败降级为 nil（与“没有监听者”区分）")
+    }
+
+    /// 真实挂住的外部命令必须在超时窗口内返回 nil（并终止本次启动的子进程）；
+    /// 正常命令不受影响。
+    func testTimeoutCommandRunnerBoundsHangingCommands() {
+        let runner = TimeoutCommandRunner(timeout: 0.3, terminationGrace: 0.2)
+
+        let start = DispatchTime.now()
+        XCTAssertNil(runner.run(["/bin/sleep", "30"]), "超时后必须降级为 nil")
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000_000
+        XCTAssertLessThan(elapsed, 5, "等待必须有上限（实际 \(elapsed)s）")
+
+        XCTAssertEqual(runner.run(["/bin/echo", "hello"]), "hello\n", "正常命令保留 stdout")
+        XCTAssertNil(runner.run(["/nonexistent/pi-web"]), "无法启动的命令返回 nil")
+    }
+
+    /// 外部监听进程的 argv 用更新路径的同一套遮罩（`PiProcessInspector.commandSummary`）：
+    /// 探测结果与最终导出文本都不得出现测试注入的凭据形态。
+    func testProbeCollectorMasksListenerArgvWithTheUpdatePathRules() {
+        // 运行时拼接：仓库里不出现任何「真实密钥形状」的字面量（本地扫描器与 GitHub
+        // push protection 都不应被测试夹具触发），但运行时值仍然是 Stripe-live 形态。
+        let secret = ["sk", "live", "51H8xQeK9FixtureOnlyValue"].joined(separator: "_")
+        let runner = ProbeCannedRunner { arguments in
+            if arguments.contains(ProcessInspector.listenerCommand) { return "4321\n" }
+            if arguments.contains(ProcessInspector.processCommand) {
+                return "next-server --token \(secret) --port 30141\n"
+            }
+            if arguments.first == "/opt/homebrew/bin/pi-web" { return "1.2.3\n" }
+            return "v22.19.0\n"
+        }
+        let collector = DiagnosticsProbeCollector(
+            queue: DispatchQueue(label: "test.diagnostics.masking"),
+            runner: runner
+        )
+        let finished = expectation(description: "probe completion")
+        var probes: DiagnosticsProbeResult?
+        collector.collect(piWebPath: "/opt/homebrew/bin/pi-web", port: 30141) { result in
+            probes = result
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 10)
+
+        XCTAssertEqual(probes?.piWebVersion, "1.2.3")
+        XCTAssertEqual(probes?.nodeVersion, "v22.19.0")
+        XCTAssertEqual(probes?.listenerPID, "4321")
+        let listenerProcess = probes?.listenerProcess ?? ""
+        XCTAssertFalse(listenerProcess.contains(secret), "argv 里的凭据必须被遮罩: \(listenerProcess)")
+        XCTAssertTrue(listenerProcess.contains(LogRedactor.marker), "遮罩占位符存在")
+        XCTAssertTrue(listenerProcess.contains("next-server"), "程序名保留")
+
+        var exported = input
+        exported.listenerPID = DiagnosticsCollector.probeValue(probes?.listenerPID)
+        exported.listenerProcess = DiagnosticsCollector.probeValue(probes?.listenerProcess)
+        let text = DiagnosticsCollector.text(for: exported)
+        XCTAssertFalse(text.contains(secret), "导出文本不得含注入的凭据形态")
+        XCTAssertTrue(text.contains("监听进程: next-server --token \(LogRedactor.marker)"))
+        assertLabelsAreUniqueAndComplete(parseExport(text))
+    }
+
+    /// lsof 成功但没有输出 = “没有监听者”这一事实；与 lsof 失败（降级为 nil）
+    /// 必须区分开。
+    func testProbeCollectorDistinguishesMissingListenerFromFailedProbe() {
+        let missingRunner = ProbeCannedRunner { arguments in
+            if arguments.contains(ProcessInspector.listenerCommand) { return "" }
+            return "v22.19.0\n"
+        }
+        let failedRunner = ProbeCannedRunner { _ in nil }
+
+        XCTAssertEqual(probeResult(using: missingRunner).listenerPID, "无")
+        XCTAssertEqual(probeResult(using: failedRunner).listenerPID, nil)
+        XCTAssertEqual(probeResult(using: failedRunner).nodeVersion, nil)
+    }
+
+    /// 探测失败/超时的字段在导出文本里被标注，其余字段与标签结构仍然完整
+    /// （不因为一条命令挂住就少产出报告）。
+    func testExportedTextMarksFailedProbes() {
+        var degraded = input
+        degraded.piWebVersion = DiagnosticsCollector.probeValue(nil)
+        degraded.piWebVersionConfidence = "unknown"
+        degraded.nodeVersion = DiagnosticsCollector.probeValue(nil)
+        degraded.nodeVersionConfidence = "unknown"
+        degraded.listenerPID = DiagnosticsCollector.probeValue(nil)
+        degraded.listenerProcess = DiagnosticsCollector.probeValue(nil)
+
+        let fields = parseExport(DiagnosticsCollector.text(for: degraded))
+        XCTAssertEqual(
+            value("pi-web 版本", in: fields),
+            "\(DiagnosticsProbeText.failure)（可信度 unknown（未知））"
+        )
+        XCTAssertEqual(value("Node.js 版本", in: fields), "\(DiagnosticsProbeText.failure)（可信度 unknown（未知））")
+        XCTAssertEqual(value("监听 PID", in: fields), DiagnosticsProbeText.failure)
+        XCTAssertEqual(value("监听进程", in: fields), DiagnosticsProbeText.failure)
+        XCTAssertEqual(value("端口", in: fields), input.port)
+        assertLabelsAreUniqueAndComplete(fields)
+        XCTAssertEqual(DiagnosticsCollector.probeValue("1.2.3"), "1.2.3", "有值时原样返回")
+    }
+
+    /// 串行跑一次探测并等回调（测试辅助）。
+    private func probeResult(using runner: CommandRunning, piWebPath: String? = nil) -> DiagnosticsProbeResult {
+        let collector = DiagnosticsProbeCollector(
+            queue: DispatchQueue(label: "test.diagnostics.helper"),
+            runner: runner
+        )
+        let finished = expectation(description: "probe completion")
+        var result = DiagnosticsProbeResult()
+        collector.collect(piWebPath: piWebPath, port: 30141) { value in
+            result = value
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 10)
+        return result
+    }
+
+    /// W4 M2/M3/L5 的接线：unhosted 测试 target 的源文件清单固定，无法直接实例化
+    /// `AppDelegate`/窗口控制器，因此用与仓库既有做法一致的源码级断言
+    /// （见 `UpdateAbandonedAttemptTests`），保证修复不会被悄悄改回去。
+    func testAppWiringKeepsTheWindowAndExportFixesInPlace() throws {
+        let app = try sourceText(relativePath: "Sources/PiWebApp.swift")
+        XCTAssertTrue(app.contains("preferencesWindowStore.reuse"), "设置窗口必须复用单例存储")
+        XCTAssertTrue(
+            app.contains("controller.update(configuration: serviceManager.configuration)"),
+            "每次打开设置窗口都必须用当前生效配置刷新控件"
+        )
+        XCTAssertFalse(app.contains("preferencesWindowController ="), "不再保留每次覆盖引用的旧写法")
+        XCTAssertTrue(app.contains("diagnosticsProbeCollector.collect("), "导出探测必须走后台串行队列")
+        XCTAssertTrue(app.contains("DiagnosticsCollector.probeValue("), "失败字段必须统一标注")
+        XCTAssertFalse(
+            app.contains("processInspector.listenerProcessDescription"),
+            "导出路径不得在主线程同步执行 lsof/ps"
+        )
+        XCTAssertTrue(app.contains("if window.isVisible"), "退出确认在窗口不可见时必须改用应用级模态")
+
+        let window = try sourceText(relativePath: "Sources/DiagnosticsWindowController.swift")
+        XCTAssertTrue(window.contains("onExportDiagnostics"), "诊断窗口必须转发到 AppDelegate 的导出路径")
+        XCTAssertFalse(window.contains("diagnosticsTextProvider"), "旧同步 provider 接线不得保留")
+
+        let clipboard = try sourceText(relativePath: "Sources/DiagnosticsClipboard.swift")
+        XCTAssertTrue(clipboard.contains("confirmExport"), "提醒与采集必须拆成两步")
+        XCTAssertTrue(clipboard.contains("window.isVisible"), "不可见窗口上不得挂 sheet")
+    }
+
+    private func sourceText(relativePath: String) throws -> String {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let candidate = repoRoot.appendingPathComponent(relativePath)
+        if FileManager.default.fileExists(atPath: candidate.path) {
+            return try String(contentsOf: candidate, encoding: .utf8)
+        }
+        return try String(
+            contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(relativePath),
+            encoding: .utf8
+        )
     }
 }

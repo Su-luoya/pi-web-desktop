@@ -233,6 +233,8 @@ enum PiPackageUpdateRefusal: Equatable {
     /// 同一组件存在未清除的「已放弃」记录（GitHub #62）：不允许自动执行；只有
     /// 用户在确认框里看到这条记录并确认后才执行一次。
     case abandonedAttemptPending(UpdateAbandonedAttempt)
+    /// 执行器上还有一次命令没结束（B-1）：本次没有执行，也没有任何状态改动。
+    case executorBusy
 
     /// 单行原因文案（固定文本 + 已脱敏的进程记录摘要）。
     var text: String {
@@ -276,6 +278,8 @@ enum PiPackageUpdateRefusal: Equatable {
             return "用户取消了更新（未确认）：不执行、不改状态"
         case .abandonedAttemptPending(let attempt):
             return UpdateAbandonedAttemptPresenter.automaticRefusalText(attempt)
+        case .executorBusy:
+            return "执行器上还有一次更新命令没有结束：本次不执行、不改状态，也不向任何进程发送信号"
         }
     }
 }
@@ -973,6 +977,8 @@ enum PiPackageUpdatePlanner {
 
 /// 命令失败类别。固定枚举，不含子进程输出或路径。
 enum PiPackageUpdateCommandFailure: String, Equatable {
+    /// 根本没有执行：同一执行器实例上还有一次运行没结束（一次只跑一个命令）。
+    case notAttempted
     case launchFailed
     case timedOut
     case abandoned
@@ -980,6 +986,7 @@ enum PiPackageUpdateCommandFailure: String, Equatable {
 
     var text: String {
         switch self {
+        case .notAttempted: return "更新命令未被执行（执行器上一次运行尚未结束）"
         case .launchFailed: return "无法启动更新命令"
         case .timedOut: return "更新命令超时（已放弃等待，没有向任何进程发送信号）"
         case .abandoned: return "更新命令被放弃等待（没有向任何进程发送信号）"
@@ -992,6 +999,8 @@ enum PiPackageUpdateCommandFailure: String, Equatable {
 /// 只在调用方脱敏后展示或记录。
 struct PiPackageUpdateCommandResult: Equatable {
     var exitCode: Int32?
+    /// 本次运行没有执行（执行器忙）：`exitCode` 为 nil，`failure` 为 `.notAttempted`。
+    var notAttempted: Bool
     var launchFailed: Bool
     var timedOut: Bool
     var abandoned: Bool
@@ -1002,6 +1011,7 @@ struct PiPackageUpdateCommandResult: Equatable {
 
     init(
         exitCode: Int32?,
+        notAttempted: Bool = false,
         launchFailed: Bool = false,
         timedOut: Bool = false,
         abandoned: Bool = false,
@@ -1011,6 +1021,7 @@ struct PiPackageUpdateCommandResult: Equatable {
         stderrTail: String? = nil
     ) {
         self.exitCode = exitCode
+        self.notAttempted = notAttempted
         self.launchFailed = launchFailed
         self.timedOut = timedOut
         self.abandoned = abandoned
@@ -1022,6 +1033,7 @@ struct PiPackageUpdateCommandResult: Equatable {
 
     /// nil 表示执行成功（退出码 0 且未超时/放弃/启动失败）。
     var failure: PiPackageUpdateCommandFailure? {
+        if notAttempted { return .notAttempted }
         if abandoned { return .abandoned }
         if timedOut { return .timedOut }
         if launchFailed { return .launchFailed }
@@ -1057,14 +1069,21 @@ protocol PiPackageUpdateRunning: AnyObject {
 final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
     /// 保留的子进程输出上限（每条流，字符）。
     static let outputTailLimit = 2000
-    /// 进程结束后等两条管道读到 EOF 的宽限时间（有界；超时后照常结束）。
-    static let pipeDrainGrace: TimeInterval = 0.5
+    /// 进程结束后等两条管道读到 EOF 的宽限时间默认值（有界；超时后照常结束）。
+    static let defaultPipeDrainGrace: TimeInterval = 0.5
+
+    /// 进程已经不在运行、但结束回调还没轮到状态队列时，超时计时最多再让出的轮数与间隔（B-2）：
+    /// 退出码是比超时更可信的证据，但要保持有界，不会因为等不到回调而永久挂住。
+    static let timeoutRetryDelay: TimeInterval = 0.2
+    static let maxTimeoutRetries = 5
 
     private let stateQueue = DispatchQueue(label: "io.github.su-luoya.pi-web-desktop.pi-package-update-command")
     private let clock: () -> Date
     private let baseEnvironment: [String: String]
     private let redact: (String) -> String
     private let recordAbandonedAttempt: (UpdateAbandonedAttempt) -> Void
+    /// 等管道读到 EOF 的宽限时间（可注入；生产用默认 0.5s）。
+    private let pipeDrainGrace: TimeInterval
 
     private var process: Process?
     private var plan: PiPackageUpdatePlan?
@@ -1072,7 +1091,10 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
     private var timer: DispatchSourceTimer?
     private var drainTimer: DispatchSourceTimer?
     private var completion: ((PiPackageUpdateCommandResult) -> Void)?
+    /// 本轮运行是否已有结果（每次 `run` 开始时复位，不是实例级的一次性标记）。
     private var finished = false
+    /// 是否有一次运行正在进行：忙时拒绝新的 `run`，但必须如实回调结果。
+    private var running = false
     private var timedOut = false
     private var abandoned = false
     private var startedAt: Date?
@@ -1080,20 +1102,27 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
     private var stderrTail = ""
     private var stdoutDrained = false
     private var stderrDrained = false
+    /// 本轮运行的两条管道读端：用来忽略上一轮运行残留的管道回调（状态按轮次隔离）。
+    private var stdoutHandle: FileHandle?
+    private var stderrHandle: FileHandle?
     /// 本次命令是否已经写过「已放弃」记录（至多一条）。
     private var didRecordAbandonedAttempt = false
+    /// 本轮超时计时为了让出「退出码还没到」而重排的次数（有界）。
+    private var timeoutRetries = 0
     private var pendingFinish: (exitCode: Int32?, launchFailed: Bool)?
 
     init(
         clock: @escaping () -> Date = { Date() },
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         redact: @escaping (String) -> String = { LogRedactor().redact($0) },
-        recordAbandonedAttempt: @escaping (UpdateAbandonedAttempt) -> Void = { _ in }
+        recordAbandonedAttempt: @escaping (UpdateAbandonedAttempt) -> Void = { _ in },
+        pipeDrainGrace: TimeInterval = ProcessPiPackageUpdateCommand.defaultPipeDrainGrace
     ) {
         self.clock = clock
         self.baseEnvironment = baseEnvironment
         self.redact = redact
         self.recordAbandonedAttempt = recordAbandonedAttempt
+        self.pipeDrainGrace = pipeDrainGrace
     }
 
     func run(
@@ -1108,7 +1137,7 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
 
     func abandon() {
         stateQueue.async { [weak self] in
-            guard let self, !self.finished else { return }
+            guard let self, self.running, !self.finished else { return }
             self.abandoned = true
             self.recordAbandonedAttemptLocked(reason: .abandonedWaiting)
             self.finishLocked(exitCode: nil)
@@ -1122,7 +1151,20 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
         timeout: TimeInterval,
         completion: @escaping (PiPackageUpdateCommandResult) -> Void
     ) {
-        guard !finished else { return }
+        // B-1：同一实例一次只跑一个命令。忙时拒绝本次运行，但拒绝也必须回调
+        // 结果（`.notAttempted`）——绝不能静默 return 让调用方永远等不到 completion。
+        guard !running else {
+            let now = clock()
+            completion(PiPackageUpdateCommandResult(
+                exitCode: nil,
+                notAttempted: true,
+                startedAt: now,
+                finishedAt: now
+            ))
+            return
+        }
+        resetRunStateLocked()
+        running = true
         self.completion = completion
         self.plan = plan
         self.timeout = timeout
@@ -1140,6 +1182,9 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
+        // 记录本轮管道的读端：回调里用它判断事件是否属于本轮运行。
+        self.stdoutHandle = stdoutPipe.fileHandleForReading
+        self.stderrHandle = stderrPipe.fileHandleForReading
         stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             self?.receive(data, toStdout: true, from: handle)
@@ -1150,7 +1195,9 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
         }
         process.terminationHandler = { [weak self] finishedProcess in
             self?.stateQueue.async {
-                self?.finishLocked(exitCode: finishedProcess.terminationStatus)
+                // 上一轮运行残留的结束回调不得替本轮收尾（B-1：状态按轮次隔离）。
+                guard let self, finishedProcess === self.process else { return }
+                self.finishLocked(exitCode: finishedProcess.terminationStatus)
             }
         }
         self.process = process
@@ -1163,11 +1210,47 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
         scheduleTimeoutLocked(timeout)
     }
 
+    /// 每次运行独立的状态（B-1）：结束/超时/放弃标记、输出片段与暂存结果都在
+    /// 新一轮开始时复位，否则第二次运行会被当成「已完成」而静默丢弃。
+    private func resetRunStateLocked() {
+        process = nil
+        plan = nil
+        timeout = 0
+        timer = nil
+        drainTimer = nil
+        completion = nil
+        finished = false
+        timedOut = false
+        abandoned = false
+        startedAt = nil
+        stdoutTail = ""
+        stderrTail = ""
+        stdoutHandle = nil
+        stderrHandle = nil
+        stdoutDrained = false
+        stderrDrained = false
+        didRecordAbandonedAttempt = false
+        timeoutRetries = 0
+        pendingFinish = nil
+    }
+
     private func scheduleTimeoutLocked(_ timeout: TimeInterval) {
         let timer = DispatchSource.makeTimerSource(queue: stateQueue)
         timer.schedule(deadline: .now() + max(0.05, timeout))
         timer.setEventHandler { [weak self] in
-            guard let self, !self.finished else { return }
+            // 只认本轮运行的计时器：上一轮残留的触发不得影响本轮。
+            guard let self, self.timer === timer, !self.finished else { return }
+            // B-2：进程已经结束（只是在等管道读到 EOF 的宽限期）时超时计时不再算数，
+            // 否则会把正常退出的命令记成超时，并写下一条不实的「已放弃」记录。
+            guard self.pendingFinish == nil else { return }
+            // B-2 补充：进程已经不在运行、只是结束回调还没轮到状态队列时，先让出一小段
+            // 时间等退出码到达（有界）——否则会把已经退出的命令记成超时并写下一条
+            // 「已放弃」记录；多次让出后仍然只看到超时，才按超时处理。
+            if self.process?.isRunning == false, self.timeoutRetries < Self.maxTimeoutRetries {
+                self.timeoutRetries += 1
+                self.scheduleTimeoutLocked(Self.timeoutRetryDelay)
+                return
+            }
             // 超时只放弃等待：不发送信号、不终止子进程；同时写一条「已放弃」记录。
             self.timedOut = true
             self.recordAbandonedAttemptLocked(reason: .timedOut)
@@ -1206,6 +1289,9 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
     private func receive(_ data: Data, toStdout: Bool, from handle: FileHandle) {
         stateQueue.async { [weak self] in
             guard let self, !self.finished else { return }
+            // 只接受本轮运行的管道事件：上一轮管道可能在结束后才把 EOF/数据投递进来。
+            let currentHandle = toStdout ? self.stdoutHandle : self.stderrHandle
+            guard handle === currentHandle else { return }
             if data.isEmpty {
                 handle.readabilityHandler = nil
                 if toStdout {
@@ -1253,9 +1339,9 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
     private func scheduleDrainDeadlineLocked() {
         guard drainTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: stateQueue)
-        timer.schedule(deadline: .now() + Self.pipeDrainGrace)
+        timer.schedule(deadline: .now() + pipeDrainGrace)
         timer.setEventHandler { [weak self] in
-            guard let self, let pending = self.pendingFinish, !self.finished else { return }
+            guard let self, self.drainTimer === timer, let pending = self.pendingFinish, !self.finished else { return }
             self.pendingFinish = nil
             self.completeLocked(exitCode: pending.exitCode, launchFailed: pending.launchFailed)
         }
@@ -1266,6 +1352,7 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
     private func completeLocked(exitCode: Int32?, launchFailed: Bool) {
         guard !finished else { return }
         finished = true
+        running = false
         timer?.cancel()
         timer = nil
         drainTimer?.cancel()
@@ -1277,6 +1364,8 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
             handle.readabilityHandler = nil
         }
         let finishedAt = clock()
+        // B-2：已经观测到退出码时不再判定为超时——退出码是更可信的证据。
+        let timedOut = self.timedOut && exitCode == nil
         let result = PiPackageUpdateCommandResult(
             exitCode: exitCode,
             launchFailed: launchFailed,
@@ -1356,7 +1445,8 @@ enum PiPackageUpdateRunOutcome: Equatable {
                 oldVersion: plan.installedVersion,
                 newVersion: plan.installedVersion,
                 targetVersion: plan.targetVersion,
-                reason: "更新失败，仍在使用旧版本：\(failure.text)"
+                // B-6：命令失败不证明旧文件没被改动，不写“仍在使用旧版本”这类没有探针支撑的断言。
+                reason: "更新失败，没有执行任何回滚动作：\(failure.text)"
             )
         case .versionUnchanged(let plan, let detectedVersion, _):
             return PiPackageUpdateWarning(
@@ -1550,6 +1640,17 @@ final class PiPackageUpdateCoordinator {
         journal.recordPreflight()
         environment.runner.run(plan, timeout: environment.timeout) { [weak self] result in
             guard let self else { return }
+            // B-1：执行器拒绝执行时（同一实例上还有一次运行没结束）也必须回调。
+            // 这里如实记录「未执行」：不写安装失败，也不断言旧版本是否还在原位。
+            if result.notAttempted {
+                let reason = PiPackageUpdateRefusal.executorBusy
+                self.logOutcome(
+                    "Pi 扩展包更新（\(plan.packageName)）：未执行（\(reason.text)）；"
+                        + "当前版本 \(plan.installedVersion)，目标版本 \(plan.targetVersion ?? "未知")。"
+                )
+                completion(.notAttempted(packageName: plan.packageName, reason: reason))
+                return
+            }
             let record = PiPackageUpdateCommandRecord(
                 exitCode: result.exitCode,
                 duration: result.duration,
@@ -1576,7 +1677,8 @@ final class PiPackageUpdateCoordinator {
                 self.logOutcome(
                     "Pi 扩展包更新（\(plan.packageName)）失败：\(failure.text)；退出码 "
                         + "\(result.exitCode.map(String.init) ?? "无")，耗时 \(record.durationText)，"
-                        + "当前版本 \(plan.installedVersion)，目标版本 \(plan.targetVersion ?? "未知")。旧版本保持不变。"
+                        + "当前版本 \(plan.installedVersion)，目标版本 \(plan.targetVersion ?? "未知")。"
+                        + "应用不声称更新成功，也未核对更新前的文件是否被改动。"
                 )
                 if let tail {
                     self.logOutcome("Pi 扩展包更新命令输出片段（已脱敏）：\(tail)")
@@ -1592,7 +1694,9 @@ final class PiPackageUpdateCoordinator {
                 previousVersion: plan.installedVersion,
                 targetVersion: plan.targetVersion,
                 detectedVersion: detected,
-                detectedPackageName: plan.packageName,
+                // B-3：不能用计划里的期望包名冒充「检测到的包名」——那会让身份检查
+                // 同义反复地恒真，却把未验证的结论写进历史。传 nil，如实记为「未验证」。
+                detectedPackageName: nil,
                 detectedExecutablePath: nil,
                 detectedResolvedPath: nil,
                 detectedPackageJSONPath: nil,

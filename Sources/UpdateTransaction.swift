@@ -76,6 +76,14 @@ enum UpdateTransactionPhaseStatus: String, Equatable {
     case failed
     case skipped
     case notAttempted
+    /// 降级阶段专用（GitHub #106）：确实执行了一次恢复动作，把调用方指回更新前
+    /// 记录的路径。只有这一种降级才算“做成了一件事”。
+    case applied
+    /// 降级阶段专用（GitHub #106）：只记录了结论，没有执行任何回滚动作
+    /// （安装失败，或核对后确认文件仍是更新前那份）。
+    case recordedOnly
+    /// 降级阶段专用（GitHub #106）：无法执行自动回滚，只报告 + 手动提示。
+    case notPossible
 
     var displayName: String {
         switch self {
@@ -83,6 +91,9 @@ enum UpdateTransactionPhaseStatus: String, Equatable {
         case .failed: return "失败"
         case .skipped: return "跳过"
         case .notAttempted: return "未执行"
+        case .applied: return "已执行"
+        case .recordedOnly: return "仅记录"
+        case .notPossible: return "无法执行"
         }
     }
 }
@@ -357,6 +368,9 @@ enum UpdateRollbackEligibility: String, Equatable {
     case missingEvidence
     /// 证据已被覆盖、删除或不可执行（例如 npm 全局安装覆盖了同一个路径）。
     case evidenceChangedOrMissing
+    /// 本次运行没有可用的文件系统探针（GitHub #106）：没法核对证据，因此既
+    /// 不回滚，也不断言证据被改动。
+    case probeUnavailable
     /// 路径与指纹一致：仍然就是更新前的文件，不需要回滚。
     case alreadyOnPreviousArtifact
     /// 安装命令失败，但没有核对过旧文件是否被改动（B-6）：既不断言“仍在更新前的
@@ -369,6 +383,7 @@ enum UpdateRollbackEligibility: String, Equatable {
         case .sourceDoesNotSupportRollback: return "该来源不支持自动回滚"
         case .missingEvidence: return "没有保留更新前的路径/版本证据"
         case .evidenceChangedOrMissing: return "更新前的证据已被覆盖、删除或不可执行"
+        case .probeUnavailable: return "本次运行没有可用的文件系统探针，无法核对更新前的证据"
         case .alreadyOnPreviousArtifact: return "当前仍在更新前的文件上"
         case .stateNotVerified: return "安装命令失败后没有核对过旧文件，无法断言仍在更新前的文件上"
         }
@@ -379,7 +394,7 @@ enum UpdateRollbackEligibility: String, Equatable {
 enum UpdateDegradationKind: String, Equatable {
     /// 本次尝试成功，不需要降级。
     case notNeeded
-    /// 安装阶段失败：系统状态未改变，仍在使用旧版本。
+    /// 安装阶段失败：没有执行任何回滚动作，也不断言旧文件未被改动。
     case installFailedKeepingPreviousVersion
     /// 验证失败，但当前文件仍是更新前的版本（版本未变化）。
     case stillUsingPreviousArtifact
@@ -391,7 +406,7 @@ enum UpdateDegradationKind: String, Equatable {
     var displayName: String {
         switch self {
         case .notNeeded: return "无需降级"
-        case .installFailedKeepingPreviousVersion: return "更新失败，仍在使用旧版本"
+        case .installFailedKeepingPreviousVersion: return "更新失败，没有执行任何回滚动作"
         case .stillUsingPreviousArtifact: return "更新后验证失败，仍在使用更新前的版本"
         case .degradedToPreviousArtifact: return "更新后验证失败，已降级"
         case .cannotAutomaticallyRollback: return "更新后验证失败，无法自动回滚"
@@ -643,7 +658,7 @@ enum UpdateDegradationPlanner {
         guard probe.isAvailable else {
             return plan(
                 kind: .cannotAutomaticallyRollback,
-                eligibility: .evidenceChangedOrMissing,
+                eligibility: .probeUnavailable,
                 reason: "验证失败（\(failureReason)）；本次运行没有可用的文件系统探针，无法确认更新前的证据仍然可用，因此不回滚"
             )
         }
@@ -868,15 +883,20 @@ struct UpdateTransactionJournal {
         record(.commit, status: .notAttempted, reason: reason)
     }
 
-    /// 降级阶段：`.notNeeded` 记为跳过，其余记为成功/失败结果。
+    /// 降级阶段（GitHub #106）：`.notNeeded` 记为跳过；只有真的执行了恢复动作
+    /// （`degradedToPreviousArtifact`）才算 `.applied`。安装失败、文件未变化只是
+    /// 记录结论，无法回滚只是报告，都不能显示成“成功”。
     mutating func recordDegradation(_ plan: UpdateDegradationPlan) {
         let status: UpdateTransactionPhaseStatus
         switch plan.kind {
         case .notNeeded:
             status = .skipped
-        case .degradedToPreviousArtifact, .stillUsingPreviousArtifact,
-             .cannotAutomaticallyRollback, .installFailedKeepingPreviousVersion:
-            status = .succeeded
+        case .degradedToPreviousArtifact:
+            status = .applied
+        case .stillUsingPreviousArtifact, .installFailedKeepingPreviousVersion:
+            status = .recordedOnly
+        case .cannotAutomaticallyRollback:
+            status = .notPossible
         }
         record(.degrade, status: status, reason: plan.reason)
     }

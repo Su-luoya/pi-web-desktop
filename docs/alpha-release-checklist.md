@@ -1331,18 +1331,17 @@ main，加上本版发布提交的版本 bump 与三份文档（发布说明、�
 
 | # | 检查 | 实测输出摘要 | 判定 |
 | --- | --- | --- | --- |
-| C1 | PR #143 的 CI（`03e06f5`） | （发布后回填） | （发布后回填） |
-| C2 | 发布提交（PR #144）的 CI | （发布后回填） | （发布后回填） |
-| C3 | `git tag -a v0.1.0-alpha.11` 指向发布提交 | （发布后回填） | （发布后回填） |
-| C4 | `release.yml`（tag push 触发） | （发布后回填） | （发布后回填） |
-| C5 | 草稿 prerelease 的正文与真机表 | （发布后回填） | （发布后回填） |
-| C6 | 真机 macOS 与 Node / pi / pi-web 版本 | Apple M4（`Mac16,10`）/ macOS 27.0（`26A428`）arm64 / Node v24.21.0 / npm 11.19.0 / pi 0.86.1 / `@agegr/pi-web` 0.9.1；`smoke.sh` 双模式通过（`items=6 blockers=3`） | 已实测（与 alpha.10 记录逐项相同） |
-| C7 | `gh release edit --draft=false`（prerelease） | （发布后回填） | （发布后回填） |
-| C8 | 回退路径（上一版资产仍在 Releases） | `v0.1.0-alpha.10`（ZIP / `.sha256` / `.evidence.md`） | 已核实 |
-| C9 | 回填 Release issue 的 run 链接与 SHA-256、关闭 issue | （发布后回填） | （发布后回填） |
+| C1 | PR #143 的 CI（`03e06f5`） | PR run [35521196316](https://github.com/Su-luoya/pi-web-desktop/actions/runs/35521196316)（build，4m10s，success）；合并提交 `03e06f5` 上的 main CI run [35521447282](https://github.com/Su-luoya/pi-web-desktop/actions/runs/35521447282)（success） | 通过 |
+| C2 | 发布提交（PR #144，`ce00aee`）的 CI | PR run [35521485544](https://github.com/Su-luoya/pi-web-desktop/actions/runs/35521485544)（success）；main CI run [35521749652](https://github.com/Su-luoya/pi-web-desktop/actions/runs/35521749652)（success，发布提交本身就是被 tag 的提交） | 通过 |
+| C3 | `git tag -a v0.1.0-alpha.11` 指向发布提交 | tag 指向 `ce00aee9f7613e5e79da0c99621096015411f639`；`gh release view` 的 `tagName` 与 `check-release-version.sh` 的 tag/build 校验一致（`MARKETING_VERSION 0.1.0-alpha.11` / `CURRENT_PROJECT_VERSION 11`） | 通过 |
+| C4 | `release.yml`（tag push 触发） | run [35521984282](https://github.com/Su-luoya/pi-web-desktop/actions/runs/35521984282)：build 与 publish 两个 job 均 success；产出 `Pi-Web-Desktop-0.1.0-alpha.11+build.11.zip`（`1602879` 字节）、`.zip.sha256`、`.evidence.md` 三件资产 | 通过 |
+| C5 | 草稿 prerelease 的正文与真机表 | 草稿 `isDraft=true` / `isPrerelease=true`；已用 Issue #145 的真机记录填掉 8 处 `<待填写>`（Apple M4 `Mac16,10` / macOS `27.0`（`26A428`）/ arm64 / Node `v24.21.0` / pi `0.86.1` / `@agegr/pi-web` `0.9.1` / `smoke.sh` 双模式 exit 0；`items=6` / `blockers=3`），并保留未公证与安装限制表述 | 通过 |
+| C7 | `gh release edit --draft=false`（prerelease） | 发布后 `isDraft=false`、`isPrerelease=true`；重新下载 ZIP 后 `shasum -a 256 -c` OK，解包 `Info.plist` 为 `0.1.0-alpha.11` / `11`，`codesign --verify --deep --strict` rc=0（`Signature=adhoc`、`TeamIdentifier=not set`） | 通过 |
+| C9 | 回填 Release issue 的 run 链接与 SHA-256、关闭 issue | Issue [#145](https://github.com/Su-luoya/pi-web-desktop/issues/145) 已回填：发布 workflow run `35521984282`、发布提交 `ce00aee`、ZIP 大小 `1602879` 与 SHA-256 `9b29a6eb…1788`，并写入发布后核对记录；本回填提交合并后关闭 | 通过 |
 
-本节的边界：C1–C5、C7 与 C9 的输出来自 CI / workflow / 维护者操作，不是本机脚本的直接输出；这些行
-在发布与回填提交里补齐（与 alpha.9 / alpha.10 的回填同一流程）。C6 来自本机实测，已写入 Release 正文。
+本节的边界：C1–C5、C7 与 C9 的输出来自 CI / workflow / 维护者操作，不是本机脚本的直接输出；
+这些行已在发布后的回填提交里补齐（与 alpha.9 / alpha.10 的回填同一流程），并已用“重新下载发布资产
+复验 SHA-256 与 `Info.plist`”再核对一次。C6 来自本机实测，已写入 Release 正文。
 
 ### 本版同时做的文档一致性改动
 

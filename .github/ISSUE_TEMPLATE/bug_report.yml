@@ -13,7 +13,7 @@ body:
     id: app_version
     attributes:
       label: Pi Web Desktop 版本
-      placeholder: 0.1.0-alpha.1
+      placeholder: 0.1.0-alpha.x（见菜单「帮助 → 关于」或 app 的 CFBundleShortVersionString）
     validations:
       required: true
   - type: input

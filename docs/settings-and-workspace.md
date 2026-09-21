@@ -131,6 +131,33 @@
 - `.adopt(record)`：只有全部校验通过的记录才能被重新认领，应用继续把它当作托管服务。
 - `.external(mismatch)`：任何失败（包括 `instanceID` 不同，即上一次运行留下的记录）都只当作外部服务：不发信号、不改状态。可判定的不匹配记录会被删除；`ps` 事实暂时不可读时保留记录、留待下次再验证。
 
+## 系统代理与 VPN 网段（GitHub #157）
+
+服务监听地址切到 Tailscale 地址（CGNAT 段 `100.x.y.z`）后，应用窗口的页面请求会走系统代理。
+如果系统代理的例外列表（「绕过这些主机与域名」）不含该网段，代理会先返回自己的错误页
+（实机实测 502 Bad Gateway），看起来像服务断开，实际服务本身正常。应用做两件事，
+都不会修改用户的系统代理设置：
+
+- **健康探测始终直连**：`Sources/Services/ServiceScheduling.swift` 的 `URLSessionServiceProbe`
+  把会话配置的 `connectionProxyDictionary` 显式置空，代理的应答（502/407/缓存页）不再参与
+  「服务是否就绪」的判定；超时、`(200..<500)` 判定与 `ephemeral` 缓存策略都保持原样。
+- **只读检测 + 提示**：`Sources/Services/SystemProxyWarning.swift` 用 `SCDynamicStoreCopyProxies`
+  读取系统代理；只对 CGNAT 段（`100.x.y.z`）内的服务地址、且该 scheme 确实启用代理（或 SOCKS/PAC
+  生效）、且该地址不被 `ExceptionsList` 命中时提示（提示文案里的具体网段写法来自
+  `SystemProxyWarningEvaluator.vpnSubnetDescription`，按仓库约定不在仓库文本里写点分字面值）。提示是「服务」菜单里的一条告警项
+  （可展开完整文本、可「清除警告」），并在日志里各记一行触发/清除；同一条件在一次运行内
+  只提示一次，切回 loopback 或用户加上例外后自动清除。
+
+取舍（与单测一起固定）：
+
+- **loopback 与普通局域网地址（`192.168.*`、`10.*`、`172.16-31.*`）不提示**：这些网段几乎总在
+  代理软件的默认例外里，逐个绑定地址提示会把噪声拉满；本次确认的现象专属于 CGNAT 段
+  （Tailscale 的 CGNAT 段，常见默认例外列表恰好不含它）。
+- **主机名不提示**：MagicDNS 名无法与网段可靠对应，只能靠用户自查；提示文案里给出了自查/修复入口。
+- **无法解析的例外条目按「已排除」处理**：宁可漏报一次，也不误报「代理没排除」，避免把
+  已经配置好的用户再拉进一次无效折腾。
+- 应用不写系统代理、不改 WebView 导航白名单，也不新增第三方依赖。
+
 ## 测试覆盖
 
 unhosted 测试（注入临时目录、假探针、假 Keychain 与假网络地址提供者，不触碰真实用户目录、进程或网络）：
@@ -140,6 +167,7 @@ unhosted 测试（注入临时目录、假探针、假 Keychain 与假网络地�
 - `PiWebDesktopTests/ServiceConfigurationTests.swift`：默认退出行为与默认工作目录、既有键名、无法识别的退出行为回落为“询问”、工作目录进入运行时签名；直接写入 UserDefaults 的通配地址、空值、带空白/非法字符的值加载后被标记为不可用且不被静默替换，合法地址与 `[::1]` 规范化后仍可用。
 - `PiWebDesktopTests/KeychainStoreTests.swift`：地址判定与保存流程共用同一规则（通配地址即使有密码也被拒绝，且先于密码写入），加载与启动诊断包含非法值与允许范围，非 loopback 缺密码仍走 #8 的缺密码提示。
 - `PiWebDesktopTests/ServiceAddressesTests.swift`（GitHub #150）：地址分类边界（Tailscale 网段两端与网段外、私有网段的边界与网段外、loopback、link-local、非法输入）、探测结果的过滤/去重/排序（与输入顺序无关）与菜单标题生成（含无候选时的单条禁用说明项）、`ServiceAddressDecision.decide` 的三个分支、链接构造只按地址与端口拼装而不改窗口打开的地址；全部使用注入的假 provider。
+- `PiWebDesktopTests/SystemProxyWarningTests.swift`（GitHub #157）：loopback（`127.*`、`localhost`、`::1`）不提示；`100.x` 无启用代理不提示；`100.x` + 代理且无例外 → 提示（HTTP/HTTPS 各自 scheme、SOCKS、PAC 均覆盖）；例外命中（`100.x.*` 通配、精确地址、CGNAT 段 CIDR、逗号串起来的整串条目）→ 不提示；不命中与畸形条目（`/99`、非 IP、`<local>`、IPv6 条目）的取舍；网段边界（`100.63.x` / `100.128.x`）与局域网/主机名不提示；代理字典缺失、键类型畸形、空字典一律不提示；一次运行内只提示一次、切回 loopback 自动清除、手动「清除警告」只抑制本次运行、日志与文案不含用户真实地址。
 - `PiWebDesktopTests/WorkspaceDirectoryTests.swift`：默认目录首次使用时创建、自选目录不被静默重建、不存在/不是目录/不可写三种原因的校验与可读修复提示、状态页文本、设置窗口选择（相对路径、缺失、不可写被拒绝且配置不变，留空回到默认目录）。
 - `PiWebDesktopTests/RecentWorkspaceTests.swift`：去重与置顶、10 条上限与路径标准化、跨 store 实例的持久化与清除、注入 defaults 的配置读取、`WorkspaceSwitchDecision.decide` 的各分支（当前目录 `.unchanged`、相对路径与不存在的目录 `.reject(.missing)`、文件 `.reject(.notDirectory)`、可用目录 `.confirm`），以及任何分支都不创建目录。
 - `PiWebDesktopTests/QuitPolicyTests.swift`：三种退出行为与三种确认选择的决策表、取消不停止服务、只有显式“退出并停止服务”才请求停止托管服务、任何行为都不停止外部服务。

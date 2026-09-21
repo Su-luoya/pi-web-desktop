@@ -101,6 +101,12 @@ final class URLSessionServiceProbe: ServiceProbing {
         let sessionConfiguration = URLSessionConfiguration.ephemeral
         sessionConfiguration.timeoutIntervalForRequest = timeout
         sessionConfiguration.timeoutIntervalForResource = timeout
+        // GitHub #157：探针只测本机/局域网/Tailscale 上的服务本身，必须直连。
+        // 默认的 ephemeral 会话会走系统代理，而代理的应答（502/407/缓存页）
+        // 不代表服务状态：用户把监听地址切到 Tailscale 地址（CGNAT 段 100.x.y.z）后，
+        // 系统代理未排除该网段就会返回 502，探针据此误报「服务已断开」。
+        // 显式空代理字典强制直连；超时、状态码判定与缓存策略保持不变。
+        sessionConfiguration.connectionProxyDictionary = [:]
         let session = URLSession(configuration: sessionConfiguration)
         session.dataTask(with: request) { _, response, _ in
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0

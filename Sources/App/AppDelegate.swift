@@ -41,6 +41,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 网络地址探测：默认枚举本机接口；测试注入替身，不访问真实网络。
     let networkAddressProvider: NetworkAddressProviding = SystemNetworkAddressProvider()
 
+    // MARK: - 系统代理告警（GitHub #157）
+
+    /// 系统代理未排除 VPN 网段时的运行时提示：条件成立时出现在“服务”菜单里，
+    /// 条件消失（切回 loopback 或用户加了例外）即清除。不写 UserDefaults：
+    /// 每次启动重新检测即可得到同样的结论。
+    var systemProxyWarning: SystemProxyWarning?
+    /// “服务”菜单里的代理告警项（无告警时隐藏）。
+    var systemProxyWarningMenuItem: NSMenuItem?
+    /// 只读的系统代理检测 + 提示状态机；绝不修改用户的系统代理设置。
+    let systemProxyWarningMonitor: SystemProxyWarningCoordinator
+
     // MARK: - 更新检查（GitHub #17）
 
     /// 版本检查器：只检查、不安装。失败只改变检查结果状态，不影响服务状态。
@@ -196,6 +207,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             logWriter: logWriter,
             // 服务启动环境与依赖探测共用同一个 PATH 构建器（GitHub #89）。
             toolPathProvider: toolPathProvider
+        )
+        // 系统代理告警（GitHub #157）：只读系统代理配置，日志与提示文案只写网段，
+        // 不写用户真实地址，也不修改用户设置。
+        self.systemProxyWarningMonitor = SystemProxyWarningCoordinator(
+            log: { [logWriter] message in _ = logWriter.append(message) }
         )
         // 更新检查设置（GitHub #18）：策略与忽略版本都存在同一个注入的
         // UserDefaults domain 里；旧版布尔键经迁移函数回退，诊断行进日志。

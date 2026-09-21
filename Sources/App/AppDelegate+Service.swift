@@ -124,7 +124,15 @@ extension AppDelegate {
     /// 正在运行的托管服务必须重启，新的 `PI_WEB_PASSWORD`（或没有它）才会进入
     /// 子进程环境。删除密码已经把 hostname 收回 loopback，因此会走普通的重启
     /// 路径。
-    func applyPreferencesConfiguration(_ newConfiguration: ServiceConfiguration, credentialsChanged: Bool) {
+    ///
+    /// `completion` 在配置生效（需要重启时，重启路径已经走完）后回到主线程调用；
+    /// 默认 nil 让既有调用方不受影响。GitHub #150 的“切换监听地址后复制链接”
+    /// 靠它保证复制发生在配置落盘与重启路径之后。
+    func applyPreferencesConfiguration(
+        _ newConfiguration: ServiceConfiguration,
+        credentialsChanged: Bool,
+        completion: (() -> Void)? = nil
+    ) {
         let previous = serviceManager.configuration
         appConfiguration.save(newConfiguration)
         let changed = previous.runtimeSignature != newConfiguration.runtimeSignature
@@ -145,6 +153,7 @@ extension AppDelegate {
                 guard let self else { return }
                 self.serviceManager.updateConfiguration(newConfiguration)
                 self.serviceManager.reloadAfterConfigurationChange()
+                completion?()
             }
         } else {
             serviceManager.updateConfiguration(newConfiguration)
@@ -154,6 +163,7 @@ extension AppDelegate {
                 // Re-emit the current state so the status menu title refreshes.
                 serviceManager.setState(serviceManager.currentState)
             }
+            completion?()
         }
     }
 }

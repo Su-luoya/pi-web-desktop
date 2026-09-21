@@ -64,13 +64,17 @@ extension AppDelegate {
         )
         webViewController.onNavigationFailure = { [weak self] failure in
             guard let self, !self.serviceManager.isQuitting else { return }
-            self.serviceManager.setState(.stopped)
+            // 导航失败只写日志并渲染错误页：服务状态由启动流程与健康检查决定，
+            // 不能因为一次页面级失败（例如被取消的外链导航）被改成「已停止」。
+            let message: String
             switch failure {
             case .loadFailed(let description):
-                self.webViewController.showErrorPage(message: "页面加载失败：\(description)")
+                message = "页面加载失败：\(description)"
             case .connectionFailed(let description):
-                self.webViewController.showErrorPage(message: "无法连接 Pi Web：\(description)")
+                message = "无法连接 Pi Web：\(description)"
             }
+            _ = self.logWriter.append(self.logRedactor.redact(message))
+            self.webViewController.showErrorPage(message: message)
         }
 
         window = NSWindow(

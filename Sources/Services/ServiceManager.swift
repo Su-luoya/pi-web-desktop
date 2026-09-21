@@ -33,7 +33,13 @@ final class ServiceManager {
     static let maxStartupAttempts = 150
     static let startupPollInterval: TimeInterval = 0.2
     static let healthCheckInterval: TimeInterval = 4
-    static let probeTimeout: TimeInterval = 1
+    /// HTTP 健康探测的超时（GitHub #147）。1 秒在系统负载波动或休眠唤醒后过短，
+    /// 会让一次正常的慢响应被当成断开，因此放宽到 3 秒。
+    static let probeTimeout: TimeInterval = 3
+    /// 连续探测失败达到该次数才判定服务断开并提示（GitHub #147）。
+    static let healthDisconnectThreshold = 2
+    /// 连续探测失败达到该次数才触发受托管重启（GitHub #147）；单次失败绝不重启。
+    static let healthRestartThreshold = 3
     static let stopPollAttempts = 40
     static let stopPollInterval: TimeInterval = 0.1
     // 日志上限/保留份数的唯一来源是 `LogRotationPolicy`（GitHub #10），这里不保留第二套常量。
@@ -130,6 +136,13 @@ final class ServiceManager {
     private var healthToken: RepeatingTimerToken?
     private var didLaunchService = false
     private var restartAttempts = 0
+    /// 连续健康探测失败计数（GitHub #147）：失败 +1，成功归零。只有连续失败达到
+    /// `healthDisconnectThreshold` 才判定断开，达到 `healthRestartThreshold` 才
+    /// 重启，一次瞬时抖动既不闪断也不重启。
+    private var consecutiveProbeFailures = 0
+    /// 本次中断是否已经发出“服务已断开”提示（GitHub #147）：重启只发生在断开判定
+    /// 之后，避免在启动中/失败态被探测波动顺手重启。探测成功后随计数一起复位。
+    private var disconnectReported = false
 
     init(
         configuration: ServiceConfiguration,
@@ -931,6 +944,10 @@ final class ServiceManager {
     func startHealthMonitor() {
         healthToken?.invalidate()
         healthToken = nil
+        // 新一轮健康监控从干净状态开始（GitHub #147）：上一轮遗留的失败计数与断开，
+        // 判定不得让新会话的第一次失败就直接触发断开或重启。
+        consecutiveProbeFailures = 0
+        disconnectReported = false
         // 门控关闭时不轮询：既不采纳外部服务，也不会触发受托管重启。
         guard isStartPermitted else { return }
         healthToken = scheduler.repeating(interval: Self.healthCheckInterval) { [weak self] in
@@ -950,6 +967,15 @@ final class ServiceManager {
                     // 门控 blocked 时不得改变状态或加载服务页，覆盖诊断页。
                     guard self.isStartPermitted else { return }
                     if ready {
+                        // 探测恢复：连续失败计数归零，断开判定随之作废（GitHub #147）。
+                        // 只在确实有过失败时记一行，避免每 4 秒刷一条“已恢复”。
+                        if self.consecutiveProbeFailures > 0 {
+                            self.logWriter.record(
+                                "健康检查探测已恢复：连续失败计数归零（此前连续失败 \(self.consecutiveProbeFailures) 次）"
+                            )
+                        }
+                        self.consecutiveProbeFailures = 0
+                        self.disconnectReported = false
                         if case .running = self.currentState {
                             self.restartAttempts = 0
                         } else {
@@ -957,11 +983,25 @@ final class ServiceManager {
                             self.restartAttempts = 0
                             self.requestLoad()
                         }
-                    } else if case .running = self.currentState {
-                        self.setState(.stopped)
-                        self.onPageMessage?("Pi Web 服务已断开，正在尝试恢复…")
-                        if self.didLaunchService && self.restartAttempts < 1 {
+                    } else {
+                        self.consecutiveProbeFailures += 1
+                        let failures = self.consecutiveProbeFailures
+                        // 每次失败记一行，便于区分瞬时抖动与真正断开；不打印探测 URL
+                        // （可能含凭据），只记计数（GitHub #147）。
+                        self.logWriter.record("健康检查探测失败：连续失败 \(failures) 次")
+                        // 单次失败不改状态、不提示：只有连续失败达到阈值才判定断开，
+                        // 且仍然只对“原本显示运行中”的服务下这个结论。
+                        if case .running = self.currentState, failures >= Self.healthDisconnectThreshold {
+                            self.setState(.stopped)
+                            self.onPageMessage?("Pi Web 服务已断开，正在尝试恢复…")
+                            self.disconnectReported = true
+                            self.logWriter.record("健康检查判定服务已断开（连续失败 \(failures) 次）")
+                        }
+                        // 断开判定成立后继续失败才重启；单次失败绝不重启（GitHub #147）。
+                        if self.disconnectReported, failures >= Self.healthRestartThreshold,
+                           self.didLaunchService, self.restartAttempts < 1 {
                             self.restartAttempts += 1
+                            self.logWriter.record("健康检查触发受托管重启（连续失败 \(failures) 次）")
                             self.startManagedService()
                         }
                     }

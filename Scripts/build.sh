@@ -161,11 +161,14 @@ if [ "$#" -eq 0 ]; then
   exit 2
 fi
 
+# SystemConfiguration 供只读的系统代理检测（GitHub #157）使用；其余框架靠
+# 源码里的 import 自动链接。
 swiftc $OPTIMIZATION_FLAGS "$@" \
   -target "arm64-apple-macosx$APP_MINIMUM_SYSTEM_VERSION" \
   -o "$BIN" \
   -framework Cocoa \
-  -framework WebKit
+  -framework WebKit \
+  -framework SystemConfiguration
 
 if [ -f "$ICON" ]; then
   # Avoid preserving Finder/File Provider metadata into the app bundle.

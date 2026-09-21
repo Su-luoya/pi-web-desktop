@@ -71,6 +71,16 @@ extension AppDelegate {
         let serviceMenu = NSMenu(title: "服务")
         statusMenuItem = serviceMenu.addItem(withTitle: "状态：正在检查…", action: nil, keyEquivalent: "")
         statusMenuItem?.isEnabled = false
+        // 系统代理告警项（GitHub #157）：条件成立时常显并可点开，不成立时隐藏。
+        let proxyWarningItem = NSMenuItem(
+            title: "",
+            action: #selector(showSystemProxyWarning(_:)),
+            keyEquivalent: ""
+        )
+        proxyWarningItem.target = self
+        proxyWarningItem.isHidden = true
+        systemProxyWarningMenuItem = proxyWarningItem
+        serviceMenu.addItem(proxyWarningItem)
         serviceMenu.addItem(.separator())
         serviceMenu.addItem(makeServiceControlMenuItem(title: "启动服务", action: #selector(startServiceAction(_:))))
         serviceMenu.addItem(makeServiceControlMenuItem(title: "重启服务", action: #selector(restartServiceAction(_:))))
@@ -109,6 +119,9 @@ extension AppDelegate {
         NSApp.windowsMenu = windowMenu
 
         NSApp.mainMenu = mainMenu
+
+        // 菜单装好后同步一次代理告警项（首次检测可能早于菜单创建）。
+        refreshSystemProxyWarning()
     }
 
     func menuWillOpen(_ menu: NSMenu) {

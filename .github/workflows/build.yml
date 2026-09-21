@@ -59,7 +59,7 @@ jobs:
       - name: Scan tracked files for committed secrets
         run: ./Scripts/scan-secrets.sh
       - name: Check shell scripts
-        run: sh -n Scripts/*.sh
+        run: for f in Scripts/*.sh; do sh -n "$f" || exit 1; done
       - name: Package smoke artifact
         run: ditto -c -k --sequesterRsrc --keepParent build/Pi-Web-Desktop.app Pi-Web-Desktop-alpha.zip
       - name: Checksum

@@ -1593,7 +1593,12 @@ final class ServiceManagerTests: XCTestCase {
 
         XCTAssertEqual(harness.manager.currentState, .running, "单次失败不得判定断开")
         XCTAssertEqual(harness.states, statesBeforeFailure, "单次失败不得改变状态")
-        XCTAssertTrue(harness.pageMessages.isEmpty, "单次失败不得提示用户")
+        // 启动路径本身已发过一条「正在启动 Pi Web…」，因此断言断开文案没有出现，
+        // 而不是断言消息记录为空。
+        XCTAssertFalse(
+            harness.pageMessages.contains("Pi Web 服务已断开，正在尝试恢复…"),
+            "单次失败不得提示用户"
+        )
         XCTAssertEqual(harness.launcher.launchCount, 1, "单次失败不得重启")
     }
 
@@ -1610,11 +1615,20 @@ final class ServiceManagerTests: XCTestCase {
 
         harness.probe.ready = false
         XCTAssertTrue(harness.scheduler.runHealthCheck())
-        XCTAssertTrue(harness.pageMessages.isEmpty)
+        // 第一次失败不得追加断开文案（启动路径的「正在启动 Pi Web…」不算失败证据）。
+        XCTAssertFalse(
+            harness.pageMessages.contains("Pi Web 服务已断开，正在尝试恢复…"),
+            "单次失败不得提示断开"
+        )
         XCTAssertTrue(harness.scheduler.runHealthCheck())
 
         XCTAssertEqual(harness.manager.currentState, .stopped)
-        XCTAssertEqual(harness.pageMessages, ["Pi Web 服务已断开，正在尝试恢复…"])
+        XCTAssertEqual(harness.pageMessages.last, "Pi Web 服务已断开，正在尝试恢复…")
+        XCTAssertEqual(
+            harness.pageMessages.filter { $0 == "Pi Web 服务已断开，正在尝试恢复…" }.count,
+            1,
+            "断开提示只出现一次"
+        )
         XCTAssertEqual(harness.launcher.launchCount, 1, "断开判定本身不重启：重启要等第三次失败")
     }
 

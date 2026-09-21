@@ -40,8 +40,47 @@ final class ServiceManager {
     static let healthDisconnectThreshold = 2
     /// 连续探测失败达到该次数才触发受托管重启（GitHub #147）；单次失败绝不重启。
     static let healthRestartThreshold = 3
-    static let stopPollAttempts = 40
-    static let stopPollInterval: TimeInterval = 0.1
+    /// 停止等待（GitHub #158）。原来是固定的 `40 × 0.1s = 4 秒`：用户点 Cmd+Q 时
+    /// 托管服务往往几十毫秒就退出了，剩下的等待全部压在退出路径上（实测约 1 秒
+    /// 的“卡顿”），而真正挂住的进程还要等满 4 秒才被 SIGKILL。
+    ///
+    /// 现在分两段：前 `stopPollFastAttempts` 次每 10 毫秒探测一次（服务已退出时
+    /// 立刻返回，检测延迟 ≤ 10ms），之后每 50 毫秒一次，睡眠总预算
+    /// `stopPollBudgetMilliseconds` = 1000 毫秒；超时才对同一进程组发 SIGKILL。
+    /// 先探测再睡眠，因此“服务已经退出”这条最常见的路径一次都不睡。
+    static let stopPollFastAttempts = 20
+    static let stopPollFastIntervalMilliseconds = 10
+    static let stopPollIntervalMilliseconds = 50
+    static let stopPollBudgetMilliseconds = 1_000
+
+    /// 两段式等待的探测次数。由预算推导，避免常量和预算对不上（20 次 10ms
+    /// 之后再用 50ms 铺满剩下的 800ms → 36 次）。
+    static var stopPollAttempts: Int {
+        let fastBudget = stopPollFastAttempts * stopPollFastIntervalMilliseconds
+        let remaining = max(0, stopPollBudgetMilliseconds - fastBudget)
+        let interval = max(1, stopPollIntervalMilliseconds)
+        return stopPollFastAttempts + (remaining + interval - 1) / interval
+    }
+
+    /// 第 `attempt` 次（从 0 开始）探测之后要等的毫秒数。
+    static func stopPollDelayMilliseconds(forAttempt attempt: Int) -> Int {
+        attempt < stopPollFastAttempts ? stopPollFastIntervalMilliseconds : stopPollIntervalMilliseconds
+    }
+
+    /// 整个等待阶段的睡眠上界（毫秒）：所有探测间隔之和。真实耗时可能略高：
+    /// 最后一次探测、信号投递和 `Date` 开销各有微秒级成本。
+    static var stopWaitUpperBoundMilliseconds: Int {
+        (0..<stopPollAttempts).reduce(0) { $0 + stopPollDelayMilliseconds(forAttempt: $1) }
+    }
+
+    static var stopWaitUpperBound: TimeInterval {
+        TimeInterval(stopWaitUpperBoundMilliseconds) / 1000
+    }
+
+    /// 第 `attempt` 次探测之后的睡眠时长（`ServiceScheduling.sleep` 的入参）。
+    static func stopPollDelay(forAttempt attempt: Int) -> TimeInterval {
+        TimeInterval(stopPollDelayMilliseconds(forAttempt: attempt)) / 1000
+    }
     // 日志上限/保留份数的唯一来源是 `LogRotationPolicy`（GitHub #10），这里不保留第二套常量。
 
     private(set) var configuration: ServiceConfiguration
@@ -866,18 +905,37 @@ final class ServiceManager {
     }
 
     /// SIGTERM to a process group, bounded wait, then SIGKILL to the same
-    /// group. The wait is bounded by `stopPollAttempts`, so at most two signals
-    /// are ever sent, both to the group. PIDs and groups 0 and 1 are refused.
+    /// group. The wait is bounded by `stopWaitUpperBound` (1 秒，GitHub #158），
+    /// so at most two signals are ever sent, both to the group. PIDs and
+    /// groups 0 and 1 are refused.
     private func terminate(processGroupID: pid_t) {
         guard processGroupID > 1 else { return }
+        let startedAt = Date()
         signaler.sendGroupSignal(SIGTERM, toProcessGroup: processGroupID)
-        for _ in 0..<Self.stopPollAttempts {
-            guard signaler.isProcessGroupAlive(processGroupID) else { return }
-            scheduler.sleep(seconds: Self.stopPollInterval)
+        logQuitTimeline(.sigtermSent)
+        // 先探测再睡眠：进程组已经消失时立刻返回，不额外睡一个探测间隔。
+        for attempt in 0..<Self.stopPollAttempts {
+            guard signaler.isProcessGroupAlive(processGroupID) else {
+                let waited = QuitTimeline.elapsedMilliseconds(from: startedAt, to: Date())
+                logQuitTimeline(.serviceExited, detail: "SIGTERM 之后等待 \(waited)ms")
+                return
+            }
+            scheduler.sleep(seconds: Self.stopPollDelay(forAttempt: attempt))
         }
         if signaler.isProcessGroupAlive(processGroupID) {
             signaler.sendGroupSignal(SIGKILL, toProcessGroup: processGroupID)
+            logQuitTimeline(
+                .sigkillSent,
+                detail: "等待超过 \(Self.stopWaitUpperBoundMilliseconds)ms（睡眠上界）"
+            )
         }
+    }
+
+    /// 记录退出/停止序列的一个节点（GitHub #158）。行内容只含阶段名、毫秒时钟和
+    /// 相对进程启动的单调偏移，不含路径、URL 或参数；`append` 内部仍会经过
+    /// `LogWriter` 的 `LogRedactor`，落盘走既有日志文件，不新增文件或依赖。
+    func logQuitTimeline(_ stage: QuitTimelineStage, detail: String? = nil) {
+        _ = logWriter.append(QuitTimeline.line(stage, detail: detail))
     }
 
     /// Shared end of a stop: clear the child state, reset the flag and report
@@ -1098,4 +1156,61 @@ final class ServiceManager {
 
 extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
+}
+
+// MARK: - 退出时间线（GitHub #158）
+
+/// 退出序列的节点。`rawValue` 直接写进用户日志，是用户复现「Cmd+Q 卡顿」时读的
+/// 那一列文字：请求 → 停止请求 → SIGTERM → 子进程退出（或 SIGKILL）→ 应用终止。
+///
+/// 停止路径也会被重启复用（重启内部同样调 `stopService`），因此非退出场景的
+/// 日志里也可能出现 SIGTERM 两行；这不影响阅读，反而便于量化停止耗时。
+enum QuitTimelineStage: String {
+    case requested = "退出请求"
+    case stopServiceRequested = "请求停止托管服务"
+    case sigtermSent = "已发送 SIGTERM"
+    case sigkillSent = "已发送 SIGKILL"
+    case serviceExited = "子进程已退出"
+    case applicationTerminating = "应用即将终止"
+}
+
+/// 退出时间线的格式化（纯函数，便于单测）。
+///
+/// 每行形如：`退出时间线 12:34:56.789 (+12345ms) 已发送 SIGTERM — SIGTERM 之后等待 8ms`。
+/// `+Nms` 是相对进程启动的单调偏移（`ProcessInfo.systemUptime`），因此任意两行
+/// 相减即得到该阶段的真实耗时，不受系统时钟调整影响；绝对时间只是给人定位现场用。
+enum QuitTimeline {
+    /// `HH:mm:ss.SSS`（本地时区）。`LogWriter.timestamp` 只精确到秒，而且它属于诊断
+    /// 模块（本次改动不碰它），所以这里单独格式化。每次调用新建 formatter：
+    /// `DateFormatter` 不是线程安全的，而退出路径横跨主线程与后台停止队列。
+    static func clock(_ date: Date, timeZone: TimeZone = .current) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter.string(from: date)
+    }
+
+    /// 相对锚点的毫秒偏移，四舍五入且永不为负（时钟回拨也不产生负数）。
+    static func elapsedMilliseconds(from origin: Date, to date: Date) -> Int {
+        max(0, Int((date.timeIntervalSince(origin) * 1000).rounded()))
+    }
+
+    /// 相对进程启动的单调毫秒偏移。
+    static func uptimeMilliseconds(_ uptime: TimeInterval) -> Int {
+        max(0, Int((uptime * 1000).rounded()))
+    }
+
+    static func line(
+        _ stage: QuitTimelineStage,
+        detail: String? = nil,
+        now: Date = Date(),
+        uptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) -> String {
+        var text = "退出时间线 \(clock(now)) (+\(uptimeMilliseconds(uptime))ms) \(stage.rawValue)"
+        if let detail, !detail.isEmpty {
+            text += " — \(detail)"
+        }
+        return text
+    }
 }

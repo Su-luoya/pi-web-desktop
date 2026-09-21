@@ -934,7 +934,7 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(harness.manager.currentState, .running)
         XCTAssertEqual(harness.loadRequests, 1)
         XCTAssertEqual(harness.probe.probedURLs.last?.absoluteString, "http://127.0.0.1:30141/")
-        XCTAssertEqual(harness.probe.timeouts.last, 1)
+        XCTAssertEqual(harness.probe.timeouts.last, 3)
     }
 
     /// 启动轮询期间子进程退出（仍填在句柄里）时必须立即给出可读失败提示，而
@@ -1451,6 +1451,10 @@ final class ServiceManagerTests: XCTestCase {
         // 假如恢复真的尝试启动，这一次会成功（新 PID），从而暴露问题。
         harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5200))
         harness.runner.handler = processOutput(for: 5200)
+        // GitHub #147：必须先连续失败两次判定断开、第三次才尝试重启，所以这里跑满三次。
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.manager.currentState, .stopped)
         XCTAssertTrue(harness.scheduler.runHealthCheck())
 
         XCTAssertEqual(harness.launcher.launchCount, 1)
@@ -1522,8 +1526,17 @@ final class ServiceManagerTests: XCTestCase {
         process.isRunning = false
         liveness.isAlive = false
         harness.probe.ready = false
+        // GitHub #147：单次失败只是瞬时抖动，不改状态也不重启。
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.manager.currentState, .running)
+        XCTAssertEqual(harness.launcher.launchCount, 1)
+        // 连续第二次失败才判定断开；此时仍不重启。
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.manager.currentState, .stopped)
+        XCTAssertTrue(harness.pageMessages.contains("Pi Web 服务已断开，正在尝试恢复…"))
+        XCTAssertEqual(harness.launcher.launchCount, 1)
         // The restart spawns a new process with a new PID, which is alive and
-        // whose `ps` facts are readable.
+        // whose `ps` facts are readable. The third consecutive failure triggers it.
         harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5200))
         harness.runner.handler = processOutput(for: 5200)
         XCTAssertTrue(harness.scheduler.runHealthCheck())
@@ -1544,13 +1557,188 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertTrue(harness.scheduler.runHealthCheck())
         XCTAssertEqual(harness.manager.currentState, .running)
 
-        // Then it goes away: an unmanaged service is never restarted.
+        // Then it goes away: a single failure is a transient blip (GitHub #147),
+        // and an unmanaged service is never restarted.
         harness.probe.ready = false
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.manager.currentState, .running)
+        XCTAssertTrue(harness.pageMessages.isEmpty)
+        // The second consecutive failure reports the disconnect; no restart follows.
         XCTAssertTrue(harness.scheduler.runHealthCheck())
         XCTAssertEqual(harness.manager.currentState, .stopped)
         XCTAssertEqual(harness.launcher.launchCount, 0)
         XCTAssertEqual(harness.pageMessages, ["Pi Web 服务已断开，正在尝试恢复…"])
+        // A third failure must not restart an unmanaged service either.
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.launcher.launchCount, 0)
+        XCTAssertEqual(harness.pageMessages, ["Pi Web 服务已断开，正在尝试恢复…"])
         XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
+    }
+
+    /// GitHub #147：单次探测失败只是瞬时抖动——不改状态、不提示、不重启。
+    func testSingleHealthProbeFailureKeepsRunningStateWithoutPromptOrRestart() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = true
+        harness.manager.startManagedService()
+        XCTAssertTrue(harness.scheduler.runNextDelayedWork())
+        harness.manager.startHealthMonitor()
+        XCTAssertEqual(harness.manager.currentState, .running)
+        let statesBeforeFailure = harness.states
+
+        harness.probe.ready = false
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+
+        XCTAssertEqual(harness.manager.currentState, .running, "单次失败不得判定断开")
+        XCTAssertEqual(harness.states, statesBeforeFailure, "单次失败不得改变状态")
+        // 启动路径本身已发过一条「正在启动 Pi Web…」，因此断言断开文案没有出现，
+        // 而不是断言消息记录为空。
+        XCTAssertFalse(
+            harness.pageMessages.contains("Pi Web 服务已断开，正在尝试恢复…"),
+            "单次失败不得提示用户"
+        )
+        XCTAssertEqual(harness.launcher.launchCount, 1, "单次失败不得重启")
+    }
+
+    /// GitHub #147：连续两次失败才判定断开并提示一次；第二次失败仍不重启。
+    func testTwoConsecutiveHealthProbeFailuresReportDisconnectWithoutRestart() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = true
+        harness.manager.startManagedService()
+        XCTAssertTrue(harness.scheduler.runNextDelayedWork())
+        harness.manager.startHealthMonitor()
+
+        harness.probe.ready = false
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        // 第一次失败不得追加断开文案（启动路径的「正在启动 Pi Web…」不算失败证据）。
+        XCTAssertFalse(
+            harness.pageMessages.contains("Pi Web 服务已断开，正在尝试恢复…"),
+            "单次失败不得提示断开"
+        )
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+
+        XCTAssertEqual(harness.manager.currentState, .stopped)
+        XCTAssertEqual(harness.pageMessages.last, "Pi Web 服务已断开，正在尝试恢复…")
+        XCTAssertEqual(
+            harness.pageMessages.filter { $0 == "Pi Web 服务已断开，正在尝试恢复…" }.count,
+            1,
+            "断开提示只出现一次"
+        )
+        XCTAssertEqual(harness.launcher.launchCount, 1, "断开判定本身不重启：重启要等第三次失败")
+    }
+
+    /// GitHub #147：连续三次失败才触发一次受托管重启，且同一轮断电只重启一次。
+    func testThirdConsecutiveHealthProbeFailureTriggersExactlyOneRestart() throws {
+        let liveness = ManagerFakeLiveness()
+        let harness = try makeHarness(
+            alive: { pid in pid == 5150 ? liveness.isAlive : true },
+            processOutput: processOutput(for: 5150)
+        )
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = true
+        harness.manager.startManagedService()
+        XCTAssertTrue(harness.scheduler.runNextDelayedWork())
+        harness.manager.startHealthMonitor()
+
+        // 服务真的退出：存活探测与所有权记录随即失效。
+        let process = try XCTUnwrap(harness.launcher.result.get() as? ManagerFakeProcess)
+        process.isRunning = false
+        liveness.isAlive = false
+        harness.probe.ready = false
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5200))
+        harness.runner.handler = processOutput(for: 5200)
+
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.launcher.launchCount, 1, "前两次失败不得重启")
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.launcher.launchCount, 2, "第三次连续失败才重启")
+
+        // 第四次失败不得再重启：restartAttempts 限制本轮只重启一次。
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.launcher.launchCount, 2, "同一轮断电只重启一次")
+
+        // 诊断日志：失败计数、断开判定与重启触发各有一行，且不含探测 URL。
+        harness.drainLogWrites()
+        let log = (try? String(contentsOf: harness.logURL, encoding: .utf8)) ?? ""
+        XCTAssertTrue(log.contains("健康检查探测失败：连续失败 1 次"), log)
+        XCTAssertTrue(log.contains("健康检查判定服务已断开（连续失败 2 次）"), log)
+        XCTAssertTrue(log.contains("健康检查触发受托管重启（连续失败 3 次）"), log)
+        let healthLines = log.split(separator: "\n").filter { $0.contains("健康检查") }
+        XCTAssertFalse(healthLines.isEmpty)
+        for line in healthLines {
+            XCTAssertFalse(line.contains("http"), "健康检查日志不得打印可能含凭据的探测 URL：\(line)")
+        }
+    }
+
+    /// GitHub #147：探测成功把连续失败计数清零，之后必须重新累计两次才再次判定断开。
+    func testSuccessfulProbeResetsTheConsecutiveFailureCount() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+        harness.manager.startHealthMonitor()
+        harness.probe.ready = true
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.manager.currentState, .running)
+
+        harness.probe.ready = false
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.manager.currentState, .stopped)
+        XCTAssertEqual(harness.pageMessages.count, 1)
+
+        // 恢复：计数归零。
+        harness.probe.ready = true
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.manager.currentState, .running)
+
+        // 恢复后的单次失败不得立刻再次判定断开（否则说明计数没有归零）。
+        harness.probe.ready = false
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.manager.currentState, .running)
+        XCTAssertEqual(harness.pageMessages.count, 1)
+
+        // 重新累计到第二次失败才再次提示。
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.manager.currentState, .stopped)
+        XCTAssertEqual(harness.pageMessages.count, 2)
+    }
+
+    /// GitHub #147：探测恢复只请求加载一次页面，之后的成功探测不再重复加载。
+    func testRecoveryAfterDisconnectLoadsThePageOnlyOnce() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+        harness.manager.startHealthMonitor()
+        harness.probe.ready = true
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.manager.currentState, .running)
+        XCTAssertEqual(harness.loadRequests, 1)
+
+        // 连续两次失败判定断开。
+        harness.probe.ready = false
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.manager.currentState, .stopped)
+
+        // 恢复路径：状态回到 running，并且只请求加载一次页面。
+        harness.probe.ready = true
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.manager.currentState, .running)
+        XCTAssertEqual(harness.loadRequests, 2, "恢复必须请求加载服务页")
+
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertEqual(harness.loadRequests, 2, "恢复之后不得重复加载页面")
+
+        harness.drainLogWrites()
+        let log = (try? String(contentsOf: harness.logURL, encoding: .utf8)) ?? ""
+        XCTAssertTrue(log.contains("健康检查探测已恢复"), log)
     }
 
     // MARK: Dependency gate (GitHub #6)

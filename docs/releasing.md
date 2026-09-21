@@ -240,7 +240,7 @@ publish job 里复验与上传前一处）。所以脚本对写入该文件的�
    `codesign -dv --verbose=4`、`spctl -a -vv`、ZIP、SHA-256、证据与元数据；
 9. 用 `docs/release-notes-template.md` 渲染 Release 说明：替换 `{{VERSION}}`、`{{BUILD}}`、
    `{{ZIP_NAME}}`、`{{SHA256}}`，并在固定位置插入证据段落；渲染后若仍有 `{{...}}` 占位符
-   或缺少 checksum 则直接失败；
+   或缺少 checksum 则直接失败；模板里的 `<待填写>` 只打 `::warning::`（计数必须为 0，但不阻断草稿创建）；
 10. 把 `dist/` 上传为 artifact。
 
 `publish` job（`ubuntu-latest`，只有这里授予 `contents: write`）：
@@ -271,7 +271,19 @@ Release 说明由 `docs/release-notes-template.md` 渲染；每个版本还会�
 `<待填写>` 保留在说明里。
 
 发布流程：workflow 结束 → 打开草稿 Release → 从 Release Issue 填入真机记录与已知问题 →
-确认没有 `<待填写>`、checksum 与 Issue 记录一致 → 发布（保持 prerelease）。
+确认没有 `<待填写>`、checksum 与 Issue 记录一致 → 发布（保持 prerelease）。workflow 渲染阶段对
+`<待填写>` 只打 `::warning::`（草稿必须仍能创建），因此发布前**必须**人工执行下面的命令，
+**输出必须为 0**；非 0 就先补填，不要发布：
+
+```sh
+gh release view v<MARKETING_VERSION> --json body --jq .body | grep -c '<待填写>'
+```
+
+`grep -c` 在计数为 0 时退出码是 1，不要只看管道退出码；要在计数非 0 时立即失败，用：
+
+```sh
+test "$(gh release view v<MARKETING_VERSION> --json body --jq .body | grep -c '<待填写>' || true)" -eq 0
+```
 
 ## 可复现性与诚实的边界
 

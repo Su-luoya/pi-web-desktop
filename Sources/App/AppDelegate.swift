@@ -35,6 +35,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     var workspaceValidation: WorkspaceDirectoryValidation = .usable(path: "")
     /// “服务”菜单中的最近工作目录；菜单每次打开时从持久存储重建。
     var recentWorkspacesMenu: NSMenu?
+    /// “复制手机访问链接”候选子菜单（应用菜单与服务菜单各一个）；菜单每次打开时
+    /// 按当前网络地址重建（GitHub #150）。
+    var phoneAccessMenus: [NSMenu] = []
+    /// 网络地址探测：默认枚举本机接口；测试注入替身，不访问真实网络。
+    let networkAddressProvider: NetworkAddressProviding = SystemNetworkAddressProvider()
 
     // MARK: - 更新检查（GitHub #17）
 

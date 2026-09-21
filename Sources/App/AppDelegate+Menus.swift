@@ -7,6 +7,7 @@ extension AppDelegate {
 
     func installMainMenu() {
         serviceControlMenuItems.removeAll()
+        phoneAccessMenus.removeAll()
         let mainMenu = NSMenu()
 
         let appMenuItem = NSMenuItem()
@@ -24,6 +25,9 @@ extension AppDelegate {
         appMenu.addItem(makeServiceControlMenuItem(title: "停止服务", action: #selector(stopServiceAction(_:))))
         appMenu.addItem(withTitle: "在浏览器中打开", action: #selector(openInBrowser(_:)), keyEquivalent: "")
         appMenu.addItem(withTitle: "复制本地地址", action: #selector(copyLocalAddress(_:)), keyEquivalent: "")
+        let appPhoneAccessItem = NSMenuItem(title: "复制手机访问链接", action: nil, keyEquivalent: "")
+        appPhoneAccessItem.submenu = makePhoneAccessMenu()
+        appMenu.addItem(appPhoneAccessItem)
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "退出 Pi Web Desktop（保持服务运行）", action: #selector(quitKeepingService(_:)), keyEquivalent: "")
         appMenu.addItem(withTitle: "退出 Pi Web Desktop（停止服务）", action: #selector(quitAndStop(_:)), keyEquivalent: "")
@@ -81,6 +85,9 @@ extension AppDelegate {
         serviceMenu.addItem(withTitle: "在 Finder 中打开当前工作目录", action: #selector(openCurrentWorkspace(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "在浏览器中打开", action: #selector(openInBrowser(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "复制本地地址", action: #selector(copyLocalAddress(_:)), keyEquivalent: "")
+        let servicePhoneAccessItem = NSMenuItem(title: "复制手机访问链接", action: nil, keyEquivalent: "")
+        servicePhoneAccessItem.submenu = makePhoneAccessMenu()
+        serviceMenu.addItem(servicePhoneAccessItem)
         serviceMenu.addItem(withTitle: "打开日志", action: #selector(openLog(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "打开日志文件夹", action: #selector(openLogsFolder(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "复制诊断", action: #selector(copyDiagnostics(_:)), keyEquivalent: "")
@@ -107,6 +114,8 @@ extension AppDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         if menu === recentWorkspacesMenu {
             rebuildRecentWorkspacesMenu()
+        } else if phoneAccessMenus.contains(where: { $0 === menu }) {
+            rebuildPhoneAccessMenu(menu)
         }
     }
 
@@ -305,6 +314,130 @@ extension AppDelegate {
 
     @objc private func openInBrowser(_ sender: Any?) { NSWorkspace.shared.open(startURL) }
     @objc private func copyLocalAddress(_ sender: Any?) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(startURL.absoluteString, forType: .string) }
+
+    // MARK: - 复制手机访问链接（GitHub #150）
+
+    /// 「复制手机访问链接」候选子菜单：与 `recentWorkspacesMenu` 同一写法（delegate +
+    /// 打开时重建）。候选地址只出现在菜单项里，不写日志与诊断导出。
+    private func makePhoneAccessMenu() -> NSMenu {
+        let menu = NSMenu(title: "复制手机访问链接")
+        menu.delegate = self
+        phoneAccessMenus.append(menu)
+        return menu
+    }
+
+    /// 菜单打开时按当前网络地址重建候选项；无可用地址时只留一条禁用的说明项。
+    func rebuildPhoneAccessMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
+        for entry in PhoneAccessMenuBuilder.entries(for: networkAddressProvider.ipv4Addresses()) {
+            let item = NSMenuItem(
+                title: entry.title,
+                action: entry.address == nil ? nil : #selector(copyPhoneAccessLink(_:)),
+                keyEquivalent: ""
+            )
+            item.representedObject = entry.address.map { ServiceAddressBox($0) }
+            item.isEnabled = entry.isEnabled
+            menu.addItem(item)
+        }
+    }
+
+    /// 候选动作：判定是纯函数（`ServiceAddressDecision`），交互层只做呈现。
+    ///
+    /// - 已经是当前监听地址：直接复制链接，不改配置；
+    /// - 没有可用密码：用共用文案引导到「设置… → 远程访问」，不静默改配置、
+    ///   不启动远程监听；
+    /// - 其他情况：先确认（会切换监听地址并重启，当前会话中断），确认后按
+    ///   设置窗口同一保存语义保存配置并重启，成功后才复制链接。
+    @objc private func copyPhoneAccessLink(_ sender: NSMenuItem) {
+        guard let address = (sender.representedObject as? ServiceAddressBox)?.address else { return }
+        let configuration = serviceManager.configuration
+        let hasPassword = RemoteAccessPassword.load(from: keychain) != nil
+        switch ServiceAddressDecision.decide(
+            currentHostname: configuration.hostname,
+            selected: address,
+            hasPassword: hasPassword
+        ) {
+        case .copyOnly:
+            copyPhoneAccessLink(for: address, port: configuration.port)
+        case .needsPassword:
+            presentPhoneAccessPasswordRequired()
+        case .needsConfirmation:
+            confirmPhoneAccessSwitch(to: address)
+        }
+    }
+
+    /// 复制链接：用选中地址与当前端口新构造 URL，不改 `startURL` 语义。
+    private func copyPhoneAccessLink(for address: ServiceAddress, port: Int) {
+        guard let url = ServiceAddressLink.url(forIPv4: address.ipv4, port: port) else {
+            presentPhoneAccessFailure("无法生成访问链接：地址 \(address.ipv4) 或端口 \(port) 无效。")
+            return
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url.absoluteString, forType: .string)
+    }
+
+    /// 没有密码时的引导：只提示下一步，不写配置、不切监听地址。
+    private func presentPhoneAccessPasswordRequired() {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "需要先设置访问密码"
+        alert.informativeText = "\(RemoteAccessPolicy.missingPasswordMessage)\n\n监听地址保持不变。"
+        alert.addButton(withTitle: "打开设置…")
+        alert.addButton(withTitle: "取消")
+        presentPhoneAccessAlert(alert) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.showPreferences(nil)
+        }
+    }
+
+    /// 切换监听地址前的确认：说明会重启服务、当前会话中断。
+    private func confirmPhoneAccessSwitch(to address: ServiceAddress) {
+        let configuration = serviceManager.configuration
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "切换到 \(address.title)？"
+        alert.informativeText = "复制链接会把服务监听地址从 \(configuration.hostname) 切换到 \(address.ipv4)，并重启服务；当前会话会中断。"
+        alert.addButton(withTitle: "切换并复制链接")
+        alert.addButton(withTitle: "取消")
+        presentPhoneAccessAlert(alert) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.switchPhoneAccessListening(to: address)
+        }
+    }
+
+    /// 确认后的切换：与设置窗口同一条保存路径（`RemoteAccessSetup.apply` 校验
+    /// hostname 并沿用 Keychain 里已有的密码）；配置未保存时不复制链接，也不启动
+    /// 远程监听。配置生效且重启路径结束（`applyPreferencesConfiguration` 的
+    /// completion）后才复制链接。
+    private func switchPhoneAccessListening(to address: ServiceAddress) {
+        var requested = serviceManager.configuration
+        requested.hostname = address.ipv4
+        let outcome = RemoteAccessSetup.apply(requested: requested, newPassword: nil, keychain: keychain)
+        guard let newConfiguration = outcome.configuration else {
+            presentPhoneAccessFailure(outcome.error ?? "设置未保存。")
+            return
+        }
+        applyPreferencesConfiguration(newConfiguration, credentialsChanged: false) { [weak self] in
+            self?.copyPhoneAccessLink(for: address, port: newConfiguration.port)
+        }
+    }
+
+    private func presentPhoneAccessFailure(_ message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "无法复制手机访问链接"
+        alert.informativeText = message
+        alert.addButton(withTitle: "好")
+        presentPhoneAccessAlert(alert) { _ in }
+    }
+
+    private func presentPhoneAccessAlert(_ alert: NSAlert, completion: @escaping (NSApplication.ModalResponse) -> Void) {
+        if let window, window.isVisible {
+            alert.beginSheetModal(for: window, completionHandler: completion)
+        } else {
+            completion(alert.runModal())
+        }
+    }
     @objc func openLog(_ sender: Any?) {
         // 日志父目录可能还不存在（从未启动过服务，或关闭了自动启动）：先补齐目录，
         // 失败时给出可读提示，不静默失败也不崩溃（GitHub #9 复审）。

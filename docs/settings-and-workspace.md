@@ -94,6 +94,15 @@
 - 子菜单另有「在 Finder 中打开当前工作目录」（`NSWorkspace.shared.open`）；当前目录不可用时改用与切换失败相同的可读提示。
 - 代价：应用因此声明 `CFBundleDocumentTypes`（`public.folder`，role `Editor`），Finder 的「打开方式」会为任意文件夹列出本应用。
 
+## 复制手机访问链接
+
+菜单「Pi Web Desktop → 复制手机访问链接」与「服务 → 复制手机访问链接」把服务换成手机可访问的地址并复制链接（GitHub #150）。候选地址只在菜单项里出现，不写日志或诊断导出。
+
+- 候选枚举：两个子菜单共用同一实现，打开时（`menuWillOpen(_:)`）按当前网络接口枚举 IPv4 地址并按用途分类——Tailscale 使用的 CGNAT 网段（`100.x.y.z`）记为「Tailscale」，私有网段 `10/8`、`172.16/12`、`192.168/16` 记为「局域网」；loopback（`127/8`）、link-local（`169.254/16`）与其他地址不进菜单，重复地址按文本去重，Tailscale 排在局域网之前。每项标题形如 `Tailscale · 100.x.y.z` 或 `局域网 · 192.168.x.y`；一个候选都没有时只显示一条禁用的「未检测到可用的 Tailscale 或局域网地址」。探测只读本机接口信息，不触发任何网络请求。
+- 前置条件：非 loopback 地址仍受「监听地址校验」的同一门控——必须已经有访问密码。没有密码时只提示并引导到「设置… → 远程访问」，不改配置、不切换监听地址、不启动远程监听。
+- 行为：选中地址已是当前监听地址（`service.hostname`）时直接复制 `http://<地址>:<端口>/`，不重启服务；否则先确认（文案写明会切换监听地址并重启服务、当前会话会中断），确认后经与设置窗口同一条保存路径（`RemoteAccessSetup.apply`，沿用 Keychain 里已有的密码）写入配置并重启服务，成功后才复制链接。链接按当前端口与新地址构造，不改窗口打开的地址。
+- 说明：应用不会自动切回 loopback，也不做 `0.0.0.0`/`::` 通配监听；切走的地址只由「设置… → 监听地址」或再次使用本菜单改回。当前 WebView 策略只把 loopback 当作站内地址（见 [architecture.md](architecture.md)），因此在非 loopback 监听下应用内窗口可能无法加载服务页，手机仍可正常访问。
+
 ## 退出行为
 
 偏好窗口“行为 → 退出行为”提供三种取值（默认“每次退出时询问”）：
@@ -124,12 +133,13 @@
 
 ## 测试覆盖
 
-unhosted 测试（注入临时目录、假探针与假 Keychain，不触碰真实用户目录、进程或网络）：
+unhosted 测试（注入临时目录、假探针、假 Keychain 与假网络地址提供者，不触碰真实用户目录、进程或网络）：
 
 - `PiWebDesktopTests/DiagnosticsCollectorTests.swift`（含 W4 M2/M3）：导出布局、脱敏上下文保留、可信度映射与组件安装区块之外，新增设置窗口控制器单例存储的复用与显式释放、探测收集器不阻塞调用方（阻塞替身 + 主线程计时）、超时终止子进程并降级、“没有监听者 ≠ 探测失败”、导出文本对外部 argv 复用更新路径遮罩（注入凭据不得出现）、失败项标注，以及 M2/M3/L5 的源码级接线断言。
 - `PiWebDesktopTests/AppConfigurationTests.swift`：三处存储位置、默认设置序列化后不含个人代理与远程 hostname、设置在重新读取后保留、smoke 使用临时目录、日志目录不存在时打开日志会先创建目录与文件（幂等、失败返回可读错误）。
 - `PiWebDesktopTests/ServiceConfigurationTests.swift`：默认退出行为与默认工作目录、既有键名、无法识别的退出行为回落为“询问”、工作目录进入运行时签名；直接写入 UserDefaults 的通配地址、空值、带空白/非法字符的值加载后被标记为不可用且不被静默替换，合法地址与 `[::1]` 规范化后仍可用。
 - `PiWebDesktopTests/KeychainStoreTests.swift`：地址判定与保存流程共用同一规则（通配地址即使有密码也被拒绝，且先于密码写入），加载与启动诊断包含非法值与允许范围，非 loopback 缺密码仍走 #8 的缺密码提示。
+- `PiWebDesktopTests/ServiceAddressesTests.swift`（GitHub #150）：地址分类边界（Tailscale 网段两端与网段外、私有网段的边界与网段外、loopback、link-local、非法输入）、探测结果的过滤/去重/排序（与输入顺序无关）与菜单标题生成（含无候选时的单条禁用说明项）、`ServiceAddressDecision.decide` 的三个分支、链接构造只按地址与端口拼装而不改窗口打开的地址；全部使用注入的假 provider。
 - `PiWebDesktopTests/WorkspaceDirectoryTests.swift`：默认目录首次使用时创建、自选目录不被静默重建、不存在/不是目录/不可写三种原因的校验与可读修复提示、状态页文本、设置窗口选择（相对路径、缺失、不可写被拒绝且配置不变，留空回到默认目录）。
 - `PiWebDesktopTests/RecentWorkspaceTests.swift`：去重与置顶、10 条上限与路径标准化、跨 store 实例的持久化与清除、注入 defaults 的配置读取、`WorkspaceSwitchDecision.decide` 的各分支（当前目录 `.unchanged`、相对路径与不存在的目录 `.reject(.missing)`、文件 `.reject(.notDirectory)`、可用目录 `.confirm`），以及任何分支都不创建目录。
 - `PiWebDesktopTests/QuitPolicyTests.swift`：三种退出行为与三种确认选择的决策表、取消不停止服务、只有显式“退出并停止服务”才请求停止托管服务、任何行为都不停止外部服务。

@@ -206,7 +206,7 @@ after 2nd scrubExisting : {"token": <redacted> trailing-context
 | IPv6 处理 | 通过 | 保存与子进程参数用不带方括号的 `::1`，拼 URL 时由 `urlHost` 加方括号（`KeychainStore.swift:244-267`；`ServiceConfiguration.swift:118-127`）；冒号只在合法 IPv6 字面量时允许（`isIPv6Literal`，`:264-267`） |
 | loopback 判定是否可能把非 loopback 误判为 loopback | 通过（方向安全） | `isLoopbackHostname`（`KeychainStore.swift:271-279`）只覆盖空值、`localhost`、`*.localhost`、`::1` 与 `127.0.0.0/8`（4 段且每段可解析为 `UInt8`）。`localhost.`、`LOCALHOST.`、`127.1`、`0177.0.0.1`、`0:0:0:0:0:0:0:1` 等形态**不会**被判为 loopback → 退化为“要求密码”的保守方向，不会静默放开；显式空值与上述歧义数值写法在保存/加载/启动都被 `addressVerdict` 拒绝（Issue #39） |
 | 密码认证 vs 传输加密的表述是否如实 | 通过 | `README.md:100`、`docs/privacy.md:53`、`docs/architecture.md:137` 与 `:141` 均明写“密码认证不等于传输加密”，并要求用户自备加密隧道或 HTTPS 反向代理 |
-| WebView 导航边界 | 通过 | `WebViewNavigationPolicy.isLocalURL`（`Sources/WebViewNavigationPolicy.swift:16-19`）只允许 http(s) + loopback host + 当前端口；其余一律外开（:31-36） |
+| WebView 导航边界 | 通过 | `WebViewNavigationPolicy`（`Sources/App/WebViewNavigationPolicy.swift`）只允许 http(s) 且命中「应用自己配置并启动的服务来源」——scheme + host + port 与 `ServiceConfiguration.serviceURL` 完全一致（#149 更新）——或 loopback host + 当前端口（`isLocalURL`）；`about`/`blob`/`data` 视为内联（`decision(for:serviceURL:)`）；其余一律外开。这不是放宽到私有网络：判定里没有任何网段/后缀白名单，与配置地址同段但不相同的 host 同样外开（`PiWebDesktopTests/WebViewNavigationPolicyTests.swift` 覆盖） |
 
 **R-3（低，已于 Issue #39 修复）**：`0.0.0.0` 等“所有接口”地址的拒绝原先只存在于**设置界面保存路径**。`ServiceConfiguration.load`（当时的 `ServiceConfiguration.swift:67-83`）直接读取 UserDefaults，不做地址校验；启动/门控路径只强制“非 loopback 需要密码”，不重新校验地址本身。因此 `defaults write <bundle-id> service.hostname -string "0.0.0.0"` 这类同用户直接写入，再配合 Keychain 中已有密码，应用会以该地址启动 pi-web。威胁模型上这不增加能力（同一非特权用户本来就能自己运行 `pi-web --hostname 0.0.0.0`），但它绕过了“应用永不启动所有接口监听”的设计声明。
 

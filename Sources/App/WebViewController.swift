@@ -17,14 +17,14 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKD
     var onDownloadStarted: (() -> Void)?
 
     private var serviceURL: URL
-    private var servicePort: Int
     private let windowProvider: () -> NSWindow?
     private var findBar: NSView?
     private var findField: NSSearchField?
 
+    /// `servicePort` 保留既有调用点签名（`AppDelegate` 传的是同一份配置里的端口）；
+    /// 导航判定统一以 `serviceURL` 为依据，避免同一配置在 WebView 里出现两个来源。
     init(serviceURL: URL, servicePort: Int, windowProvider: @escaping () -> NSWindow?) {
         self.serviceURL = serviceURL
-        self.servicePort = servicePort
         self.windowProvider = windowProvider
 
         let configuration = WKWebViewConfiguration()
@@ -41,9 +41,9 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKD
 
     // MARK: - Service endpoint
 
+    /// 同上：`port` 只为兼容既有调用点，导航判定只读 `url`。
     func updateService(url: URL, port: Int) {
         serviceURL = url
-        servicePort = port
     }
 
     func loadServicePage() {
@@ -166,7 +166,7 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKD
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
-        switch WebViewNavigationPolicy.decision(for: url, port: servicePort) {
+        switch WebViewNavigationPolicy.decision(for: url, serviceURL: serviceURL) {
         case .allow:
             decisionHandler(.allow)
         case .openExternally:
@@ -209,11 +209,11 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKD
     // MARK: - WKUIDelegate
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        // Same rule as the pre-split implementation: a popup that targets the
-        // local service replaces the current page, everything else is handed to
-        // the system.
+        // Same rule as the pre-split implementation, extended to the configured
+        // service origin (#149): a popup that targets the current allow surface
+        // replaces the current page, everything else is handed to the system.
         if let url = navigationAction.request.url {
-            if WebViewNavigationPolicy.isLocalURL(url, port: servicePort) {
+            if WebViewNavigationPolicy.isAllowedURL(url, serviceURL: serviceURL) {
                 webView.load(URLRequest(url: url))
             } else {
                 NSWorkspace.shared.open(url)

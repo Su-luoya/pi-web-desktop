@@ -1,16 +1,7 @@
 import Cocoa
 import WebKit
 
-/// Navigation failure reported to AppDelegate. AppDelegate owns the user
-/// visible copy and decides whether to react (it ignores failures while the app
-/// is quitting).
-
 /// WKWebView hosting, navigation, downloads and status pages.
-
-enum WebViewNavigationFailure: Equatable {
-    case loadFailed(String)
-    case connectionFailed(String)
-}
 
 /// Owns the WebKit surface: web view creation and configuration, navigation
 /// policy, downloads, external links, the find bar and zoom.
@@ -159,11 +150,18 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKD
     // MARK: - WKNavigationDelegate
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        onNavigationFailure?(.loadFailed(error.localizedDescription))
+        reportNavigationFailure(error)
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        onNavigationFailure?(.connectionFailed(error.localizedDescription))
+        reportNavigationFailure(error)
+    }
+
+    /// 只有非取消类错误才作为导航失败上报：取消判定与错误码映射位于
+    /// `WebViewNavigationPolicy.navigationFailure(for:)`，可被单元测试覆盖。
+    private func reportNavigationFailure(_ error: Error) {
+        guard let failure = WebViewNavigationPolicy.navigationFailure(for: error) else { return }
+        onNavigationFailure?(failure)
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {

@@ -59,18 +59,31 @@ struct RecentWorkspaceStore {
     ///   选中它等于让 pi-web 往 `/` 写运行文件；
     /// - 解析符号链接并标准化（`..`、多余斜杠、结尾斜杠），使同一目录只有一种
     ///   存储形式，菜单去重与“当前目录”比较才能命中；
-    /// - 超过 `maximumPathLength` 的最终路径 → 拒绝。
+    /// - 长度分两道：输入长度（trim 后、`~` 展开后各检查一次）和解析标准化后的
+    ///   最终长度，任一超过 `maximumPathLength` 都拒绝。
     static func normalizedPath(_ path: String) -> String? {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
               !trimmed.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
         else { return nil }
         let expanded = (trimmed as NSString).expandingTildeInPath
+        // 第一道：按输入长度拒绝，必须在任何 Foundation 改写之前做。
+        // `NSString.expandingTildeInPath` 与 `URL…resolvingSymlinksInPath()` 都会把
+        // 超过 PATH_MAX 的输入截断回合法长度（本机 Swift 6.4 / macOS 27 实测：
+        // 1025 字节经 expandingTildeInPath 就变成 1024；CI run 35608664645 里
+        // 1025 字节的输入也没被拒绝），所以只在解析之后比较长度永远看不到超长输入。
+        // trimmed 与 expanded 各查一次：前者挡住展开阶段发生的截断，后者挡住
+        // `~` 展开把路径变长。
+        guard trimmed.utf8.count <= maximumPathLength,
+              expanded.utf8.count <= maximumPathLength
+        else { return nil }
         guard (expanded as NSString).isAbsolutePath else { return nil }
         let resolved = URL(fileURLWithPath: expanded, isDirectory: true)
             .standardizedFileURL
             .resolvingSymlinksInPath()
             .path
+        // 第二道：按规范化后的最终长度拒绝。`~` 展开、`/..` 折叠、符号链接解析
+        // 都可能让结果比输入更长，单靠第一道检查挡不住。
         guard resolved != "/", resolved.utf8.count <= maximumPathLength else { return nil }
         return resolved
     }

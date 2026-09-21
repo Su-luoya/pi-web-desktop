@@ -98,4 +98,56 @@ final class RecentWorkspaceTests: XCTestCase {
         )
         XCTAssertTrue(createCalls.isEmpty)
     }
+
+    // MARK: 路径归一化（GitHub #135 F4）
+
+    func testNormalizedPathExpandsTildeAndRejectsRootRelativeAndControlCharacters() {
+        let expanded = ("~/work" as NSString).expandingTildeInPath
+        let expandedResult = RecentWorkspaceStore.normalizedPath(expanded)
+        XCTAssertEqual(RecentWorkspaceStore.normalizedPath("~/work"), expandedResult)
+        XCTAssertFalse(expandedResult?.hasPrefix("~") ?? true)
+        XCTAssertTrue(expandedResult?.hasSuffix("/work") ?? false)
+
+        XCTAssertNil(RecentWorkspaceStore.normalizedPath("/"))
+        XCTAssertNil(RecentWorkspaceStore.normalizedPath("/.."))
+        XCTAssertNil(RecentWorkspaceStore.normalizedPath("relative/workspace"))
+        XCTAssertNil(RecentWorkspaceStore.normalizedPath("   "))
+        XCTAssertNil(RecentWorkspaceStore.normalizedPath("/tmp/bad\npath"))
+        XCTAssertNil(RecentWorkspaceStore.normalizedPath("/tmp/bad\u{0}path"))
+    }
+
+    func testNormalizedPathRejectsPathsBeyondTheLengthLimit() {
+        let maximum = RecentWorkspaceStore.maximumPathLength
+        XCTAssertEqual(maximum, 1024)
+        // "/tmp/" is five bytes, so the first path is exactly 1024 bytes and the
+        // second one is one byte over the PATH_MAX-based limit.
+        let atLimit = "/tmp/" + String(repeating: "a", count: maximum - 5)
+        XCTAssertEqual(RecentWorkspaceStore.normalizedPath(atLimit)?.utf8.count, maximum)
+        let overLimit = "/tmp/" + String(repeating: "a", count: maximum - 4)
+        XCTAssertNil(RecentWorkspaceStore.normalizedPath(overLimit))
+    }
+
+    func testNormalizedPathResolvesSymlinksAndStoreDropsRejectedPaths() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RecentWorkspaceSymlink-\(UUID().uuidString)", isDirectory: true)
+        let target = root.appendingPathComponent("target", isDirectory: true)
+        let link = root.appendingPathComponent("link", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let expected = try XCTUnwrap(RecentWorkspaceStore.normalizedPath(target.path))
+        XCTAssertEqual(RecentWorkspaceStore.normalizedPath(link.path), expected)
+        XCTAssertNotEqual(RecentWorkspaceStore.normalizedPath(link.path), link.path)
+        XCTAssertEqual(RecentWorkspaceStore.normalizedPath(target.path + "/../target"), expected)
+
+        // 存储层同样收紧：根目录不进历史，符号链接存成解析后的同一形式。
+        let (defaults, name) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let store = RecentWorkspaceStore(defaults: defaults)
+        store.record(path: "/")
+        XCTAssertTrue(store.load().isEmpty)
+        store.record(path: link.path)
+        XCTAssertEqual(store.load(), [expected])
+    }
 }

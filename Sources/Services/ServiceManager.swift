@@ -221,8 +221,41 @@ final class ServiceManager {
 
     // MARK: - Configuration
 
+    /// 配置请求代次（GitHub #135 F1）。
+    ///
+    /// 每一次“要写入一份新配置”的意图都会让代次前进：`beginConfigurationChange()`
+    /// 在请求开始时领取一个代次，任何直接写入（`updateConfiguration(_:)`）也会让
+    /// 更早的代次失效。异步回调（例如 `stopService` 的完成回调）回到主线程后用
+    /// `updateConfiguration(_:ifGenerationMatches:)` 校验自己是否仍是最新请求；
+    /// 过期回调只做清理，绝不覆盖更新的配置。没有这道校验时，重叠切换工作目录
+    /// 的两次 stop 回调会按完成顺序各自写回捕获的配置，最终配置可能是被取代的
+    /// 那一次，界面勾选、配置与实际服务目录三者就会不一致。
+    ///
+    /// 所有读写都发生在主线程（应用的生命周期入口与调度器的 `onMain`），因此
+    /// “领取代次”与随后的异步写回之间不会出现两次请求读到同一个代次。
+    private var configurationGeneration = 0
+
+    /// 开始一次配置变更请求并返回它的代次。每次调用都让更早的、尚未写回的请求
+    /// 失效。
+    func beginConfigurationChange() -> Int {
+        configurationGeneration &+= 1
+        return configurationGeneration
+    }
+
+    /// 直接写入配置（启动、停止、退出、远程访问收敛等同步路径）。写入本身也让
+    /// 更早的异步请求过期，避免迟到的回调把刚写入的配置改回去。
     func updateConfiguration(_ configuration: ServiceConfiguration) {
+        configurationGeneration &+= 1
         self.configuration = configuration
+    }
+
+    /// 只有仍是最新一次配置请求时才写入，返回是否写入。过期请求返回 false，
+    /// 调用方只能做清理：停止与状态收敛已经由 `stopService` 完成。
+    @discardableResult
+    func updateConfiguration(_ configuration: ServiceConfiguration, ifGenerationMatches generation: Int) -> Bool {
+        guard generation == configurationGeneration else { return false }
+        self.configuration = configuration
+        return true
     }
 
     /// 更新工作目录门控（GitHub #9）。`problem` 为 nil 表示目录可用；路径与

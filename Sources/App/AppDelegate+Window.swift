@@ -101,6 +101,28 @@ extension AppDelegate {
         }
     }
 
+    // MARK: - 打开工作目录
+
+    /// Finder 拖放 / `open -a` 的入口（GitHub #135 F3）。
+    ///
+    /// 只接受 file URL：非 file URL（http/https、自定义 scheme）的 `path` 不是
+    /// 目录路径，拿去校验只会得到误导性的“目录不存在”，因此显式忽略。一次打开
+    /// 多个 file URL 时只处理第一个，其余记一条脱敏日志（只记数量，不记路径）：
+    /// 既不静默丢弃，也不为多个 URL 弹多个窗口或连续切换。
+    func application(_ application: NSApplication, open urls: [URL]) {
+        let fileURLs = urls.filter(\.isFileURL)
+        guard let directory = fileURLs.first else {
+            if !urls.isEmpty {
+                _ = logWriter.append(logRedactor.redact("打开请求含 \(urls.count) 个非文件 URL，已忽略"))
+            }
+            return
+        }
+        if fileURLs.count > 1 {
+            _ = logWriter.append(logRedactor.redact("打开请求含 \(fileURLs.count) 个文件 URL，只处理第一个"))
+        }
+        requestWorkspaceSwitch(to: directory)
+    }
+
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         sender.orderOut(nil)
         return false

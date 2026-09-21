@@ -39,11 +39,6 @@ extension AppDelegate {
         runDependencyCheck()
     }
 
-    func application(_ application: NSApplication, open urls: [URL]) {
-        guard let directory = urls.first else { return }
-        requestWorkspaceSwitch(to: directory)
-    }
-
     // MARK: - Pi 扩展包更新（GitHub #22）
 
     /// 当前扩展包策略。策略只允许 关闭 / 检查并通知 / 询问后更新。

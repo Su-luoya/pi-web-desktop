@@ -2702,4 +2702,56 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(harness.manager.currentState, .running)
         XCTAssertEqual(harness.manager.managedServicePID(), 5300)
     }
+
+    // MARK: 配置代次（GitHub #135 F1）
+
+    /// 重叠切换工作目录时，只有最新一次请求能写回配置：迟到的 stop 回调不得
+    /// 覆盖更新的配置（否则菜单勾选与实际服务目录会随配置一起倒退）。
+    func testOverlappingConfigurationRequestsKeepOnlyTheLatestWrite() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+        let initialPath = harness.manager.configuration.workspacePath
+
+        var first = harness.manager.configuration
+        first.workspacePath = "/tmp/first-workspace"
+        var second = harness.manager.configuration
+        second.workspacePath = "/tmp/second-workspace"
+
+        // 两次切换重叠：两个请求都在各自的停止回调写回之前领到了代次。
+        let firstGeneration = harness.manager.beginConfigurationChange()
+        let secondGeneration = harness.manager.beginConfigurationChange()
+
+        // 迟到的第一次回调：只能清理，不能写配置。
+        XCTAssertFalse(harness.manager.updateConfiguration(first, ifGenerationMatches: firstGeneration))
+        XCTAssertEqual(harness.manager.configuration.workspacePath, initialPath)
+        // 最新请求的写回被接受。
+        XCTAssertTrue(harness.manager.updateConfiguration(second, ifGenerationMatches: secondGeneration))
+        XCTAssertEqual(harness.manager.configuration.workspacePath, "/tmp/second-workspace")
+
+        // 反过来（新请求已经写完、旧回调才到）结论相同：旧代次永远不能再写配置。
+        var third = harness.manager.configuration
+        third.workspacePath = "/tmp/third-workspace"
+        let thirdGeneration = harness.manager.beginConfigurationChange()
+        XCTAssertTrue(harness.manager.updateConfiguration(third, ifGenerationMatches: thirdGeneration))
+        XCTAssertFalse(harness.manager.updateConfiguration(second, ifGenerationMatches: secondGeneration))
+        XCTAssertEqual(harness.manager.configuration.workspacePath, "/tmp/third-workspace")
+    }
+
+    /// 同步路径的直接写入（例如远程访问被收敛）同样让未写回的请求过期：
+    /// 否则迟到的回调会把刚写入的配置改回去。
+    func testDirectConfigurationWriteInvalidatesAPendingRequest() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+
+        var pending = harness.manager.configuration
+        pending.workspacePath = "/tmp/pending-workspace"
+        let generation = harness.manager.beginConfigurationChange()
+
+        var direct = harness.manager.configuration
+        direct.workspacePath = "/tmp/direct-workspace"
+        harness.manager.updateConfiguration(direct)
+
+        XCTAssertFalse(harness.manager.updateConfiguration(pending, ifGenerationMatches: generation))
+        XCTAssertEqual(harness.manager.configuration.workspacePath, "/tmp/direct-workspace")
+    }
 }

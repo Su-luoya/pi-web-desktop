@@ -128,11 +128,18 @@ extension AppDelegate {
     /// `completion` 在配置生效（需要重启时，重启路径已经走完）后回到主线程调用；
     /// 默认 nil 让既有调用方不受影响。GitHub #150 的“切换监听地址后复制链接”
     /// 靠它保证复制发生在配置落盘与重启路径之后。
+    ///
+    /// 重叠切换（GitHub #135 F1）：被更新的配置请求取代时，这次调用的
+    /// `completion` 不会被调用——写入与重启由取代它的请求完成。过期回调只负责
+    /// 停止/清理（`stopService` 已经做完），不得把捕获的旧配置写回去。
     func applyPreferencesConfiguration(
         _ newConfiguration: ServiceConfiguration,
         credentialsChanged: Bool,
         completion: (() -> Void)? = nil
     ) {
+        // GitHub #135 F1：在改动任何状态之前领取本次请求的配置代次。之后任何更新的
+        // 配置请求或直接写入都会让它失效，用于让迟到的停止回调不再写配置。
+        let configurationGeneration = serviceManager.beginConfigurationChange()
         let previous = serviceManager.configuration
         appConfiguration.save(newConfiguration)
         let changed = previous.runtimeSignature != newConfiguration.runtimeSignature
@@ -151,7 +158,14 @@ extension AppDelegate {
             // 先停止旧参数启动的服务，再切换配置，避免旧端口和新端口同时留下实例。
             serviceManager.stopService { [weak self] in
                 guard let self else { return }
-                self.serviceManager.updateConfiguration(newConfiguration)
+                // GitHub #135 F1：这个回调可能在用户又切换了一次工作目录之后才回来。
+                // 只有仍是最新请求的那一次才写配置并重启；过期请求到此为止（停止与
+                // 状态收敛已由 stopService 完成），否则会把配置写回旧目录，菜单勾选
+                // 与实际服务目录随之后退。
+                guard self.serviceManager.updateConfiguration(
+                    newConfiguration,
+                    ifGenerationMatches: configurationGeneration
+                ) else { return }
                 self.serviceManager.reloadAfterConfigurationChange()
                 completion?()
             }

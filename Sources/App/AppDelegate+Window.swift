@@ -163,4 +163,45 @@ extension AppDelegate {
         // the full-screen Space and restored the normal window frame.
         scheduleWindowFit()
     }
+
+    // MARK: - Dock 恢复（GitHub #158）
+
+    /// 点 Dock 图标（或应用被重新打开）时把主窗口带回来。返回 true 表示事件已处理，
+    /// AppKit 不再走自带的“新建窗口”路径。
+    ///
+    /// AppKit 只在 `hasVisibleWindows == false` 时调这个方法，恰好覆盖三种情形：
+    /// 1. 红色关闭按钮之后（`windowShouldClose` 只做 `orderOut(nil)`）；
+    /// 2. 窗口被最小化到 Dock（`isVisible` 仍为 true，但屏幕上没有窗口）；
+    /// 3. 窗口还没创建（启动早期点击 Dock 图标）。
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        showMainWindow()
+        return true
+    }
+
+    /// 把已存在的主窗口显示到当前屏幕并置前；窗口对象还没创建时补建它。
+    ///
+    /// 关闭按钮只隐藏窗口（见 `windowShouldClose`），窗口对象、WebView 和页面会话都
+    /// 还在，所以这里**必须复用**同一个窗口：重建会丢掉页面状态并留下第二个窗口。
+    func showMainWindow() {
+        guard let window else {
+            // 还没有窗口：只有主菜单已安装（即启动流程已经走到
+            // `applicationDidFinishLaunching`/smoke 路径）时才补建，避免和
+            // `AppDelegate+PackageUpdates.swift` 里的正常启动路径各建一个窗口。
+            if NSApp.mainMenu != nil {
+                createWindow()
+            }
+            return
+        }
+        // 最小化的窗口必须先还原：`makeKeyAndOrderFront` 不会把它拉出最小化状态。
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        // 隐藏期间显示器可能已经变过（分辨率/旋转/插拔外接屏），重新显示前按当前
+        // 屏幕适配一次；重建大小不会动自动保存的 frame 名。
+        fitWindowToCurrentScreen()
+        window.makeKeyAndOrderFront(nil)
+        if !NSApp.isActive {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
 }

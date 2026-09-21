@@ -16,7 +16,7 @@ Closes #
 
 <!-- 列出实际执行的命令与结果。不要复述文档或凭记忆填写版本号与路径。 -->
 
-- [ ] `sh -n Scripts/*.sh`
+- [ ] `for f in Scripts/*.sh; do sh -n "$f" || exit 1; done`
 - [ ] `git diff --check`
 - [ ] `./Scripts/build.sh`
 - [ ] `./Scripts/check-identity.sh` 退出 0

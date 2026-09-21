@@ -13,6 +13,7 @@ extension AppDelegate {
     /// “漏掉 `reply(toApplicationShouldTerminate:)`”而让终止序列永久悬空的路径；
     /// 等待期间主队列也不再停在 AppKit 的终止等待循环里。
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        logQuitRequestIfIdle()
         let transition = quitCoordinator.handle(.appKitTerminationRequested(
             behavior: serviceManager.configuration.quitBehavior,
             service: currentQuitServiceState(),
@@ -41,9 +42,18 @@ extension AppDelegate {
 
     /// 处理一个退出事件：状态机给出副作用，这里只负责执行与记录。
     func handleQuitEvent(_ event: QuitEvent) {
+        logQuitRequestIfIdle()
         let transition = quitCoordinator.handle(event)
         logQuitOutcome(transition.outcome)
         applyQuitEffects(transition.effects)
+    }
+
+    /// 退出时间线：一个退出序列只记一次“退出请求”。状态机不在 `.idle` 时说明本次
+    /// 退出已经在进行（例如 `NSApp.terminate(nil)` 会重入
+    /// `applicationShouldTerminate`），再写一行会让时间线看起来有两个起点。
+    private func logQuitRequestIfIdle() {
+        guard quitCoordinator.isIdle else { return }
+        serviceManager.logQuitTimeline(.requested)
     }
 
     private func applyQuitEffects(_ effects: [QuitEffect]) {
@@ -52,6 +62,7 @@ extension AppDelegate {
             case .presentDecisionAlert:
                 presentQuitDecisionAlert()
             case .stopManagedService:
+                serviceManager.logQuitTimeline(.stopServiceRequested)
                 // 异步等待停止完成（不嵌套 RunLoop、不在等待期间停住主队列）；
                 // 完成回调只回报事件，由状态机决定下一步。
                 serviceManager.stopManagedServiceOnQuit { [weak self] in
@@ -69,6 +80,9 @@ extension AppDelegate {
     /// `stopManagedServiceOnQuit` 的同步完成回调，同步调用 `NSApp.terminate(nil)`
     /// 会在 AppKit 回调栈里重入终止序列（W4 M4）。
     private func finishQuit() {
+        // 时间线的最后一行为应用侧记录：这里之后只剩 `applicationWillTerminate`
+        // 的收尾，没有更多退出阶段可记。
+        serviceManager.logQuitTimeline(.applicationTerminating)
         // 停止服务的路径已经由 `stopManagedServiceOnQuit` → `beginQuitting()` 进入
         // 退出状态；保持运行的路径在这里进入退出状态并关闭日志句柄，子进程与
         // service-owner.json 都保留。

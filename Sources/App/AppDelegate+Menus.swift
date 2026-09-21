@@ -144,12 +144,21 @@ extension AppDelegate {
             presentWorkspaceSwitchFailure(validation)
         case .confirm(let path):
             let managed = serviceManager.managedServicePID() != nil
+            // GitHub #135 F2：三种情形的生效时机不同，文案必须分开讲。正在响应但
+            // 所有权不属于本应用的进程不会被本应用发信号或重启，用户要自己重启它；
+            // 未运行时只是等下次启动。只有受托管服务才提示“确认后将重启服务”。
+            let detail: String
+            if managed {
+                detail = "将工作目录切换到：\n\(path)\n\n当前服务由应用管理并正在运行，确认后将重启服务。"
+            } else if case .running = serviceManager.currentState {
+                detail = "将工作目录切换到：\n\(path)\n\n当前服务不是由本应用启动的，本应用不会重启它；新目录要等你自行重启该服务后才会生效。"
+            } else {
+                detail = "将工作目录切换到：\n\(path)\n\n当前服务未运行，新目录会在下次启动服务时生效。"
+            }
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = "切换工作目录？"
-            alert.informativeText = managed
-                ? "将工作目录切换到：\n\(path)\n\n当前服务由应用管理并正在运行，确认后将重启服务。"
-                : "将工作目录切换到：\n\(path)"
+            alert.informativeText = detail
             alert.addButton(withTitle: managed ? "切换并重启" : "切换")
             alert.addButton(withTitle: "取消")
             presentWorkspaceAlert(alert) { [weak self] response in

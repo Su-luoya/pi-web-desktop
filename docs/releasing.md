@@ -75,7 +75,7 @@ Release 标记 prerelease；说明中写明未公证与安装限制；上一版�
 ## 本地演练（不需要完整 Xcode，不 push tag）
 
 ```sh
-sh -n Scripts/*.sh
+for f in Scripts/*.sh; do sh -n "$f" || exit 1; done
 git diff --check
 ./Scripts/build.sh
 ./Scripts/check-identity.sh

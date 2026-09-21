@@ -1037,6 +1037,122 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(harness.manager.currentState, .stopped)
     }
 
+    // MARK: 退出/停止等待上界（GitHub #158）
+
+    func testStopPollScheduleIsTwoStageAndStaysWithinTheOneSecondBudget() {
+        // 前 `stopPollFastAttempts` 次是 10 毫秒粒度：服务已经退出时（最常见）在
+        // 这一阶段就会被发现，检测延迟 ≤ 10ms。
+        XCTAssertEqual(ServiceManager.stopPollDelayMilliseconds(forAttempt: 0), 10)
+        XCTAssertEqual(
+            ServiceManager.stopPollDelayMilliseconds(forAttempt: ServiceManager.stopPollFastAttempts - 1),
+            10
+        )
+        // 之后退回到 50 毫秒粒度，避免为慢退出的进程做上千次系统调用。
+        XCTAssertEqual(
+            ServiceManager.stopPollDelayMilliseconds(forAttempt: ServiceManager.stopPollFastAttempts),
+            50
+        )
+        XCTAssertEqual(
+            ServiceManager.stopPollDelayMilliseconds(forAttempt: ServiceManager.stopPollAttempts - 1),
+            50
+        )
+        // 上界由预算推导，不是手写常量：睡眠之和正好是 1000 毫秒。
+        XCTAssertEqual(ServiceManager.stopPollFastAttempts * ServiceManager.stopPollFastIntervalMilliseconds
+            + (ServiceManager.stopPollAttempts - ServiceManager.stopPollFastAttempts) * ServiceManager.stopPollIntervalMilliseconds,
+            ServiceManager.stopWaitUpperBoundMilliseconds)
+        XCTAssertEqual(ServiceManager.stopPollAttempts, 36)
+        XCTAssertEqual(ServiceManager.stopWaitUpperBound, 1.0, accuracy: 0.0001)
+        XCTAssertLessThanOrEqual(
+            ServiceManager.stopWaitUpperBound,
+            1.0,
+            "退出等待上界必须 ≤ 1 秒（GitHub #158：之前是固定的 4 秒）"
+        )
+    }
+
+    func testStopServiceEscalatesOnlyAfterTheOneSecondBudgetOfSleeping() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.manager.startManagedService()
+        harness.signaler.aliveProcessGroups = [5150]
+        harness.signaler.groupSurvivesSignals = true
+
+        harness.manager.stopService()
+        harness.scheduler.runAllBackgroundWork()
+
+        // 服务一直不退出时，实际睡眠总量就是声明的上界（1 秒）；SIGKILL 只在这个
+        // 上界之后才发出。旧实现是 40 × 0.1 秒 = 4 秒。
+        XCTAssertEqual(harness.scheduler.sleeps.reduce(0, +), ServiceManager.stopWaitUpperBound, accuracy: 0.001)
+        XCTAssertEqual(harness.signaler.groupSignals.map(\.signal), [SIGTERM, SIGKILL])
+    }
+
+    func testStopServiceWritesQuitTimelineLinesWithMillisecondClock() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.manager.startManagedService()
+        harness.signaler.aliveProcessGroups = [5150]
+
+        harness.manager.stopService()
+        harness.scheduler.runAllBackgroundWork()
+        harness.drainLogWrites()
+
+        let log = (try? String(contentsOf: harness.logURL, encoding: .utf8)) ?? ""
+        // 用户复现退出卡顿时要看的几行：SIGTERM 与“进程组已退出”各一行。
+        XCTAssertTrue(log.contains(QuitTimelineStage.sigtermSent.rawValue), log)
+        XCTAssertTrue(log.contains(QuitTimelineStage.serviceExited.rawValue), log)
+        XCTAssertTrue(log.contains("退出时间线"), log)
+        // 毫秒时钟 + 单调偏移：秒级时间戳无法量化退出延迟。
+        XCTAssertNotNil(
+            log.range(of: #"退出时间线 \d\d:\d\d:\d\d\.\d\d\d \(\+\d+ms\)"#, options: .regularExpression),
+            log
+        )
+    }
+
+    func testQuitTimelineClockKeepsMillisecondPrecision() throws {
+        let utc = TimeZone(secondsFromGMT: 0)!
+        let parser = DateFormatter()
+        parser.locale = Locale(identifier: "en_US_POSIX")
+        parser.timeZone = utc
+        parser.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS"
+        let date = try XCTUnwrap(parser.date(from: "2026-01-02T03:04:05.678"))
+
+        XCTAssertEqual(QuitTimeline.clock(date, timeZone: utc), "03:04:05.678")
+    }
+
+    func testQuitTimelineOffsetsRoundAndNeverGoNegative() {
+        let origin = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(QuitTimeline.elapsedMilliseconds(from: origin, to: origin.addingTimeInterval(0.0084)), 8)
+        XCTAssertEqual(QuitTimeline.elapsedMilliseconds(from: origin, to: origin.addingTimeInterval(0.0086)), 9)
+        XCTAssertEqual(QuitTimeline.elapsedMilliseconds(from: origin, to: origin.addingTimeInterval(1.5)), 1500)
+        // 系统时钟回拨（或注入的时钟倒退）不得产生负数偏移。
+        XCTAssertEqual(QuitTimeline.elapsedMilliseconds(from: origin, to: origin.addingTimeInterval(-5)), 0)
+        XCTAssertEqual(QuitTimeline.uptimeMilliseconds(12.3456), 12346)
+        XCTAssertEqual(QuitTimeline.uptimeMilliseconds(-1), 0)
+    }
+
+    func testQuitTimelineLineCarriesStageDetailAndOffset() {
+        let now = Date(timeIntervalSince1970: 0)
+        let line = QuitTimeline.line(
+            .sigkillSent,
+            detail: "等待超过 1000ms（睡眠上界）",
+            now: now,
+            uptime: 12.345
+        )
+
+        XCTAssertEqual(
+            line,
+            "退出时间线 \(QuitTimeline.clock(now)) (+12345ms) \(QuitTimelineStage.sigkillSent.rawValue) — 等待超过 1000ms（睡眠上界）"
+        )
+        // 没有 detail 时不留下多余分隔符。
+        XCTAssertEqual(
+            QuitTimeline.line(.requested, now: now, uptime: 0),
+            "退出时间线 \(QuitTimeline.clock(now)) (+0ms) \(QuitTimelineStage.requested.rawValue)"
+        )
+    }
+
     func testStopServiceWithoutAVerifiedRecordSendsNothingAndKeepsTheState() throws {
         let harness = try makeHarness()
         defer { harness.cleanUp() }
@@ -2585,5 +2701,57 @@ final class ServiceManagerTests: XCTestCase {
         harness.launcher.terminationHandlers[0](first)
         XCTAssertEqual(harness.manager.currentState, .running)
         XCTAssertEqual(harness.manager.managedServicePID(), 5300)
+    }
+
+    // MARK: 配置代次（GitHub #135 F1）
+
+    /// 重叠切换工作目录时，只有最新一次请求能写回配置：迟到的 stop 回调不得
+    /// 覆盖更新的配置（否则菜单勾选与实际服务目录会随配置一起倒退）。
+    func testOverlappingConfigurationRequestsKeepOnlyTheLatestWrite() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+        let initialPath = harness.manager.configuration.workspacePath
+
+        var first = harness.manager.configuration
+        first.workspacePath = "/tmp/first-workspace"
+        var second = harness.manager.configuration
+        second.workspacePath = "/tmp/second-workspace"
+
+        // 两次切换重叠：两个请求都在各自的停止回调写回之前领到了代次。
+        let firstGeneration = harness.manager.beginConfigurationChange()
+        let secondGeneration = harness.manager.beginConfigurationChange()
+
+        // 迟到的第一次回调：只能清理，不能写配置。
+        XCTAssertFalse(harness.manager.updateConfiguration(first, ifGenerationMatches: firstGeneration))
+        XCTAssertEqual(harness.manager.configuration.workspacePath, initialPath)
+        // 最新请求的写回被接受。
+        XCTAssertTrue(harness.manager.updateConfiguration(second, ifGenerationMatches: secondGeneration))
+        XCTAssertEqual(harness.manager.configuration.workspacePath, "/tmp/second-workspace")
+
+        // 反过来（新请求已经写完、旧回调才到）结论相同：旧代次永远不能再写配置。
+        var third = harness.manager.configuration
+        third.workspacePath = "/tmp/third-workspace"
+        let thirdGeneration = harness.manager.beginConfigurationChange()
+        XCTAssertTrue(harness.manager.updateConfiguration(third, ifGenerationMatches: thirdGeneration))
+        XCTAssertFalse(harness.manager.updateConfiguration(second, ifGenerationMatches: secondGeneration))
+        XCTAssertEqual(harness.manager.configuration.workspacePath, "/tmp/third-workspace")
+    }
+
+    /// 同步路径的直接写入（例如远程访问被收敛）同样让未写回的请求过期：
+    /// 否则迟到的回调会把刚写入的配置改回去。
+    func testDirectConfigurationWriteInvalidatesAPendingRequest() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+
+        var pending = harness.manager.configuration
+        pending.workspacePath = "/tmp/pending-workspace"
+        let generation = harness.manager.beginConfigurationChange()
+
+        var direct = harness.manager.configuration
+        direct.workspacePath = "/tmp/direct-workspace"
+        harness.manager.updateConfiguration(direct)
+
+        XCTAssertFalse(harness.manager.updateConfiguration(pending, ifGenerationMatches: generation))
+        XCTAssertEqual(harness.manager.configuration.workspacePath, "/tmp/direct-workspace")
     }
 }

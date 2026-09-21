@@ -1361,3 +1361,66 @@ main，加上本版发布提交的版本 bump 与三份文档（发布说明、�
 - `docs/security-review-alpha.11.md`（本版新增）：alpha.10 → alpha.11 的只读 delta 安全评审。
 - `docs/alpha-release-checklist.md`（本文件）：新增本节（alpha.11 执行记录、行为不变性机械证据、
   `#142` 覆盖方式、安全审查结论、C 项与文档一致性清单）。
+
+## Release v0.1.0-alpha.12 执行记录
+
+本版候选：`main` 上的 `f938773`（#147 / #148 / #149 / #150 四个 Issue 的修复，PR #151–#154 合并后的
+main；main CI run [35596701327](https://github.com/Su-luoya/pi-web-desktop/actions/runs/35596701327)
+success、5m5s），加上本版发布提交的版本 bump 与三份文档（发布说明、安全评审、本节执行记录）。
+
+本节脚本输出在**本工作区**（`release-alpha12`，基于 `main` `f938773`）上采集；四个改动文件在扫描前已
+`git add`——`check-identity.sh` / `scan-secrets.sh` 的文本扫描只覆盖已跟踪文件，未跟踪的新文件会被跳过
+（见安全审查 R-11）。
+
+### 按 #155 门槛清单的实测值
+
+| # | #155 门槛 | 实测值 / 证据 | 判定 |
+| --- | --- | --- | --- |
+| 1 | main CI 为绿 | run [35596701327](https://github.com/Su-luoya/pi-web-desktop/actions/runs/35596701327)（success、5m5s），发布提交 `f938773` | 通过（CI 结论来自 GitHub，不是本机脚本输出） |
+| 2 | 本地门槛：构建 | `./Scripts/build.sh` → `build: release build with -O -wmo`、`Built: …/build/Pi-Web-Desktop.app`（脚本输出工作区绝对路径，此处缩写字面路径）、`Contents/MacOS/PiWebDesktop: Mach-O 64-bit executable arm64` | 退出 0，通过 |
+| 3 | 本地门槛：身份与版本一致性 | `./Scripts/check-identity.sh` → `check-identity: PASSED (45 checks)`（含 `no hardcoded MARKETING_VERSION outside Configuration/AppIdentity.xcconfig`） | 退出 0，通过 |
+| 4 | 本地门槛：secret 扫描 | `./Scripts/scan-secrets.sh` → `scan-secrets: suppressed 15 lines`、`scan-secrets: PASS (no matches in tracked files; no untracked files)`；输出里没有 `scan-secrets: rejected` | 退出 0，通过（N=15 与 alpha.5 … alpha.11 一致，本版没有新增抑制标记） |
+| 5 | 本地门槛：版本与 tag | `./Scripts/check-release-version.sh --print-tag` → `v0.1.0-alpha.12`；`./Scripts/check-release-version.sh` → `PASSED (MARKETING_VERSION 0.1.0-alpha.12, CURRENT_PROJECT_VERSION 12; tag comparison skipped)` | 两者都退出 0，通过（本机没有 tag，脚本按设计跳过 tag 比对） |
+| 6 | 本地门槛：smoke | `./Scripts/smoke.sh` → `smoke: startup mode OK (marker "smoke: ready", exit 0)`、`smoke: diagnostics items=6 blockers=3`、`smoke: diagnostics mode OK (marker "smoke: diagnostics ready", exit 0)`、`smoke: OK (markers "smoke: ready" and "smoke: diagnostics ready", both modes exit 0)` | 退出 0，通过（两种模式都断言） |
+| 7 | 脚本语法与补丁空白 | `sh -n Scripts/*.sh`（无输出，退出 0）；`git diff --check` 与 `git diff --cached --check`（无输出，退出 0） | 通过 |
+| 8 | `docs/security-review-alpha.12.md` 无阻断项（S1–S8 逐项核对） | 报告：[security-review-alpha.12.md](security-review-alpha.12.md)。S1 通过（进程启动点 4/4、`.arguments =` 6/6、信号调用点未变）、S2 通过（无新增 Keychain 写入点；新增的密码接触点只取布尔值）、S3 通过（新增日志经统一 `LogRedactor`，只记计数、不记探测 URL）、S4 通过（放行面 = 精确 origin + loopback + inline，无网段/后缀/通配；切换监听有用户确认与密码门槛）、S5/S6/S7 通过（脚本与 workflow 未改、无新增第三方依赖）、S8 通过（两条文本扫描均通过）。**阻断项 0 条**，非阻断 **3 条**（`R1` 非 loopback 时窗口加载该地址、`R2` host 尾部点不归一、`R3` 切换监听的完成语义不等于服务就绪） | 通过（非阻断项已登记并不阻塞） |
+| 9 | tag 与 bundle 版本一致 | 版本唯一来源已 bump 为 `MARKETING_VERSION = 0.1.0-alpha.12`、`CURRENT_PROJECT_VERSION = 12`；`--print-tag` 输出 `v0.1.0-alpha.12` | 通过（tag 尚未创建；本版按约束不打 tag） |
+| 10 | 真机 smoke 记录（本机 + 受影响设备） | 见下「真机 smoke 记录（待填）」 | **待填**（保留 #155 的五行验证项，本机不代填结果） |
+| 11 | checksum 记录（ZIP / `.sha256` / `.evidence.md`） | 见下「checksum 记录（待填）」 | **待填**（由 `release.yml` 在 tag 上的产物回填） |
+| 12 | prerelease 且包含「未公证」说明 | 未执行：Release 与 prerelease 标记由维护者在 tag 之后创建 | 待发布后核对 |
+| 13 | 回退路径可用（`v0.1.0-alpha.11` 资产仍可下载） | 未执行：本版只做本地提交，不访问 Releases | 待发布后核对 |
+
+### 真机 smoke 记录（待填）
+
+| 验证项 | 设备 | 步骤 | 期望 | 结果 |
+| --- | --- | --- | --- | --- |
+| 服务闪断消失 | 另一台 Mac（此前反复闪现「Pi Web 服务已断开，正在尝试恢复…」） | 冷启动应用，观察 ≥2 分钟，并同时开着 `tail -f "$HOME/Library/Logs/Pi Web Desktop/Pi Web Desktop.log"` | 不再出现周期性「已断开」提示；日志里没有高频重启记录 | 待填 |
+| 手机访问（Tailscale） | 手机（已登录同一 tailnet） | 应用「服务 → 复制手机访问链接 → Tailscale」→ 粘贴到手机浏览器 | 无需额外配置即可打开；首次访问提示输入远程访问密码 | 待填 |
+| 手机访问（局域网） | 手机（同一 Wi-Fi） | 同上，选「局域网」 | 可打开 | 待填 |
+| 非 loopback 下应用窗口可用 | 本机或另一台 Mac | 切换监听地址到 Tailscale/局域网后，看应用自身窗口 | 窗口显示服务页，不再跳到系统浏览器、不再闪断 | 待填 |
+| 导航失败不再误报 | 任意机器 | 在页面里点一个外部链接 | 外链在系统浏览器打开，应用内不出现服务断开提示 | 待填 |
+
+### checksum 记录（待填）
+
+| 项 | 值 |
+| --- | --- |
+| 发布资产 | `Pi-Web-Desktop-0.1.0-alpha.12+build.12.zip` |
+| 大小 | 待填 |
+| SHA-256 | 待填 |
+| `.zip.sha256` / `.evidence.md` | 待填（由 `release.yml` 在 tag `v0.1.0-alpha.12` 上生成） |
+| 校验命令与结果 | `shasum -a 256 -c Pi-Web-Desktop-0.1.0-alpha.12+build.12.zip.sha256` → 待填 |
+
+### 本版同时做的文档一致性改动
+
+- `Configuration/AppIdentity.xcconfig`（本版唯一版本来源）：`MARKETING_VERSION` → `0.1.0-alpha.12`、
+  `CURRENT_PROJECT_VERSION` → `12`。
+- `docs/release-notes-v0.1.0-alpha.12.md`（本版新增）：#147–#150 逐条成节（改前/改后对照、判定阈值、
+  放行面的精确比较项、复制链接的四条走向）；安装、依赖前置、未公证与 ad-hoc、已知问题、回退到
+  `v0.1.0-alpha.11` 的链接都在文内；真机表五项状态写「待真机验证」；校验值的大小与 SHA-256 保持
+  「发布后回填」占位，不用本机演练值冒充发布值。
+- `docs/security-review-alpha.12.md`（本版新增）：按 S1–S8 覆盖本版 delta 的只读安全评审；放行面变化、
+  接口枚举与切换监听、日志与状态机行为变化是重点。
+- `docs/alpha-release-checklist.md`（本文件）：新增本节（#155 门槛清单实测值、真机 smoke 表、checksum
+  记录、文档一致性清单）。
+- 本版**没有**改代码、**没有**改 `PiWebDesktop.xcodeproj/project.pbxproj`（该文件在本版 delta 里的 13 行
+  改动来自 #150 的源文件登记，不是本版发布提交）、**没有**打 tag、**没有** push。

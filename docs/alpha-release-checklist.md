@@ -1424,3 +1424,81 @@ success、5m5s），加上本版发布提交的版本 bump 与三份文档（发
   记录、文档一致性清单）。
 - 本版**没有**改代码、**没有**改 `PiWebDesktop.xcodeproj/project.pbxproj`（该文件在本版 delta 里的 13 行
   改动来自 #150 的源文件登记，不是本版发布提交）、**没有**打 tag、**没有** push。
+
+## Release v0.1.0-alpha.13 执行记录
+
+本版候选：`main` 上的 `506f5d6`（#158 / #135 / #139 / #141 / #157 五个 Issue 的修复，PR #161 / #160 /
+#159 / #162 / #164 合并后的 main；main CI run [35620781999](https://github.com/Su-luoya/pi-web-desktop/actions/runs/35620781999)
+success），加上本版发布提交的版本 bump 与三份文档（发布说明、安全评审、本节执行记录）。
+本节首轮记录（#163）的候选曾是 `5efa0cd`；#157 通过 PR #164（`506f5d6`）并入 main 后，本节改以
+`506f5d6` 为候选，并把门槛全部重跑了一遍（下表数值均为重跑值）。
+`v0.1.0-alpha.12` 只有草稿 Release、从未发布，本版取代它：alpha.12 草稿里的 #147 / #148 / #149 / #150
+由本版首次发布（其 delta 评审结论继承 [security-review-alpha.12.md](security-review-alpha.12.md)）。
+
+本节脚本输出在**本工作区**（`release-alpha-13`，基于 `main` `506f5d6`）上采集；改动文件与新增文档在
+扫描前已 `git add`——`check-identity.sh` / `scan-secrets.sh` 的文本扫描只覆盖已跟踪文件，未跟踪的新文件
+会被跳过（见安全审查 R-11）。
+
+### 按 #163 门槛清单的实测值
+
+下表是 #157（PR #164，`506f5d6`）并入、三份文档同步更新后的**重跑值**；首轮（`5efa0cd`）的数值已被
+本轮取代。
+
+| # | #163 门槛 | 实测值 / 证据 | 判定 |
+| --- | --- | --- | --- |
+| 1 | main CI 为绿 | run [35620781999](https://github.com/Su-luoya/pi-web-desktop/actions/runs/35620781999)（success，耗时 4m7s），发布前提交 `506f5d6`（#164 合并提交） | 通过（CI 结论来自 GitHub，不是本机脚本输出） |
+| 2 | 本地门槛：构建 | `./Scripts/build.sh` → `build: release build with -O -wmo`、`Built: …/build/Pi-Web-Desktop.app`（脚本输出工作区绝对路径，此处缩写字面路径）、`Contents/MacOS/PiWebDesktop: Mach-O 64-bit executable arm64` | 退出 0，通过 |
+| 3 | 本地门槛：身份与版本一致性 | `./Scripts/check-identity.sh` → `check-identity: PASSED (45 checks)`（含 `no hardcoded MARKETING_VERSION outside Configuration/AppIdentity.xcconfig`） | 退出 0，通过 |
+| 4 | 本地门槛：secret 扫描 | `./Scripts/scan-secrets.sh` → `scan-secrets: suppressed 15 lines`、`scan-secrets: PASS (no matches in tracked files; no untracked files)`；输出里没有 `scan-secrets: rejected` | 退出 0，通过（N=15 与 alpha.5 … alpha.12 一致，本版没有新增抑制标记） |
+| 5 | 本地门槛：版本与 tag | `./Scripts/check-release-version.sh --print-tag` → `v0.1.0-alpha.13`；`./Scripts/check-release-version.sh` → `PASSED (MARKETING_VERSION 0.1.0-alpha.13, CURRENT_PROJECT_VERSION 13; tag comparison skipped)` | 两者都退出 0，通过（本机没有 `v0.1.0-alpha.13` tag，脚本按设计跳过 tag 比对） |
+| 6 | 本地门槛：smoke | `./Scripts/smoke.sh` → `smoke: startup mode OK (marker "smoke: ready", exit 0)`、`smoke: diagnostics items=6 blockers=3`、`smoke: diagnostics mode OK (marker "smoke: diagnostics ready", exit 0)`、`smoke: OK (markers "smoke: ready" and "smoke: diagnostics ready", both modes exit 0)` | 退出 0，通过（两种模式都断言） |
+| 7 | 脚本语法与补丁空白 | `for f in Scripts/*.sh; do sh -n "$f" || exit 1; done`（无输出，退出 0；本条采用 #139 之后的逐文件形式，替换旧的 `sh -n Scripts/*.sh`）；`git diff --check` 与 `git diff --cached --check`（无输出，退出 0） | 通过 |
+| 8 | `docs/security-review-alpha.13.md` 无阻断项（S1–S8 逐项核对） | 报告：[security-review-alpha.13.md](security-review-alpha.13.md)，delta `730128d..506f5d6`。S1 通过（`Process()` 4/4、`.arguments =` 6/6、信号调用点未变；只有受托管服务的停止等待预算收紧）、S2 通过（`keychain.save(` 1/1，无新增凭据接触点）、S3 通过（新增日志只有计数 / 阶段名 / 毫秒时钟，经统一 `LogRedactor`；#157 的代理告警日志只写网段）、S4 通过（`open` 只接受文件 URL、路径归一化收紧；#157 探测直连、系统代理只读、窗口放行面未改，其余继承 alpha.12 结论）、S5 通过（#139 修复门禁空转、#141 占位符提示升为 warning 并补人工硬门禁、Actions 固定 SHA 与权限未放宽）、S6/S7 通过（无新增依赖；`Sources/` 只新增 `Darwin` / `Foundation` / `SystemConfiguration` 三个系统框架导入，workflow 未改 `uses:`/`permissions:`）、S8 通过（两条文本扫描均通过）。**阻断项 0 条**，非阻断 **6 条**（继承 `R1` 非 loopback 时窗口加载该地址、`R2` host 尾部点不归一、`R3` 切换监听的完成语义不等于服务就绪；本版新增 `R4` 退出等待预算 ≤1 秒可能提前 SIGKILL、`R5` 占位符硬门禁依赖人工执行、`R6` 窗口页面请求仍走系统代理） | 通过（非阻断项已登记并不阻塞） |
+| 9 | tag 与 bundle 版本一致 | 版本唯一来源已 bump 为 `MARKETING_VERSION = 0.1.0-alpha.13`、`CURRENT_PROJECT_VERSION = 13`；`--print-tag` 输出 `v0.1.0-alpha.13` | 通过（tag 尚未创建；本版按约束不打 tag） |
+| 10 | 真机 smoke 记录（本机 + 受影响设备） | 见下「真机 smoke 记录（待真机验证）」 | **待真机验证**（保留 #163 的验证项并补 #157 代理告警一行，本机不代填结果） |
+| 11 | checksum 记录（ZIP / `.sha256` / `.evidence.md`） | 见下「checksum 记录（发布后回填）」 | **发布后回填**（由 `release.yml` 在 tag 上的产物生成） |
+| 12 | prerelease 且包含「未公证」说明 | 未执行：Release 与 prerelease 标记由维护者在 tag 之后创建 | 待发布后核对 |
+| 13 | 回退路径可用（`v0.1.0-alpha.11` 资产仍可下载） | 未执行：本版只做本地提交，不访问 Releases。（`v0.1.0-alpha.12` 只有草稿 Release，不作为回退来源） | 待发布后核对 |
+
+### 真机 smoke 记录（待真机验证）
+
+| 验证项 | 设备 | 步骤 | 期望 | 结果 |
+| --- | --- | --- | --- | --- |
+| 服务闪断消失 | 另一台 Mac（此前反复闪现「Pi Web 服务已断开，正在尝试恢复…」） | 冷启动应用，观察 ≥2 分钟，并同时开着 `tail -f "$HOME/Library/Logs/Pi Web Desktop/Pi Web Desktop.log"` | 不再出现周期性「已断开」提示；日志里没有高频重启记录 | 待真机验证 |
+| 手机访问（Tailscale） | 手机（已登录同一 tailnet） | 应用「服务 → 复制手机访问链接 → Tailscale」→ 粘贴到手机浏览器 | 无需额外配置即可打开；首次访问提示输入远程访问密码 | 待真机验证 |
+| 手机访问（局域网） | 手机（同一 Wi-Fi） | 同上，选「局域网」 | 可打开 | 待真机验证 |
+| 非 loopback 下应用窗口可用 | 本机或另一台 Mac | 切换监听地址到 Tailscale/局域网后，看应用自身窗口 | 窗口显示服务页，不再跳到系统浏览器、不再闪断 | 待真机验证 |
+| 导航失败不再误报 | 任意机器 | 在页面里点一个外部链接 | 外链在系统浏览器打开，应用内不出现服务断开提示 | 待真机验证 |
+| 代理告警与修复提示（#157） | 任意机器（已连 VPN，且系统代理未排除该网段） | 把监听地址切到 Tailscale 地址，打开「服务」菜单 | 「服务」菜单出现代理告警项，点开有修复步骤；按提示为代理加上该网段例外后，告警自动消失（应用只读系统代理，不代改设置） | 待真机验证 |
+| 关窗后 Dock 恢复 | 任意机器 | 点红色关闭按钮 → 点 Dock 图标 | 主窗口恢复（含最小化状态下的恢复） | 待真机验证 |
+| 退出不卡顿 | 任意机器 | `Cmd+Q`，对照日志里的「退出时间线」 | 从退出请求到进程结束 ≤1s 量级，无残留服务进程；核对没有走到「已发送 SIGKILL」 | 待真机验证 |
+
+### checksum 记录（发布后回填）
+
+| 项 | 值 |
+| --- | --- |
+| 发布资产 | `Pi-Web-Desktop-0.1.0-alpha.13+build.13.zip` |
+| 大小 | 发布后回填 |
+| SHA-256 | 发布后回填 |
+| `.zip.sha256` / `.evidence.md` | 发布后回填（由 `release.yml` 在 tag `v0.1.0-alpha.13` 上生成） |
+| 校验命令与结果 | `shasum -a 256 -c Pi-Web-Desktop-0.1.0-alpha.13+build.13.zip.sha256` → 发布后回填 |
+
+### 本版同时做的文档一致性改动
+
+- `Configuration/AppIdentity.xcconfig`（本版唯一版本来源）：`MARKETING_VERSION` → `0.1.0-alpha.13`、
+  `CURRENT_PROJECT_VERSION` → `13`。
+- `docs/release-notes-v0.1.0-alpha.13.md`（本版新增）：说明本版取代 alpha.12 草稿、相对已发布的
+  `v0.1.0-alpha.11` 一次发布八个 Issue 的修复；#147–#150 四节沿用 alpha.12 说明的改前/改后对照并标注
+  「alpha.12 草稿内容，本版首次发布」；#158 / #135 / #139 / #141 / #157 逐条成节；安装、依赖前置、未公证与
+  ad-hoc、已知问题、回退到 `v0.1.0-alpha.11` 的链接都在文内；真机表八项状态写「待真机验证」；校验值的
+  大小与 SHA-256 保持「发布后回填」占位，不用本机演练值冒充发布值；全文不含待填写占位符字面量
+  （按 #163 的文档约定，本次新增/修改的文档都不写这个字面量）。
+- `docs/security-review-alpha.13.md`（本版新增）：按 S1–S8 覆盖本版 delta（`730128d..506f5d6`），并明确
+  继承 alpha.12 评审针对 #147–#150 的结论；`R1`–`R3` 继承、`R4`/`R5`/`R6` 本版新增，阻断项 0 条。
+- `docs/alpha-release-checklist.md`（本文件）：新增本节（#163 门槛清单实测值、真机 smoke 表、checksum
+  记录、文档一致性清单）。
+- 本节与三份文档在 #157（PR #164，`506f5d6`）并入后整体复核一遍：候选提交、门槛实测值、安全评审的
+  delta 与 S4/S7 结论、已知问题、真机 smoke 表都已同步；#157 的改动说明见发布说明第 9 节与安全评审
+  §4.3。
+- 本次发布准备**只改版本文件与文档**：没有改 `Sources/`、`PiWebDesktopTests/`、`.github/`、`Scripts/`，
+  **没有** push、**没有** 建 PR、**没有** 打 tag、**没有** 碰 GitHub Release 或 Issue 状态（由协调器负责）。

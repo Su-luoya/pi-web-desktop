@@ -149,7 +149,12 @@ jobs:
             exit 1
           fi
           unfilled="$(grep -c '<待填写>' dist/release-body.md || true)"
-          echo "::notice::${unfilled} field(s) still marked 待填写; they must be filled from the Release Issue before the draft release is published"
+          # Warning, not error: the draft must still be created so a maintainer can
+          # fill these fields from the Release Issue. The hard gate is the manual
+          # pre-publish check documented in docs/releasing.md and
+          # docs/alpha-release-checklist.md; this count must reach 0 before the
+          # draft is published (undrafted), and publishing with it > 0 is a defect.
+          echo "::warning::${unfilled} field(s) still marked 待填写; they must be filled from the Release Issue and this count must be 0 before the release is published (undrafted)"
 
       - name: Summarize the artifact and evidence
         run: |

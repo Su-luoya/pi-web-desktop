@@ -11,14 +11,21 @@ extension AppDelegate {
         }
         serviceManager.onLoadPage = { [weak self] in
             guard let self else { return }
-            self.webViewController.updateService(
-                url: self.serviceManager.configuration.serviceURL,
-                port: self.serviceManager.configuration.port
-            )
-            self.webViewController.loadServicePage()
+            // 多窗口（GitHub #168）：同一个服务地址更新到**所有已登记窗口**（最近使用
+            // 优先），再一起重新加载服务页。窗口只是展示层：这里不会因为多窗口而新增
+            // 任何服务启动/停止/重启路径。
+            let configuration = self.serviceManager.configuration
+            for controller in self.windowRegistry.controllers {
+                controller.updateService(url: configuration.serviceURL, port: configuration.port)
+                controller.loadServicePage()
+            }
         }
         serviceManager.onPageMessage = { [weak self] message in
-            self?.webViewController.showLoadingPage(message: message)
+            guard let self else { return }
+            // 启动阶段的状态文案同样同步到所有窗口，避免新窗口停留在旧页面。
+            for controller in self.windowRegistry.controllers {
+                controller.showLoadingPage(message: message)
+            }
         }
         serviceManager.onStartupFailure = { [weak self] message in
             self?.presentStartupError(message)

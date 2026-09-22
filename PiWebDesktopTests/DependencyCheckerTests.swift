@@ -1230,8 +1230,8 @@ final class DependencyCheckerTests: XCTestCase {
     /// 上次结论为不可启动：即使指纹与时间都一致也必须重跑完整检查。
     func testDependencyGateCacheRejectsReportThatCouldNotStartService() {
         var report = makeCacheReport()
-        report.findings = report.findings.map { finding in
-            finding.kind == .piWeb ? self.finding(.piWeb, .missing) : finding
+        report.findings = report.findings.map { item in
+            item.kind == .piWeb ? finding(.piWeb, .missing) : item
         }
         let cache = DependencyGateCache(
             report: report,

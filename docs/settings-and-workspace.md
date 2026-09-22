@@ -109,10 +109,13 @@
 
 - **一个服务、多个窗口**：所有窗口共享同一个 `ServiceManager`（以及同一个服务进程与端口），新建/关闭窗口只影响显示层，不会触发服务启动、停止或重启；⌘N 不重新探测依赖、不改写配置、不重启服务。
 - **新窗口的内容**：新窗口使用**新的** `WebViewController` 实例，加载当前 `serviceManager.configuration.serviceURL`（与已有窗口同一地址，沿用 [architecture.md](architecture.md) 的放行面）。若依赖门控未放行或工作目录不可用，新窗口显示与主窗口一致的诊断状态页，而不是自行启动服务。
-- **窗口登记表**：`AppWindowRegistry<Window, Controller>`（`Sources/App/AppWindowRegistry.swift`）按对象身份登记窗口与其控制器，并维护“最近使用”顺序；`mainWindow`/`mainController` 即最近使用的那个窗口。登记表只依赖 Foundation，可在无宿主的单测里覆盖。
-- **主窗口语义不变**：最近使用的窗口作为主窗口，⌘W/关闭按钮仍是隐藏（`windowShouldClose` → `orderOut`，应用与服务继续运行）；其它窗口按标准语义真正关闭，关闭只从登记表移除，不碰服务。
-- **最近使用**：窗口成为 key window（`windowDidBecomeKey`）或经“显示 Pi Web”置前时更新顺序。Dock 点击与重新激活走 `applicationShouldHandleReopen` → `showMainWindow()`，恢复最近使用的窗口；没有已登记窗口时按需新建一个（同样不启动服务）。
-- **菜单动作的目标**：页面类菜单/快捷键动作（重新加载、硬刷新、放大/缩小/实际大小、查找栏）作用于当前 key window，没有可用的 key window 时回落到最近使用的主窗口；菜单“窗口 → 进入/退出全屏幕”的标题跟随 key window 状态（快捷键固定 ⌃⌘F，不再按窗口注册）。
+- **窗口登记表**：`AppWindowRegistry<Window, Controller>`（`Sources/App/AppWindowRegistry.swift`）按对象身份登记窗口与其控制器，并同时维护两个**相互独立**的角色。登记表只依赖 Foundation，可在无宿主的单测里覆盖。
+  - **启动主窗口（primary）**：`createWindow()` 创建的启动窗口，`primaryWindow`/`primaryController` 表示它。只有真正关闭（`remove(window:)`）才清除；按下面“关闭语义”一条，正常运行时它一直存在。关闭语义、Dock 恢复与“显示 Pi Web”都以它为准。
+  - **最近使用的窗口**：`mainWindow`/`mainController` 表示它（`register` 与 `noteUsage(of:)` 都把它移到最前）。它只作为菜单/页面动作在没有 key window 时的回落目标；⌘N 之后新窗口成为最近使用，但 primary 仍是启动窗口，最近使用顺序的变化不改变 primary。
+- **关闭语义（⌘W / 红色关闭按钮）**：`windowShouldClose` 只对 **primary** 返回 `orderOut(nil)` + `false`（隐藏、保留窗口对象、WebView 与页面会话，应用与服务继续运行，与 GitHub #158 一致）；**其它所有窗口**返回 `true` 真正关闭，`windowWillClose` 只从登记表移除该窗口，不影响其它窗口与服务。判据是“是不是 primary”而不是“是不是最近使用”：⌘N 打开的新窗口即使成为最近使用，也总能真正关闭，不会留下隐藏但存活、内存不释放的窗口与 WebView。
+- **Dock 恢复 /“显示 Pi Web”**：Dock 点击与重新激活走 `applicationShouldHandleReopen` → `showMainWindow()`，恢复 **primary**（最小化时先 deminiaturize，再按当前屏幕适配并置前）；登记表为空或 primary 缺失时按现有逻辑补建一个窗口，并在 `createWindow()` 里登记为新的 primary。恢复的不是“最近使用”窗口——除非 primary 不存在。
+- **最近使用顺序的更新时机**：窗口成为 key window（`windowDidBecomeKey`）时移到最前。Dock 恢复与“显示 Pi Web”不再参与排序，它们只负责把 primary 带回来。
+- **菜单动作的目标**：页面类菜单/快捷键动作（重新加载、硬刷新、放大/缩小/实际大小、查找栏）作用于当前 key window，没有可用的 key window 时回落到最近使用的窗口（`mainWindow`）；菜单“窗口 → 进入/退出全屏幕”的标题跟随 key window 状态（快捷键固定 ⌃⌘F，不再按窗口注册）。
 - **配置变更**：设置保存等原有流程只是把“更新服务地址并重新加载”这个最小动作扩展到所有已登记窗口（最近使用优先），没有新增服务重启路径；设置窗口（⌘,）、退出决策与诊断模式（只开一个窗口）的行为不变。
 - **退出**：⌘Q/菜单退出时所有窗口一起关闭，不影响服务处置逻辑；退出决策仍在 AppKit 终止序列之外完成（见下文“退出行为”）。
 - **共享状态**：多个窗口共享同一份 WebKit 网站数据与会话（同一服务进程），仅用于并行查看/操作，不做窗口级会话隔离。

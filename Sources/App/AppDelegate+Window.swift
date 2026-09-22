@@ -28,14 +28,15 @@ extension AppDelegate {
         )
     }
 
-    /// 把**最近使用的主窗口**适配到它当前所在的屏幕（既有调用点语义不变，
-    /// 见 `AppDelegate+Quit.swift` 的 `scheduleWindowFit`）。
+    /// 把**最近使用的窗口**（`mainWindow`，不一定等于启动主窗口 primary）适配到它
+    /// 当前所在的屏幕（既有调用点语义不变，见 `AppDelegate+Quit.swift` 的
+    /// `scheduleWindowFit`）。
     func fitWindowToCurrentScreen() {
         fitOnCurrentScreen(window)
     }
 
     /// 把指定窗口适配到它当前所在的屏幕。多窗口（GitHub #168）下每个窗口只改
-    /// 自己的 frame：主窗口的适配不会覆盖用户刚挪到另一块屏幕上的新窗口。
+    /// 自己的 frame：对某个窗口的适配不会覆盖用户刚挪到另一块屏幕上的新窗口。
     private func fitOnCurrentScreen(_ target: NSWindow?) {
         guard let target, let screen = target.screen ?? NSScreen.main else { return }
         // Native full-screen mode owns the window frame. Do not overwrite it
@@ -66,10 +67,12 @@ extension AppDelegate {
 
     // MARK: - 窗口创建（GitHub #168 多窗口）
 
-    /// 创建**启动窗口**（主窗口）：登记进 `windowRegistry`，继续使用
+    /// 创建**启动主窗口（primary）**：登记进 `windowRegistry` 并标记为 primary
+    /// （primary 与最近使用顺序相互独立，见 `AppWindowRegistry`），继续使用
     /// `PiWebMainWindow` 这个自动保存名（多窗口后只有这一个窗口使用它）。
     func createWindow() {
         let made = makeWindow(autosaveName: "PiWebMainWindow", offsetFromMostRecentlyUsed: false)
+        windowRegistry.markPrimary(window: made.window)
         presentWindow(made.window)
     }
 
@@ -137,7 +140,8 @@ extension AppDelegate {
         newWindow.minSize = NSSize(width: 560, height: 560)
         // 使用原生标题栏作为稳定的拖拽区域；网页内容不会被透明拖拽层遮挡。
         newWindow.contentView = controller.webView
-        // 主窗口只隐藏不关闭（`windowShouldClose`）；⌘N 打开的窗口可以真正关闭。
+        // 启动主窗口（primary）只隐藏不关闭（`windowShouldClose`）；⌘N 打开的
+        // 窗口可以真正关闭。
         // 让 ARC 持有/释放窗口，避免 AppKit 在 isReleasedWhenClosed 下重复释放。
         newWindow.isReleasedWhenClosed = false
         controller.windowProvider = { [weak newWindow] in newWindow }
@@ -227,11 +231,15 @@ extension AppDelegate {
         requestWorkspaceSwitch(to: directory)
     }
 
-    /// 关闭窗口：主窗口沿用 GitHub #158 的语义（只 `orderOut` 隐藏，窗口对象、
-    /// WebView 与页面会话都保留，服务不因关窗而停止）；⌘N 打开的窗口返回 true
-    /// 真正关闭，登记表在 `windowWillClose` 里移除它，其它窗口完全不受影响。
+    /// 关闭窗口：**只有启动主窗口（primary）**沿用 GitHub #158 的语义（只 `orderOut`
+    /// 隐藏，窗口对象、WebView 与页面会话都保留，服务不因关窗而停止）；**其它所有
+    /// 窗口**（包括 ⌘N 新建后成为最近使用的窗口）返回 true 真正关闭，登记表在
+    /// `windowWillClose` 里移除它，其它窗口完全不受影响。
+    ///
+    /// 判据是「是不是 primary」而不是「是不是最近使用」：否则 ⌘N 之后新窗口成为
+    /// 最近使用，就永远关不掉，而用户真正想关的（最近使用）窗口反而关不掉。
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        if windowRegistry.isMainWindow(sender) {
+        if windowRegistry.isPrimaryWindow(sender) {
             sender.orderOut(nil)
             return false
         }
@@ -239,29 +247,31 @@ extension AppDelegate {
     }
 
     /// 窗口真正关闭（红色关闭按钮、⌘W 或以后新增的“关闭窗口”动作）后从登记表
-    /// 移除，避免对已释放窗口继续下发页面动作。移除主窗口时由剩下的最近使用窗口
-    /// 接任；登记表清空只意味着下次 `showMainWindow()` 会补建窗口，**不代表**服务
-    /// 被停止（服务生命周期只由 `ServiceManager` 决定）。
+    /// 移除，避免对已释放窗口继续下发页面动作。移除 primary 时 `primaryWindow`
+    /// 回到 nil（正常路径不会发生，因为 `windowShouldClose` 对 primary 只隐藏），
+    /// 下次 `showMainWindow()` 会补建窗口并登记新的 primary；移除最近使用的窗口
+    /// 时 `mainWindow` 由下一个最近使用窗口接任。登记表清空只意味着下次会补建窗口，
+    /// **不代表**服务被停止（服务生命周期只由 `ServiceManager` 决定）。
     func windowWillClose(_ notification: Notification) {
         guard let closed = notification.object as? NSWindow else { return }
         windowRegistry.remove(window: closed)
     }
 
-    /// 窗口成为 key 窗口即记为最近使用：Dock 恢复与「显示 Pi Web」都回到用户
-    /// 最后操作过的窗口，而不是固定某一个窗口对象。
+    /// 窗口成为 key 窗口即记为最近使用（只影响菜单/页面动作的回落目标，**不改变**
+    /// 启动主窗口 primary）。
     func windowDidBecomeKey(_ notification: Notification) {
         guard let key = notification.object as? NSWindow else { return }
         windowRegistry.noteUsage(of: key)
     }
 
-    /// 「显示 Pi Web」菜单项：与 Dock 点击同一条路径（恢复最近使用的主窗口）。
+    /// 「显示 Pi Web」菜单项：与 Dock 点击同一条路径（恢复启动主窗口 primary）。
     @objc func showWindow(_ sender: Any?) {
         showMainWindow()
     }
 
     func windowDidChangeScreen(_ notification: Notification) {
-        // 主窗口沿用防抖适配（`scheduleWindowFit`，见 `AppDelegate+Quit.swift`）；
-        // 其它窗口直接适配自己，避免把某个窗口的屏幕变化应用到主窗口。
+        // 最近使用的窗口沿用防抖适配（`scheduleWindowFit`，见 `AppDelegate+Quit.swift`）；
+        // 其它窗口直接适配自己，避免把某个窗口的屏幕变化应用到最近使用窗口。
         if let changed = notification.object as? NSWindow, !windowRegistry.isMainWindow(changed) {
             fitOnCurrentScreen(changed)
             return
@@ -270,7 +280,7 @@ extension AppDelegate {
     }
 
     /// 全屏幕（菜单 ⌃⌘F 与绿色按钮）：作用于当前 key 窗口（仅限已登记窗口），
-    /// 没有可用的 key 窗口时回落到最近使用的主窗口。
+    /// 没有可用的 key 窗口时回落到最近使用的窗口（`mainWindow`）。
     @objc func toggleFullScreen(_ sender: Any?) {
         activeWindow?.toggleFullScreen(sender)
     }
@@ -298,8 +308,8 @@ extension AppDelegate {
 
     // MARK: - Dock 恢复（GitHub #158）
 
-    /// 点 Dock 图标（或应用被重新打开）时把最近使用的主窗口带回来。返回 true 表示
-    /// 事件已处理，AppKit 不再走自带的“新建窗口”路径。
+    /// 点 Dock 图标（或应用被重新打开）时把**启动主窗口（primary）**带回来。返回
+    /// true 表示事件已处理，AppKit 不再走自带的“新建窗口”路径。
     ///
     /// AppKit 只在 `hasVisibleWindows == false` 时调这个方法，恰好覆盖三种情形：
     /// 1. 红色关闭按钮之后（`windowShouldClose` 只做 `orderOut(nil)`）；
@@ -310,32 +320,34 @@ extension AppDelegate {
         return true
     }
 
-    /// 把最近使用的主窗口显示到当前屏幕并置前；登记表为空时补建窗口。
+    /// 把**启动主窗口（primary）**显示到当前屏幕并置前；登记表为空或 primary 缺失
+    /// 时补建一个窗口，并在 `createWindow()` 里把它登记为新的 primary。
     ///
-    /// 关闭按钮只隐藏主窗口（见 `windowShouldClose`），窗口对象、WebView 和页面
+    /// 关闭按钮只隐藏 primary（见 `windowShouldClose`），窗口对象、WebView 和页面
     /// 会话都还在，所以这里**必须复用**同一个窗口：重建会丢掉页面状态并留下第二个
-    /// 窗口。⌘N 打开的窗口真正关闭后会从登记表移除，因此这里恢复的总是「还活着的
-    /// 最近使用窗口」。
+    /// 窗口。恢复的不是「最近使用」窗口（⌘N 打开的新窗口可能正是最近使用，但它不是
+    /// 主窗口）；只有在 primary 不存在时才补建，见 `AppWindowRegistry`。
     func showMainWindow() {
-        guard let window else {
-            // 还没有窗口：只有主菜单已安装（即启动流程已经走到
-            // `applicationDidFinishLaunching`/smoke 路径）时才补建，避免和
-            // `AppDelegate+PackageUpdates.swift` 里的正常启动路径各建一个窗口。
-            if NSApp.mainMenu != nil {
-                createWindow()
+        if let primary = windowRegistry.primaryWindow {
+            // 最小化的窗口必须先还原：`makeKeyAndOrderFront` 不会把它拉出最小化状态。
+            if primary.isMiniaturized {
+                primary.deminiaturize(nil)
+            }
+            // 隐藏期间显示器可能已经变过（分辨率/旋转/插拔外接屏），重新显示前按当前
+            // 屏幕适配一次；重建大小不会动自动保存的 frame 名。
+            fitOnCurrentScreen(primary)
+            primary.makeKeyAndOrderFront(nil)
+            if !NSApp.isActive {
+                NSApp.activate(ignoringOtherApps: true)
             }
             return
         }
-        // 最小化的窗口必须先还原：`makeKeyAndOrderFront` 不会把它拉出最小化状态。
-        if window.isMiniaturized {
-            window.deminiaturize(nil)
-        }
-        // 隐藏期间显示器可能已经变过（分辨率/旋转/插拔外接屏），重新显示前按当前
-        // 屏幕适配一次；重建大小不会动自动保存的 frame 名。
-        fitWindowToCurrentScreen()
-        window.makeKeyAndOrderFront(nil)
-        if !NSApp.isActive {
-            NSApp.activate(ignoringOtherApps: true)
+        // 没有 primary：登记表为空，或主窗口已被真正关闭（正常路径不会发生，因为
+        // `windowShouldClose` 对 primary 只隐藏）。只有主菜单已安装（即启动流程已经
+        // 走到 `applicationDidFinishLaunching`/smoke 路径）时才补建，避免和
+        // `AppDelegate+PackageUpdates.swift` 里的正常启动路径各建一个窗口。
+        if NSApp.mainMenu != nil {
+            createWindow()
         }
     }
 }

@@ -3,8 +3,9 @@ import XCTest
 /// 多窗口登记表的无宿主单元测试（GitHub #168）。
 ///
 /// `Sources/App/AppWindowRegistry.swift` 直接编译进测试目标，而且刻意不依赖 AppKit
-/// 或 `ServiceManager`：这里用最小的替身类覆盖「新建后可查找到、关闭后移除、主窗口
-/// 跟随最近使用、多窗口并存互不影响」四条契约，不需要真实窗口、WebView 或服务。
+/// 或 `ServiceManager`：这里用最小的替身类覆盖「新建后可查找到、关闭后移除、最近使用
+/// 顺序、启动主窗口（primary）与最近使用相互独立、多窗口并存互不影响」五条契约，
+/// 不需要真实窗口、WebView 或服务。
 final class AppWindowRegistryTests: XCTestCase {
     /// 替身窗口/控制器：登记表只按对象身份（`===`）识别它们，不需要 AppKit 类型。
     private final class FakeWindow {}
@@ -21,6 +22,9 @@ final class AppWindowRegistryTests: XCTestCase {
         XCTAssertEqual(registry.count, 0)
         XCTAssertNil(registry.mainWindow)
         XCTAssertNil(registry.mainController)
+        XCTAssertNil(registry.primaryWindow)
+        XCTAssertNil(registry.primaryController)
+        XCTAssertFalse(registry.isPrimaryWindow(FakeWindow()))
         XCTAssertTrue(registry.windows.isEmpty)
         XCTAssertTrue(registry.controllers.isEmpty)
     }
@@ -39,6 +43,10 @@ final class AppWindowRegistryTests: XCTestCase {
         XCTAssertTrue(registry.controller(for: window) === controller)
         XCTAssertTrue(registry.window(for: controller) === window)
         XCTAssertTrue(registry.isMainWindow(window))
+        // 登记只决定「最近使用」，启动主窗口（primary）需要显式标记，
+        // 由 `AppDelegate.createWindow()` 完成。
+        XCTAssertNil(registry.primaryWindow)
+        XCTAssertFalse(registry.isPrimaryWindow(window))
     }
 
     /// 重复登记同一个窗口（例如窗口重建时复用登记路径）只更新记录，不产生第二条。
@@ -76,7 +84,7 @@ final class AppWindowRegistryTests: XCTestCase {
         XCTAssertNil(registry.window(for: FakeController()))
     }
 
-    // MARK: - 主窗口选择（最近使用）
+    // MARK: - 最近使用窗口（`mainWindow`）的选择
 
     func testMainWindowFollowsTheMostRecentlyUsedWindow() {
         var registry = Registry()
@@ -148,7 +156,8 @@ final class AppWindowRegistryTests: XCTestCase {
         XCTAssertTrue(registry.mainWindow === window)
     }
 
-    /// 主窗口被移除（例如以后允许关闭主窗口）后由剩下的最近使用窗口接任。
+    /// 最近使用的窗口被移除后由下一个最近使用的窗口接任（`mainWindow` 始终表示
+    /// 最近使用，与 primary 无关）。
     func testRemovingMainWindowPromotesTheMostRecentlyUsedRemainingWindow() {
         var registry = Registry()
         let firstWindow = FakeWindow()
@@ -170,7 +179,8 @@ final class AppWindowRegistryTests: XCTestCase {
 
     // MARK: - 多窗口并存互不影响
 
-    /// 关闭一个非主窗口只移除它自己：主窗口、其它窗口与它们的控制器都保持原样。
+    /// 关闭一个非最近使用的窗口只移除它自己：最近使用的窗口、其它窗口与它们的
+    /// 控制器都保持原样。
     func testRemovingSecondaryWindowLeavesMainAndOtherWindowsUntouched() {
         var registry = Registry()
         let mainWindow = FakeWindow()
@@ -250,5 +260,176 @@ final class AppWindowRegistryTests: XCTestCase {
         XCTAssertTrue(registry.isEmpty)
         XCTAssertNil(registry.mainWindow)
         XCTAssertNil(registry.mainController)
+    }
+
+    // MARK: - 启动主窗口（primary）与最近使用相互独立（GitHub #168 续作）
+
+    /// primary 表示启动主窗口，与最近使用顺序无关：⌘N 之后新窗口成为最近使用，
+    /// primary 仍是启动窗口，`isPrimaryWindow` 也只对启动窗口为 true。
+    func testPrimaryWindowIsIndependentOfMostRecentlyUsedOrder() {
+        var registry = Registry()
+        let primaryWindow = FakeWindow()
+        let primaryController = FakeController()
+        let newWindow = FakeWindow()
+        let newController = FakeController()
+        registry.register(window: primaryWindow, controller: primaryController)
+        XCTAssertTrue(registry.markPrimary(window: primaryWindow))
+
+        registry.register(window: newWindow, controller: newController)
+
+        XCTAssertTrue(registry.primaryWindow === primaryWindow)
+        XCTAssertTrue(registry.primaryController === primaryController)
+        XCTAssertTrue(registry.isPrimaryWindow(primaryWindow))
+        XCTAssertFalse(registry.isPrimaryWindow(newWindow))
+        // 最近使用顺序独立变化：新窗口在最前，primary 没有跟着变。
+        XCTAssertTrue(registry.mainWindow === newWindow)
+        XCTAssertTrue(registry.mainController === newController)
+    }
+
+    /// 未登记的窗口（设置窗口、面板等）不能被标记为 primary，也不产生任何记录。
+    func testMarkingUnregisteredWindowAsPrimaryIsANoOp() {
+        var registry = Registry()
+        let window = FakeWindow()
+        registry.register(window: window, controller: FakeController())
+
+        XCTAssertFalse(registry.markPrimary(window: FakeWindow()))
+
+        XCTAssertNil(registry.primaryWindow)
+        XCTAssertFalse(registry.isPrimaryWindow(window))
+        XCTAssertEqual(registry.count, 1)
+    }
+
+    /// 关闭非 primary 窗口（⌘N 打开的新窗口）只移除它自己：primary 与其它窗口
+    /// 的查找结果都保持不变。
+    func testRemovingNonPrimaryWindowKeepsPrimaryAndOtherWindows() {
+        var registry = Registry()
+        let primaryWindow = FakeWindow()
+        let primaryController = FakeController()
+        let secondaryWindow = FakeWindow()
+        let secondaryController = FakeController()
+        let thirdWindow = FakeWindow()
+        let thirdController = FakeController()
+        registry.register(window: primaryWindow, controller: primaryController)
+        registry.markPrimary(window: primaryWindow)
+        registry.register(window: secondaryWindow, controller: secondaryController)
+        registry.register(window: thirdWindow, controller: thirdController)
+
+        XCTAssertTrue(registry.remove(window: secondaryWindow) === secondaryController)
+
+        XCTAssertTrue(registry.primaryWindow === primaryWindow)
+        XCTAssertTrue(registry.primaryController === primaryController)
+        XCTAssertTrue(registry.isPrimaryWindow(primaryWindow))
+        XCTAssertEqual(registry.count, 2)
+        XCTAssertNil(registry.controller(for: secondaryWindow))
+        XCTAssertNil(registry.window(for: secondaryController))
+        XCTAssertTrue(registry.controller(for: primaryWindow) === primaryController)
+        XCTAssertTrue(registry.controller(for: thirdWindow) === thirdController)
+        XCTAssertFalse(registry.isPrimaryWindow(thirdWindow))
+    }
+
+    /// primary 被真正关闭（模拟）：`primaryWindow` 变 nil，剩余窗口的最近使用顺序
+    /// 与它们的控制器完全不受影响。
+    func testRemovingPrimaryWindowClearsPrimaryAndKeepsRecencyOrder() {
+        var registry = Registry()
+        let primaryWindow = FakeWindow()
+        let primaryController = FakeController()
+        let secondWindow = FakeWindow()
+        let secondController = FakeController()
+        let thirdWindow = FakeWindow()
+        let thirdController = FakeController()
+        registry.register(window: primaryWindow, controller: primaryController)
+        registry.markPrimary(window: primaryWindow)
+        registry.register(window: secondWindow, controller: secondController)
+        registry.register(window: thirdWindow, controller: thirdController)
+        // 最近使用顺序：third → second → primary。
+        XCTAssertTrue(registry.noteUsage(of: secondWindow))
+        XCTAssertTrue(registry.noteUsage(of: primaryWindow))
+
+        XCTAssertTrue(registry.remove(window: primaryWindow) === primaryController)
+
+        XCTAssertNil(registry.primaryWindow)
+        XCTAssertNil(registry.primaryController)
+        XCTAssertFalse(registry.isPrimaryWindow(primaryWindow))
+        XCTAssertEqual(registry.count, 2)
+        XCTAssertTrue(registry.windows[0] === secondWindow)
+        XCTAssertTrue(registry.windows[1] === thirdWindow)
+        XCTAssertTrue(registry.mainWindow === secondWindow)
+        XCTAssertTrue(registry.mainController === secondController)
+        XCTAssertTrue(registry.controller(for: secondWindow) === secondController)
+        XCTAssertTrue(registry.controller(for: thirdWindow) === thirdController)
+    }
+
+    /// 记使用（最近使用顺序更新）永远不改变 primary，即使成为 key 窗口的不是 primary。
+    func testNoteUsageNeverChangesPrimary() {
+        var registry = Registry()
+        let primaryWindow = FakeWindow()
+        let otherWindow = FakeWindow()
+        registry.register(window: primaryWindow, controller: FakeController())
+        registry.markPrimary(window: primaryWindow)
+        registry.register(window: otherWindow, controller: FakeController())
+
+        XCTAssertTrue(registry.noteUsage(of: otherWindow))
+
+        XCTAssertTrue(registry.primaryWindow === primaryWindow)
+        XCTAssertTrue(registry.isPrimaryWindow(primaryWindow))
+        XCTAssertTrue(registry.mainWindow === otherWindow)
+
+        XCTAssertTrue(registry.noteUsage(of: primaryWindow))
+
+        XCTAssertTrue(registry.primaryWindow === primaryWindow)
+        XCTAssertTrue(registry.isPrimaryWindow(primaryWindow))
+        XCTAssertTrue(registry.mainWindow === primaryWindow)
+    }
+
+    /// 已有 primary 时再标记另一个窗口（primary 缺失后补建启动窗口的防御路径）：
+    /// primary 被替换，同一时刻只有一个 primary。
+    func testMarkingAnotherWindowAsPrimaryReplacesThePreviousPrimary() {
+        var registry = Registry()
+        let firstPrimary = FakeWindow()
+        let secondPrimary = FakeWindow()
+        let secondController = FakeController()
+        registry.register(window: firstPrimary, controller: FakeController())
+        registry.markPrimary(window: firstPrimary)
+        registry.register(window: secondPrimary, controller: secondController)
+
+        XCTAssertTrue(registry.markPrimary(window: secondPrimary))
+
+        XCTAssertTrue(registry.primaryWindow === secondPrimary)
+        XCTAssertTrue(registry.primaryController === secondController)
+        XCTAssertFalse(registry.isPrimaryWindow(firstPrimary))
+        XCTAssertEqual(registry.count, 2)
+    }
+
+    /// 重复登记 primary（同一窗口换控制器）时 primary 身份不变、控制器跟随更新；
+    /// 重复登记不会产生第二条记录。
+    func testReRegisteringPrimaryKeepsPrimaryIdentityWithLatestController() {
+        var registry = Registry()
+        let primaryWindow = FakeWindow()
+        registry.register(window: primaryWindow, controller: FakeController())
+        registry.markPrimary(window: primaryWindow)
+        let replacementController = FakeController()
+
+        registry.register(window: primaryWindow, controller: replacementController)
+
+        XCTAssertEqual(registry.count, 1)
+        XCTAssertTrue(registry.isPrimaryWindow(primaryWindow))
+        XCTAssertTrue(registry.primaryController === replacementController)
+        XCTAssertTrue(registry.mainController === replacementController)
+    }
+
+    /// 应用收尾清空登记表时 primary 一并清除。
+    func testRemoveAllClearsPrimary() {
+        var registry = Registry()
+        let primaryWindow = FakeWindow()
+        registry.register(window: primaryWindow, controller: FakeController())
+        registry.markPrimary(window: primaryWindow)
+        registry.register(window: FakeWindow(), controller: FakeController())
+
+        registry.removeAll()
+
+        XCTAssertTrue(registry.isEmpty)
+        XCTAssertNil(registry.primaryWindow)
+        XCTAssertNil(registry.primaryController)
+        XCTAssertFalse(registry.isPrimaryWindow(primaryWindow))
     }
 }

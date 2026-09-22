@@ -629,8 +629,9 @@ extension AppDelegate {
     }
 
     /// 菜单动作与窗口菜单标题的目标窗口：当前 key 窗口（仅限已登记窗口，设置/诊断
-    /// 窗口与面板不参与多窗口路由），没有可用的 key 窗口时回落到最近使用的主窗口
-    /// （GitHub #168：多窗口下菜单动作不能固定第一个窗口）。
+    /// 窗口与面板不参与多窗口路由），没有可用的 key 窗口时回落到**最近使用**的窗口
+    /// （`mainWindow`，不是启动主窗口 primary；GitHub #168：多窗口下菜单动作不能
+    /// 固定第一个窗口）。
     var activeWindow: NSWindow? {
         if let key = NSApp.keyWindow, windowRegistry.controller(for: key) != nil { return key }
         return windowRegistry.mainWindow

@@ -180,6 +180,27 @@ private func finding(_ kind: DependencyFinding.Kind, _ status: DependencyFinding
     )
 }
 
+/// 启动门控缓存的假文件接缝（GitHub #169）：只存字节，不碰真实文件系统。
+private final class DependencyGateFakeCacheFileIO: DependencyGateCacheFileIO {
+    var data: Data?
+    var writeSucceeds = true
+    private(set) var readURLs: [URL] = []
+    private(set) var writtenURLs: [URL] = []
+
+    func read(from url: URL) -> Data? {
+        readURLs.append(url)
+        return data
+    }
+
+    @discardableResult
+    func write(_ data: Data, to url: URL) -> Bool {
+        writtenURLs.append(url)
+        guard writeSucceeds else { return false }
+        self.data = data
+        return true
+    }
+}
+
 final class DependencyCheckerTests: XCTestCase {
     // MARK: - 语义化版本
 
@@ -983,5 +1004,339 @@ final class DependencyCheckerTests: XCTestCase {
 
         XCTAssertEqual(DependencyPathRedactor(homeDirectory: "/").redact("/opt/homebrew/bin/pi"), "/opt/homebrew/bin/pi")
         XCTAssertEqual(DependencyPathRedactor(homeDirectory: "").redact("/opt/homebrew/bin/pi"), "/opt/homebrew/bin/pi")
+    }
+
+    // MARK: - 启动门控快路径缓存（GitHub #169）
+
+    /// 缓存里的样例报告：三条硬性前置都 `ok`，带一个 pi-web 组件与一条不阻塞的
+    /// 端口提示（端口占用只提示、不影响 `canStartService`）。
+    private func makeCacheReport() -> DependencyReport {
+        var piWeb = finding(.piWeb, .ok)
+        piWeb.path = "~/tools/bin/pi-web"
+        piWeb.version = "1.2.3"
+        piWeb.installSource = .npmGlobal
+        piWeb.confidence = .verified
+        piWeb.packageName = "@agegr/pi-web"
+        piWeb.packageVersion = "1.2.3"
+        var port = finding(.port, .occupied)
+        port.detail = "端口已被占用，将复用已有服务"
+        return DependencyReport(
+            findings: [finding(.node, .ok), finding(.piCLI, .ok), piWeb, port],
+            components: [
+                ComponentInstallation(
+                    kind: .piWeb,
+                    packageName: "@agegr/pi-web",
+                    version: "1.2.3",
+                    executablePath: "~/tools/bin/pi-web",
+                    resolvedPath: "~/tools/lib/node_modules/@agegr/pi-web/cli.js",
+                    symlinkChain: ["~/tools/bin/pi-web"],
+                    packageJSONPath: "~/tools/lib/node_modules/@agegr/pi-web/package.json",
+                    source: .npmGlobal,
+                    confidence: .verified,
+                    evidence: ["npm 全局前缀命中"],
+                    suggestedCommand: "npm install -g @agegr/pi-web@latest"
+                )
+            ]
+        )
+    }
+
+    private func makeCacheFingerprint() -> DependencyGateFingerprint {
+        DependencyGateFingerprint(
+            appVersion: "0.1.0",
+            piWebPath: "",
+            workspacePath: "",
+            hostname: "127.0.0.1",
+            port: 30141,
+            toolPathDigest: "3f2a1b"
+        )
+    }
+
+    private func makeCacheStore(_ io: DependencyGateFakeCacheFileIO) -> DependencyGateCacheStore {
+        DependencyGateCacheStore(
+            url: URL(fileURLWithPath: "/tmp/pi-web-desktop-tests-home/support/dependency-gate-cache.json"),
+            fileIO: io
+        )
+    }
+
+    /// 缓存文件位置：支持目录下的独立 JSON（不写用户偏好设置、不进仓库）。
+    func testDependencyGateCacheLivesUnderSupportDirectoryAsItsOwnFile() {
+        let support = URL(fileURLWithPath: "/tmp/pi-web-desktop-tests-home/support")
+        let configuration = AppConfiguration(
+            supportURL: support,
+            logsRootURL: URL(fileURLWithPath: "/tmp/pi-web-desktop-tests-home/logs"),
+            defaults: UserDefaults(suiteName: "pi-web-desktop-cache-tests") ?? .standard
+        )
+        XCTAssertEqual(configuration.dependencyGateCacheURL.lastPathComponent, "dependency-gate-cache.json")
+        XCTAssertEqual(
+            configuration.dependencyGateCacheURL.deletingLastPathComponent().path,
+            configuration.supportURL.path
+        )
+        XCTAssertEqual(
+            configuration.dependencyGateCacheURL.path,
+            configuration.supportURL.appendingPathComponent("dependency-gate-cache.json").path
+        )
+    }
+
+    /// 写入 → 读取 → 判定全链路：报告与指纹逐字段还原，结论可以放行。
+    func testDependencyGateCacheRoundTripsReportAndFingerprint() {
+        let io = DependencyGateFakeCacheFileIO()
+        let store = makeCacheStore(io)
+        let fingerprint = makeCacheFingerprint()
+        let writtenAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let cache = DependencyGateCache(report: makeCacheReport(), fingerprint: fingerprint, writtenAt: writtenAt)
+
+        XCTAssertTrue(store.save(cache))
+        XCTAssertEqual(io.writtenURLs, [store.url])
+        let loaded = store.load()
+        XCTAssertEqual(loaded, cache)
+
+        let verdict = DependencyGateFastPath.decide(
+            cache: loaded,
+            fingerprint: fingerprint,
+            now: writtenAt.addingTimeInterval(3_600)
+        )
+        guard case .valid(let report) = verdict else {
+            return XCTFail("缓存应当可用，实际：\(verdict)")
+        }
+        XCTAssertEqual(report.findings, makeCacheReport().findings)
+        XCTAssertEqual(report.components, makeCacheReport().components)
+        XCTAssertTrue(report.canStartService)
+        XCTAssertEqual(report.component(for: .piWeb)?.version, "1.2.3")
+        XCTAssertEqual(report.component(for: .piWeb)?.suggestedCommand, "npm install -g @agegr/pi-web@latest")
+    }
+
+    /// 缓存缺失、内容不是 JSON、枚举取值无法识别：都按“没有可用缓存”处理。
+    func testDependencyGateCacheTreatsMissingOrUnreadableDataAsNoCache() {
+        let io = DependencyGateFakeCacheFileIO()
+        let store = makeCacheStore(io)
+        XCTAssertNil(store.load())
+        XCTAssertEqual(
+            DependencyGateFastPath.decide(cache: store.load(), fingerprint: makeCacheFingerprint(), now: Date()),
+            .invalid(.missingOrUnreadable)
+        )
+
+        io.data = Data("{ not json".utf8)
+        XCTAssertNil(store.load())
+
+        io.data = nil
+        let cache = DependencyGateCache(
+            report: makeCacheReport(),
+            fingerprint: makeCacheFingerprint(),
+            writtenAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        XCTAssertTrue(store.save(cache))
+        let text = String(data: io.data ?? Data(), encoding: .utf8) ?? ""
+        XCTAssertTrue(text.contains("\"pi-web\""))
+        // 把一个合法 JSON 里的枚举取值改成不认识的字符串：整份缓存不可用。
+        io.data = Data(text.replacingOccurrences(of: "\"pi-web\"", with: "\"pi-web-legacy\"").utf8)
+        XCTAssertNil(store.load())
+    }
+
+    /// schema 版本不符：即字段含义变化后的旧缓存。
+    func testDependencyGateCacheRejectsSchemaMismatch() {
+        var cache = DependencyGateCache(
+            report: makeCacheReport(),
+            fingerprint: makeCacheFingerprint(),
+            writtenAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        XCTAssertEqual(cache.schemaVersion, DependencyGateCache.schemaVersion)
+        cache.schemaVersion = DependencyGateCache.schemaVersion + 1
+        XCTAssertEqual(
+            DependencyGateFastPath.decide(
+                cache: cache,
+                fingerprint: makeCacheFingerprint(),
+                now: Date(timeIntervalSince1970: 1_700_000_100)
+            ),
+            .invalid(.schemaMismatch)
+        )
+    }
+
+    /// 有效期：默认 7 天，边界内可用、边界外失效；时钟回拨得到的“未来缓存”不可信。
+    func testDependencyGateCacheHonoursItsAgeLimit() {
+        let policy = DependencyGateCachePolicy()
+        XCTAssertEqual(policy.maximumAge, 7 * 24 * 60 * 60)
+        let writtenAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let fingerprint = makeCacheFingerprint()
+        let cache = DependencyGateCache(report: makeCacheReport(), fingerprint: fingerprint, writtenAt: writtenAt)
+
+        XCTAssertEqual(
+            DependencyGateFastPath.decide(
+                cache: cache,
+                fingerprint: fingerprint,
+                policy: policy,
+                now: writtenAt.addingTimeInterval(policy.maximumAge - 1)
+            ),
+            .valid(makeCacheReport())
+        )
+        XCTAssertEqual(
+            DependencyGateFastPath.decide(
+                cache: cache,
+                fingerprint: fingerprint,
+                policy: policy,
+                now: writtenAt.addingTimeInterval(policy.maximumAge + 1)
+            ),
+            .invalid(.expired)
+        )
+        XCTAssertEqual(
+            DependencyGateFastPath.decide(
+                cache: cache,
+                fingerprint: fingerprint,
+                policy: policy,
+                now: writtenAt.addingTimeInterval(-1)
+            ),
+            .invalid(.expired)
+        )
+    }
+
+    /// 指纹的每个字段变化都必须让缓存失效。
+    func testDependencyGateCacheRejectsEveryFingerprintChange() {
+        let fingerprint = makeCacheFingerprint()
+        let writtenAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let cache = DependencyGateCache(report: makeCacheReport(), fingerprint: fingerprint, writtenAt: writtenAt)
+
+        var variants: [(String, DependencyGateFingerprint)] = []
+        var variant = fingerprint
+        variant.appVersion = "0.2.0"
+        variants.append(("应用版本", variant))
+        variant = fingerprint
+        variant.piWebPath = "~/other/pi-web"
+        variants.append(("pi-web 路径", variant))
+        variant = fingerprint
+        variant.workspacePath = "~/code"
+        variants.append(("工作目录", variant))
+        variant = fingerprint
+        variant.hostname = "127.0.0.2"
+        variants.append(("服务地址", variant))
+        variant = fingerprint
+        variant.port = 30142
+        variants.append(("服务端口", variant))
+        variant = fingerprint
+        variant.toolPathDigest = "9c8b7a"
+        variants.append(("工具 PATH 摘要", variant))
+
+        for (label, changed) in variants {
+            XCTAssertEqual(
+                DependencyGateFastPath.decide(
+                    cache: cache,
+                    fingerprint: changed,
+                    now: writtenAt.addingTimeInterval(60)
+                ),
+                .invalid(.fingerprintChanged),
+                "\(label)变化必须让缓存失效"
+            )
+        }
+    }
+
+    /// 上次结论为不可启动：即使指纹与时间都一致也必须重跑完整检查。
+    func testDependencyGateCacheRejectsReportThatCouldNotStartService() {
+        var report = makeCacheReport()
+        report.findings = report.findings.map { finding in
+            finding.kind == .piWeb ? self.finding(.piWeb, .missing) : finding
+        }
+        let cache = DependencyGateCache(
+            report: report,
+            fingerprint: makeCacheFingerprint(),
+            writtenAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        XCTAssertFalse(cache.canStartService)
+        XCTAssertFalse(report.canStartService)
+        XCTAssertEqual(
+            DependencyGateFastPath.decide(
+                cache: cache,
+                fingerprint: makeCacheFingerprint(),
+                now: Date(timeIntervalSince1970: 1_700_000_060)
+            ),
+            .invalid(.canStartServiceIsFalse)
+        )
+    }
+
+    /// 缓存里的布尔值不能单独放行：结论以 findings 重新计算的 `canStartService`
+    /// 为准（缓存文件被改坏时宁可多跑一次完整检查）。
+    func testDependencyGateCacheRecomputesCanStartServiceFromFindings() {
+        var cache = DependencyGateCache(
+            report: makeCacheReport(),
+            fingerprint: makeCacheFingerprint(),
+            writtenAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        XCTAssertTrue(cache.canStartService)
+        cache.findings = [finding(.node, .ok), finding(.piWeb, .missing)]
+        XCTAssertEqual(
+            DependencyGateFastPath.decide(
+                cache: cache,
+                fingerprint: makeCacheFingerprint(),
+                now: Date(timeIntervalSince1970: 1_700_000_060)
+            ),
+            .invalid(.canStartServiceIsFalse)
+        )
+    }
+
+    /// 写失败不抛错、不改变判定：只是下一次启动拿不到缓存。
+    func testDependencyGateCacheWriteFailureIsReportedInsteadOfThrowing() {
+        let io = DependencyGateFakeCacheFileIO()
+        io.writeSucceeds = false
+        let store = makeCacheStore(io)
+        let cache = DependencyGateCache(
+            report: makeCacheReport(),
+            fingerprint: makeCacheFingerprint(),
+            writtenAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        XCTAssertFalse(store.save(cache))
+        XCTAssertNil(io.data)
+        XCTAssertNil(store.load())
+    }
+
+    /// 摘要函数：同样输入同样结果，分隔符不同不能撞车。
+    func testDependencyGateDigestSeparatesInputs() {
+        XCTAssertEqual(DependencyGateCacheDigest.digest(["a", "b"]), DependencyGateCacheDigest.digest(["a", "b"]))
+        XCTAssertNotEqual(DependencyGateCacheDigest.digest(["ab"]), DependencyGateCacheDigest.digest(["a", "b"]))
+        XCTAssertNotEqual(DependencyGateCacheDigest.digest(["a"]), DependencyGateCacheDigest.digest(["A"]))
+        // 原文不进摘要：摘要只比较是否变化，不含主目录路径原文。
+        XCTAssertFalse(DependencyGateCacheDigest.digest(["/tmp/pi-web-desktop-tests-home"]).contains("tmp"))
+    }
+
+    /// 快路径之后的收敛判据（安全关键路径）：只有“路由仍是主窗口且复查同意可启动”
+    /// 才不收敛，其余三种情况都必须收敛到真实状态。
+    func testDependencyGateFastPathConvergenceCoversEveryOutcome() {
+        XCTAssertFalse(
+            DependencyGateFastPath.requiresConvergence(canStartService: true, routeIsMainWindow: true),
+            "一致时不得重新路由（重跑路由会把服务页换回加载页并再启动一次服务）"
+        )
+        XCTAssertTrue(
+            DependencyGateFastPath.requiresConvergence(canStartService: false, routeIsMainWindow: true),
+            "复查发现不可启动时必须收敛"
+        )
+        XCTAssertTrue(
+            DependencyGateFastPath.requiresConvergence(canStartService: true, routeIsMainWindow: false),
+            "复查路由到诊断页时必须收敛"
+        )
+        XCTAssertTrue(
+            DependencyGateFastPath.requiresConvergence(canStartService: false, routeIsMainWindow: false),
+            "复查与路由都不成立时必须收敛"
+        )
+    }
+
+    /// 接线断言（test target 装不了 AppDelegate，沿用仓库既有的源码级断言做法）：
+    /// 启动路径走快路径入口、用户“重新检测”不走，复查不一致时复用可测的收敛判据
+    /// 并停掉本应用托管的服务。
+    func testAppWiringUsesStartupFastPathAndConvergesOnDivergence() throws {
+        let diagnostics = SourceScan.codeText(of: try SourceScan.text(named: "AppDelegate+Diagnostics.swift"))
+        XCTAssertTrue(diagnostics.contains("func runStartupDependencyCheck()"), "启动路径必须有快路径入口")
+        XCTAssertTrue(diagnostics.contains("guard applyDependencyGateCacheFastPath()"), "快路径必须先于完整检查")
+        XCTAssertTrue(
+            diagnostics.contains("DependencyGateFastPath.requiresConvergence("),
+            "复查收敛必须复用可测的纯函数判据"
+        )
+        XCTAssertTrue(diagnostics.contains("serviceManager.stopService()"), "复查不一致时必须停掉本应用托管的服务")
+        XCTAssertTrue(diagnostics.contains("logDependencyGate("), "快路径命中/失效/复查不一致都必须写日志")
+        // 快路径调用点只有声明与启动入口两处：用户“重新检测”的入口必须绕开快路径。
+        XCTAssertEqual(
+            diagnostics.components(separatedBy: "applyDependencyGateCacheFastPath()").count,
+            3,
+            "快路径只能被启动入口调用一次"
+        )
+
+        let packageUpdates = SourceScan.codeText(of: try SourceScan.text(named: "AppDelegate+PackageUpdates.swift"))
+        XCTAssertTrue(packageUpdates.contains("runStartupDependencyCheck()"), "启动装配必须改走快路径入口")
+        XCTAssertFalse(packageUpdates.contains("runDependencyCheck()"), "启动装配不得直接跑完整检查")
     }
 }

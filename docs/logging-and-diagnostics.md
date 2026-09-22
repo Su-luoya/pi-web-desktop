@@ -124,6 +124,19 @@ Pi Web 安装超时或取消、Pi CLI 与扩展包的更新命令超时或放弃
 
 统一的更新历史（`updateChecks.updateHistory`）只存时间、组件、来源、从/到版本、每个阶段的固定结论、固定原因文案与降级结论；写入前逐条校验，非法版本号、非法包名与未知枚举直接丢弃，不写绝对路径、环境值或子进程输出。诊断页的“最近一次更新”行只展示完成阶段、阶段结论与建议动作，手动命令文本来自静态清单，仅展示、不执行。验证阶段的探针结果（文件是否存在、是否可执行、`package.json` 名称、可选的大小/mtime）只在内存中参与判定，不写入历史也不进入诊断导出。
 
+### 启动门控缓存与后台复查（GitHub #169）
+
+启动时先读一份依赖检查缓存：命中就直接放行服务启动入口，完整检查转后台复查。判定与两条复查路径都写应用日志行（`LogWriter` 惯例，经 `LogRedactor`），可以回答“这次为什么走了/没走快路径”：
+
+- 快路径命中：`环境检查快路径命中：立即放行服务启动入口，完整检查转入后台复查`
+- 快路径未命中：`环境检查快路径未命中：<原因>，本次走完整检查`，原因取固定文案之一：`缓存缺失或不可解析`、`缓存 schema 版本不符`、`缓存已过期`、`启动输入指纹已变化`、`上次检查的结论为不可启动`、`缓存内容无法还原`
+- 快路径不适用（诊断启动模式，或首次设置未完成）：`环境检查快路径不适用：本次启动需要完整检查`
+- 缓存写入：`环境检查缓存已更新：有效期 N 天，任一启动输入变化即失效`；写失败时 `环境检查缓存写入失败：不影响本次结论，只影响下次启动的快路径`
+- 后台复查与缓存一致：`环境检查后台复查与缓存一致：服务可启动，不重新路由`
+- 后台复查与缓存不一致：`环境检查后台复查与缓存不一致：canStartService=<true|false>，收敛到诊断页`
+
+这些日志行只含固定文案、原因枚举与结论布尔值，不含路径、凭据或 URL：指纹里的工具 PATH 输入只以摘要（`DependencyGateCacheDigest.digest`）参与比较，Home 路径原文不写日志。缓存文件位于支持目录（`AppConfiguration.dependencyGateCacheURL` = `<支持目录>/dependency-gate-cache.json`），不写用户偏好设置；内容是报告快照（`findings` 与 `components`，路径已在 `DependencyChecker` 里做过 `~` 脱敏），**有效期 7 天**，`schemaVersion` 不符、任一指纹字段（应用版本、`piWebPath`、`workspacePath`、`hostname`、`port`、工具 PATH 摘要）变化、超过有效期或上次结论为不可启动时立即失效并回到完整检查。详细门控语义见 [架构说明](architecture.md)。
+
 ## 命令探测失败的原因（GitHub #89）
 
 依赖探测只在只读的子进程里跑版本查询。拿不到版本时不再只报“无法确定/未知”，原因会写入 `DependencyFinding.diagnosis`，并出现在三个地方：
@@ -209,6 +222,7 @@ Pi Web 安装超时或取消、Pi CLI 与扩展包的更新命令超时或放弃
 | 探测不阻塞调用方（阻塞替身）、超时终止子进程并降级、“没有监听者 ≠ 探测失败”、失败项标注、监听 argv 复用更新路径遮罩、设置窗口控制器单例复用，以及 M2/M3/L5 的源码级接线断言 | `PiWebDesktopTests/DiagnosticsCollectorTests.swift` |
 | 组件安装区块的多行标签与逐项渲染（`组件安装[2]:`） | `PiWebDesktopTests/DiagnosticsCollectorTests.swift` |
 | 组件安装识别、只读约束与建议命令策略 | `PiWebDesktopTests/ComponentInstallationTests.swift` |
+| 启动门控缓存往返、schema 版本、有效期与时钟回拨、六类失效原因、写失败降级、指纹摘要函数、缓存文件位置 | `PiWebDesktopTests/DependencyCheckerTests.swift` |
 | 启动失败消息先脱敏再进状态/回调/日志 | `PiWebDesktopTests/ServiceManagerTests.swift` |
 | 退出但保持服务运行不停止服务、保留所有权记录，并交出子进程输出读端（排空进程） | `PiWebDesktopTests/ServiceManagerTests.swift`、`PiWebDesktopTests/LogWriterTests.swift` |
 | 打包、身份、双模式 smoke | `./Scripts/build.sh`、`./Scripts/check-identity.sh`、`./Scripts/smoke.sh` |

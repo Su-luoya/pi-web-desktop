@@ -835,3 +835,72 @@ struct DependencyChecker {
         return version.patchVersion >= minimum.patchVersion
     }
 }
+
+// MARK: - 启动门控快路径缓存存储（GitHub #169）
+
+/// 缓存文件的读写接缝：生产环境用 `FileManager`，测试用内存替身。
+/// 缓存只是“上次结论的副本”，读写失败都不影响本次检查结论。
+protocol DependencyGateCacheFileIO {
+    /// 读取整个文件；不存在、不可读或读取失败时返回 nil。
+    func read(from url: URL) -> Data?
+    /// 原子写入（必要时创建父目录）；返回是否成功。
+    @discardableResult
+    func write(_ data: Data, to url: URL) -> Bool
+}
+
+/// 生产实现：`FileManager` + 原子写入，父目录按需创建。
+struct SystemDependencyGateCacheFileIO: DependencyGateCacheFileIO {
+    private let fileManager: FileManager
+
+    init(fileManager: FileManager = .default) {
+        self.fileManager = fileManager
+    }
+
+    func read(from url: URL) -> Data? {
+        fileManager.contents(atPath: url.path)
+    }
+
+    @discardableResult
+    func write(_ data: Data, to url: URL) -> Bool {
+        do {
+            try fileManager.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try data.write(to: url, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+}
+
+/// 启动门控快路径缓存的落盘存储。
+///
+/// 文件是支持目录下的独立 JSON（路径来自 `AppConfiguration.dependencyGateCacheURL`），
+/// 不写用户偏好设置、不进仓库。两个方向都以“返回 nil / false”表示失败：缓存永远
+/// 不能把启动卡住，也不能改变本次结论。
+struct DependencyGateCacheStore {
+    var url: URL
+    var fileIO: DependencyGateCacheFileIO = SystemDependencyGateCacheFileIO()
+
+    /// 读缓存：nil 表示没有可用缓存（缺失、读不到或不可解析），调用方按完整检查
+    /// 处理（fail-closed）。
+    func load() -> DependencyGateCache? {
+        guard let data = fileIO.read(from: url) else { return nil }
+        let decoder = JSONDecoder()
+        // `writtenAt` 用 ISO8601：跨版本可读，日志里也能直接看出缓存写入时间。
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(DependencyGateCache.self, from: data)
+    }
+
+    /// 写缓存：返回是否成功。失败只影响下一次启动的速度。
+    @discardableResult
+    func save(_ cache: DependencyGateCache) -> Bool {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(cache) else { return false }
+        return fileIO.write(data, to: url)
+    }
+}

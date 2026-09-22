@@ -36,7 +36,9 @@ extension AppDelegate {
         // 更新检查立即开始：先把应用自身版本发出去；依赖检测完成后补齐
         // Pi / Pi Web / 扩展包版本（见 `startUpdateChecking`）。
         startUpdateChecking(with: UpdateCheckInventory(desktopAppVersion: ApplicationInstallationProbe.current.version))
-        runDependencyCheck()
+        // 环境门控（GitHub #169）：有可信缓存就立刻放行并跳过这屏等待，完整检查
+        // 转入后台复查；没有缓存（或缓存不可信）时走原来的完整检查。
+        runStartupDependencyCheck()
     }
 
     // MARK: - Pi 扩展包更新（GitHub #22）

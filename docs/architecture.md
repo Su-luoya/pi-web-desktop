@@ -118,6 +118,19 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 
 诊断文本只包含已脱敏的字段：Home 前缀替换为 `~`，URL 去掉 userinfo、query 和 fragment；不写入用户名、绝对 Home 路径、凭据、token 或查询参数。导出前整段文本经过与日志、错误消息、环境变量/命令行展示共用的 `LogRedactor`（规则见 [日志与诊断导出](logging-and-diagnostics.md)）。Pi 配置目录只报告路径（`~/.pi/agent`）与“存在/可读”状态：既不做目录列表，也不读取目录内任何文件，认证内容永远不会进入报告。
 
+### 启动门控缓存与后台复查（GitHub #169）
+
+启动不再等整份依赖检查跑完：`AppDelegate.runStartupDependencyCheck()`（由 `Sources/App/AppDelegate+PackageUpdates.swift` 的 `applicationDidFinishLaunching` 调用）先查一次缓存，`DependencyChecker` 的完整检查随后照常在后台跑。
+
+- **缓存位置与格式**：`AppConfiguration.dependencyGateCacheURL` = `AppPaths.supportURL/dependency-gate-cache.json`，支持目录下的独立 JSON 文件（**不写** UserDefaults/偏好设置 plist，也不进仓库）。结构 `DependencyGateCache`（`Sources/Services/DependencyModel.swift`）：`schemaVersion`（当前 1）、`writtenAt`（ISO 8601 绝对时间）、`canStartService`、`fingerprint`、`findings`、`components`（枚举按 rawValue 存取）。
+- **指纹**（`DependencyGateFingerprint`）：应用版本、`piWebPath`、`workspacePath`、`hostname`、`port`、`toolPathDigest`。工具 PATH 相关输入（进程 `PATH`、登录 shell 报告的 `PATH`、用户主目录）先经 `DependencyGateCacheDigest.digest`（FNV-1a 64 位十六进制）压成摘要，缓存里不存路径原文。
+- **失效条件**（`DependencyGateFastPath.decide(cache:fingerprint:policy:now:)`，纯函数）：缓存缺失或不可解析（`missingOrUnreadable`）、schema 版本不符（`schemaMismatch`）、超过有效期（`expired`，`DependencyGateCachePolicy.maximumAge` 默认 **7 天**，时间戳在未来也按过期处理）、任一指纹字段变化（`fingerprintChanged`）、上次结论为不可启动（`canStartServiceIsFalse`）、内容无法还原（`reportUnreadable`）。结论永远以缓存里的 `findings` 重算出的 `canStartService` 为准，不信任文件里的布尔值。
+- **快路径**：命中时立即 `dependencyGate = .ready`、`serviceManager.isDependencyGateOpen = true`，跳过“正在检查运行环境…”的加载页直接开始加载服务页；同时仍在后台跑一次完整检查（`runDependencyCheck(refiningCachedGate: true)`）。后台复查不回退门控到 `.checking`、不关闭启动入口——复查结果可能早于启动请求返回（启动前还有一次自动更新决策），把门控关回去会让服务永远起不来。
+- **收敛**：复查与缓存一致时只更新缓存与日志；不一致时收敛到真实状态——更新门控、必要时用现有 `ServiceManager.stopService()` 停掉本应用托管且所有权记录可验证的服务（外部服务不动）、`stopHealthMonitor()`、显示诊断状态页并打开诊断窗口。
+- **缓存写入**：每次完整检查（启动检查、用户“重新检测”）结束都写一次，`canStartService == false` 的报告也写（读取端会拒绝它，失效规则因此不是空承诺）。
+- **不走快路径的情形**：诊断启动模式、首次启动设置未完成（`hasCompletedFirstLaunchSetup == false`）、用户“重新检测”（`triggeredByUser == true` 的入口不经过快路径）。这些情形保持完整检查与原有加载页文案不变。
+- **不被推迟的即时步骤**：`closeRemoteAccessIfCredentialsAreUnavailable()`、工作目录校验与 `DiagnosticsRouting.route(...)` 仍在启动时执行，缓存只影响依赖检查这一项。
+
 ### 探针超时与取消语义
 
 依赖诊断与诊断导出共用的 `SystemCommandRunner` 对每条命令都有超时上限（`timeout` 可注入，默认 `SystemCommandRunner.defaultTimeout` = 10 秒；等待 SIGTERM 生效的宽限默认为 0.5 秒）。语义：

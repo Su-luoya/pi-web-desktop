@@ -110,10 +110,14 @@ extension AppDelegate {
         let windowMenuItem = NSMenuItem()
         mainMenu.addItem(windowMenuItem)
         let windowMenu = NSMenu(title: "窗口")
+        // 多窗口（GitHub #168）：在现有「最小化/缩放/全屏幕/显示 Pi Web」之前加
+        // 「新建窗口」，新窗口用新的 WebViewController 加载同一个服务地址。
+        windowMenu.addItem(withTitle: "新建窗口", action: #selector(newWindow(_:)), keyEquivalent: "n")
+        windowMenu.addItem(.separator())
         windowMenu.addItem(withTitle: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "缩放", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
-        windowMenu.addItem(withTitle: "全屏幕", action: #selector(toggleFullScreen(_:)), keyEquivalent: "f")
-        windowMenu.item(at: 2)?.keyEquivalentModifierMask = [.command, .control]
+        let windowFullScreenItem = windowMenu.addItem(withTitle: "全屏幕", action: #selector(toggleFullScreen(_:)), keyEquivalent: "f")
+        windowFullScreenItem.keyEquivalentModifierMask = [.command, .control]
         windowMenu.addItem(withTitle: "显示 Pi Web", action: #selector(showWindow(_:)), keyEquivalent: "")
         windowMenuItem.submenu = windowMenu
         NSApp.windowsMenu = windowMenu
@@ -624,13 +628,30 @@ extension AppDelegate {
         ServiceState.statusText(for: currentState, managedPID: serviceManager.managedServicePID())
     }
 
-    @objc func reloadPage(_ sender: Any?) { webViewController.reload() }
-    @objc func hardReloadPage(_ sender: Any?) { webViewController.reloadFromOrigin() }
-    @objc private func zoomIn(_ sender: Any?) { webViewController.zoomIn() }
-    @objc private func zoomOut(_ sender: Any?) { webViewController.zoomOut() }
-    @objc private func resetZoom(_ sender: Any?) { webViewController.resetZoom() }
+    /// 菜单动作与窗口菜单标题的目标窗口：当前 key 窗口（仅限已登记窗口，设置/诊断
+    /// 窗口与面板不参与多窗口路由），没有可用的 key 窗口时回落到最近使用的主窗口
+    /// （GitHub #168：多窗口下菜单动作不能固定第一个窗口）。
+    var activeWindow: NSWindow? {
+        if let key = NSApp.keyWindow, windowRegistry.controller(for: key) != nil { return key }
+        return windowRegistry.mainWindow
+    }
 
-    @objc private func showFindBar(_ sender: Any?) { webViewController.showFindBar(in: window) }
+    /// 页面动作的目标 WebView 控制器，与 `activeWindow` 同源。
+    private var activeWebViewController: WebViewController? {
+        guard let target = activeWindow else { return nil }
+        return windowRegistry.controller(for: target) ?? windowRegistry.mainController
+    }
+
+    @objc func reloadPage(_ sender: Any?) { activeWebViewController?.reload() }
+    @objc func hardReloadPage(_ sender: Any?) { activeWebViewController?.reloadFromOrigin() }
+    @objc private func zoomIn(_ sender: Any?) { activeWebViewController?.zoomIn() }
+    @objc private func zoomOut(_ sender: Any?) { activeWebViewController?.zoomOut() }
+    @objc private func resetZoom(_ sender: Any?) { activeWebViewController?.resetZoom() }
+
+    @objc private func showFindBar(_ sender: Any?) {
+        guard let target = activeWindow else { return }
+        activeWebViewController?.showFindBar(in: target)
+    }
 
     /// 显式菜单项“退出 Pi Web Desktop（保持服务运行）”：不受设置的退出行为影响。
     /// 不调用 stopService，也不删除 service-owner.json，让 pi-web 继续独立运行。

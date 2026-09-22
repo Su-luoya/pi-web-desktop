@@ -28,11 +28,19 @@ extension AppDelegate {
         )
     }
 
+    /// 把**最近使用的主窗口**适配到它当前所在的屏幕（既有调用点语义不变，
+    /// 见 `AppDelegate+Quit.swift` 的 `scheduleWindowFit`）。
     func fitWindowToCurrentScreen() {
-        guard let window, let screen = window.screen ?? NSScreen.main else { return }
+        fitOnCurrentScreen(window)
+    }
+
+    /// 把指定窗口适配到它当前所在的屏幕。多窗口（GitHub #168）下每个窗口只改
+    /// 自己的 frame：主窗口的适配不会覆盖用户刚挪到另一块屏幕上的新窗口。
+    private func fitOnCurrentScreen(_ target: NSWindow?) {
+        guard let target, let screen = target.screen ?? NSScreen.main else { return }
         // Native full-screen mode owns the window frame. Do not overwrite it
         // while AppKit is entering or already in a full-screen Space.
-        guard !isFullScreenTransition, !window.styleMask.contains(.fullScreen) else { return }
+        guard !isFullScreenTransition, !target.styleMask.contains(.fullScreen) else { return }
         let visible = screen.visibleFrame
         guard visible.width > 0, visible.height > 0 else { return }
 
@@ -40,32 +48,69 @@ extension AppDelegate {
         // 而且还额外留了 20pt 边距；如果窗口之前已经较小，就永远不会
         // 被放大回去，因此在旋转显示器或恢复自动保存 frame 后会偶发露出桌面。
         if visible.height > visible.width {
-            if window.frame != visible {
-                window.setFrame(visible, display: true, animate: false)
+            if target.frame != visible {
+                target.setFrame(visible, display: true, animate: false)
             }
             return
         }
 
-        var frame = window.frame
-        frame.size.width = min(max(frame.size.width, window.minSize.width), visible.width)
-        frame.size.height = min(max(frame.size.height, window.minSize.height), visible.height)
+        var frame = target.frame
+        frame.size.width = min(max(frame.size.width, target.minSize.width), visible.width)
+        frame.size.height = min(max(frame.size.height, target.minSize.height), visible.height)
         frame.origin.x = min(max(frame.origin.x, visible.minX), visible.maxX - frame.width)
         frame.origin.y = min(max(frame.origin.y, visible.minY), visible.maxY - frame.height)
-        if frame != window.frame {
-            window.setFrame(frame, display: true, animate: false)
+        if frame != target.frame {
+            target.setFrame(frame, display: true, animate: false)
         }
     }
 
+    // MARK: - 窗口创建（GitHub #168 多窗口）
+
+    /// 创建**启动窗口**（主窗口）：登记进 `windowRegistry`，继续使用
+    /// `PiWebMainWindow` 这个自动保存名（多窗口后只有这一个窗口使用它）。
     func createWindow() {
-        webViewController = WebViewController(
+        let made = makeWindow(autosaveName: "PiWebMainWindow", offsetFromMostRecentlyUsed: false)
+        presentWindow(made.window)
+    }
+
+    /// 「新建窗口」/ ⌘N 的入口：新窗口 + **新的** `WebViewController` 实例，加载
+    /// `serviceManager.configuration.serviceURL`（GitHub #149 的放行面由
+    /// `WebViewController` 自身的 `serviceURL` 决定，不受窗口数量影响）。
+    ///
+    /// 窗口共享同一个 `ServiceManager`：开窗只创建展示层，不启动、不停止、不重启
+    /// 服务；新窗口位置按最近使用窗口级联偏移，也不与主窗口抢同一个 autosave 名。
+    @discardableResult
+    func createNewWindow() -> NSWindow {
+        let made = makeWindow(autosaveName: nil, offsetFromMostRecentlyUsed: true)
+        presentWindow(made.window)
+        loadInitialPage(in: made.controller)
+        return made.window
+    }
+
+    /// ⌘N / 窗口菜单「新建窗口」动作。
+    @objc func newWindow(_ sender: Any?) {
+        createNewWindow()
+    }
+
+    /// 创建一个窗口与它自己的 WebView 控制器，并登记两者。
+    ///
+    /// 控制器先建、窗口后建：`WebViewController` 需要在初始化时就拿到窗口供
+    /// 查找栏/保存面板使用，而窗口的 `contentView` 又需要 `webView`。这里先给
+    /// 控制器一个占位 provider，窗口建好后立刻改写成绑定该窗口的 provider。
+    private func makeWindow(
+        autosaveName: String?,
+        offsetFromMostRecentlyUsed: Bool
+    ) -> (window: NSWindow, controller: WebViewController) {
+        let controller = WebViewController(
             serviceURL: startURL,
             servicePort: serviceManager.configuration.port,
-            windowProvider: { [weak self] in self?.window }
+            windowProvider: { nil }
         )
-        webViewController.onNavigationFailure = { [weak self] failure in
-            guard let self, !self.serviceManager.isQuitting else { return }
+        controller.onNavigationFailure = { [weak self, weak controller] failure in
+            guard let self, let controller, !self.serviceManager.isQuitting else { return }
             // 导航失败只写日志并渲染错误页：服务状态由启动流程与健康检查决定，
             // 不能因为一次页面级失败（例如被取消的外链导航）被改成「已停止」。
+            // 多窗口下错误页只渲染到出错的那个窗口，其它窗口保持原样。
             let message: String
             switch failure {
             case .loadFailed(let description):
@@ -74,31 +119,90 @@ extension AppDelegate {
                 message = "无法连接 Pi Web：\(description)"
             }
             _ = self.logWriter.append(self.logRedactor.redact(message))
-            self.webViewController.showErrorPage(message: message)
+            controller.showErrorPage(message: message)
         }
 
-        window = NSWindow(
+        let newWindow = NSWindow(
             contentRect: preferredWindowFrame(for: NSScreen.main),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.delegate = self
-        window.title = "Pi Web Desktop"
-        window.titlebarAppearsTransparent = false
+        newWindow.delegate = self
+        newWindow.title = "Pi Web Desktop"
+        newWindow.titlebarAppearsTransparent = false
         // Keep the native green button and the standard Control-Command-F
         // shortcut available on a regular foreground application.
-        window.collectionBehavior = [.fullScreenPrimary]
-        window.minSize = NSSize(width: 560, height: 560)
+        newWindow.collectionBehavior = [.fullScreenPrimary]
+        newWindow.minSize = NSSize(width: 560, height: 560)
         // 使用原生标题栏作为稳定的拖拽区域；网页内容不会被透明拖拽层遮挡。
-        window.contentView = webViewController.webView
-        window.center()
-        window.setFrameAutosaveName("PiWebMainWindow")
-        window.makeKeyAndOrderFront(nil)
-        fitWindowToCurrentScreen()
+        newWindow.contentView = controller.webView
+        // 主窗口只隐藏不关闭（`windowShouldClose`）；⌘N 打开的窗口可以真正关闭。
+        // 让 ARC 持有/释放窗口，避免 AppKit 在 isReleasedWhenClosed 下重复释放。
+        newWindow.isReleasedWhenClosed = false
+        controller.windowProvider = { [weak newWindow] in newWindow }
+        if offsetFromMostRecentlyUsed, let reference = windowRegistry.mainWindow {
+            cascade(newWindow, from: reference)
+        } else {
+            newWindow.center()
+        }
+        if let autosaveName {
+            newWindow.setFrameAutosaveName(autosaveName)
+        }
+        windowRegistry.register(window: newWindow, controller: controller)
+        return (newWindow, controller)
+    }
+
+    /// 新窗口位置：从最近使用窗口向右下偏移；偏移后超出屏幕可用区域时回落到
+    /// 该屏幕上的默认 frame（竖屏同样是整块可用区域）。
+    private func cascade(_ target: NSWindow, from reference: NSWindow) {
+        let screen = reference.screen ?? NSScreen.main
+        var frame = reference.frame
+        frame.origin.x += 24
+        frame.origin.y -= 24
+        if let visible = screen?.visibleFrame, !visible.contains(frame) {
+            frame = preferredWindowFrame(for: screen)
+        }
+        target.setFrame(frame, display: false)
+    }
+
+    /// 把窗口显示到最前并适配当前屏幕；主窗口启动路径与 ⌘N 共用。
+    private func presentWindow(_ target: NSWindow) {
+        target.makeKeyAndOrderFront(nil)
+        fitOnCurrentScreen(target)
         if !NSApp.isActive {
             NSApp.activate(ignoringOtherApps: true)
         }
+    }
+
+    /// 新窗口的首页：依赖门控就绪时加载同一个服务地址；门控未就绪时渲染与主窗口
+    /// 同一来源（`DiagnosticsRouting` 的输入）的诊断状态页，而不是留下空白窗口。
+    /// 两种路径都不触碰服务生命周期。
+    private func loadInitialPage(in controller: WebViewController) {
+        guard dependencyGate == .ready, workspaceValidation.isUsable else {
+            let dependencyText = dependencyReport.map {
+                DependencyReportPresenter.statusPageText(
+                    for: $0,
+                    setupIncomplete: !appConfiguration.hasCompletedFirstLaunchSetup
+                )
+            }
+            let message = [workspaceProblemMessage, dependencyText]
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n\n")
+            controller.showDependencyPage(
+                title: appConfiguration.hasCompletedFirstLaunchSetup
+                    ? "无法启动 Pi Web 服务"
+                    : "首次启动环境检查",
+                message: message.isEmpty ? "依赖检查尚未完成，请稍后重新检测。" : message
+            )
+            return
+        }
+        controller.updateService(
+            url: serviceManager.configuration.serviceURL,
+            port: serviceManager.configuration.port
+        )
+        controller.loadServicePage()
     }
 
     // MARK: - 打开工作目录
@@ -123,24 +227,52 @@ extension AppDelegate {
         requestWorkspaceSwitch(to: directory)
     }
 
+    /// 关闭窗口：主窗口沿用 GitHub #158 的语义（只 `orderOut` 隐藏，窗口对象、
+    /// WebView 与页面会话都保留，服务不因关窗而停止）；⌘N 打开的窗口返回 true
+    /// 真正关闭，登记表在 `windowWillClose` 里移除它，其它窗口完全不受影响。
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        sender.orderOut(nil)
-        return false
+        if windowRegistry.isMainWindow(sender) {
+            sender.orderOut(nil)
+            return false
+        }
+        return true
     }
 
+    /// 窗口真正关闭（红色关闭按钮、⌘W 或以后新增的“关闭窗口”动作）后从登记表
+    /// 移除，避免对已释放窗口继续下发页面动作。移除主窗口时由剩下的最近使用窗口
+    /// 接任；登记表清空只意味着下次 `showMainWindow()` 会补建窗口，**不代表**服务
+    /// 被停止（服务生命周期只由 `ServiceManager` 决定）。
+    func windowWillClose(_ notification: Notification) {
+        guard let closed = notification.object as? NSWindow else { return }
+        windowRegistry.remove(window: closed)
+    }
+
+    /// 窗口成为 key 窗口即记为最近使用：Dock 恢复与「显示 Pi Web」都回到用户
+    /// 最后操作过的窗口，而不是固定某一个窗口对象。
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard let key = notification.object as? NSWindow else { return }
+        windowRegistry.noteUsage(of: key)
+    }
+
+    /// 「显示 Pi Web」菜单项：与 Dock 点击同一条路径（恢复最近使用的主窗口）。
     @objc func showWindow(_ sender: Any?) {
-        window.makeKeyAndOrderFront(nil)
-        if !NSApp.isActive {
-            NSApp.activate(ignoringOtherApps: true)
-        }
+        showMainWindow()
     }
 
     func windowDidChangeScreen(_ notification: Notification) {
+        // 主窗口沿用防抖适配（`scheduleWindowFit`，见 `AppDelegate+Quit.swift`）；
+        // 其它窗口直接适配自己，避免把某个窗口的屏幕变化应用到主窗口。
+        if let changed = notification.object as? NSWindow, !windowRegistry.isMainWindow(changed) {
+            fitOnCurrentScreen(changed)
+            return
+        }
         scheduleWindowFit()
     }
 
+    /// 全屏幕（菜单 ⌃⌘F 与绿色按钮）：作用于当前 key 窗口（仅限已登记窗口），
+    /// 没有可用的 key 窗口时回落到最近使用的主窗口。
     @objc func toggleFullScreen(_ sender: Any?) {
-        window.toggleFullScreen(sender)
+        activeWindow?.toggleFullScreen(sender)
     }
 
     func windowWillEnterFullScreen(_ notification: Notification) {
@@ -166,8 +298,8 @@ extension AppDelegate {
 
     // MARK: - Dock 恢复（GitHub #158）
 
-    /// 点 Dock 图标（或应用被重新打开）时把主窗口带回来。返回 true 表示事件已处理，
-    /// AppKit 不再走自带的“新建窗口”路径。
+    /// 点 Dock 图标（或应用被重新打开）时把最近使用的主窗口带回来。返回 true 表示
+    /// 事件已处理，AppKit 不再走自带的“新建窗口”路径。
     ///
     /// AppKit 只在 `hasVisibleWindows == false` 时调这个方法，恰好覆盖三种情形：
     /// 1. 红色关闭按钮之后（`windowShouldClose` 只做 `orderOut(nil)`）；
@@ -178,10 +310,12 @@ extension AppDelegate {
         return true
     }
 
-    /// 把已存在的主窗口显示到当前屏幕并置前；窗口对象还没创建时补建它。
+    /// 把最近使用的主窗口显示到当前屏幕并置前；登记表为空时补建窗口。
     ///
-    /// 关闭按钮只隐藏窗口（见 `windowShouldClose`），窗口对象、WebView 和页面会话都
-    /// 还在，所以这里**必须复用**同一个窗口：重建会丢掉页面状态并留下第二个窗口。
+    /// 关闭按钮只隐藏主窗口（见 `windowShouldClose`），窗口对象、WebView 和页面
+    /// 会话都还在，所以这里**必须复用**同一个窗口：重建会丢掉页面状态并留下第二个
+    /// 窗口。⌘N 打开的窗口真正关闭后会从登记表移除，因此这里恢复的总是「还活着的
+    /// 最近使用窗口」。
     func showMainWindow() {
         guard let window else {
             // 还没有窗口：只有主菜单已安装（即启动流程已经走到

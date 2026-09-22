@@ -1502,3 +1502,92 @@ success），加上本版发布提交的版本 bump 与三份文档（发布说�
   §4.3。
 - 本次发布准备**只改版本文件与文档**：没有改 `Sources/`、`PiWebDesktopTests/`、`.github/`、`Scripts/`，
   **没有** push、**没有** 建 PR、**没有** 打 tag、**没有** 碰 GitHub Release 或 Issue 状态（由协调器负责）。
+
+## Release v0.1.0-alpha.14 执行记录
+
+本版候选：`main` 上的 `e0afaf1`（#168 / #169 / #166 / #167 四个 Issue 的修复，PR #170 / #171 /
+#166 / #167 合并后的 main；main CI run [35690235011](https://github.com/Su-luoya/pi-web-desktop/actions/runs/35690235011)
+success，耗时约 4m57s），加上本版发布提交的版本 bump 与三份文档（发布说明、安全评审、本节执行记录）。
+
+本节脚本输出在**本工作区**（`release-alpha-14`，基于 `main` `e0afaf1`）上采集；版本 bump 与新增文档在
+扫描前已 `git add`——`check-identity.sh` / `scan-secrets.sh` 的文本扫描只覆盖已跟踪文件，未跟踪的新文件
+会被跳过（见安全评审 R-11）。
+
+一个**环境发现**（不是本版代码缺陷）：本版在另一个 checkout（iCloud / Finder 同步目录）上首次执行
+`./Scripts/build.sh` 以退出码 1 失败，错误为 `resource fork, Finder information, or similar detritus not
+allowed`（bundle 上带有 `com.apple.FinderInfo` / `com.apple.fileprovider.fpfs#P` 扩展属性，ad-hoc 签名
+因此被拒绝）；按脚本提示 `xattr -cr <bundle>` 清理后重跑退出 0。下表的构建值是在**清理后、本工作区**
+实测的。同一个问题在本文件 alpha.1 一节与 `docs/development.md` 的「构建」一节都有记载；本版没有改
+`Scripts/`，也没有把清理动作写进脚本。
+
+### 按 #172 门槛清单的实测值
+
+| # | #172 门槛 | 实测值 / 证据 | 判定 |
+| --- | --- | --- | --- |
+| 1 | main CI 为绿 | run [35690235011](https://github.com/Su-luoya/pi-web-desktop/actions/runs/35690235011)（success，约 4m57s），发布前提交 `e0afaf1`（#171 合并提交，含 #168 / #169 / #166 / #167） | 通过（CI 结论来自 GitHub，不是本机脚本输出） |
+| 2 | 本地门槛：构建 | `./Scripts/build.sh` → `build: release build with -O -wmo`、`Built: …/build/Pi-Web-Desktop.app`（脚本输出工作区绝对路径，此处缩写字面路径）、`Contents/MacOS/PiWebDesktop: Mach-O 64-bit executable arm64` | 退出 0，通过 |
+| 3 | 本地门槛：身份与版本一致性 | `./Scripts/check-identity.sh` → `check-identity: PASSED (45 checks)`；其中 `xcconfig MARKETING_VERSION = 0.1.0-alpha.14`、`xcconfig CURRENT_PROJECT_VERSION = 14`、bundle `CFBundleShortVersionString = 0.1.0-alpha.14`、bundle `CFBundleVersion = 14`，以及 `no hardcoded MARKETING_VERSION outside Configuration/AppIdentity.xcconfig` | 退出 0，通过 |
+| 4 | 本地门槛：secret 扫描 | `./Scripts/scan-secrets.sh` → `scan-secrets: suppressed 15 lines`、`scan-secrets: PASS (no matches in tracked files; no untracked files)`；输出里没有 `scan-secrets: rejected` | 退出 0，通过（N=15 与 alpha.5 … alpha.13 一致，本版没有新增抑制标记） |
+| 5 | 本地门槛：版本与 tag | `./Scripts/check-release-version.sh --print-tag` → `v0.1.0-alpha.14`；`./Scripts/check-release-version.sh` → `PASSED (MARKETING_VERSION 0.1.0-alpha.14, CURRENT_PROJECT_VERSION 14; tag comparison skipped)`，并有 `ok CURRENT_PROJECT_VERSION=14 matches the build rule for MARKETING_VERSION=0.1.0-alpha.14` | 两者都退出 0，通过（本机没有 `v0.1.0-alpha.14` tag，脚本按设计跳过 tag 比对） |
+| 6 | 本地门槛：smoke | `./Scripts/smoke.sh` → `smoke: startup mode OK (marker "smoke: ready", exit 0)`（启动模式 1 秒退出 0）、`smoke: diagnostics items=6 blockers=3`、`smoke: diagnostics mode OK (marker "smoke: diagnostics ready", exit 0)`、`smoke: OK (markers "smoke: ready" and "smoke: diagnostics ready", both modes exit 0)` | 退出 0，通过（两种模式都断言） |
+| 7 | 脚本语法与补丁空白 | `for f in Scripts/*.sh; do sh -n "$f" || exit 1; done`（无输出，退出 0）；`git diff --check` 与 `git diff --cached --check`（无输出，退出 0） | 通过 |
+| 8 | `docs/security-review-alpha.14.md` 无阻断项（S1–S8 逐项核对） | 报告：[security-review-alpha.14.md](security-review-alpha.14.md)，delta `aa3ee17..e0afaf1`。S1 通过（`Process()` 5/5、`.arguments =` 6/6、`kill(` 7/7、`sendGroupSignal` 4/4；登记表不 import AppKit、不引用 `ServiceManager`；多窗口广播不是新的服务控制路径；#169 唯一的服务动作是复用既有 `stopService`，所有权判定未改）、S2 通过（`keychain.save(` 1/1；缓存顶层键只有 `canStartService` / `components` / `findings` / `fingerprint` / `schemaVersion` / `writtenAt`，无凭据）、S3 通过（新增日志集中在 `AppDelegate+Diagnostics.swift:103` 的 `logDependencyGate`，只写状态与原因码）、S4 通过（放行面实现未改；`URLSession` 14/14、`getifaddrs` 2/2；缓存 fail closed 且不能绕过密码 / 地址门槛，也不会让应用执行缓存里的路径）、S5 通过（`release.yml` 只升级两个 artifact action 的固定 SHA，`name` / `path` 与 `permissions` 未变；版本来源唯一）、S6/S7 通过（无新增依赖，`Sources/` 只新增 `+import Foundation`；`try!` / `as!` 0/0、`fatalError` 3/3）、S8 通过（两条文本扫描均通过；`UserDefaults` 79/79）。**阻断项 0 条**，非阻断 **9 条**（继承 `R1`–`R6`；本版新增 `R7` 缓存的信任边界与隐私足迹、`R8` 指纹不含依赖版本、`R9` 收敛与启动所有权记录的窄竞态（证据强度 [C]）） | 通过（非阻断项已登记并不阻塞） |
+| 9 | tag 与 bundle 版本一致 | 版本唯一来源已 bump 为 `MARKETING_VERSION = 0.1.0-alpha.14`、`CURRENT_PROJECT_VERSION = 14`；`--print-tag` 输出 `v0.1.0-alpha.14`；构建出的 bundle `CFBundleShortVersionString = 0.1.0-alpha.14` / `CFBundleVersion = 14` | 通过（tag 尚未创建；本版按约束不打 tag） |
+| 10 | 真机 smoke 记录（本机 + 受影响设备） | 见下「真机 smoke 记录（待真机验证）」 | **待真机验证**（保留 alpha.13 的验证项，新增 #168 多窗口四项与 #169 启动 / 缓存两项，本机不代填结果） |
+| 11 | checksum 记录（ZIP / `.sha256` / `.evidence.md`） | 见下「checksum 记录（发布后回填）」 | **发布后回填**（由 `release.yml` 在 tag 上的产物生成） |
+| 12 | prerelease 且包含「未公证」说明 | 未执行：Release 与 prerelease 标记由维护者在 tag 之后创建 | 待发布后核对 |
+| 13 | 回退路径可用（`v0.1.0-alpha.13` 资产仍可下载） | 未执行：本版只做本地提交，不访问 Releases | 待发布后核对 |
+
+### 真机 smoke 记录（待真机验证）
+
+本机脚本 smoke 的结果已在上表第 6 行（启动模式与诊断模式都退出 0，`items=6 blockers=3`）；下表是**需要人
+在真机上点击 / 观察**的项，由 [Release Issue #172](https://github.com/Su-luoya/pi-web-desktop/issues/172)
+的真机表回填，本机不代填结果。
+
+| 验证项 | 设备 | 步骤 | 期望 | 结果 |
+| --- | --- | --- | --- | --- |
+| ⌘N 多窗口 | 任意机器 | 启动应用 → ⌘N 开第二个窗口 → 两窗口间切换 | 出现第二个窗口并向右下偏移；两个窗口都能显示服务页 | 待真机验证 |
+| 主窗口关窗语义（primary 隐藏） | 任意机器 | 对主窗口点红色关闭按钮 / ⌘W，再点 Dock 图标或「服务 → 显示 Pi Web」 | 主窗口隐藏、页面会话保留，恢复的是同一个窗口（不是新窗口） | 待真机验证 |
+| 非 primary 窗口真正关闭 | 任意机器 | 对 ⌘N 打开的窗口点红色关闭按钮 / ⌘W | 该窗口真正关闭，主窗口不受影响，可再次 ⌘N | 待真机验证 |
+| 菜单动作跟随 key 窗口 | 任意机器 | 在第二个窗口为 key 时执行刷新 / 放大缩小 / 在页面中查找 | 动作只作用于 key 窗口，另一窗口的缩放与查找状态不变 | 待真机验证 |
+| 地址变更广播不重复开窗 | 任意机器 | 在「设置」里切换监听地址（或触发服务重载） | 所有已打开窗口都更新到新地址，不额外产生窗口 | 待真机验证 |
+| 启动耗时（#169 快路径） | 任意机器 | 第二次及之后的冷启动，观察首屏与日志里的门控 / 缓存行 | 首屏快速进入服务页；日志出现「快路径命中」与缓存有效期；后台复查完成（实测区间见发布说明第 2 节） | 待真机验证 |
+| 缓存失效与收敛 | 任意机器 | 构造一次「依赖不可用」后重启应用（例如临时改坏依赖路径） | 不走快路径，或后台复查发现不一致后收敛到环境检查页并停掉本次启动的受托管服务 | 待真机验证 |
+| 服务闪断消失 | 另一台 Mac（此前反复闪现「Pi Web 服务已断开，正在尝试恢复…」） | 冷启动应用，观察 ≥2 分钟，并同时 `tail -f` 日志 | 不再出现周期性「已断开」提示；日志里没有高频重启记录 | 待真机验证 |
+| 手机访问（Tailscale / 局域网） | 手机（已登录同一 tailnet / 同一 Wi-Fi） | 「服务 → 复制手机访问链接」选对应地址 → 粘贴到手机浏览器 | 无需额外配置即可打开；首次访问提示输入远程访问密码 | 待真机验证 |
+| 非 loopback 下应用窗口可用 | 本机或另一台 Mac | 切换监听地址到 Tailscale / 局域网后看应用自身窗口 | 窗口显示服务页，不再跳到系统浏览器、不再闪断 | 待真机验证 |
+| 代理未排除时的菜单告警 | 任意机器（系统代理已启用且未排除 VPN 网段） | 把监听地址切到 Tailscale 地址，切到应用前台 | 「服务」菜单出现代理告警项、点开有修复步骤；按提示加例外后告警自动消失 | 待真机验证 |
+| 导航失败不再误报 | 任意机器 | 在页面里点一个外部链接 | 外链在系统浏览器打开，应用内不出现服务断开提示 | 待真机验证 |
+| 退出不卡顿 | 任意机器 | `Cmd+Q`，对照日志里的「退出时间线」 | 从退出请求到进程结束 ≤1s 量级，无残留服务进程 | 待真机验证 |
+
+### checksum 记录（发布后回填）
+
+| 项 | 值 |
+| --- | --- |
+| 发布资产 | `Pi-Web-Desktop-0.1.0-alpha.14+build.14.zip` |
+| 大小 | 发布后回填 |
+| SHA-256 | 发布后回填 |
+| `.zip.sha256` / `.evidence.md` | 发布后回填（由 `release.yml` 在 tag `v0.1.0-alpha.14` 上生成） |
+| 校验命令与结果 | `shasum -a 256 -c Pi-Web-Desktop-0.1.0-alpha.14+build.14.zip.sha256` → 发布后回填 |
+
+### 本版同时做的文档一致性改动
+
+- `Configuration/AppIdentity.xcconfig`（本版唯一版本来源）：`MARKETING_VERSION` → `0.1.0-alpha.14`、
+  `CURRENT_PROJECT_VERSION` → `14`。
+- `docs/release-notes-v0.1.0-alpha.14.md`（本版新增）：相对已发布的 `v0.1.0-alpha.13` 说明三个改动组
+  （#168 多窗口与 primary / MRU 关闭语义、#169 依赖门控缓存快路径、#166 / #167 artifact action 升级）；
+  性能数字使用 #169 的实测区间（门控放行 0.81–0.86s → 0.137–0.139s，服务就绪 1.89–1.96s →
+  0.61–0.64s，后台完整检查 +0.92s），没有新增数字；安装、依赖前置、未公证与 ad-hoc、已知问题（含
+  缓存不是信任边界、多窗口的可见变化）、回退到 `v0.1.0-alpha.13` 的链接都在文内；真机表 15 项状态写
+  「待真机验证」；校验值的大小与 SHA-256 保持「发布后回填」，不用本机演练值冒充发布值；全文不含待填写
+  占位符字面量（按 #163 的文档约定，本次新增 / 修改的文档都不写这个字面量）。
+- `docs/security-review-alpha.14.md`（本版新增）：按 S1–S8 覆盖本版 delta（`aa3ee17..e0afaf1`），
+  `R1`–`R6` 继承、本版新增 `R7`（缓存信任边界与隐私足迹）/ `R8`（指纹不含依赖版本）/ `R9`（收敛与
+  启动所有权记录的窄竞态，[C]），阻断项 0 条；缓存内容、权限与失效规则都用真机实测与代码行号佐证。
+- `docs/alpha-release-checklist.md`（本文件）：新增本节（#172 门槛清单实测值、真机 smoke 表、checksum
+  记录、文档一致性清单）。
+- 本版门槛全部在最终树（含本节）上重跑一遍：构建、身份、secret 扫描、版本 / tag、smoke 都退出 0，
+  `git diff --check` 与逐文件 `sh -n` 也通过；构建 `PiWebDesktop.xcodeproj/project.pbxproj` 未改，因此
+  没有执行 `plutil -lint`。
+- 本次发布准备**只改版本文件与文档**：没有改 `Sources/`、`PiWebDesktopTests/`、`.github/`、`Scripts/`，
+  **没有** push、**没有** 建 PR、**没有** 打 tag、**没有** 碰 GitHub Release 或 Issue 状态（由协调器负责）。

@@ -1,8 +1,20 @@
 import Cocoa
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
-    var window: NSWindow!
-    var webViewController: WebViewController!
+    /// 多窗口登记表（GitHub #168）：窗口 ↔ WebView 控制器的唯一对应关系来源，
+    /// 同时维护启动主窗口（primary）标识与最近使用顺序。
+    /// 它只做登记/查找/最近使用排序，不触碰服务生命周期（开窗、关窗都不会启动、
+    /// 停止或重启服务）。
+    var windowRegistry = AppWindowRegistry<NSWindow, WebViewController>()
+    /// 最近使用的窗口（`mainWindow`）与它的 WebView 控制器。
+    ///
+    /// 这两个名字保留给既有调用点（启动路由、诊断页、更新页、菜单动作）：多窗口下
+    /// 它们表示**最近使用**的窗口，状态页与菜单动作因此总是落在用户刚操作过的窗口
+    /// 上，而不是固定第一个窗口；窗口全部关闭时为 nil。它们**不是**启动主窗口
+    /// （primary）：Dock 恢复、关闭语义与 `showMainWindow()` 只认
+    /// `windowRegistry.primaryWindow`。
+    var window: NSWindow! { windowRegistry.mainWindow }
+    var webViewController: WebViewController! { windowRegistry.mainController }
     var statusMenuItem: NSMenuItem?
     /// 退出状态机（GitHub #72）：决策、超时兜底与副作用顺序都是纯逻辑，见
     /// `Sources/QuitCoordinator.swift`。
@@ -513,7 +525,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // 诊断导出进行中（提醒框已弹出或后台采集未结束）：忽略重复触发。
         case #selector(copyDiagnostics(_:)): return !diagnosticsExportInProgress
         case #selector(toggleFullScreen(_:)):
-            menuItem.title = window.styleMask.contains(.fullScreen) ? "退出全屏幕" : "进入全屏幕"
+            // 多窗口（GitHub #168）：标题跟随将被切换的那个窗口（已登记的 key 窗口），
+            // 没有时回落到最近使用的窗口（`mainWindow`）。
+            menuItem.title = activeWindow?.styleMask.contains(.fullScreen) == true ? "退出全屏幕" : "进入全屏幕"
             return true
         default: return true
         }

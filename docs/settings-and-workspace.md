@@ -103,6 +103,23 @@
 - 行为：选中地址已是当前监听地址（`service.hostname`）时直接复制 `http://<地址>:<端口>/`，不重启服务；否则先确认（文案写明会切换监听地址并重启服务、当前会话会中断），确认后经与设置窗口同一条保存路径（`RemoteAccessSetup.apply`，沿用 Keychain 里已有的密码）写入配置并重启服务，成功后才复制链接。链接按当前端口与新地址构造，不改窗口打开的地址。
 - 说明：应用不会自动切回 loopback，也不做 `0.0.0.0`/`::` 通配监听；切走的地址只由「设置… → 监听地址」或再次使用本菜单改回。当前 WebView 策略只把 loopback 当作站内地址（见 [architecture.md](architecture.md)），因此在非 loopback 监听下应用内窗口可能无法加载服务页，手机仍可正常访问。
 
+## 多窗口与窗口注册（GitHub #168）
+
+菜单“窗口 → 新建窗口”（⌘N）新开一个独立窗口，用于并行查看同一服务。设计要点：
+
+- **一个服务、多个窗口**：所有窗口共享同一个 `ServiceManager`（以及同一个服务进程与端口），新建/关闭窗口只影响显示层，不会触发服务启动、停止或重启；⌘N 不重新探测依赖、不改写配置、不重启服务。
+- **新窗口的内容**：新窗口使用**新的** `WebViewController` 实例，加载当前 `serviceManager.configuration.serviceURL`（与已有窗口同一地址，沿用 [architecture.md](architecture.md) 的放行面）。若依赖门控未放行或工作目录不可用，新窗口显示与主窗口一致的诊断状态页，而不是自行启动服务。
+- **窗口登记表**：`AppWindowRegistry<Window, Controller>`（`Sources/App/AppWindowRegistry.swift`）按对象身份登记窗口与其控制器，并同时维护两个**相互独立**的角色。登记表只依赖 Foundation，可在无宿主的单测里覆盖。
+  - **启动主窗口（primary）**：`createWindow()` 创建的启动窗口，`primaryWindow`/`primaryController` 表示它。只有真正关闭（`remove(window:)`）才清除；按下面“关闭语义”一条，正常运行时它一直存在。关闭语义、Dock 恢复与“显示 Pi Web”都以它为准。
+  - **最近使用的窗口**：`mainWindow`/`mainController` 表示它（`register` 与 `noteUsage(of:)` 都把它移到最前）。它只作为菜单/页面动作在没有 key window 时的回落目标；⌘N 之后新窗口成为最近使用，但 primary 仍是启动窗口，最近使用顺序的变化不改变 primary。
+- **关闭语义（⌘W / 红色关闭按钮）**：`windowShouldClose` 只对 **primary** 返回 `orderOut(nil)` + `false`（隐藏、保留窗口对象、WebView 与页面会话，应用与服务继续运行，与 GitHub #158 一致）；**其它所有窗口**返回 `true` 真正关闭，`windowWillClose` 只从登记表移除该窗口，不影响其它窗口与服务。判据是“是不是 primary”而不是“是不是最近使用”：⌘N 打开的新窗口即使成为最近使用，也总能真正关闭，不会留下隐藏但存活、内存不释放的窗口与 WebView。
+- **Dock 恢复 /“显示 Pi Web”**：Dock 点击与重新激活走 `applicationShouldHandleReopen` → `showMainWindow()`，恢复 **primary**（最小化时先 deminiaturize，再按当前屏幕适配并置前）；登记表为空或 primary 缺失时按现有逻辑补建一个窗口，并在 `createWindow()` 里登记为新的 primary。恢复的不是“最近使用”窗口——除非 primary 不存在。
+- **最近使用顺序的更新时机**：窗口成为 key window（`windowDidBecomeKey`）时移到最前。Dock 恢复与“显示 Pi Web”不再参与排序，它们只负责把 primary 带回来。
+- **菜单动作的目标**：页面类菜单/快捷键动作（重新加载、硬刷新、放大/缩小/实际大小、查找栏）作用于当前 key window，没有可用的 key window 时回落到最近使用的窗口（`mainWindow`）；菜单“窗口 → 进入/退出全屏幕”的标题跟随 key window 状态（快捷键固定 ⌃⌘F，不再按窗口注册）。
+- **配置变更**：设置保存等原有流程只是把“更新服务地址并重新加载”这个最小动作扩展到所有已登记窗口（最近使用优先），没有新增服务重启路径；设置窗口（⌘,）、退出决策与诊断模式（只开一个窗口）的行为不变。
+- **退出**：⌘Q/菜单退出时所有窗口一起关闭，不影响服务处置逻辑；退出决策仍在 AppKit 终止序列之外完成（见下文“退出行为”）。
+- **共享状态**：多个窗口共享同一份 WebKit 网站数据与会话（同一服务进程），仅用于并行查看/操作，不做窗口级会话隔离。
+
 ## 退出行为
 
 偏好窗口“行为 → 退出行为”提供三种取值（默认“每次退出时询问”）：
@@ -168,6 +185,7 @@ unhosted 测试（注入临时目录、假探针、假 Keychain 与假网络地�
 - `PiWebDesktopTests/KeychainStoreTests.swift`：地址判定与保存流程共用同一规则（通配地址即使有密码也被拒绝，且先于密码写入），加载与启动诊断包含非法值与允许范围，非 loopback 缺密码仍走 #8 的缺密码提示。
 - `PiWebDesktopTests/ServiceAddressesTests.swift`（GitHub #150）：地址分类边界（Tailscale 网段两端与网段外、私有网段的边界与网段外、loopback、link-local、非法输入）、探测结果的过滤/去重/排序（与输入顺序无关）与菜单标题生成（含无候选时的单条禁用说明项）、`ServiceAddressDecision.decide` 的三个分支、链接构造只按地址与端口拼装而不改窗口打开的地址；全部使用注入的假 provider。
 - `PiWebDesktopTests/SystemProxyWarningTests.swift`（GitHub #157）：loopback（`127.*`、`localhost`、`::1`）不提示；`100.x` 无启用代理不提示；`100.x` + 代理且无例外 → 提示（HTTP/HTTPS 各自 scheme、SOCKS、PAC 均覆盖）；例外命中（`100.x.*` 通配、精确地址、CGNAT 段 CIDR、逗号串起来的整串条目）→ 不提示；不命中与畸形条目（`/99`、非 IP、`<local>`、IPv6 条目）的取舍；网段边界（`100.63.x` / `100.128.x`）与局域网/主机名不提示；代理字典缺失、键类型畸形、空字典一律不提示；一次运行内只提示一次、切回 loopback 自动清除、手动「清除警告」只抑制本次运行、日志与文案不含用户真实地址。
+- `PiWebDesktopTests/AppWindowRegistryTests.swift`（GitHub #168）：多窗口登记表契约（新建后可查找、关闭后移除、主窗口随最近使用变化、多窗口并存互不影响、移除未知窗口是空操作）用泛型占位类型断言，不需要真实窗口或服务。
 - `PiWebDesktopTests/WorkspaceDirectoryTests.swift`：默认目录首次使用时创建、自选目录不被静默重建、不存在/不是目录/不可写三种原因的校验与可读修复提示、状态页文本、设置窗口选择（相对路径、缺失、不可写被拒绝且配置不变，留空回到默认目录）。
 - `PiWebDesktopTests/RecentWorkspaceTests.swift`：去重与置顶、10 条上限与路径标准化、跨 store 实例的持久化与清除、注入 defaults 的配置读取、`WorkspaceSwitchDecision.decide` 的各分支（当前目录 `.unchanged`、相对路径与不存在的目录 `.reject(.missing)`、文件 `.reject(.notDirectory)`、可用目录 `.confirm`），以及任何分支都不创建目录。
 - `PiWebDesktopTests/QuitPolicyTests.swift`：三种退出行为与三种确认选择的决策表、取消不停止服务、只有显式“退出并停止服务”才请求停止托管服务、任何行为都不停止外部服务。

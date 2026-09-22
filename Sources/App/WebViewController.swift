@@ -17,7 +17,11 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKD
     var onDownloadStarted: (() -> Void)?
 
     private var serviceURL: URL
-    private let windowProvider: () -> NSWindow?
+    /// 找到**本实例所在**的窗口（查找栏、下载保存面板、文件面板用）。
+    ///
+    /// 多窗口（GitHub #168）：由 `AppDelegate+Window.swift` 在窗口建好后立刻改写为
+    /// 绑定该窗口的 provider，因此每个窗口的 WebView 都不会借用别的窗口。
+    var windowProvider: () -> NSWindow?
     private var findBar: NSView?
     private var findField: NSSearchField?
 

@@ -2,7 +2,108 @@
 
 import Cocoa
 
+/// 门控结论的来源（GitHub #169）：决定日志文案，以及结果该重新路由还是只做收敛。
+enum DependencyGateReportSource: Equatable {
+    /// 本机完整检查（启动时或用户重新检测）。
+    case check
+    /// 可信缓存快路径：立即放行服务启动入口，随后仍会跑一次完整复查。
+    case cachedFastPath
+    /// 快路径之后的后台复查：结果与缓存一致时不重新路由。
+    case cachedFastPathRecheck
+}
+
 extension AppDelegate {
+    // MARK: - 启动门控缓存快路径（GitHub #169）
+
+    /// 快路径缓存的存储位置：支持目录下的独立 JSON 文件。
+    var dependencyGateCacheStore: DependencyGateCacheStore {
+        DependencyGateCacheStore(url: appConfiguration.dependencyGateCacheURL)
+    }
+
+    /// 当前启动输入的指纹。只读本地廉价事实（不执行命令、不启动登录 shell），
+    /// 因此可以放在首屏路径上。工具 PATH 的输入只留摘要，原文（含主目录）既不进
+    /// 缓存文件也不进日志。
+    func currentDependencyGateFingerprint() -> DependencyGateFingerprint {
+        let configuration = serviceManager.configuration
+        let environment = ProcessInfo.processInfo.environment
+        return DependencyGateFingerprint(
+            appVersion: ApplicationInstallationProbe.current.version ?? "unknown",
+            piWebPath: configuration.piWebPath,
+            workspacePath: configuration.workspacePath,
+            hostname: configuration.hostname,
+            port: configuration.port,
+            toolPathDigest: DependencyGateCacheDigest.digest([
+                environment["PATH"] ?? "",
+                LoginShellResolver.shellPath(environment: environment),
+                FileManager.default.homeDirectoryForCurrentUser.path
+            ])
+        )
+    }
+
+    /// 启动时的环境门控入口：先试缓存快路径，命中就立刻放行并把完整检查放到后台
+    /// 复查；未命中则走原来的完整检查（“正在检查运行环境…”照常显示）。
+    ///
+    /// **只有启动路径可以调用**：用户点“重新检测”走
+    /// `runDependencyCheck(triggeredByUser: true)`，永远不经过快路径。
+    func runStartupDependencyCheck() {
+        guard applyDependencyGateCacheFastPath() else {
+            runDependencyCheck()
+            return
+        }
+        runDependencyCheck(refiningCachedGate: true)
+    }
+
+    /// 缓存快路径：命中可信缓存时立即放行门控并按缓存报告路由到主窗口，首屏不再
+    /// 等整份检查。
+    ///
+    /// 只有“这次启动本来就会进主窗口”才成立：菜单进入了诊断路由
+    /// （`shouldPresentDiagnostics`）或首次启动（还没有完成设置的记录）时不走快
+    /// 路径——那一屏必须用真实结论决定是进主窗口还是“首次启动环境检查”页。
+    @discardableResult
+    func applyDependencyGateCacheFastPath() -> Bool {
+        guard !shouldPresentDiagnostics, appConfiguration.hasCompletedFirstLaunchSetup else {
+            logDependencyGate("环境检查快路径不适用：本次启动需要完整检查")
+            return false
+        }
+        let verdict = DependencyGateFastPath.decide(
+            cache: dependencyGateCacheStore.load(),
+            fingerprint: currentDependencyGateFingerprint(),
+            now: Date()
+        )
+        guard case .valid(let report) = verdict else {
+            if case .invalid(let reason) = verdict {
+                logDependencyGate("环境检查快路径未命中：\(reason.logText)，本次走完整检查")
+            }
+            return false
+        }
+        logDependencyGate("环境检查快路径命中：立即放行服务启动入口，完整检查转入后台复查")
+        applyDependencyReport(report, triggeredByUser: false, source: .cachedFastPath)
+        return true
+    }
+
+    /// 缓存写回：只在拿到本机真实检查结论后调用（完整检查，或快路径之后的复查）。
+    /// 不可启动的结论也会写入，读取端一律拒绝，因此“上次不可启动”是一条真实生效
+    /// 的失效规则。
+    private func persistDependencyGateCache(_ report: DependencyReport) {
+        let cache = DependencyGateCache(
+            report: report,
+            fingerprint: currentDependencyGateFingerprint(),
+            writtenAt: Date()
+        )
+        guard dependencyGateCacheStore.save(cache) else {
+            logDependencyGate("环境检查缓存写入失败：不影响本次结论，只影响下次启动的快路径")
+            return
+        }
+        let days = Int(DependencyGateCachePolicy.standard.maximumAge / 86_400)
+        logDependencyGate("环境检查缓存已更新：有效期 \(days) 天，任一启动输入变化即失效")
+    }
+
+    /// 门控相关日志：复用现有 LogWriter 与脱敏器，只写状态与静态文案，不写凭据、
+    /// URL 或路径原文。
+    private func logDependencyGate(_ text: String) {
+        _ = logWriter.append(logRedactor.redact(text))
+    }
+
     // MARK: - 依赖诊断门控
 
     /// 工作目录校验（GitHub #9）：默认目录首次使用时创建，自选目录必须已存在
@@ -30,11 +131,18 @@ extension AppDelegate {
     /// 上限，超时按不可用处理并写进诊断项的“原因”），因此整份检查走
     /// `CommandProbeDispatch`：后台执行、结果回到主队列再决定路由与门控。
     /// 检查期间服务控件保持禁用。
-    func runDependencyCheck(triggeredByUser: Bool = false) {
-        dependencyGate = .checking
-        applyServiceControlAvailability()
-        // 检查期间即使有异步回调到达，服务启动入口也必须保持关闭。
-        serviceManager.isDependencyGateOpen = false
+    ///
+    /// - Parameter refiningCachedGate: true 表示这是缓存快路径之后的后台复查
+    ///   （GitHub #169）：门控保持现状（不回到 `.checking`、不关闭服务启动入口），
+    ///   因为快路径已经放行、启动请求可能已经发出，中途关闸会把这次启动挡回去。
+    ///   复查结果回来后只做收敛（见 `convergeAfterCachedFastPath`）。
+    func runDependencyCheck(triggeredByUser: Bool = false, refiningCachedGate: Bool = false) {
+        if !refiningCachedGate {
+            dependencyGate = .checking
+            applyServiceControlAvailability()
+            // 检查期间即使有异步回调到达，服务启动入口也必须保持关闭。
+            serviceManager.isDependencyGateOpen = false
+        }
         dependencyCheckGeneration += 1
         let generation = dependencyCheckGeneration
         // 在主线程读配置和注入的 runner，后台只执行只读探测。
@@ -52,7 +160,11 @@ extension AppDelegate {
         )
         CommandProbeDispatch.runOffMain(work: { checker.run() }) { [weak self] report in
             guard let self, generation == self.dependencyCheckGeneration else { return }
-            self.applyDependencyReport(report, triggeredByUser: triggeredByUser)
+            self.applyDependencyReport(
+                report,
+                triggeredByUser: triggeredByUser,
+                source: refiningCachedGate ? .cachedFastPathRecheck : .check
+            )
         }
     }
 
@@ -85,7 +197,8 @@ extension AppDelegate {
     func applyDependencyReport(
         _ report: DependencyReport,
         triggeredByUser: Bool,
-        firstLaunchSetupJustCompleted: Bool = false
+        firstLaunchSetupJustCompleted: Bool = false,
+        source: DependencyGateReportSource = .check
     ) {
         dependencyReport = report
         // 命令探测失败的原因（GitHub #89）进日志：不再只留一个 `.unknown`。
@@ -113,6 +226,12 @@ extension AppDelegate {
         // 而本应用管理的远程进程仍在运行时，立即停止它并关闭远程模式。
         serviceManager.closeRemoteAccessIfCredentialsAreUnavailable()
 
+        // 只有本机真实检查的结论才写回缓存：快路径里的报告本身来自缓存，写回去
+        // 只会不断刷新它的时间戳，让有效期形同虚设。
+        if source != .cachedFastPath {
+            persistDependencyGateCache(report)
+        }
+
         let firstLaunchSetupIncomplete = !appConfiguration.hasCompletedFirstLaunchSetup
         let route = DiagnosticsRouting.route(DiagnosticsRouting.Context(
             report: report,
@@ -121,6 +240,17 @@ extension AppDelegate {
         ))
         let presentDiagnostics = shouldPresentDiagnostics
         shouldPresentDiagnostics = false
+
+        // 快路径之后的那次完整复查：结果与缓存一致时不重新路由（服务页已经在
+        // 加载），不一致时按真实状态收敛。
+        if source == .cachedFastPathRecheck {
+            convergeAfterCachedFastPath(
+                report: report,
+                route: route,
+                firstLaunchSetupIncomplete: firstLaunchSetupIncomplete
+            )
+            return
+        }
 
         switch route {
         case .mainWindow:
@@ -135,29 +265,74 @@ extension AppDelegate {
                 presentDiagnostics: presentDiagnostics
             )
         case .diagnostics(let reasons):
-            // 诊断页不管理服务：停掉健康轮询并把状态置为 stopped，避免健康检查
-            // 把状态改回 running、把诊断页覆盖回服务页。前置缺失、“首次设置
-            // 未完成”与“工作目录不可用”三条路径都不启动服务。
-            serviceManager.stopHealthMonitor()
-            serviceManager.setState(.stopped)
             let workspaceReasons = reasons.contains { reason in
                 if case .unusableWorkspace = reason { return true }
                 return false
             }
-            webViewController.showDependencyPage(
-                title: firstLaunchSetupIncomplete ? "首次启动环境检查" : "无法启动 Pi Web 服务",
-                message: diagnosticsPageText(
-                    report: report,
-                    firstLaunchSetupIncomplete: firstLaunchSetupIncomplete,
-                    workspaceReasons: workspaceReasons
-                )
-            )
-            showDiagnostics(
+            presentDependencyDiagnosticsPage(
                 report: report,
                 firstLaunchSetupIncomplete: firstLaunchSetupIncomplete,
-                canContinueToService: report.canStartService && workspaceValidation.isUsable
+                workspaceReasons: workspaceReasons
             )
         }
+    }
+
+    /// 诊断页展示：停掉健康轮询并把状态置为 stopped，避免健康检查把状态改回
+    /// running、把诊断页覆盖回服务页。前置缺失、“首次设置未完成”与“工作目录
+    /// 不可用”三条路径都不启动服务。
+    private func presentDependencyDiagnosticsPage(
+        report: DependencyReport,
+        firstLaunchSetupIncomplete: Bool,
+        workspaceReasons: Bool
+    ) {
+        serviceManager.stopHealthMonitor()
+        serviceManager.setState(.stopped)
+        webViewController.showDependencyPage(
+            title: firstLaunchSetupIncomplete ? "首次启动环境检查" : "无法启动 Pi Web 服务",
+            message: diagnosticsPageText(
+                report: report,
+                firstLaunchSetupIncomplete: firstLaunchSetupIncomplete,
+                workspaceReasons: workspaceReasons
+            )
+        )
+        showDiagnostics(
+            report: report,
+            firstLaunchSetupIncomplete: firstLaunchSetupIncomplete,
+            canContinueToService: report.canStartService && workspaceValidation.isUsable
+        )
+    }
+
+    /// 缓存快路径之后那次完整复查的收敛（GitHub #169）。
+    ///
+    /// 与缓存一致（仍然可启动、路由仍是主窗口）时只刷新状态：重新走一遍
+    /// `beginMainWindowLaunch` 会把服务页翻回加载页并重复发起启动，没有收益。
+    /// 不一致时按真实状态收敛到诊断页，并把本次启动的服务按现有停止路径处理
+    /// （`stopService` 只停本应用管理、所有权记录可验证的服务，外部服务不会被误杀）。
+    private func convergeAfterCachedFastPath(
+        report: DependencyReport,
+        route: DiagnosticsRouting.Route,
+        firstLaunchSetupIncomplete: Bool
+    ) {
+        let routeIsMainWindow: Bool
+        if case .mainWindow = route { routeIsMainWindow = true } else { routeIsMainWindow = false }
+        if !DependencyGateFastPath.requiresConvergence(
+            canStartService: report.canStartService,
+            routeIsMainWindow: routeIsMainWindow
+        ) {
+            logDependencyGate("环境检查后台复查与缓存一致：服务可启动，不重新路由")
+            return
+        }
+        logDependencyGate(
+            "环境检查后台复查与缓存不一致：canStartService=\(report.canStartService)，收敛到诊断页"
+        )
+        if serviceManager.managedServicePID() != nil {
+            serviceManager.stopService()
+        }
+        presentDependencyDiagnosticsPage(
+            report: report,
+            firstLaunchSetupIncomplete: firstLaunchSetupIncomplete,
+            workspaceReasons: workspaceValidation.problem != nil
+        )
     }
 
     /// 诊断状态页正文：依赖报告文本 + （不可用时）工作目录修复提示。

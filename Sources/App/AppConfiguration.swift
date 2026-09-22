@@ -76,6 +76,12 @@ struct AppConfiguration {
 
     var logURL: URL { paths.logFileURL }
 
+    /// 启动门控快路径缓存（GitHub #169）：上次完整环境检查的结论与失效指纹，
+    /// 放在支持目录下的独立 JSON 文件里（不写用户偏好设置，也不进仓库）。
+    var dependencyGateCacheURL: URL {
+        supportURL.appendingPathComponent("dependency-gate-cache.json")
+    }
+
     /// 打开日志文件夹前的准备：确保日志目录存在（不创建日志文件）。
     ///
     /// 日志目录可能还不存在（从未启动过服务，或关闭了自动启动）；重复调用是

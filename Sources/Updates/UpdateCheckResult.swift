@@ -9,6 +9,8 @@ struct UpdateCheckResult: Equatable {
     var status: UpdateCheckStatus
     var installedVersion: String?
     var latestVersion: String?
+    /// GitHub Release 的原始 tag；只用于按 tag 重新获取发布资产，不能单独证明资产可信。
+    var upstreamTag: String? = nil
     /// 上游版本经过预期端点 + 可解析结构验证时为 `verified`；否则 `unknown`。
     var confidence: DetectionConfidence
     var freshness: UpdateResultFreshness

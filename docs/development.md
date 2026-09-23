@@ -29,12 +29,12 @@
 | 公证 | 未公证。Gatekeeper 默认拒绝（`spctl --assess` 返回 rejected），需要用户在“系统设置 → 隐私与安全性”里手动批准 |
 | 发行状态 | 当前最新是早期 alpha（prerelease），没有正式发行版；更早的 alpha 资产仍然可以下载 |
 | 分发现状 | alpha 以 prerelease 形式发布在 [GitHub Releases](https://github.com/Su-luoya/pi-web-desktop/releases)：自 `v0.1.0-alpha.1` 起提供预编译 ZIP、`.sha256` 与签名/公证证据 Markdown；也可以按 [发布说明](releasing.md) 从源码构建。所有资产都是 **ad-hoc 签名、未公证** |
-| 应用内更新 | 桌面应用自身更新未实现（后续 issue）：应用只检查版本、提示并给出下载入口，不下载、不安装、不降级 `Pi Web Desktop.app`。四类检查可分别关闭 / 每日 / 每周（扩展包：关闭 / 检查并通知 / 询问后更新），可忽略某个具体版本。依赖更新自 GitHub #20–#23 起分成三条受限路径且**两个自动开关默认关闭**：Pi Web 启动前自动安装（仅限来源为已验证的 npm 全局安装）、Pi CLI 启动前自动更新（仅限已验证的 npm/pnpm 全局安装，且有运行中的 Pi 进程或状态不确定时一律推迟，不发送任何信号）、扩展包“询问后更新”（必须用户确认，**没有无人值守路径**）。更新后只验证能验证到的事实（可执行位、真实路径可读、版本重检测、`package.json` 名称、健康检查），**不做代码签名或内容哈希确认**；“回滚”最多是把服务/重检测指回应用保留且仍可用的更新前 npm 全局可执行文件，其它来源与证据缺失时一律写“无法自动回滚”。见 [隐私说明](privacy.md) 的“版本检查、提示与忽略版本”、[设置说明](settings-and-workspace.md) 与 [发布说明](releasing.md#版本门槛) |
+| 应用内更新 | 桌面应用自身更新（PR #174）只由用户点击触发：菜单入口仅在本轮刚从 GitHub API 核实出更高版本时出现，确认框说明当前包未签名、未公证；确认后用独立临时 `URLSession` 取固定名字的 `<资产名>.zip` 与 `.sha256`（重定向只放行 `release-assets.githubusercontent.com`，zip 与 `.sha256` 不能互换），哈希不一致就不解包；安装只替换 `/Applications/Pi-Web-Desktop.app`（要求该包真实存在、路径形状正确、不跳符号链接、`/Applications` 可写探查通过），替换后应用退出并重启。缓存结论不触发安装，没有无人值守路径，也没有降级路径。四类检查可分别关闭 / 每日 / 每周（扩展包：关闭 / 检查并通知 / 询问后更新），可忽略某个具体版本。依赖更新自 GitHub #20–#23 起分成三条受限路径且**两个自动开关默认关闭**：Pi Web 启动前自动安装（仅限来源为已验证的 npm 全局安装）、Pi CLI 启动前自动更新（仅限已验证的 npm/pnpm 全局安装，且有运行中的 Pi 进程或状态不确定时一律推迟，不发送任何信号）、扩展包“询问后更新”（必须用户确认，**没有无人值守路径**）。更新后只验证能验证到的事实（可执行位、真实路径可读、版本重检测、`package.json` 名称、健康检查），**不做代码签名或内容哈希确认**；“回滚”最多是把服务/重检测指回应用保留且仍可用的更新前 npm 全局可执行文件，其它来源与证据缺失时一律写“无法自动回滚”。见 [隐私说明](privacy.md) 的“版本检查、提示与忽略版本”、[设置说明](settings-and-workspace.md) 与 [发布说明](releasing.md#版本门槛) |
 | 支持承诺 | 无 SLA，无响应或修复时限。Issue 和 PR 按维护者可用时间处理 |
 | 远程访问 | 默认只监听 loopback；远程访问必须自备加密隧道或 HTTPS 反向代理，密码认证 ≠ 传输加密 |
 | 日志与诊断 | 日志写在 `~/Library/Logs/Pi Web Desktop/`，10 MB 轮转、保留 5 份；日志行、错误消息、环境变量/命令行展示与“复制诊断”导出共用同一个脱敏器。规则与字段见 [日志与诊断导出](logging-and-diagnostics.md) |
 
-未在表中列出的组合（Intel、更旧的系统版本、正式发行版、应用内更新）都视为未支持：文档、Issue 和 Release 说明里都不能暗示它们已经可用。
+未在表中列出的组合（Intel、更旧的系统版本、正式发行版）都视为未支持：文档、Issue 和 Release 说明里都不能暗示它们已经可用。
 
 ## 构建
 
@@ -61,11 +61,14 @@ Finder 或 File Provider 会在构建过程中给 app bundle 本身或 `Contents
 - 把 `com.apple.FinderInfo` 写到 bundle 根目录或 `Contents/MacOS/PiWebDesktop` 上，
   `codesign --verify --deep --strict --verbose=2` 立即以退出码 1 报上面的 detritus 错误；
   写到 `Contents/Info.plist` 上则仍然通过（校验只看 bundle 与 Mach-O 可执行文件）。
-- `xattr -cr <app>` 清除后同一 bundle 立即校验通过，不需要重新签名。
+- `xattr -cr <app>` 清除后同一 bundle 立即校验通过，不需要重新签名；但同步代理可能在 1 秒内重新
+  贴上 `com.apple.FinderInfo`，复验仍可能连败（脚本会在同步目录之外复验一次，见下）。
 
 脚本已经处理这个坑：`Scripts/build.sh` 在 ad-hoc 签名前与签名后各清一次扩展属性（`xattr -cr`），
-签名后用 `codesign --verify --deep --strict` 复验，失败时清属性重试最多 3 次；仍失败则以可读错误
-停下并提示 `xattr -l` / `xattr -cr`，不会静默忽略签名错误。`Scripts/package-release.sh` 在签名校验与
+签名后用 `codesign --verify --deep --strict` 复验，失败时清属性重试最多 3 次。仍失败时，如果诊断正好
+是 bundle 根目录上的 `com.apple.FinderInfo`，脚本会把 bundle 复制到同步目录之外再复验一次：副本通过
+就只告警并继续（签名本身没问题，脏的只是同步目录），副本也失败才以可读错误停下并提示 `xattr -l` /
+`xattr -cr`，不会静默忽略签名错误。`Scripts/package-release.sh` 在签名校验与
 打包前也会防御性清理，所以“构建成功、打包时校验失败”不会再出现。清除扩展属性不会破坏已签名的封条，
 不需要重新签名。CI 在干净的 runner 目录里 checkout，不受影响；这个坑只在把仓库放在同步目录的本地
 环境出现。手工排查：

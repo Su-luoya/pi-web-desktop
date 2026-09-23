@@ -17,6 +17,8 @@ struct UpdateCacheEntry: Codable, Equatable {
     var etag: String?
     var lastModified: String?
     var latestVersion: String?
+    /// GitHub Release 的原始 tag；安装前必须再次从网络获取该 tag 的资产，缓存 tag 只用于提示。
+    var upstreamTag: String? = nil
     /// 写下这条结论时的本机版本（GitHub #74）。缓存里的 `status` 只对写下它的
     /// 那个本机版本成立，因此复用任何结论字段前都要先与当前本机版本核对；
     /// 旧缓存（schema 1）没有这个字段，读取后一律按“结论不可判定”处理。
@@ -35,6 +37,7 @@ struct UpdateCacheEntry: Codable, Equatable {
         etag: String? = nil,
         lastModified: String? = nil,
         latestVersion: String? = nil,
+        upstreamTag: String? = nil,
         installedVersion: String? = nil,
         status: String? = nil,
         confidence: String? = nil,
@@ -49,6 +52,7 @@ struct UpdateCacheEntry: Codable, Equatable {
         self.etag = etag
         self.lastModified = lastModified
         self.latestVersion = latestVersion
+        self.upstreamTag = upstreamTag
         self.installedVersion = installedVersion
         self.status = status
         self.confidence = confidence
@@ -200,6 +204,12 @@ extension UpdateCacheEntry {
             guard latestVersion.count <= UpdateCheckCacheFile.maximumVersionLength,
                   let parsed = SemanticVersion(latestVersion),
                   parsed.description == latestVersion else { return .invalidVersionShape }
+        }
+        if let upstreamTag {
+            guard upstreamTag.count <= UpdateCheckCacheFile.maximumVersionLength,
+                  !upstreamTag.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+                return .invalidEntry
+            }
         }
         // 写入结论时的本机版本不必是规范化的语义化版本（本机安装元数据可以是
         // `dev-build` 这类值），但必须是有限长度、不含控制字符的字符串：它只

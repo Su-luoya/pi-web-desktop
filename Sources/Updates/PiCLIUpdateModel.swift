@@ -22,8 +22,6 @@ import Foundation
 /// Pi CLI update settings, refusal/deferral reasons, plans and decisions.
 
 extension UpdateCheckPreferences {
-    /// 启动前自动更新 Pi CLI 的默认值：关闭。
-    static let defaultAutoUpdatePiBeforeLaunch = false
     /// 设置位已生效（GitHub #21）：打开后也只有“没有运行中的 Pi 进程 +
     /// 已验证的 npm/pnpm 全局安装 + 已验证且更高的目标版本”时才自动执行。
     static let autoUpdatePiBeforeLaunchIsEffective = true

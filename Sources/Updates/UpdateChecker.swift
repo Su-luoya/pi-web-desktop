@@ -358,6 +358,7 @@ final class UpdateChecker {
             status: .unknown,
             installedVersion: item.installedVersion,
             latestVersion: item.cached?.latestVersion,
+            upstreamTag: item.cached?.upstreamTag,
             confidence: .unknown,
             freshness: item.cached?.latestVersion == nil ? .none : .cached,
             failure: failure,
@@ -380,6 +381,7 @@ final class UpdateChecker {
     private struct CachedFallbackOutcome {
         var status: UpdateCheckStatus
         var latestVersion: String?
+        var upstreamTag: String?
         var confidence: DetectionConfidence
         var freshness: UpdateResultFreshness
         var origin: UpdateCheckOrigin
@@ -398,6 +400,7 @@ final class UpdateChecker {
         func resolve(
             status: UpdateCheckStatus,
             latestVersion: String?,
+            upstreamTag: String?,
             confidence: DetectionConfidence,
             freshness: UpdateResultFreshness,
             failure: UpdateCheckFailure?,
@@ -407,6 +410,7 @@ final class UpdateChecker {
             keepSuccessFields: Bool
         ) -> (UpdateCacheEntry, UpdateCheckResult) {
             entry.latestVersion = latestVersion
+            entry.upstreamTag = upstreamTag
             entry.status = status.rawValue
             entry.confidence = confidence.rawValue
             entry.failure = failure?.rawValue
@@ -424,6 +428,7 @@ final class UpdateChecker {
                 status: status,
                 installedVersion: item.installedVersion,
                 latestVersion: latestVersion,
+                upstreamTag: upstreamTag,
                 confidence: confidence,
                 freshness: freshness,
                 failure: failure,
@@ -449,6 +454,7 @@ final class UpdateChecker {
             return resolve(
                 status: fallback.status,
                 latestVersion: fallback.latestVersion,
+                upstreamTag: fallback.upstreamTag,
                 confidence: fallback.confidence,
                 freshness: fallback.freshness,
                 failure: failure,
@@ -470,6 +476,7 @@ final class UpdateChecker {
                 return resolve(
                     status: fallback.status,
                     latestVersion: fallback.latestVersion,
+                    upstreamTag: fallback.upstreamTag,
                     confidence: fallback.confidence,
                     freshness: fallback.freshness,
                     failure: .unexpectedHost,
@@ -501,6 +508,7 @@ final class UpdateChecker {
                         return resolve(
                             status: fallback.status,
                             latestVersion: fallback.latestVersion,
+                            upstreamTag: fallback.upstreamTag,
                             confidence: fallback.confidence,
                             freshness: fallback.freshness,
                             failure: .unparsableVersion,
@@ -514,6 +522,7 @@ final class UpdateChecker {
                     return resolve(
                         status: verdict,
                         latestVersion: upstream.version,
+                        upstreamTag: upstream.tag,
                         confidence: .verified,
                         freshness: .fresh,
                         failure: nil,
@@ -533,6 +542,7 @@ final class UpdateChecker {
                     return resolve(
                         status: fallback.status,
                         latestVersion: fallback.latestVersion,
+                        upstreamTag: fallback.upstreamTag,
                         confidence: fallback.confidence,
                         freshness: fallback.freshness,
                         failure: .invalidResponse,
@@ -559,6 +569,7 @@ final class UpdateChecker {
                     return resolve(
                         status: fallback.status,
                         latestVersion: fallback.latestVersion,
+                        upstreamTag: fallback.upstreamTag,
                         confidence: fallback.confidence,
                         freshness: fallback.freshness,
                         failure: .invalidResponse,
@@ -577,6 +588,7 @@ final class UpdateChecker {
                 return resolve(
                     status: verdict,
                     latestVersion: cachedVersion,
+                    upstreamTag: cachedEntry.upstreamTag,
                     confidence: .verified,
                     freshness: .fresh,
                     failure: nil,
@@ -598,6 +610,7 @@ final class UpdateChecker {
                 return resolve(
                     status: fallback.status,
                     latestVersion: fallback.latestVersion,
+                    upstreamTag: fallback.upstreamTag,
                     confidence: fallback.confidence,
                     freshness: fallback.freshness,
                     failure: failure,
@@ -645,6 +658,7 @@ final class UpdateChecker {
             return CachedFallbackOutcome(
                 status: .unknown,
                 latestVersion: nil,
+                upstreamTag: nil,
                 confidence: .unknown,
                 freshness: .none,
                 origin: cacheOrigin.origin,
@@ -655,6 +669,7 @@ final class UpdateChecker {
             CachedFallbackOutcome(
                 status: .unknown,
                 latestVersion: latestVersion,
+                upstreamTag: entry.upstreamTag,
                 confidence: .unknown,
                 freshness: .cached,
                 origin: cacheOrigin.origin,
@@ -685,6 +700,7 @@ final class UpdateChecker {
         return CachedFallbackOutcome(
             status: status,
             latestVersion: latestVersion,
+            upstreamTag: entry.upstreamTag,
             confidence: confidence,
             freshness: .cached,
             origin: cacheOrigin.origin,

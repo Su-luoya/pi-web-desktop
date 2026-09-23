@@ -284,9 +284,10 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
         }) else { throw DesktopAppUpdateFailure.invalidArchive }
         return app
     }
-    static func canReplaceInstalledApp(_ app: URL, fileManager: FileManager = .default) -> Bool {
-        let root = URL(fileURLWithPath: "/Applications", isDirectory: true)
-            .resolvingSymlinksInPath().path
+    static func canReplaceInstalledApp(_ app: URL,
+                                       applicationsRoot: URL = URL(fileURLWithPath: "/Applications", isDirectory: true),
+                                       fileManager: FileManager = .default) -> Bool {
+        let root = applicationsRoot.resolvingSymlinksInPath().path
         let originalPath = app.path.hasSuffix("/") ? String(app.path.dropLast()) : app.path
         let appURL = URL(fileURLWithPath: originalPath, isDirectory: true).standardizedFileURL
         let resolvedApp = appURL.resolvingSymlinksInPath()

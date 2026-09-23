@@ -1615,13 +1615,13 @@ run [35822177506](https://github.com/Su-luoya/pi-web-desktop/actions/runs/358221
 | 3 | 安全门槛逐项核对（S1–S8） | 见下「S1–S8 逐项结论」 | 通过 |
 | 4 | `scan-secrets.sh` 与 `--self-test` 均退出 0 | `self-test: PASS (all rules fired, look-alikes stayed clean, suppression and rejection verified, untracked-file gate verified, samples cleaned up)`；`scan-secrets: suppressed 15 lines`、`scan-secrets: PASS (no matches in tracked files; no untracked files)`，输出里没有 `scan-secrets: rejected` | 两者退出 0，通过（N=15 与 alpha.5 … alpha.14 一致，本版没有新增抑制标记；扫描前先 `git add`，避免 R-11 的假绿） |
 | 5 | tag 与 bundle 版本一致 | `./Scripts/check-identity.sh` → `check-identity: PASSED (45 checks)`（含 `ok   no hardcoded MARKETING_VERSION outside Configuration/AppIdentity.xcconfig`）；`sh Scripts/check-release-version.sh v0.1.0-alpha.15` → `PASSED (tag v0.1.0-alpha.15, MARKETING_VERSION 0.1.0-alpha.15, CURRENT_PROJECT_VERSION 15)`；构建出的 bundle `CFBundleShortVersionString=0.1.0-alpha.15` / `CFBundleVersion=15` | 退出 0，通过（tag 尚未创建；脚本只做字符串比对，不检查 tag 是否存在） |
-| 6 | 真机 smoke 记录 | 本机脚本两种模式的结果见第 7 行；需要人点击 / 观察的 5 项见下「真机 smoke 记录（待验证）」 | **待验证**（保留 #179 的五行验证项，本机不代填结果） |
+| 6 | 真机 smoke 记录 | 本机脚本两种模式的结果见第 7 行；需要人点击 / 观察的 5 项见下「真机 smoke 记录（本版未执行）」 | **未执行**（发布后维护者选择跳过这轮真机验证；保留 #179 的五行验证项，本机不代填结果） |
 | 7 | 本地门槛：构建与 smoke | `./Scripts/build.sh` → `build: release build with -O -wmo`、`Built: …/build/Pi-Web-Desktop.app`、`Contents/MacOS/PiWebDesktop: Mach-O 64-bit executable arm64`，退出 0（首次运行时日志里两条 `warning: codesign --force --deep --sign - failed (attempt N/3, status 1); clearing extended attributes and retrying` 是 iCloud 重贴属性触发的预期重试；本节写完后在最终树上重跑时不再出现，构建日志 0 warning）；`./Scripts/smoke.sh` → `smoke: startup mode OK (marker "smoke: ready", exit 0)`、`smoke: diagnostics items=6 blockers=3`、`smoke: diagnostics mode OK (marker "smoke: diagnostics ready", exit 0)`、`smoke: OK` | 退出 0，通过 |
 | 8 | 脚本语法与补丁空白 | `sh -n Scripts/*.sh`（7 个脚本，无输出，退出 0）；`git diff --check`（无输出，退出 0）与 `git diff --cached --check`（无输出，退出 0） | 通过 |
 | 9 | 打包与证据（演练值） | 见下「本版演练记录」：`package-release: OK`、`Pi-Web-Desktop-0.1.0-alpha.15+build.15.zip`（`1617804` 字节，SHA-256 `f62359c7…9eab`）、白名单条目集合一致（8 条，无 `__MACOSX/`）、`shasum -a 256 -c` → `OK`、解包后 `codesign --verify --deep --strict` 退出 0 | 通过（**演练值**；发布资产由 `release.yml` 在 tag 上生成） |
-| 10 | checksum 记录（与 Release 资产一致） | 见下「checksum 记录（发布后回填）」 | **发布后回填** |
-| 11 | Release 标记 prerelease，说明中写明未公证与安装限制 | 未执行：Release 与 prerelease 标记由维护者在 tag 之后创建。发布说明已写明未公证 / ad-hoc、`/Applications` 限制、信任边界与「没有自动回滚」 | 待发布后核对 |
-| 12 | 回退路径确认（上一版 `v0.1.0-alpha.14` 资产仍可下载） | 未执行：本版本地不访问 Releases。#179 的「已知问题与回退」一节已写入 `v0.1.0-alpha.14` 的 Release 链接（该版资产在上一轮发布后已下载核验过 SHA-256） | 待发布后核对 |
+| 10 | checksum 记录（与 Release 资产一致） | 见下「checksum 记录（发布后回填）」：`1700138` 字节、SHA-256 `7721d240…fe1c8a`，发布后从公开发布页重新下载并复验一致 | 通过 |
+| 11 | Release 标记 prerelease，说明中写明未公证与安装限制 | 已发布：[v0.1.0-alpha.15](https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.15)，`isDraft=false`、`isPrerelease=true`、`publishedAt=2026-09-23T05:59:51Z`，3 个资产；正文写明未公证 / ad-hoc、`/Applications` 限制、信任边界与「没有自动回滚」 | 通过 |
+| 12 | 回退路径确认（上一版 `v0.1.0-alpha.14` 资产仍可下载） | `gh release view v0.1.0-alpha.14` → `prerelease=true`、3 个资产；资产 ZIP 的 URL `HEAD` → `200`、`content-length: 1663691`（与该版记录的大小一致） | 通过 |
 
 ### S1–S8 逐项结论
 
@@ -1659,42 +1659,47 @@ run [35822177506](https://github.com/Su-luoya/pi-web-desktop/actions/runs/358221
 | P8 | 包内版本与签名复验 | `ditto -x -k <zip> <mktemp -d>` + `plutil -p …/Contents/Info.plist` + `codesign --verify --deep --strict …/Pi-Web-Desktop.app` | `CFBundleShortVersionString=0.1.0-alpha.15`、`CFBundleVersion=15`、`LSMinimumSystemVersion=14.0`、`CFBundleIdentifier=io.github.su-luoya.pi-web-desktop`；解包出的 bundle 签名校验退出 0；可执行文件 SHA-256 `e2ee759e8a82c62c8209c72bf3e2e2e43e4802338243163d3b59a7dea5a6e056` | 通过（临时目录已删除） |
 | P9 | 同步目录内的演练失败（如实登记） | `./Scripts/package-release.sh --tag v0.1.0-alpha.15`（本工作区 `~/Documents`） | `warning: codesign --verify --deep --strict failed (attempt 1/2, status 1); clearing extended attributes and retrying`；`file with invalid attached data: Disallowed xattr com.apple.FinderInfo found on …/build/Pi-Web-Desktop.app`；`package-release: FAILED - codesign --verify --deep --strict failed with status 1`，未生成任何资产 | 退出 1，**已知环境问题**（iCloud 重贴属性），因此在副本里完成演练（P1–P8） |
 
-### 真机 smoke 记录（待验证）
+### 真机 smoke 记录（本版未执行）
 
 本机脚本 smoke 的结果在上表第 7 行（启动模式与诊断模式都退出 0，`items=6 blockers=3`）。下表是**需要人在
 真机上点击 / 观察**的项，由 [Release Issue #179](https://github.com/Su-luoya/pi-web-desktop/issues/179) 的
 真机表回填，本机不代填结果。
 
+**本版这轮真机验证没有执行**：`v0.1.0-alpha.15` 发布后维护者决定跳过（时间与理由见 #179 的发布后评论），
+因此下表 5 项在本版保持未执行状态，不用演练值或 alpha.14 周期的旧结论冒充本版结果。alpha.14 周期做过
+一轮同类端到端验证（`/Applications` 内替换成功、资产 SHA-256 逐字节一致），可作为该流程仍然可用的参考，
+但**不构成本版资产的验证**。
+
 | # | 验证项 | 步骤 | 期望 | 结果 |
 | --- | --- | --- | --- | --- |
-| 1 | 自更新入口出现 | 用低于本版的构建（`MARKETING_VERSION` 临时改为 `0.1.0-alpha.14` 后 build）装进 `/Applications`，点「服务 → 更新检查设置 → 检查更新…」 | 菜单出现「下载并安装桌面应用更新…」 | 待验证（alpha.14 周期已在真机上验证过同类路径；本版资产发布后复验） |
-| 2 | 确认与安装 | 点该菜单项 → 确认框写明目标版本 → 点「更新」 | 下载、校验、替换 `/Applications` 应用，应用退出并重启 | 待验证（同上） |
-| 3 | 安装结果可核对 | 更新后核对 `/Applications/Pi-Web-Desktop.app` | `CFBundleShortVersionString=0.1.0-alpha.15`，可执行文件 SHA-256 与 Release 资产一致 | 待验证 |
-| 4 | 校验失败即中止 | 本机演练：把下载到的 `.sha256` 换成一个不匹配的值后再触发更新 | 报「更新包校验失败，已停止安装」，`/Applications` 应用不变 | 待验证 |
-| 5 | 非 `/Applications` 拒绝 | 把同一个构建放到 `/tmp` 运行后点该菜单项 | 报「当前应用不是从 /Applications 安装，无法自动更新。」 | 待验证 |
+| 1 | 自更新入口出现 | 用低于本版的构建（`MARKETING_VERSION` 临时改为 `0.1.0-alpha.14` 后 build）装进 `/Applications`，点「服务 → 更新检查设置 → 检查更新…」 | 菜单出现「下载并安装桌面应用更新…」 | 未执行（本版跳过真机验证；alpha.14 周期已验证同类路径） |
+| 2 | 确认与安装 | 点该菜单项 → 确认框写明目标版本 → 点「更新」 | 下载、校验、替换 `/Applications` 应用，应用退出并重启 | 未执行（本版跳过真机验证；alpha.14 周期已验证同类路径） |
+| 3 | 安装结果可核对 | 更新后核对 `/Applications/Pi-Web-Desktop.app` | `CFBundleShortVersionString=0.1.0-alpha.15`，可执行文件 SHA-256 与 Release 资产一致 | 未执行（本版跳过真机验证） |
+| 4 | 校验失败即中止 | 本机演练：把下载到的 `.sha256` 换成一个不匹配的值后再触发更新 | 报「更新包校验失败，已停止安装」，`/Applications` 应用不变 | 未执行（本版跳过真机验证） |
+| 5 | 非 `/Applications` 拒绝 | 把同一个构建放到 `/tmp` 运行后点该菜单项 | 报「当前应用不是从 /Applications 安装，无法自动更新。」 | 未执行（本版跳过真机验证） |
 
 ### checksum 记录（发布后回填）
 
 | 项 | 值 |
 | --- | --- |
 | 发布资产 | `Pi-Web-Desktop-0.1.0-alpha.15+build.15.zip` |
-| 大小 | 发布后回填（演练值 `1617804` 字节） |
-| SHA-256 | 发布后回填（演练值 `f62359c7bfedcdf1b8ff9f257b5b20e65f2ae8a5f246e6d36a4cd7349ecd9eab`） |
-| `.zip.sha256` / `.evidence.md` | 发布后回填（由 `release.yml` 在 tag `v0.1.0-alpha.15` 上生成） |
-| 校验命令与结果 | `shasum -a 256 -c Pi-Web-Desktop-0.1.0-alpha.15+build.15.zip.sha256` → 发布后回填 |
-| 发布提交 | 本版发布提交（`d1f8ea7` 之后的版本 bump 与文档提交），tag `v0.1.0-alpha.15` 指向它 |
+| 大小 | `1700138` 字节（发布后实测；演练值 `1617804` 字节） |
+| SHA-256 | `7721d2403d8335f4439ada9b92adeba13a890480dd79bbeaaedc9126ccfe1c8a`（发布后实测；演练值 `f62359c7bfedcdf1b8ff9f257b5b20e65f2ae8a5f246e6d36a4cd7349ecd9eab`） |
+| `.zip.sha256` / `.evidence.md` | `109` 字节 / `3994` 字节 |
+| 校验命令与结果 | 发布后重新下载 ZIP 与 `.zip.sha256`：`shasum -a 256 -c Pi-Web-Desktop-0.1.0-alpha.15+build.15.zip.sha256` → `OK`；解包后 `CFBundleShortVersionString=0.1.0-alpha.15` / `CFBundleVersion=15` / `CFBundleIdentifier=io.github.su-luoya.pi-web-desktop`、可执行文件 SHA-256 `0a92168487291be1968e8a0fb0904dcdbe1e5bdeb0801eb10001927f651bf5a7` 与 `.evidence.md` 清单一致、`codesign --verify --deep --strict` 退出 0、`spctl -a -vv` 退出 3（ad-hoc 未公证的预期结果） |
+| 发布提交 | `e0a62b1`（`chore(release): v0.1.0-alpha.15 版本 bump、发布说明、安全评审与门槛执行记录（#179） (#180)`）；tag `v0.1.0-alpha.15` 指向它 |
 
 ### 还需 CI / 发布 workflow 完成
 
 | # | 检查 | 实测输出摘要 | 判定 |
 | --- | --- | --- | --- |
-| C1 | 发布提交的 PR CI（build workflow） | 待回填（PR 创建后） | 待回填 |
-| C2 | 发布提交合并后的 main CI | 待回填（合并后） | 待回填 |
-| C3 | `git tag -a v0.1.0-alpha.15` 指向发布提交 | 待回填（tag 由维护者在合并后创建；`check-release-version.sh` 只做字符串比对，不检查 tag 是否存在） | 待回填 |
-| C4 | `release.yml`（tag push 触发） | 待回填（build 与 publish 两个 job；产出 ZIP / `.zip.sha256` / `.evidence.md` 三件资产） | 待回填 |
-| C5 | 草稿 prerelease 的正文与真机表 | 待回填（`isDraft=true` / `isPrerelease=true`；正文由 `release.yml` 渲染发布说明模板） | 待回填 |
-| C6 | `gh release edit --draft=false`（prerelease） | 待回填（发布后重新下载 ZIP 复验 `shasum -a 256 -c`、解包 `Info.plist`、`codesign --verify --deep --strict`） | 待回填 |
-| C7 | 回填 Issue #179 的 run 链接、ZIP 大小与 SHA-256、真机结果 | 待回填（与 checksum 记录同步） | 待回填 |
+| C1 | 发布提交的 PR CI（build workflow） | [run 35824048853](https://github.com/Su-luoya/pi-web-desktop/actions/runs/35824048853)（PR #180，commit `57d419f`，4m30s，`success`） | 通过 |
+| C2 | 发布提交合并后的 main CI | [run 35824398805](https://github.com/Su-luoya/pi-web-desktop/actions/runs/35824398805)（main `e0a62b1`，`success`） | 通过 |
+| C3 | `git tag -a v0.1.0-alpha.15` 指向发布提交 | annotated tag `v0.1.0-alpha.15`（标注「Pi Web Desktop v0.1.0-alpha.15 (build 15)」）→ `e0a62b10b878505f3a61c49eecf4f76ab1166373`（= 发布提交 `e0a62b1`） | 通过 |
+| C4 | `release.yml`（tag push 触发） | [run 35824416998](https://github.com/Su-luoya/pi-web-desktop/actions/runs/35824416998)（`success`），产出 `Pi-Web-Desktop-0.1.0-alpha.15+build.15.zip` / `.zip.sha256` / `.evidence.md` 三件资产 | 通过 |
+| C5 | 草稿 prerelease 的正文与真机表 | 正文由 `release.yml` 渲染（发布后检查：无 `<待填写>` 占位符残留；实测环境表与「已知问题」已填）；真机表见上节（本版未执行） | 通过（正文已核对） |
+| C6 | `gh release edit --draft=false`（prerelease） | 已发布：[v0.1.0-alpha.15](https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.15)（prerelease，`publishedAt=2026-09-23T05:59:51Z`）；发布后重新下载 ZIP 复验：`shasum -a 256 -c` → `OK`、解包 `Info.plist` 为 `0.1.0-alpha.15` / `15`、可执行文件 SHA-256 `0a921684…bf5a7` 与 `.evidence.md` 一致、`codesign --verify --deep --strict` 退出 0、`spctl -a -vv` 退出 3 | 通过 |
+| C7 | 回填 Issue #179 的 run 链接、ZIP 大小与 SHA-256、真机结果 | 已回填（#179 的发布后评论：发布链接 / 时间 / 大小 / SHA-256 / run 链接；真机结果按「本版未执行」记录） | 通过 |
 
 ### 本版同时做的文档一致性改动
 
@@ -1705,8 +1710,8 @@ run [35822177506](https://github.com/Su-luoya/pi-web-desktop/actions/runs/358221
   （同源校验值 + bundle 身份自检，不含签名链）、失败不破坏现有安装、不做无人值守安装、只在 `/Applications`
   可用、没有自动回滚；「更新检查与自动更新的边界」表区分本版变化与未变路径；真机实测环境（Mac16,10 /
   Apple M4 / macOS `27.0`（`26A428`）/ arm64 / Node `v24.21.0` / npm `11.19.0` / pi `0.87.1` /
-  `@agegr/pi-web` `0.9.2`）与 alpha.14 周期的端到端自更新验证都写进文内；校验值的大小与 SHA-256 保持
-  「发布后回填」，不用演练值冒充发布值；全文不含待填写占位符字面量（按 #163 的文档约定）。
+  `@agegr/pi-web` `0.9.2`）与 alpha.14 周期的端到端自更新验证都写进文内；校验值的大小与 SHA-256 标注
+  「发布后回填」（发布后已按公开资产回填，见「checksum 记录（发布后回填）」），不用演练值冒充发布值；全文不含待填写占位符字面量（按 #163 的文档约定）。
 - `docs/security-review-alpha.15.md`（本版新增）：按 S1–S8 覆盖本版 delta（`e0afaf1..d1f8ea7`）；`R1`–`R9`
   继承，本版新增 `R10`（信任边界不含签名链）/ `R11`（没有自动回滚）/ `R12`（解压器对恶意归档路径未审计，
   [C]）/ `R13`（`/Applications` 写权限探针与替换之间的 TOCTOU，[C]）/ `R14`（待安装版本字符串可能来自

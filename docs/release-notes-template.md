@@ -94,7 +94,7 @@ Pi Web Desktop {{VERSION}} is an early alpha for Apple Silicon (arm64) Macs runn
 
 - 未公证导致首次打开必须手动放行；重新下载后（quarantine 属性存在时）可能需要再次确认。
 - 依赖（Node.js、Pi、`@agegr/pi-web`）需要用户自行安装；缺失时应用只显示诊断信息，不会自动安装。
-- `v0.1.0` 不实现应用内更新，升级需要重新下载并替换应用包。
+- `v0.1.0-alpha.14` 及更早版本不实现应用内更新，升级需要重新下载并替换应用包；从 `v0.1.0-alpha.15` 起有应用内自更新（菜单「下载并安装桌面应用更新…」，仅 `/Applications` 可用）。
 - 只支持 Apple Silicon，Intel Mac 不支持。
 - <待填写：Release Issue 中记录的本版本已知问题>
 
@@ -102,13 +102,13 @@ Pi Web Desktop {{VERSION}} is an early alpha for Apple Silicon (arm64) Macs runn
 
 1. 保留上一版 ZIP 与它的 checksum；回退时解压上一版并替换当前的 `Pi-Web-Desktop.app`。
 2. 应用没有系统级常驻组件，删除应用包即可卸载；服务配置保留在用户目录（UserDefaults、Application Support 与 Logs），回退时不会自动清理。
-3. 没有应用内自动回滚或自动更新；新版本不可用时按上面步骤手动换回旧版本，并在 Release Issue 中记录问题。
+3. 没有应用内自动回滚；自更新需要用户确认后才执行（`v0.1.0-alpha.15` 起，仅 `/Applications`），新版本不可用时按上面步骤手动换回旧版本，并在 Release Issue 中记录问题。
 4. Node.js、Pi、Pi Web 的版本回退由用户自行管理；本项目不承诺能恢复第三方包的旧版本。
 
 ## 支持边界
 
 - 只支持 Apple Silicon（arm64）与 macOS 14 或更高版本。
 - 没有 SLA：这是 alpha 预览，按“现状”提供，不承诺修复时间。
-- 没有自动更新。
+- 没有无人值守的自动更新：自更新从 `v0.1.0-alpha.15` 起可用，但必须由用户在菜单里确认后才执行，且只在 `/Applications` 下可用。
 - 没有 Developer ID 签名、没有 Apple 公证，也没有 Apple 支持渠道。
 - 不要在公开 issue 或 Release 评论里粘贴密码、token、私有主机名、代理凭据或未脱敏日志。

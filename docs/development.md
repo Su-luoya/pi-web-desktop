@@ -61,11 +61,14 @@ Finder 或 File Provider 会在构建过程中给 app bundle 本身或 `Contents
 - 把 `com.apple.FinderInfo` 写到 bundle 根目录或 `Contents/MacOS/PiWebDesktop` 上，
   `codesign --verify --deep --strict --verbose=2` 立即以退出码 1 报上面的 detritus 错误；
   写到 `Contents/Info.plist` 上则仍然通过（校验只看 bundle 与 Mach-O 可执行文件）。
-- `xattr -cr <app>` 清除后同一 bundle 立即校验通过，不需要重新签名。
+- `xattr -cr <app>` 清除后同一 bundle 立即校验通过，不需要重新签名；但同步代理可能在 1 秒内重新
+  贴上 `com.apple.FinderInfo`，复验仍可能连败（脚本会在同步目录之外复验一次，见下）。
 
 脚本已经处理这个坑：`Scripts/build.sh` 在 ad-hoc 签名前与签名后各清一次扩展属性（`xattr -cr`），
-签名后用 `codesign --verify --deep --strict` 复验，失败时清属性重试最多 3 次；仍失败则以可读错误
-停下并提示 `xattr -l` / `xattr -cr`，不会静默忽略签名错误。`Scripts/package-release.sh` 在签名校验与
+签名后用 `codesign --verify --deep --strict` 复验，失败时清属性重试最多 3 次。仍失败时，如果诊断正好
+是 bundle 根目录上的 `com.apple.FinderInfo`，脚本会把 bundle 复制到同步目录之外再复验一次：副本通过
+就只告警并继续（签名本身没问题，脏的只是同步目录），副本也失败才以可读错误停下并提示 `xattr -l` /
+`xattr -cr`，不会静默忽略签名错误。`Scripts/package-release.sh` 在签名校验与
 打包前也会防御性清理，所以“构建成功、打包时校验失败”不会再出现。清除扩展属性不会破坏已签名的封条，
 不需要重新签名。CI 在干净的 runner 目录里 checkout，不受影响；这个坑只在把仓库放在同步目录的本地
 环境出现。手工排查：

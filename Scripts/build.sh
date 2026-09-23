@@ -226,6 +226,26 @@ verify_ad_hoc_signature() {
 
   printf 'error: codesign --verify --deep --strict failed for %s (status %s)\n' "$APP" "$verify_status" >&2
   [ -z "$verify_output" ] || printf '%s\n' "$verify_output" >&2
+
+  # An iCloud Drive / File Provider work tree reattaches com.apple.FinderInfo to the
+  # bundle root faster than the retry loop above can clear it. That metadata is not
+  # part of the seal, so verify the same signature on a copy outside the synced tree:
+  # if the copy passes, only the local directory is dirty and the bundle is fine.
+  if printf '%s' "$verify_output" | grep -Fq "Disallowed xattr com.apple.FinderInfo found on $APP" \
+     && printf '%s' "$verify_output" | grep -Fq "resource fork, Finder information, or similar detritus not allowed"; then
+    isolated_dir=$(mktemp -d "${TMPDIR:-/tmp}/pi-web-verify.XXXXXX")
+    isolated_app="$isolated_dir/$(basename "$APP")"
+    if ditto "$APP" "$isolated_app" \
+       && xattr -cr "$isolated_app" \
+       && codesign --verify --deep --strict "$isolated_app"; then
+      printf 'warning: %s sits in a synced directory whose File Provider reattached com.apple.FinderInfo; the signature itself verified on an isolated copy\n' "$APP" >&2
+      printf 'warning: for a clean bundle, build from a work tree outside synced folders such as ~/Documents (docs/development.md, section 构建)\n' >&2
+      rm -rf "$isolated_dir"
+      return 0
+    fi
+    rm -rf "$isolated_dir"
+  fi
+
   printf 'error: the bundle or its executable carries metadata that ad-hoc verification rejects.\n' >&2
   printf 'error: inspect with "xattr -l %s" and clear with "xattr -cr %s", then rebuild; see docs/development.md (section 构建).\n' "$APP" "$APP" >&2
   exit 1
@@ -285,9 +305,31 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-if ! codesign --force --deep --sign - "$APP" >/dev/null; then
-  printf 'error: codesign --force --deep --sign - failed for %s\n' "$APP" >&2
-  printf 'error: if the message mentions "resource fork, Finder information, or similar detritus not allowed", clear the attributes with "xattr -cr %s" and retry (see docs/development.md, section 构建).\n' "$APP" >&2
+# Clear extended attributes before signing as well: a synced parent directory can
+# attach com.apple.FinderInfo to the bundle after the files above were written, and
+# codesign --sign then refuses with "resource fork, Finder information, or similar
+# detritus not allowed" before the verify step below ever runs.
+sign_attempt=0
+sign_status=1
+while [ "$sign_attempt" -lt 3 ]; do
+  sign_attempt=$((sign_attempt + 1))
+  clear_extended_attributes
+  set +e
+  sign_output=$(codesign --force --deep --sign - "$APP" 2>&1 >/dev/null)
+  sign_status=$?
+  set -e
+  if [ "$sign_status" -eq 0 ]; then
+    break
+  fi
+  if [ "$sign_attempt" -lt 3 ]; then
+    printf 'warning: codesign --force --deep --sign - failed (attempt %s/3, status %s); clearing extended attributes and retrying\n' "$sign_attempt" "$sign_status" >&2
+    [ -z "$sign_output" ] || printf '%s\n' "$sign_output" >&2
+    sleep 1
+  fi
+done
+if [ "$sign_status" -ne 0 ]; then
+  printf 'error: codesign --force --deep --sign - failed for %s (status %s)\n' "$APP" "$sign_status" >&2
+  printf 'error: if the message mentions "resource fork, Finder information, or similar detritus not allowed", inspect with "xattr -l %s" and clear with "xattr -cr %s", then rebuild (see docs/development.md, section 构建).\n' "$APP" "$APP" >&2
   exit 1
 fi
 # The enclosing synced directory can reattach Finder metadata after signing

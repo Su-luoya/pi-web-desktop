@@ -192,6 +192,11 @@ open "$HOME/Applications/Pi-Web-Desktop.app"
 
 `Scripts/install.sh` 会把 `build/Pi-Web-Desktop.app` 复制到 `~/Applications/`，覆盖前把已有同名 app 改名为带时间戳的备份，然后重新做 ad-hoc 签名与校验。它要求 `~/Applications` 已存在（脚本不会创建目录），目录缺失时先执行 `mkdir -p ~/Applications`，否则复制会以 No such file or directory 失败。
 
+把 `/Applications` 或 `~/Applications` 里的应用替换成另一个 ad-hoc 构建（包括用应用内更新装上的新版
+本）后，首次启动 macOS 可能弹窗要求授权新的可执行文件读取 Keychain 中已保存的远程访问密码：ad-hoc
+签名的 CDHash 随构建内容变化，系统把它当成“另一个程序”重新征求同意，属于预期行为，不是更新失败；
+授权或拒绝都不影响应用启动、服务与其它功能，只影响弹出那次进程发起的自动化读取。
+
 默认服务地址是 `http://127.0.0.1:30141/`。默认监听 loopback，不开放局域网监听：要改成远程地址，必须在“设置…→远程访问”里先在 Keychain 中保存密码（输入或点“生成高强度密码”）。密码认证只验证访问者，不加密传输；远程访问请自行配置受信任的加密隧道或 HTTPS 反向代理。删除密码会自动把监听地址改回 `127.0.0.1`（若远程服务正在运行，会先停止它再回落）。设置界面也拒绝 `0.0.0.0` 这类“所有接口”地址。
 
 ## 依赖诊断与首次启动

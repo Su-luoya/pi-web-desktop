@@ -95,6 +95,9 @@ Pi Web Desktop {{VERSION}} is an early alpha for Apple Silicon (arm64) Macs runn
 - 未公证导致首次打开必须手动放行；重新下载后（quarantine 属性存在时）可能需要再次确认。
 - 依赖（Node.js、Pi、`@agegr/pi-web`）需要用户自行安装；缺失时应用只显示诊断信息，不会自动安装。
 - `v0.1.0-alpha.14` 及更早版本不实现应用内更新，升级需要重新下载并替换应用包；从 `v0.1.0-alpha.15` 起有应用内自更新（菜单「下载并安装桌面应用更新…」，仅 `/Applications` 可用）。
+- 换成另一个 ad-hoc 构建（包括用应用内更新装上的新版本）后首次启动，macOS 可能弹窗要求授权新的
+  可执行文件读取已保存的远程访问密码（Keychain 授权弹窗）。这是 ad-hoc 签名的 CDHash 变化导致的
+  预期行为，不是更新失败；授权或拒绝都不影响应用启动与其它功能。
 - 只支持 Apple Silicon，Intel Mac 不支持。
 - <待填写：Release Issue 中记录的本版本已知问题>
 

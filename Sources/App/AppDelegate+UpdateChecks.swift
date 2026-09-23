@@ -3,6 +3,137 @@
 import Cocoa
 
 extension AppDelegate {
+    // MARK: - 桌面 App 自动更新
+
+    /// 只允许本次刚从 GitHub API 验证过的 Release 进入下载流程；缓存结果不会安装。
+    @objc func updateDesktopAppNow(_ sender: Any?) {
+        guard desktopAppUpdateInstaller == nil else { return }
+        guard let result = updateChecker?.summary.result(for: UpdateCheckCategory.desktopApp.rawValue),
+              result.status == .updateAvailable,
+              result.origin == .network,
+              result.freshness == .fresh,
+              result.confidence == .verified,
+              let version = result.latestVersion,
+              let releaseTag = result.upstreamTag else {
+            presentDesktopUpdateFailure(.missingAsset)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "更新桌面应用"
+        alert.informativeText = "检测到桌面应用新版本 \(version)。下载并安装后应用会退出并重新启动。"
+            + "当前版本未经过 Apple Developer 签名与 notarization，请确认 GitHub 发布来源。"
+        alert.addButton(withTitle: "更新")
+        alert.addButton(withTitle: "取消")
+        alert.alertStyle = .warning
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.downloadAndInstallDesktopApp(version: version, releaseTag: releaseTag)
+        }
+    }
+
+    private func downloadAndInstallDesktopApp(version: String, releaseTag: String) {
+        let tagCharacters = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        guard DesktopAppReleaseAssetSelector.isReleaseTag(releaseTag),
+              let encodedTag = releaseTag.addingPercentEncoding(withAllowedCharacters: tagCharacters),
+              let releaseURL = URL(string: "https://api.github.com/repos/\(UpdateCheckUpstream.desktopRepository)/releases/tags/\(encodedTag)"),
+              let components = URLComponents(url: releaseURL, resolvingAgainstBaseURL: false),
+              components.scheme == "https",
+              components.host == UpdateCheckUpstream.githubHost,
+              components.path == "/repos/\(UpdateCheckUpstream.desktopRepository)/releases/tags/\(encodedTag)",
+              components.query == nil,
+              components.fragment == nil else {
+            presentDesktopUpdateFailure(.invalidAssetURL)
+            return
+        }
+
+        var request = URLRequest(url: releaseURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = UpdateChecker.requestTimeout
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(UpdateCheckIdentity.current.userAgent, forHTTPHeaderField: "User-Agent")
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            guard let data, error == nil,
+                  response?.url == releaseURL,
+                  (response as? HTTPURLResponse)?.statusCode == 200,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tag = json["tag_name"] as? String,
+                  tag == releaseTag,
+                  let assets = json["assets"] as? [[String: Any]] else {
+                DispatchQueue.main.async { self?.presentDesktopUpdateFailure(.downloadFailed) }
+                return
+            }
+            let parsedAssets = assets.compactMap { asset -> (name: String, url: URL)? in
+                guard let name = asset["name"] as? String,
+                      let text = asset["browser_download_url"] as? String,
+                      let url = URL(string: text) else { return nil }
+                return (name, url)
+            }
+            guard let archive = parsedAssets.first(where: {
+                      DesktopAppReleaseAssetSelector.isArchiveName($0.name, version: version)
+                  }),
+                  let checksumAsset = parsedAssets.first(where: { $0.name == "\(archive.name).sha256" }),
+                  DesktopAppReleaseAssetSelector.allowsDownloadURL(
+                      archive.url, assetName: archive.name, releaseTag: releaseTag
+                  ),
+                  DesktopAppReleaseAssetSelector.allowsChecksumDownloadURL(
+                      checksumAsset.url, assetName: checksumAsset.name, releaseTag: releaseTag
+                  ) else {
+                DispatchQueue.main.async { self?.presentDesktopUpdateFailure(.missingAsset) }
+                return
+            }
+
+            var checksumRequest = URLRequest(url: checksumAsset.url)
+            checksumRequest.httpMethod = "GET"
+            checksumRequest.timeoutInterval = UpdateChecker.requestTimeout
+            checksumRequest.setValue("text/plain", forHTTPHeaderField: "Accept")
+            checksumRequest.setValue(UpdateCheckIdentity.current.userAgent, forHTTPHeaderField: "User-Agent")
+            let checksumSession = URLSession(
+                configuration: .ephemeral,
+                delegate: ChecksumRedirectDelegate(),
+                delegateQueue: nil
+            )
+            checksumSession.dataTask(with: checksumRequest) { [weak self] checksumData, checksumResponse, checksumError in
+                guard let checksumData, checksumError == nil,
+                      (checksumResponse as? HTTPURLResponse)?.statusCode == 200,
+                      let finalURL = checksumResponse?.url,
+                      DesktopAppReleaseAssetSelector.allowsChecksumRedirect(finalURL),
+                      let checksum = String(data: checksumData, encoding: .utf8),
+                      let verifiedAsset = DesktopAppReleaseAssetSelector.select(
+                          version: version,
+                          assets: [(name: archive.name, url: archive.url)],
+                          checksum: checksum,
+                          releaseTag: releaseTag
+                      ) else {
+                    checksumSession.finishTasksAndInvalidate()
+                    DispatchQueue.main.async { self?.presentDesktopUpdateFailure(.checksumUnavailable) }
+                    return
+                }
+                checksumSession.finishTasksAndInvalidate()
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.desktopAppUpdateInstaller == nil else { return }
+                    let installer = DesktopAppUpdateInstaller()
+                    self.desktopAppUpdateInstaller = installer
+                    installer.install(asset: verifiedAsset) { [weak self, weak installer] result in
+                        if self?.desktopAppUpdateInstaller === installer {
+                            self?.desktopAppUpdateInstaller = nil
+                        }
+                        if case .failed(let failure) = result {
+                            self?.presentDesktopUpdateFailure(failure)
+                        }
+                    }
+                }
+            }.resume()
+        }.resume()
+    }
+
+    private func presentDesktopUpdateFailure(_ failure: DesktopAppUpdateFailure) {
+        let alert = NSAlert()
+        alert.messageText = "桌面应用更新未完成"
+        alert.informativeText = failure.text
+        alert.addButton(withTitle: "好")
+        alert.beginSheetModal(for: window)
+    }
+
     // MARK: - 更新检查（GitHub #17）
 
     /// 更新检查的生命周期入口：第一次调用启动（立即检查一次并安排周期复查），
@@ -184,6 +315,18 @@ extension AppDelegate {
         piPackageWarningItem.isHidden = true
         piPackageUpdateWarningMenuItem = piPackageWarningItem
         menu.addItem(piPackageWarningItem)
+        // 桌面 App 自更新入口：默认隐藏，只有检测到“本次网络检查 + 已核实”的新版本时才显示。
+        // 下载、校验与替换进程都由 `updateDesktopAppNow(_:)` 负责；这里只是一个入口。
+        let desktopUpdateItem = NSMenuItem(
+            title: "下载并安装桌面应用更新…",
+            action: #selector(updateDesktopAppNow(_:)),
+            keyEquivalent: ""
+        )
+        desktopUpdateItem.target = self
+        desktopUpdateItem.isHidden = true
+        desktopUpdateItem.isEnabled = false
+        desktopAppUpdateMenuItem = desktopUpdateItem
+        menu.addItem(desktopUpdateItem)
         menu.addItem(.separator())
         for category in UpdateCheckCategory.allCases {
             let toggle = NSMenuItem(
@@ -279,6 +422,12 @@ extension AppDelegate {
             piPackageUpdateWarningMenuItem.title = piPackageUpdateWarning?.shortText ?? ""
             piPackageUpdateWarningMenuItem.isHidden = piPackageUpdateWarning == nil
         }
+        // 桌面 App 自更新入口：只有「本次网络检查 + 已核实 + 有可用版本」才显示；安装器
+        // 运行期间置灰，避免同一时刻进入两次下载/替换流程。
+        let desktopResult = updateChecker?.summary.result(for: UpdateCheckCategory.desktopApp.rawValue)
+        let desktopInstallable = desktopResult?.status == .updateAvailable
+        desktopAppUpdateMenuItem?.isHidden = !desktopInstallable
+        desktopAppUpdateMenuItem?.isEnabled = desktopInstallable && desktopAppUpdateInstaller == nil
         // 扩展包入口与上面两个组件同一套闸控（GitHub #107）：忙或上一次命令已放弃等待、
         // 退出未确认时，菜单项直接带可见原因置灰，而不是让用户点下去才被拒。
         let packageEntry = piPackageUpdateEntryState
@@ -422,5 +571,21 @@ extension AppDelegate {
         alert.informativeText = summary.detailText
         alert.addButton(withTitle: "好")
         alert.beginSheetModal(for: window)
+    }
+}
+
+/// Checksummed assets use a dedicated session so the redirect policy cannot be toggled
+/// while an unrelated archive download is in flight.
+private final class ChecksumRedirectDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(
+            DesktopAppReleaseAssetSelector.allowsChecksumRedirect(request.url) ? request : nil
+        )
     }
 }

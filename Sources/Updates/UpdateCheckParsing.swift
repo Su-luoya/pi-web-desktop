@@ -56,6 +56,20 @@ struct UpdateUpstreamVersion: Equatable {
     var semanticVersion: SemanticVersion
     /// GitHub Release 的 prerelease 标记；npm 端点按版本形态推断。
     var isPrerelease: Bool
+    /// GitHub Releases 的原始 tag；npm 结果没有 tag。
+    var tag: String?
+
+    init(
+        version: String,
+        semanticVersion: SemanticVersion,
+        isPrerelease: Bool,
+        tag: String? = nil
+    ) {
+        self.version = version
+        self.semanticVersion = semanticVersion
+        self.isPrerelease = isPrerelease
+        self.tag = tag
+    }
 }
 
 /// 只做 JSON 解析的纯函数集合：不联网、不读文件，可直接用字符串断言。
@@ -88,7 +102,8 @@ enum UpdateResponseParser {
         return .success(UpdateUpstreamVersion(
             version: best.version.description,
             semanticVersion: best.version,
-            isPrerelease: best.prerelease
+            isPrerelease: best.prerelease,
+            tag: best.tag
         ))
     }
 
@@ -109,7 +124,8 @@ enum UpdateResponseParser {
         return .success(UpdateUpstreamVersion(
             version: version.description,
             semanticVersion: version,
-            isPrerelease: version.prerelease != nil
+            isPrerelease: version.prerelease != nil,
+            tag: nil
         ))
     }
 }

@@ -73,6 +73,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     var updateSettingsMenu: NSMenu?
     /// “更新检查偏好设置”窗口（GitHub #18）。
     var updateSettingsWindowController: UpdateSettingsWindowController?
+    /// 当前正在执行的桌面 App 安装器；必须由 AppDelegate 持有到下载/替换流程结束。
+    var desktopAppUpdateInstaller: DesktopAppUpdateInstalling?
+    /// 更新菜单里的「下载并安装桌面应用更新…」入口；只在检测到已核实的可用新版本时显示。
+    var desktopAppUpdateMenuItem: NSMenuItem?
     /// 每类组件的“忽略版本”（只存版本字符串与时间戳，见 `UpdateIgnoredVersions`）。
     var ignoredVersions: UpdateIgnoredVersions = .empty
     /// 本次运行已经提示过哪些版本，避免同一个版本反复打扰；退出即丢弃。
@@ -425,6 +429,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        desktopAppUpdateInstaller = nil
         // 退出已开始：兜底计时器不再需要。
         quitDecisionTimer?.invalidate()
         quitDecisionTimer = nil

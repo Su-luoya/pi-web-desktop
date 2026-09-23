@@ -211,6 +211,7 @@ struct UpdateCheckPreferences: Equatable {
     /// Pi Web 启用启动前受限自动安装；其它来源仍只显示命令，绝不自动安装。
     static let autoUpdateBeforeLaunchIsEffective = true
     static let defaultAutoUpdatePiWebBeforeLaunch = false
+    static let defaultAutoUpdatePiBeforeLaunch = false
 
     /// 四类组件各自的策略。字典始终包含 `UpdateCheckCategory.allCases`，
     /// 不合法的组合在写入时被拒绝（`setPolicy`）。

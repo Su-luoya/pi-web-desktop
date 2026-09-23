@@ -5,29 +5,28 @@ import Cocoa
 extension AppDelegate {
     // MARK: - 桌面 App 自动更新
 
-    /// 只允许本次刚从 GitHub API 验证过的 Release 进入下载流程；缓存结果不会安装。
+    /// 允许本次网络往返确认过的结果（含条件请求命中 304 的重验证结果）进入下载
+    /// 流程；准入条件与理由见 `DesktopAppUpdateInstallPolicy`。
     @objc func updateDesktopAppNow(_ sender: Any?) {
         guard desktopAppUpdateInstaller == nil else { return }
-        guard let result = updateChecker?.summary.result(for: UpdateCheckCategory.desktopApp.rawValue),
-              result.status == .updateAvailable,
-              result.origin == .network,
-              result.freshness == .fresh,
-              result.confidence == .verified,
-              let version = result.latestVersion,
-              let releaseTag = result.upstreamTag else {
-            presentDesktopUpdateFailure(.missingAsset)
+        let result = updateChecker?.summary.result(for: UpdateCheckCategory.desktopApp.rawValue)
+        let runningVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        guard let target = DesktopAppUpdateInstallPolicy.installTarget(
+                  for: result, runningVersion: runningVersion
+              ) else {
+            presentDesktopUpdateFailure(.unconfirmedUpdate)
             return
         }
         let alert = NSAlert()
         alert.messageText = "更新桌面应用"
-        alert.informativeText = "检测到桌面应用新版本 \(version)。下载并安装后应用会退出并重新启动。"
+        alert.informativeText = "检测到桌面应用新版本 \(target.version)。下载并安装后应用会退出并重新启动。"
             + "当前版本未经过 Apple Developer 签名与 notarization，请确认 GitHub 发布来源。"
         alert.addButton(withTitle: "更新")
         alert.addButton(withTitle: "取消")
         alert.alertStyle = .warning
         alert.beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn else { return }
-            self?.downloadAndInstallDesktopApp(version: version, releaseTag: releaseTag)
+            self?.downloadAndInstallDesktopApp(version: target.version, releaseTag: target.releaseTag)
         }
     }
 

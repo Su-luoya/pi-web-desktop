@@ -39,10 +39,13 @@ enum DesktopAppUpdateFailure: String, Error, Equatable {
     case unsupportedInstallation, missingAsset, invalidAssetURL, downloadFailed
     case invalidArchive, checksumUnavailable, checksumMismatch, invalidBundle
     case notWritable, replacementFailed, relaunchFailed
+    /// 菜单入口拿到的结论不满足 `DesktopAppUpdateInstallPolicy` 的准入条件。
+    case unconfirmedUpdate
 
     var text: String {
         switch self {
         case .unsupportedInstallation: return "当前应用不是从 /Applications 安装，无法自动更新。"
+        case .unconfirmedUpdate: return "本次检查结果不是本轮从上游确认的可用更新，或目标版本不比当前版本新；请重新检查更新后再试。"
         case .missingAsset: return "该版本没有可用的桌面应用 ZIP 发布包。"
         case .invalidAssetURL: return "更新包地址不在允许的 GitHub 主机上。"
         case .downloadFailed: return "更新包下载失败。"
@@ -54,6 +57,48 @@ enum DesktopAppUpdateFailure: String, Error, Equatable {
         case .replacementFailed: return "替换桌面应用失败，原应用未被删除。"
         case .relaunchFailed: return "应用已更新，但重新启动失败，请从 /Applications 手动打开。"
         }
+    }
+}
+
+/// 人工「更新桌面应用」流程的目标：要装的版本与要按哪个 tag 联网复核。
+struct DesktopAppUpdateInstallTarget: Equatable {
+    var version: String
+    var releaseTag: String
+}
+
+/// 人工「更新桌面应用」流程的准入判定（GitHub #176）。
+///
+/// 自动安装必须要求 `origin == .network`（只有本次从白名单主机取回的结果可用，见
+/// `UpdateCheckOrigin` 的来源文档）。人工流程不一样：它由用户在菜单里点出、看到
+/// 版本号并确认之后才下载，而且 `AppDelegate+UpdateChecks.swift` 的
+/// `downloadAndInstallDesktopApp` 会按 tag 重新联网取 `releases/tags/<tag>`、钉死
+/// `releases/download/<tag>/<assetName>`、用 GitHub 公布的 `.sha256` 校验，最后
+/// 核对 bundle id 与 `CFBundleShortVersionString`（见本文件 `isValidBundle`）。
+/// 版本值在这里只是待确认的线索，不是信任来源。
+///
+/// 所以条件请求命中 304（`freshness == .fresh`、`origin == .cachedFallback`）也要
+/// 允许进入下载流程：304 是成功的网络往返，只把缓存结论当「提示」会让菜单入口在
+/// 每一次热缓存检查后都报「该版本没有可用的桌面应用 ZIP 发布包」。
+///
+/// 代价是版本字符串可能来自本机缓存文件（同一用户可改写），因此这里保留三道硬
+/// 条件：本轮网络往返成功（`freshness == .fresh`）、上游结构验证通过
+/// (`confidence == .verified`)、目标版本比正在运行的版本新。缓存的版本字符串决定
+/// 下载哪个资产名，没有最后这道比较，改写缓存就能让人工流程装回旧版本。
+enum DesktopAppUpdateInstallPolicy {
+    static func installTarget(
+        for result: UpdateCheckResult?,
+        runningVersion: String?
+    ) -> DesktopAppUpdateInstallTarget? {
+        guard let result,
+              result.status == .updateAvailable,
+              result.freshness == .fresh,
+              result.confidence == .verified,
+              let version = result.latestVersion,
+              let releaseTag = result.upstreamTag,
+              let candidate = SemanticVersion(version),
+              let running = runningVersion.flatMap({ SemanticVersion($0) }),
+              candidate > running else { return nil }
+        return DesktopAppUpdateInstallTarget(version: version, releaseTag: releaseTag)
     }
 }
 
@@ -91,20 +136,43 @@ enum DesktopAppReleaseAssetSelector {
         return !build.isEmpty && build.allSatisfy { $0.isASCII && $0.isNumber }
     }
 
+    /// 允许跟随的重定向目标：必须还在 GitHub 的下载主机里，且文件名后缀仍是被期望的
+    /// 资产类型。GitHub 的签名直链把文件名放在查询串里
+    /// （`response-content-disposition=attachment; filename=….zip`，`rscd` 同义），
+    /// 路径却是 `github-production-release-asset/<id>/<uuid>` 这样的不透明 id：只看
+    /// `url.pathExtension` 会把真实的重定向当成非法，下载与校验值读取全部失败
+    /// （GitHub #177，真机 E2E 发现）。
     static func allowsAssetRedirect(_ url: URL?) -> Bool {
-        guard let url else { return false }
-        return url.scheme?.lowercased() == "https"
-            && allowedRedirectHosts.contains(url.host?.lowercased() ?? "")
-            && url.user == nil && url.password == nil
-            && url.pathExtension.lowercased() == "zip"
+        allowsRedirect(url, requiringExtension: "zip")
     }
 
     static func allowsChecksumRedirect(_ url: URL?) -> Bool {
-        guard let url else { return false }
-        return url.scheme?.lowercased() == "https"
-            && allowedRedirectHosts.contains(url.host?.lowercased() ?? "")
-            && url.user == nil && url.password == nil
-            && url.pathExtension.lowercased() == "sha256"
+        allowsRedirect(url, requiringExtension: "sha256")
+    }
+
+    private static func allowsRedirect(_ url: URL?, requiringExtension expected: String) -> Bool {
+        guard let url, url.scheme?.lowercased() == "https",
+              url.user == nil, url.password == nil,
+              allowedRedirectHosts.contains(url.host?.lowercased() ?? "") else { return false }
+        if url.pathExtension.lowercased() == expected { return true }
+        guard let name = signedFileName(in: url)?.lowercased() else { return false }
+        return name.hasSuffix(".\(expected)")
+    }
+
+    /// 从签名直链的查询串里取回原始资产名：`response-content-disposition` 与
+    /// `rscd` 都长成 `attachment; filename=<asset>`；拿不到或没有 filename 时返回 nil。
+    static func signedFileName(in url: URL) -> String? {
+        for key in ["response-content-disposition", "rscd"] {
+            guard let value = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                        .queryItems?.first(where: { $0.name.lowercased() == key })?.value,
+                  let filename = value.range(of: "filename=", options: .caseInsensitive) else { continue }
+            var name = String(value[filename.upperBound...])
+            if let semicolon = name.firstIndex(of: ";") { name = String(name[..<semicolon]) }
+            name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            name = name.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            if !name.isEmpty { return name }
+        }
+        return nil
     }
 
     static func allowsDownloadURL(_ url: URL, assetName: String? = nil, releaseTag: String? = nil) -> Bool {

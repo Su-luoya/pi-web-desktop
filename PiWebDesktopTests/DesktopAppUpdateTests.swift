@@ -80,4 +80,93 @@ final class DesktopAppUpdateTests: XCTestCase {
         ))
         XCTAssertNil(DesktopAppReleaseAssetSelector.normalizedChecksum("not-a-sha256"))
     }
+
+    /// 人工更新流程的准入：网络往返成功就够（含 304 重验证的缓存版本值），但要有
+    /// 可联网复核的 tag，且目标版本必须比正在运行的版本新。（版本字符串用与项目自身
+    /// 无关的值：check-identity.sh 禁止本机 MARKETING_VERSION 出现在源码里。）
+    func testInstallPolicyAcceptsRevalidatedCacheOnlyForANewerTarget() {
+        func check(
+            status: UpdateCheckStatus = .updateAvailable,
+            latest: String? = "1.2.4",
+            tag: String? = "v1.2.4",
+            confidence: DetectionConfidence = .verified,
+            freshness: UpdateResultFreshness = .fresh,
+            origin: UpdateCheckOrigin = .cachedFallback
+        ) -> UpdateCheckResult {
+            UpdateCheckResult(
+                target: UpdateCheckTarget(category: .desktopApp, packageName: nil),
+                status: status,
+                installedVersion: "1.2.3",
+                latestVersion: latest,
+                upstreamTag: tag,
+                confidence: confidence,
+                freshness: freshness,
+                failure: nil,
+                httpStatusCode: origin == .cachedFallback ? 304 : 200,
+                checkedAt: nil,
+                lastSuccessAt: nil,
+                origin: origin
+            )
+        }
+        let running = "1.2.3"
+
+        // 304：本次网络往返成功、版本值来自缓存文件 —— 人工流程允许
+        XCTAssertEqual(
+            DesktopAppUpdateInstallPolicy.installTarget(for: check(), runningVersion: running),
+            DesktopAppUpdateInstallTarget(version: "1.2.4", releaseTag: "v1.2.4")
+        )
+        // 本次网络结果（200）照旧通过
+        XCTAssertNotNil(DesktopAppUpdateInstallPolicy.installTarget(
+            for: check(origin: .network), runningVersion: running
+        ))
+        // 网络失败沿用的缓存结论不是本轮确认过的，不能进安装流程
+        XCTAssertNil(DesktopAppUpdateInstallPolicy.installTarget(
+            for: check(freshness: .cached), runningVersion: running
+        ))
+        // 上游结构未验证的结论不能进安装流程
+        XCTAssertNil(DesktopAppUpdateInstallPolicy.installTarget(
+            for: check(confidence: .unknown), runningVersion: running
+        ))
+        // 没有 tag 就没有可联网复核的发布
+        XCTAssertNil(DesktopAppUpdateInstallPolicy.installTarget(
+            for: check(tag: nil), runningVersion: running
+        ))
+        // 改写缓存让目标版本不比当前版本新：拒绝降级与平级重装
+        XCTAssertNil(DesktopAppUpdateInstallPolicy.installTarget(
+            for: check(latest: "1.2.2", tag: "v1.2.2"), runningVersion: running
+        ))
+        XCTAssertNil(DesktopAppUpdateInstallPolicy.installTarget(
+            for: check(), runningVersion: "1.2.4"
+        ))
+        // 本机版本读不到、或根本没有结论时都不安装
+        XCTAssertNil(DesktopAppUpdateInstallPolicy.installTarget(for: check(), runningVersion: nil))
+        XCTAssertNil(DesktopAppUpdateInstallPolicy.installTarget(for: nil, runningVersion: running))
+    }
+
+    /// 真实签名直链把资产名放在查询串里，路径是 `…/github-production-release-asset/<id>/<uuid>`
+    /// ——只看 url.pathExtension 会把 GitHub 自己的重定向判成非法（GitHub #177）。
+    func testRedirectValidationAcceptsGitHubSignedAssetURLs() {
+        let asset = "Pi-Web-Desktop-1.2.4+build.7.zip"
+        let signedZip = URL(string: "https://release-assets.githubusercontent.com/github-production-release-asset/1/2"
+            + "?sp=r&rscd=attachment%3B+filename%3D\(asset)&response-content-disposition=attachment%3B%20filename%3D\(asset)&sig=opaque")!
+        let signedChecksum = URL(string: "https://release-assets.githubusercontent.com/github-production-release-asset/1/2"
+            + "?sp=r&rscd=attachment%3B+filename%3D\(asset).sha256&response-content-disposition=attachment%3B%20filename%3D\(asset).sha256&sig=opaque")!
+
+        XCTAssertTrue(DesktopAppReleaseAssetSelector.allowsAssetRedirect(signedZip))
+        XCTAssertTrue(DesktopAppReleaseAssetSelector.allowsChecksumRedirect(signedChecksum))
+        XCTAssertEqual(DesktopAppReleaseAssetSelector.signedFileName(in: signedZip), asset)
+        // 资产类型必须对得上，不能把校验值当安装包、也不能反过来
+        XCTAssertFalse(DesktopAppReleaseAssetSelector.allowsChecksumRedirect(signedZip))
+        XCTAssertFalse(DesktopAppReleaseAssetSelector.allowsAssetRedirect(signedChecksum))
+        // 签名直链里声明的文件名后缀不对（例如被换成别的类型）、或主机不在白名单
+        XCTAssertFalse(DesktopAppReleaseAssetSelector.allowsAssetRedirect(URL(string:
+            "https://release-assets.githubusercontent.com/a/b?response-content-disposition=attachment%3B%20filename%3Dsetup.dmg")!))
+        XCTAssertFalse(DesktopAppReleaseAssetSelector.allowsAssetRedirect(URL(string:
+            "https://attacker.example/a/b?response-content-disposition=attachment%3B%20filename%3D\(asset)")!))
+        // 既没有可读的 filename、路径又没有扩展名：保持拒绝
+        XCTAssertFalse(DesktopAppReleaseAssetSelector.allowsAssetRedirect(URL(string:
+            "https://release-assets.githubusercontent.com/github-production-release-asset/1/2?sig=opaque")!))
+        XCTAssertNil(DesktopAppReleaseAssetSelector.signedFileName(in: URL(string:
+            "https://release-assets.githubusercontent.com/a/b?sig=opaque")!))
+    }
 }

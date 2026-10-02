@@ -66,11 +66,53 @@ final class UpdateCheckerTests: XCTestCase {
         }
     }
 
+    private final class ControlledUpdateHTTPClient: UpdateHTTPClient {
+        private(set) var requests: [UpdateHTTPRequest] = []
+        private var completions: [(Result<UpdateHTTPResponse, UpdateHTTPFailure>) -> Void] = []
+
+        func perform(
+            _ request: UpdateHTTPRequest,
+            completion: @escaping (Result<UpdateHTTPResponse, UpdateHTTPFailure>) -> Void
+        ) {
+            requests.append(request)
+            completions.append(completion)
+        }
+
+        func completeNext(with response: Result<UpdateHTTPResponse, UpdateHTTPFailure>) {
+            precondition(!completions.isEmpty)
+            completions.removeFirst()(response)
+        }
+    }
+
     private final class FakeUpdateTimerToken: UpdateTimerToken {
         private(set) var isCancelled = false
 
         func cancel() {
             isCancelled = true
+        }
+    }
+
+    private final class ControlledUpdateCheckScheduler: UpdateCheckScheduling {
+        private var pending: [() -> Void] = []
+        private(set) var pendingCount = 0
+
+        func perform(_ work: @escaping () -> Void) {
+            pending.append(work)
+            pendingCount = pending.count
+        }
+
+        func deliver(_ work: @escaping () -> Void) {
+            work()
+        }
+
+        func startRepeating(interval: TimeInterval, _ work: @escaping () -> Void) -> UpdateTimerToken {
+            FakeUpdateTimerToken()
+        }
+
+        func runNext() {
+            precondition(!pending.isEmpty)
+            pending.removeFirst()()
+            pendingCount = pending.count
         }
     }
 
@@ -102,6 +144,7 @@ final class UpdateCheckerTests: XCTestCase {
             timers.filter { !$0.token.isCancelled }.map(\.interval)
         }
     }
+
 
     private final class InMemoryUpdateCacheStore: UpdateCacheStoring {
         var file: UpdateCheckCacheFile
@@ -2009,7 +2052,161 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertTrue(second.isEmpty, "同一版本在本次运行里不应重复提示")
     }
 
-    // MARK: - 状态与启动前自动更新开关
+    func testStopDuringInFlightCheckPreventsFurtherRequests() {
+        var preferences = UpdateCheckPreferences.factoryDefaults
+        preferences.setPolicy(.off, for: .desktopApp)
+        preferences.setPolicy(.off, for: .piCLI)
+        preferences.setPolicy(.off, for: .piWeb)
+        preferences.setPolicy(.checkAndNotify, for: .piPackages)
+        let first = UpdateCheckPackage(name: "@example/first", installedVersion: "1.0.0")
+        let second = UpdateCheckPackage(name: "@example/second", installedVersion: "1.0.0")
+        let client = ControlledUpdateHTTPClient()
+        let scheduler = ControlledUpdateCheckScheduler()
+        let checker = UpdateChecker(
+            httpClient: client,
+            clock: UpdateClock { self.referenceDate },
+            cacheStore: InMemoryUpdateCacheStore(),
+            scheduler: scheduler,
+            identity: UpdateCheckIdentity(appName: "Pi Web Desktop", version: desktopInstalledVersion, bundleIdentifier: "io.github.su-luoya.pi-web-desktop"),
+            preferences: preferences
+        )
+        var completed = false
+        checker.checkNow(triggeredBy: .launch, inventory: UpdateCheckInventory(piPackages: [first, second])) {
+            completed = true
+        }
+        scheduler.runNext()
+        XCTAssertEqual(client.requests.count, 1)
+        XCTAssertFalse(completed)
+        checker.stop()
+        scheduler.runNext()
+        XCTAssertTrue(completed)
+        client.completeNext(with: Self.npmHTTPResponse(version: "1.0.1"))
+        scheduler.runNext()
+        XCTAssertEqual(client.requests.count, 1)
+    }
+
+    func testInventoryUpdateDuringCheckSchedulesFollowUpWithNewInventory() {
+        var preferences = UpdateCheckPreferences.factoryDefaults
+        preferences.setPolicy(.off, for: .desktopApp)
+        preferences.setPolicy(.off, for: .piCLI)
+        preferences.setPolicy(.daily, for: .piWeb)
+        preferences.setPolicy(.off, for: .piPackages)
+        let client = ControlledUpdateHTTPClient()
+        let scheduler = ControlledUpdateCheckScheduler()
+        let checker = UpdateChecker(
+            httpClient: client,
+            clock: UpdateClock { self.referenceDate },
+            cacheStore: InMemoryUpdateCacheStore(),
+            scheduler: scheduler,
+            identity: UpdateCheckIdentity(appName: "Pi Web Desktop", version: desktopInstalledVersion, bundleIdentifier: "io.github.su-luoya.pi-web-desktop"),
+            preferences: preferences
+        )
+        let oldInventory = UpdateCheckInventory(piWebVersion: "0.8.0")
+        let newInventory = UpdateCheckInventory(piWebVersion: "0.9.0")
+        var completed = false
+        var reentrantCompleted = false
+        var didReenter = false
+        checker.onResultsChanged = { _ in
+            guard !didReenter else { return }
+            didReenter = true
+            checker.checkNow(triggeredBy: .manual) { reentrantCompleted = true }
+        }
+        checker.checkNow(triggeredBy: .launch, inventory: oldInventory) { completed = true }
+        scheduler.runNext()
+        XCTAssertEqual(client.requests.count, 1)
+
+        checker.updateInventory(newInventory)
+        scheduler.runNext()
+        XCTAssertFalse(completed)
+
+        client.completeNext(with: Self.npmHTTPResponse(version: "1.0.0"))
+        scheduler.runNext()
+        scheduler.runNext()
+        XCTAssertEqual(client.requests.count, 1)
+        scheduler.runNext()
+        XCTAssertEqual(client.requests.count, 2)
+        XCTAssertFalse(completed)
+        XCTAssertFalse(reentrantCompleted)
+
+        client.completeNext(with: Self.npmHTTPResponse(version: "1.0.0"))
+        scheduler.runNext()
+        XCTAssertTrue(completed)
+        XCTAssertTrue(reentrantCompleted)
+        XCTAssertEqual(checker.summary.results.first?.installedVersion, "0.9.0")
+    }
+
+    func testOverlappingChecksWaitForSharedFailure() {
+        let client = ControlledUpdateHTTPClient()
+        let scheduler = ControlledUpdateCheckScheduler()
+        let checker = UpdateChecker(
+            httpClient: client,
+            clock: UpdateClock { self.referenceDate },
+            cacheStore: InMemoryUpdateCacheStore(),
+            scheduler: scheduler,
+            identity: UpdateCheckIdentity(appName: "Pi Web Desktop", version: desktopInstalledVersion, bundleIdentifier: "io.github.su-luoya.pi-web-desktop"),
+            preferences: .factoryDefaults
+        )
+        var completions = 0
+        checker.checkNow(triggeredBy: .launch, inventory: UpdateCheckInventory(desktopAppVersion: desktopInstalledVersion)) { completions += 1 }
+        scheduler.runNext()
+        checker.checkNow(triggeredBy: .manual) { completions += 1 }
+        scheduler.runNext()
+        XCTAssertEqual(completions, 0)
+
+        client.completeNext(with: .failure(.offline))
+        scheduler.runNext()
+
+        XCTAssertEqual(completions, 2)
+        let result = checker.summary.result(for: UpdateCheckTarget(category: .desktopApp).id)
+        XCTAssertEqual(result?.status, .unknown)
+        XCTAssertEqual(result?.failure, .offline)
+        XCTAssertEqual(client.requests.count, 1)
+    }
+
+    func testOverlappingChecksWaitForTheInFlightResult() {
+        let client = ControlledUpdateHTTPClient()
+        let scheduler = ControlledUpdateCheckScheduler()
+        let checker = UpdateChecker(
+            httpClient: client,
+            clock: UpdateClock { self.referenceDate },
+            cacheStore: InMemoryUpdateCacheStore(),
+            scheduler: scheduler,
+            identity: UpdateCheckIdentity(
+                appName: "Pi Web Desktop",
+                version: desktopInstalledVersion,
+                bundleIdentifier: "io.github.su-luoya.pi-web-desktop"
+            ),
+            preferences: .factoryDefaults
+        )
+        let inventory = UpdateCheckInventory(desktopAppVersion: desktopInstalledVersion)
+        var firstCompletion = false
+        var secondCompletion = false
+
+        checker.checkNow(triggeredBy: .launch, inventory: inventory) {
+            firstCompletion = true
+        }
+        scheduler.runNext()
+        XCTAssertEqual(client.requests.count, 1)
+
+        checker.checkNow(triggeredBy: .manual) {
+            secondCompletion = true
+        }
+        scheduler.runNext()
+
+        XCTAssertFalse(firstCompletion)
+        XCTAssertFalse(secondCompletion)
+        XCTAssertNil(checker.summary.result(for: UpdateCheckTarget(category: .desktopApp).id))
+
+        client.completeNext(with: Self.githubHTTPResponse(tags: ["v2.4.1-alpha.2"]))
+        scheduler.runNext()
+
+        XCTAssertTrue(firstCompletion)
+        XCTAssertTrue(secondCompletion)
+        XCTAssertEqual(
+            checker.summary.result(for: UpdateCheckTarget(category: .desktopApp).id)?.status,
+            .updateAvailable
+        )
+    }
 
     func testSummaryPublishesPerCategoryStatusWithNextCheckTime() {
         let world = makeWorld(responder: automaticResponder())

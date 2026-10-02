@@ -171,6 +171,17 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
         var abandonedUnconfirmed = false
         /// 是否已经收到进程退出通知（决定「不确定」计数由谁结清）。
         var exitNotified = false
+        private let terminationObservationLock = NSLock()
+        var terminationObserved: Bool {
+            terminationObservationLock.lock()
+            defer { terminationObservationLock.unlock() }
+            return exitNotified
+        }
+        func markTerminationObserved() {
+            terminationObservationLock.lock()
+            exitNotified = true
+            terminationObservationLock.unlock()
+        }
         /// 本轮是否已经走到终态（结果已经或即将投递）。
         var finished = false
         /// 超时落在「进程已结束、退出通知还没到」窗口里的让出次数（B-2，有界）。
@@ -295,8 +306,13 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
             self?.receive(data, toStdout: false, from: handle, attempt: attempt)
         }
         process.terminationHandler = { [weak self, weak attempt] finishedProcess in
+            guard let attempt else { return }
+            // Observe termination before enqueueing stateQueue work. This closes the
+            // small race where the timeout fires after Process has invoked the
+            // handler but before the handler's stateQueue block runs.
+            attempt.markTerminationObserved()
             self?.stateQueue.async {
-                guard let self, let attempt else { return }
+                guard let self else { return }
                 attempt.exitNotified = true
                 self.settleAbandonedChildLocked(attempt)
                 self.finishLocked(attempt, exitCode: finishedProcess.terminationStatus)
@@ -324,8 +340,10 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
             // B-2：进程已经结束（只是在等管道读到 EOF 的宽限期）时超时计时不再算数，
             // 否则会把正常退出的命令记成超时，并写下一条不实的「已放弃」记录。
             guard attempt.pendingFinish == nil else { return }
-            // B-2 补充：进程已经不在运行、只是结束回调还没轮到状态队列时，先让出一小段
-            // 时间等退出码到达（有界）——否则会把已经退出的命令记成超时。
+            guard !attempt.terminationObserved else { return }
+            // If Process reports itself as no longer running but its termination
+            // callback has not yet reached stateQueue, give that callback one
+            // bounded chance. A running process remains a real timeout.
             if attempt.process?.isRunning == false, attempt.timeoutRetries < Self.maxTimeoutRetries {
                 attempt.timeoutRetries += 1
                 self.scheduleTimeoutLocked(attempt, after: Self.timeoutRetryDelay)

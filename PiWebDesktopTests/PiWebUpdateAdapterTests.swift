@@ -279,6 +279,16 @@ final class PiWebUpdateAdapterTests: XCTestCase {
             preferences: pnpmInput.preferences,
             installation: pnpmInput.installation
         ))
+        var checkDisabledPreferences = input(installation: installation()).preferences
+        XCTAssertTrue(checkDisabledPreferences.setPolicy(.off, for: .piWeb))
+        checkDisabledPreferences.autoUpdatePiWebBeforeLaunch = true
+        XCTAssertFalse(PiWebUpdatePlanner.needsTargetVersionBeforeLaunch(
+            preferences: checkDisabledPreferences,
+            installation: installation()
+        ))
+        var checkDisabledInput = input(installation: installation())
+        checkDisabledInput.preferences = checkDisabledPreferences
+        XCTAssertFalse(PiWebUpdatePlanner.decide(checkDisabledInput).isAutomatic)
         // npm 全局但可信度不是 verified，同样不允许。
         XCTAssertFalse(PiWebUpdatePlanner.decide(input(installation: installation(confidence: .inferred))).isAutomatic)
         XCTAssertFalse(PiWebUpdatePlanner.decide(input(installation: installation(source: .gitCheckout))).isAutomatic)

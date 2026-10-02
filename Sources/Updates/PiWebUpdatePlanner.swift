@@ -12,7 +12,8 @@ enum PiWebUpdatePlanner {
         installation: ComponentInstallation?
     ) -> Bool {
         guard preferences.autoUpdatePiWebBeforeLaunch, let installation else { return false }
-        return installation.kind == .piWeb
+        return preferences.isEnabled(.piWeb)
+            && installation.kind == .piWeb
             && installation.source == .npmGlobal
             && installation.confidence == .verified
     }
@@ -34,6 +35,9 @@ enum PiWebUpdatePlanner {
         // 条件影响，也不允许被绕过；手动入口单独经 `manualPlan` 走。
         if let attempt = input.abandonedAttempt {
             return .manualOnly(commandText: commandText, reason: .abandonedAttemptPending(attempt))
+        }
+        guard input.preferences.isEnabled(.piWeb) else {
+            return .manualOnly(commandText: commandText, reason: .settingDisabled)
         }
         guard input.preferences.autoUpdatePiWebBeforeLaunch else {
             return .manualOnly(commandText: commandText, reason: .settingDisabled)

@@ -2,6 +2,19 @@
 
 import Foundation
 
+enum UpdateCommandOutputText {
+    static func tail(stdout: String?, stderr: String?, redactingWith redactor: LogRedactor) -> String? {
+        let parts = [stdout, stderr].enumerated().compactMap { index, text -> String? in
+            guard let text, !text.isEmpty else { return nil }
+            return "\(index == 0 ? "标准输出" : "标准错误")：\(text)"
+        }
+        guard !parts.isEmpty else { return nil }
+        let joined = redactor.redact(parts.joined(separator: "\n"))
+        let collapsed = joined.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        return collapsed.isEmpty ? nil : collapsed
+    }
+}
+
 // MARK: - 执行结果
 
 /// 一次命令执行的记录：退出码、耗时与失败类别（成功时 failure 为 nil）。
@@ -403,13 +416,11 @@ final class PiPackageUpdateCoordinator {
 
     /// 标准输出/错误尾部：合并、脱敏、折叠空白；没有输出时返回 nil。
     static func outputTailText(_ result: PiPackageUpdateCommandResult, redactingWith redactor: LogRedactor) -> String? {
-        var parts: [String] = []
-        if let stdout = result.stdoutTail, !stdout.isEmpty { parts.append("标准输出：\(stdout)") }
-        if let stderr = result.stderrTail, !stderr.isEmpty { parts.append("标准错误：\(stderr)") }
-        guard !parts.isEmpty else { return nil }
-        let joined = redactor.redact(parts.joined(separator: "\n"))
-        let collapsed = joined.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-        return collapsed.isEmpty ? nil : collapsed
+        UpdateCommandOutputText.tail(
+            stdout: result.stdoutTail,
+            stderr: result.stderrTail,
+            redactingWith: redactor
+        )
     }
 }
 

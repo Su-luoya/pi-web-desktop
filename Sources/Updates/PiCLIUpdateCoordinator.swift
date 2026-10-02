@@ -387,13 +387,11 @@ final class PiCLIUpdateCoordinator {
 
     /// 标准输出/错误尾部：合并、脱敏、折叠空白；没有输出时返回 nil。
     static func outputTailText(_ result: PiCLIUpdateCommandResult, redactingWith redactor: LogRedactor) -> String? {
-        var parts: [String] = []
-        if let stdout = result.stdoutTail, !stdout.isEmpty { parts.append("标准输出：\(stdout)") }
-        if let stderr = result.stderrTail, !stderr.isEmpty { parts.append("标准错误：\(stderr)") }
-        guard !parts.isEmpty else { return nil }
-        let joined = redactor.redact(parts.joined(separator: "\n"))
-        let collapsed = joined.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-        return collapsed.isEmpty ? nil : collapsed
+        UpdateCommandOutputText.tail(
+            stdout: result.stdoutTail,
+            stderr: result.stderrTail,
+            redactingWith: redactor
+        )
     }
 
     static func durationText(_ duration: TimeInterval) -> String {

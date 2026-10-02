@@ -58,8 +58,31 @@ final class UpdateChecker {
     private var cache: UpdateCheckCacheFile = .empty
     private var cacheLoaded = false
     private var started = false
-    private var stopped = false
+    private let lifecycleLock = NSLock()
+    private var stoppedState = false
+    private var stopped: Bool {
+        get {
+            lifecycleLock.lock()
+            defer { lifecycleLock.unlock() }
+            return stoppedState
+        }
+        set {
+            lifecycleLock.lock()
+            stoppedState = newValue
+            lifecycleLock.unlock()
+        }
+    }
     private var isChecking = false
+    private var inventoryRevision = 0
+    private var activeOnlyDue = false
+    private var activeInventoryRevision = 0
+    private var activeCompletions: [() -> Void] = []
+    private struct QueuedCheck {
+        var trigger: UpdateCheckTrigger
+        var onlyDue: Bool
+        var completions: [() -> Void]
+    }
+    private var queuedCheck: QueuedCheck?
     private var timerTokens: [UpdateTimerToken] = []
 
     /// 忽略版本。由调用方（`AppDelegate`）从 UserDefaults 读入并在界面里更新；
@@ -96,17 +119,21 @@ final class UpdateChecker {
     /// 被检查，因此启动时还未知的组件不需要额外强制请求。
     func start(inventory: UpdateCheckInventory) {
         guard !stopped else { return }
-        self.inventory = inventory
         started = true
         restartTimers()
-        checkNow(triggeredBy: .launch)
+        checkNow(triggeredBy: .launch, inventory: inventory)
     }
 
     /// 依赖检测完成后更新本机版本清单（不强制发请求；未检查过的对象会在到期
     /// 判断里被补上）。
     func updateInventory(_ inventory: UpdateCheckInventory) {
-        self.inventory = inventory
-        checkIfDue(triggeredBy: .launch)
+        guard !stopped else { return }
+        scheduler.perform { [weak self] in
+            guard let self, !self.stopped else { return }
+            self.inventory = inventory
+            self.inventoryRevision += 1
+            self.performCheck(triggeredBy: .launch, onlyDue: true, completion: nil)
+        }
     }
 
     /// 手动触发：忽略 TTL，但仍尊重每一类的开关。`inventory` 非 nil 时先用它
@@ -118,12 +145,18 @@ final class UpdateChecker {
         completion: (() -> Void)? = nil
     ) {
         guard !stopped else {
-            completion?()
+            scheduler.deliver { completion?() }
             return
         }
         scheduler.perform { [weak self] in
-            guard let self else { return }
-            if let inventory { self.inventory = inventory }
+            guard let self, !self.stopped else {
+                if let self { self.scheduler.deliver { completion?() } }
+                return
+            }
+            if let inventory {
+                self.inventory = inventory
+                self.inventoryRevision += 1
+            }
             self.performCheck(triggeredBy: trigger, onlyDue: false, completion: completion)
         }
     }
@@ -131,20 +164,37 @@ final class UpdateChecker {
     /// 周期触发：只检查已经到期的对象。
     func checkIfDue(triggeredBy trigger: UpdateCheckTrigger = .scheduled, completion: (() -> Void)? = nil) {
         guard !stopped else {
-            completion?()
+            scheduler.deliver { completion?() }
             return
         }
         scheduler.perform { [weak self] in
-            self?.performCheck(triggeredBy: trigger, onlyDue: true, completion: completion)
+            guard let self else { return }
+            guard !self.stopped else {
+                self.scheduler.deliver { completion?() }
+                return
+            }
+            self.performCheck(triggeredBy: trigger, onlyDue: true, completion: completion)
         }
     }
 
     /// 应用退出：取消全部计时器，此后的触发一律忽略（关闭时不检查）。
     func stop() {
-        stopped = true
         started = false
+        lifecycleLock.lock()
+        stoppedState = true
+        lifecycleLock.unlock()
         for token in timerTokens { token.cancel() }
         timerTokens = []
+        scheduler.perform { [weak self] in
+            guard let self else { return }
+            let queuedCompletions = self.queuedCheck?.completions ?? []
+            let activeWaiters = self.activeCompletions
+            self.activeCompletions = []
+            self.queuedCheck = nil
+            self.scheduler.deliver {
+                (activeWaiters + queuedCompletions).forEach { $0() }
+            }
+        }
     }
 
     // MARK: - 周期调度
@@ -188,10 +238,45 @@ final class UpdateChecker {
             return
         }
         guard !isChecking else {
-            scheduler.deliver { completion?() }
+            // A completion must never mean “some check is already running”. It is
+            // held until the in-flight check has published its result. A request
+            // that needs a broader scope, or one that arrived with newer
+            // inventory, gets one merged follow-up check.
+            let inventoryChanged = inventoryRevision != activeInventoryRevision
+            let needsFollowUp = inventoryChanged || (activeOnlyDue && !onlyDue)
+            if var queuedCheck {
+                queuedCheck.onlyDue = queuedCheck.onlyDue && onlyDue && !inventoryChanged
+                queuedCheck.trigger = trigger
+                if let completion { queuedCheck.completions.append(completion) }
+                self.queuedCheck = queuedCheck
+            } else if needsFollowUp {
+                self.queuedCheck = QueuedCheck(
+                    trigger: trigger,
+                    onlyDue: onlyDue && !inventoryChanged,
+                    completions: completion.map { [$0] } ?? []
+                )
+            } else {
+                activeOnlyDue = activeOnlyDue && onlyDue
+                if let completion { activeCompletions.append(completion) }
+            }
+            return
+        }
+        startCheck(triggeredBy: trigger, onlyDue: onlyDue, completions: completion.map { [$0] } ?? [])
+    }
+
+    private func startCheck(
+        triggeredBy trigger: UpdateCheckTrigger,
+        onlyDue: Bool,
+        completions: [() -> Void]
+    ) {
+        guard !stopped else {
+            scheduler.deliver { completions.forEach { $0() } }
             return
         }
         isChecking = true
+        activeOnlyDue = onlyDue
+        activeInventoryRevision = inventoryRevision
+        activeCompletions = completions
         loadCacheIfNeeded()
 
         let enabled = UpdateCheckCategory.allCases.filter { preferences.isEnabled($0) }
@@ -200,15 +285,13 @@ final class UpdateChecker {
 
         // 周期触发时可能没有任何到期对象：保持上一次汇总，不刷新时间戳。
         guard !items.isEmpty || enabled.isEmpty else {
-            isChecking = false
-            scheduler.deliver { completion?() }
+            finishCheckWithoutNewSummary()
             return
         }
 
         runItems(items, at: 0, collected: [], now: now) { [weak self] results in
             guard let self else { return }
             self.cacheStore.save(self.cache)
-            self.isChecking = false
             let summary = UpdateCheckSummary(
                 results: results,
                 checkedAt: self.clock.now(),
@@ -223,11 +306,90 @@ final class UpdateChecker {
                 )
             )
             self.logSummary(summary)
-            self.scheduler.deliver {
+            self.finishCheck(with: summary)
+        }
+    }
+
+    private func finishStoppedCheck(waiters: [() -> Void] = []) {
+        let completions = waiters + activeCompletions + (queuedCheck?.completions ?? [])
+        activeCompletions = []
+        queuedCheck = nil
+        isChecking = false
+        scheduler.deliver {
+            completions.forEach { $0() }
+        }
+    }
+
+    private func finishCheckWithoutNewSummary() {
+        let waiters = activeCompletions
+        activeCompletions = []
+        if stopped {
+            finishStoppedCheck(waiters: waiters)
+            return
+        }
+        if let queued = queuedCheck {
+            queuedCheck = nil
+            scheduler.deliver { [weak self] in
+                guard let self else { return }
+                waiters.forEach { $0() }
+                self.scheduler.perform { [weak self] in
+                    guard let self else { return }
+                    self.startCheck(
+                        triggeredBy: queued.trigger,
+                        onlyDue: queued.onlyDue,
+                        completions: queued.completions
+                    )
+                }
+            }
+            return
+        }
+        isChecking = false
+        scheduler.deliver {
+            waiters.forEach { $0() }
+        }
+    }
+
+    private func finishCheck(with summary: UpdateCheckSummary) {
+        guard !stopped else {
+            finishStoppedCheck()
+            return
+        }
+        let waiters = activeCompletions
+        activeCompletions = []
+        var next = stopped ? nil : queuedCheck
+        queuedCheck = nil
+        if !stopped, next == nil, inventoryRevision != activeInventoryRevision {
+            next = QueuedCheck(trigger: summary.trigger, onlyDue: true, completions: [])
+        }
+        if var next {
+            next.completions.insert(contentsOf: waiters, at: 0)
+            queuedCheck = next
+            self.isChecking = true
+            self.scheduler.deliver { [weak self] in
+                guard let self else { return }
                 self.summary = summary
                 self.onResultsChanged?(summary)
-                completion?()
+                self.scheduler.perform { [weak self] in
+                    guard let self else { return }
+                    guard var next = self.queuedCheck else { return }
+                    self.queuedCheck = nil
+                    next.completions.append(contentsOf: self.activeCompletions)
+                    self.activeCompletions = []
+                    self.startCheck(
+                        triggeredBy: next.trigger,
+                        onlyDue: next.onlyDue,
+                        completions: next.completions
+                    )
+                }
             }
+            return
+        }
+        isChecking = false
+        scheduler.deliver { [weak self] in
+            guard let self else { return }
+            self.summary = summary
+            self.onResultsChanged?(summary)
+            waiters.forEach { $0() }
         }
     }
 
@@ -323,9 +485,16 @@ final class UpdateChecker {
         let request = makeRequest(endpoint: endpoint, cached: item.cached)
         httpClient.perform(request) { [weak self] response in
             guard let self else { return }
-            let (entry, result) = self.evaluate(item: item, endpoint: endpoint, response: response, at: now)
-            self.cache.upsert(entry)
-            self.runItems(items, at: index + 1, collected: collected + [result], now: now, completion: completion)
+            self.scheduler.perform { [weak self] in
+                guard let self else { return }
+                guard !self.stopped else {
+                    self.finishStoppedCheck()
+                    return
+                }
+                let (entry, result) = self.evaluate(item: item, endpoint: endpoint, response: response, at: now)
+                self.cache.upsert(entry)
+                self.runItems(items, at: index + 1, collected: collected + [result], now: now, completion: completion)
+            }
         }
     }
 

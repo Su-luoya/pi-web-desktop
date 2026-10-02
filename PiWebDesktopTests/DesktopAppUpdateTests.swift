@@ -1,6 +1,10 @@
 import XCTest
 
 final class DesktopAppUpdateTests: XCTestCase {
+    func testDesktopAppDownloadResourceTimeoutAllowsLargeArchives() {
+        XCTAssertGreaterThan(DesktopAppUpdateInstaller.downloadResourceTimeout, UpdateChecker.requestTimeout)
+    }
+
     func testSelectsOnlyPinnedGitHubZipAndValidChecksum() {
         let archiveName = "Pi-Web-Desktop-2.5.0+build.42.zip"
         let archiveURL = URL(string: "https://github.com/Su-luoya/pi-web-desktop/releases/download/v2.5.0/Pi-Web-Desktop-2.5.0%2Bbuild.42.zip")!

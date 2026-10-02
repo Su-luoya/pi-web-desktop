@@ -219,6 +219,8 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
     private let fileManager: FileManager
     private let session: URLSession?
     private let completionQueue: DispatchQueue
+    static let downloadResourceTimeout: TimeInterval = 300
+
     private lazy var ownedDownloadSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieAcceptPolicy = .never
@@ -227,7 +229,7 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
         configuration.urlCredentialStorage = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = UpdateChecker.requestTimeout
-        configuration.timeoutIntervalForResource = UpdateChecker.requestTimeout
+        configuration.timeoutIntervalForResource = Self.downloadResourceTimeout
         return URLSession(configuration: configuration, delegate: DesktopAppArchiveRedirectDelegate(), delegateQueue: nil)
     }()
     private var installInProgress = false

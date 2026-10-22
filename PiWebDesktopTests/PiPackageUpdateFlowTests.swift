@@ -15,7 +15,7 @@ private func onCoordinatorDeliveryChecked(_ key: DispatchSpecificKey<Bool>) -> B
     DispatchQueue.getSpecific(key: key) == true
 }
 
-final class PiPackageUpdateAdapterTests: XCTestCase {
+final class PiPackageUpdateFlowTests: XCTestCase {
 
     private let fixtureHome = "/tmp/pi-package-update-tests-home"
     private let piPath = "/opt/homebrew/bin/pi"
@@ -263,7 +263,7 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
         XCTAssertFalse(PiPackageUpdatePolicy.off.notifiesAboutUpdates)
         XCTAssertFalse(PiPackageUpdatePolicy.off.offersExecutionEntry)
         // 调度层同样不为关闭策略安排复查（#17/#18 的间隔表）。
-        XCTAssertNil(UpdateCheckIntervals.standard.interval(for: .piPackages, policy: .off))
+        XCTAssertNil(UpdateCheckIntervals.standard.interval(for: .off))
         // 单个包的决策此时也只是 `.disabled`。
         let single = PiPackageUpdatePlanner.decide(
             candidate(),

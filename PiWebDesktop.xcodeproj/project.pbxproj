@@ -175,10 +175,10 @@
 		A184B7634BC6822D18A2E396 /* KeychainStoreTests.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A2489EA3F320C4834711E252 /* KeychainStoreTests.swift */; };
 		A169B96030D3547A8B3D226B /* LogRedactorTests.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A2C2FF55D845C10D3BE0E3E3 /* LogRedactorTests.swift */; };
 		A17D0AF36BEEECD3E674714E /* LogWriterTests.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A2CFF5D4BFEA56E8A79B4EE7 /* LogWriterTests.swift */; };
-		A19C41E0049960CD901DB959 /* PiCLIUpdateAdapterTests.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A231B5EBCD77C6C38412541B /* PiCLIUpdateAdapterTests.swift */; };
-		A1F5AAB748B5A049617BADC2 /* PiPackageUpdateAdapterTests.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A257297A89B8484C82BBF30A /* PiPackageUpdateAdapterTests.swift */; };
+		A19C41E0049960CD901DB959 /* PiCLIUpdateFlowTests.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A231B5EBCD77C6C38412541B /* PiCLIUpdateFlowTests.swift */; };
+		A1F5AAB748B5A049617BADC2 /* PiPackageUpdateFlowTests.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A257297A89B8484C82BBF30A /* PiPackageUpdateFlowTests.swift */; };
 		A12ADDF9A94C2E39C4F7B554 /* PiProcessInspectorTests.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A2754C1941C957BA26532729 /* PiProcessInspectorTests.swift */; };
-		A1F1FA4FC77221EC3D06E4C3 /* PiWebUpdateAdapterTests.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A2D2852BA7C63B7973334231 /* PiWebUpdateAdapterTests.swift */; };
+		A1F1FA4FC77221EC3D06E4C3 /* PiWebUpdateFlowTests.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A2D2852BA7C63B7973334231 /* PiWebUpdateFlowTests.swift */; };
 		A1E9BBCE9F1744ADBF5EFE99 /* ProcessInspectorTests.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A27E0204630725C9436748BA /* ProcessInspectorTests.swift */; };
 		A1E075BB36E9C0CB68B06A68 /* QuitCoordinatorTests.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A26540DD472FF61D30CA1E68 /* QuitCoordinatorTests.swift */; };
 		A19E53C321243CB2E1960059 /* QuitPolicyTests.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = A2CD969486E905E8DFDD3BF0 /* QuitPolicyTests.swift */; };
@@ -213,10 +213,10 @@
 		A2489EA3F320C4834711E252 /* KeychainStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStoreTests.swift; sourceTree = "<group>"; };
 		A2C2FF55D845C10D3BE0E3E3 /* LogRedactorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogRedactorTests.swift; sourceTree = "<group>"; };
 		A2CFF5D4BFEA56E8A79B4EE7 /* LogWriterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogWriterTests.swift; sourceTree = "<group>"; };
-		A231B5EBCD77C6C38412541B /* PiCLIUpdateAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PiCLIUpdateAdapterTests.swift; sourceTree = "<group>"; };
-		A257297A89B8484C82BBF30A /* PiPackageUpdateAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PiPackageUpdateAdapterTests.swift; sourceTree = "<group>"; };
+		A231B5EBCD77C6C38412541B /* PiCLIUpdateFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PiCLIUpdateFlowTests.swift; sourceTree = "<group>"; };
+		A257297A89B8484C82BBF30A /* PiPackageUpdateFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PiPackageUpdateFlowTests.swift; sourceTree = "<group>"; };
 		A2754C1941C957BA26532729 /* PiProcessInspectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PiProcessInspectorTests.swift; sourceTree = "<group>"; };
-		A2D2852BA7C63B7973334231 /* PiWebUpdateAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PiWebUpdateAdapterTests.swift; sourceTree = "<group>"; };
+		A2D2852BA7C63B7973334231 /* PiWebUpdateFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PiWebUpdateFlowTests.swift; sourceTree = "<group>"; };
 		A27E0204630725C9436748BA /* ProcessInspectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessInspectorTests.swift; sourceTree = "<group>"; };
 		A26540DD472FF61D30CA1E68 /* QuitCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuitCoordinatorTests.swift; sourceTree = "<group>"; };
 		A2CD969486E905E8DFDD3BF0 /* QuitPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuitPolicyTests.swift; sourceTree = "<group>"; };

@@ -192,8 +192,12 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
 
     /// 是否有一次运行正在进行（供 UI 门控，GitHub #107）。已经放弃等待、但子进程
     /// 退出还没确认时也算「进行中」：这段时间里不会再启动第二次运行。
+    ///
+    /// 并发审计次要：调用方必须在 stateQueue 之外的队列（当前全部为主线程）。
+    /// `stateQueue.sync` 在 stateQueue 内部调用会自死锁，用前置条件显式拒绝。
     var isRunning: Bool {
-        stateQueue.sync { running || !abandonedProcesses.isEmpty }
+        dispatchPrecondition(condition: .notOnQueue(stateQueue))
+        return stateQueue.sync { running || !abandonedProcesses.isEmpty }
     }
 
     /// 已经放弃等待、但子进程退出还没确认（GitHub #107）：这种窗口下的拒绝要给出

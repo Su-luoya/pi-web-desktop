@@ -184,6 +184,9 @@ final class UpdateChecker {
             return
         }
         scheduler.perform { [weak self] in
+            // 并发审计次要：self 已释放时 completion 无法投递（scheduler 属于 self，
+            // 没有可达的投递队列）。当前 checker 是应用级对象、不释放，分支不可达；
+            // 记录为防御性缺口，停止路径（stopped）已在下方 completion 补偿。
             guard let self, !self.stopped else {
                 if let self { self.scheduler.deliver { completion?() } }
                 return
@@ -242,7 +245,7 @@ final class UpdateChecker {
         // 产生请求。
         var intervalsInUse: [TimeInterval] = []
         for category in UpdateCheckCategory.allCases {
-            guard let interval = intervals.interval(for: category, policy: preferences.policy(for: category)) else { continue }
+            guard let interval = intervals.interval(for: preferences.policy(for: category)) else { continue }
             guard !intervalsInUse.contains(interval) else { continue }
             intervalsInUse.append(interval)
         }
@@ -463,7 +466,7 @@ final class UpdateChecker {
         let cached = cache.entry(for: target.id)
         if let onlyDueAt {
             // 关闭的分类没有间隔，永远不会成为到期对象。
-            guard let interval = intervals.interval(for: category, policy: preferences.policy(for: category)) else {
+            guard let interval = intervals.interval(for: preferences.policy(for: category)) else {
                 return
             }
             if let lastAttempt = cached?.lastAttemptAt, onlyDueAt.timeIntervalSince(lastAttempt) < interval {

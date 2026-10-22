@@ -517,10 +517,6 @@ struct UpdateCheckIntervals: Equatable {
         }
     }
 
-    func interval(for category: UpdateCheckCategory, policy: UpdateCheckPolicy) -> TimeInterval? {
-        interval(for: policy)
-    }
-
     /// 缓存 TTL 使用该分类的默认策略间隔（与当前策略无关，避免关闭后旧缓存
     /// 立刻失效导致界面跳变）。
     func ttl(for category: UpdateCheckCategory) -> TimeInterval {

@@ -21,6 +21,9 @@ final class UpdateSettingsWindowController: NSWindowController {
     private var ignorableVersions: [UpdateCheckCategory: String] = [:]
     private var piCLIStatusText = ""
     private var piPackageStatusText = ""
+    /// 最近一次外部推送的放弃状态文本；内部动作触发的局部刷新用它回填，
+    /// 不再依赖外部“恰好会再同步一次”（审计次要）。
+    private var abandonedStatusText = ""
 
     private var policyPopups: [UpdateCheckCategory: NSPopUpButton] = [:]
     private var statusLabels: [UpdateCheckCategory: NSTextField] = [:]
@@ -83,6 +86,7 @@ final class UpdateSettingsWindowController: NSWindowController {
         self.ignorableVersions = ignorableVersions
         self.piCLIStatusText = piCLIStatus
         self.piPackageStatusText = piPackageStatus
+        self.abandonedStatusText = abandonedStatus
         for category in UpdateCheckCategory.allCases {
             let policy = preferences.policy(for: category)
             let popup = policyPopups[category]
@@ -286,7 +290,8 @@ final class UpdateSettingsWindowController: NSWindowController {
             statuses: statuses,
             ignorableVersions: ignorableVersions,
             piCLIStatus: piCLIStatusText,
-            piPackageStatus: piPackageStatusText
+            piPackageStatus: piPackageStatusText,
+            abandonedStatus: abandonedStatusText
         )
         onPreferencesChanged?(updated)
     }
@@ -301,7 +306,8 @@ final class UpdateSettingsWindowController: NSWindowController {
             statuses: statuses,
             ignorableVersions: ignorableVersions,
             piCLIStatus: piCLIStatusText,
-            piPackageStatus: piPackageStatusText
+            piPackageStatus: piPackageStatusText,
+            abandonedStatus: abandonedStatusText
         )
         onPreferencesChanged?(updated)
     }
@@ -317,7 +323,8 @@ final class UpdateSettingsWindowController: NSWindowController {
             statuses: statuses,
             ignorableVersions: ignorableVersions,
             piCLIStatus: piCLIStatusText,
-            piPackageStatus: piPackageStatusText
+            piPackageStatus: piPackageStatusText,
+            abandonedStatus: abandonedStatusText
         )
         onPreferencesChanged?(updated)
     }

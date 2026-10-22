@@ -244,8 +244,12 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
 
     /// 是否有命令正在运行（供 UI 门控）。已经放弃等待、但子进程退出还没确认时
     /// 也算「进行中」：这段时间里不会再启动第二轮的 `pi update --self`（W3B F1）。
+    ///
+    /// 并发审计次要：调用方必须在 stateQueue 之外的队列（当前全部为主线程）。
+    /// `stateQueue.sync` 在 stateQueue 内部调用会自死锁，用前置条件显式拒绝。
     var isRunning: Bool {
-        stateQueue.sync { attempt != nil || abandonedChildrenInFlight > 0 }
+        dispatchPrecondition(condition: .notOnQueue(stateQueue))
+        return stateQueue.sync { attempt != nil || abandonedChildrenInFlight > 0 }
     }
 
     /// 已经放弃等待、但子进程退出还没确认（W3B F3）：这种窗口下的拒绝必须给出

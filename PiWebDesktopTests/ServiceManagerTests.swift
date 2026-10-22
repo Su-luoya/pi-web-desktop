@@ -478,10 +478,6 @@ private final class ServiceManagerHarness {
         try "\(pid)\n".write(to: legacyPIDFileURL, atomically: true, encoding: .utf8)
     }
 
-    func readLegacyPIDRecord() -> String? {
-        try? String(contentsOf: legacyPIDFileURL, encoding: .utf8)
-    }
-
     /// Creates a real executable file in the temporary root.
     @discardableResult
     func makeExecutable(named name: String = "pi-web") throws -> String {

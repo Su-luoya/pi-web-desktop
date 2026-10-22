@@ -103,7 +103,6 @@ enum DesktopAppUpdateInstallPolicy {
 }
 
 enum DesktopAppReleaseAssetSelector {
-    static let allowedHost = UpdateCheckUpstream.githubHost
     static let allowedAssetHost = "github.com"
     static let allowedRedirectHosts: Set<String> = [
         "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"
@@ -369,9 +368,6 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
         return true
     }
 
-    static func isRunningFromApplications(_ url: URL) -> Bool {
-        canReplaceInstalledApp(url)
-    }
     static func canWriteApplicationDirectory(applicationURL: URL, fileManager: FileManager = .default) -> Bool {
         guard canReplaceInstalledApp(applicationURL, fileManager: fileManager) else { return false }
         let probe = applicationURL.deletingLastPathComponent().appendingPathComponent(".PiWebDesktop-write-test-\(UUID().uuidString)")
@@ -395,14 +391,3 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }
-
-#if DEBUG
-private enum DesktopAppUpdateSelfCheck {
-    static func verify() {
-        assert(DesktopAppReleaseAssetSelector.isReleaseTag("v2.5.0"))
-        assert(!DesktopAppReleaseAssetSelector.isReleaseTag("v2/5.0"))
-        assert(DesktopAppReleaseAssetSelector.normalizedChecksum(String(repeating: "A", count: 64)) != nil)
-        assert(DesktopAppReleaseAssetSelector.normalizedChecksum("not-a-checksum") == nil)
-    }
-}
-#endif

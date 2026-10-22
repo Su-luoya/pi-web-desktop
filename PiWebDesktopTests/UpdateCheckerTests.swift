@@ -1399,6 +1399,24 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertFalse(world.client.requests.contains { $0.url.query?.contains("password") == true })
     }
 
+    /// 批次3 审计次要：User-Agent 拼接前过滤控制字符（含 CR/LF）。数据源是
+    /// Info.plist，但请求头不得含换行，防御性清洗要有回归断言。
+    func testUserAgentStripsControlCharactersFromIdentityFields() {
+        let identity = UpdateCheckIdentity(
+            appName: "Pi Web Desktop",
+            version: "1.2.3\r\nX-Injected: yes",
+            bundleIdentifier: "com.example\u{7F}app"
+        )
+        let userAgent = identity.userAgent
+        XCTAssertFalse(userAgent.contains("\r"))
+        XCTAssertFalse(userAgent.contains("\n"))
+        XCTAssertFalse(userAgent.contains("\u{7F}"))
+        // 控制字符被剥掉，余下文本原样保留（头不换行即安全）。
+        XCTAssertEqual(userAgent, "Pi-Web-Desktop/1.2.3X-Injected: yes (com.exampleapp)")
+        // 控制字符清洗后仍是单行头，可安全拼进 HTTP 请求。
+        XCTAssertFalse(userAgent.contains(where: { $0.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7F } }))
+    }
+
     func testSanitizedRequestDropsForbiddenHeadersAndForcesGet() {
         var request = UpdateHTTPRequest(
             url: URL(string: "https://api.github.com/repos/a/b/releases")!,
@@ -1905,7 +1923,7 @@ final class UpdateCheckerTests: XCTestCase {
 
             let enabled = UpdateCheckCategory.allCases.filter { preferences.isEnabled($0) }
             let expectedIntervals = Set(enabled.map {
-                UpdateCheckIntervals.standard.interval(for: $0, policy: preferences.policy(for: $0)) ?? -1
+                UpdateCheckIntervals.standard.interval(for: preferences.policy(for: $0)) ?? -1
             })
             XCTAssertEqual(Set(world.scheduler.activeIntervals), expectedIntervals, "计时器应与开启分类的策略一致")
         }

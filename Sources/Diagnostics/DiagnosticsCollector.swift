@@ -331,6 +331,10 @@ final class DiagnosticsProbeCollector {
 /// 请求同一个实例、旧实例被显式放弃后不再被保留”可以在没有 AppKit 应用实例的
 /// 情况下被断言（见 `DiagnosticsCollectorTests`）。
 final class ReusableControllerStore<Controller: AnyObject> {
+    /// 并发审计次要：本类型无锁，调用方契约是「全部在主线程使用」（当前
+    /// 唯一使用者是 AppDelegate 的窗口入口，均在 AppKit 主线程回调上）。
+    /// 不加 @MainActor 标注：AppDelegate 的 @objc 入口本身无静态隔离，
+    /// 强加标注只会迫使调用点添加无意义的 MainActor.assumeIsolated。
     private(set) var stored: Controller?
 
     /// 复用已有实例；没有才用 `make` 创建并保存。

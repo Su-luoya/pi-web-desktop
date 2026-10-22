@@ -10,7 +10,7 @@ import XCTest
 //
 // 唯一写 UserDefaults 的用例使用 suiteName 隔离的 domain，测试结束即删除。
 
-final class PiCLIUpdateAdapterTests: XCTestCase {
+final class PiCLIUpdateFlowTests: XCTestCase {
 
     private let fixtureHome = "/tmp/pi-cli-update-tests-home"
     private let piPath = "/opt/homebrew/bin/pi"

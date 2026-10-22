@@ -111,7 +111,7 @@ enum UpdateCategoryStatusBuilder {
         }
 
         var nextCheckAt: Date?
-        if let lastAttemptAt, let interval = intervals.interval(for: category, policy: policy) {
+        if let lastAttemptAt, let interval = intervals.interval(for: policy) {
             nextCheckAt = lastAttemptAt.addingTimeInterval(interval)
         }
 

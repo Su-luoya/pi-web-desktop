@@ -904,13 +904,47 @@ final class UpdateTransactionTests: XCTestCase {
           "manualCommandText":null,"manualGuidanceText":null,"rollbackDescription":null}]
         """.utf8)
         let decoded = UpdateHistoryStore.decode(handcrafted)
-        XCTAssertEqual(decoded?.count, 1)
-        XCTAssertNil(decoded?.first?.fromVersion)
-        XCTAssertNil(decoded?.first?.completedPhase)
-        XCTAssertEqual(decoded?.first?.phases.count, 1)
+        XCTAssertEqual(decoded?.entries.count, 1)
+        XCTAssertEqual(decoded?.discardedCount, 0, "字段值无法校验时条目仍保留（sanitize 降级），不算丢弃")
+        XCTAssertNil(decoded?.entries.first?.fromVersion)
+        XCTAssertNil(decoded?.entries.first?.completedPhase)
+        XCTAssertEqual(decoded?.entries.first?.phases.count, 1)
 
         UpdateHistoryStore.clear(from: defaults)
         XCTAssertTrue(UpdateHistoryStore.load(from: defaults).isEmpty)
+    }
+
+    /// 批次3 审计次要：decode 返回被丢弃的条数——损坏结构（非字典元素）或未知
+    /// 枚举原始值等不可还原的条目逐条丢弃，排查「历史条数变少」有迹可循。
+    func testHistoryDecodeReportsDiscardedEntryCount() throws {
+        let goodObject: [String: Any] = [
+            "recordedAt": 0.0,
+            "componentKind": "pi",
+            "source": "npm-global",
+            "toVersion": "1.2.3",
+            "phases": [[String: Any]](),
+        ]
+        // 结构损坏：数组里混入字符串（只丢弃该条，不影响其余）。
+        // 未知枚举原始值：componentKind 无法映射，条目不可还原，计入丢弃。
+        var unknownKind = goodObject
+        unknownKind["componentKind"] = "mystery-component"
+        let mixed: [[String: Any]] = [goodObject, unknownKind]
+        let data = try JSONSerialization.data(withJSONObject: mixed)
+
+        let decoded = UpdateHistoryStore.decode(data)
+        XCTAssertEqual(decoded?.entries.count, 1)
+        XCTAssertEqual(decoded?.discardedCount, 1, "未知枚举原始值算丢弃")
+        XCTAssertEqual(decoded?.entries.first?.toVersion, "1.2.3")
+
+        // 非字典元素：只丢弃自己。
+        let withJunk: [Any] = ["not-an-object", goodObject]
+        let junkData = try JSONSerialization.data(withJSONObject: withJunk)
+        let junkDecoded = UpdateHistoryStore.decode(junkData)
+        XCTAssertEqual(junkDecoded?.entries.count, 1)
+        XCTAssertEqual(junkDecoded?.discardedCount, 1, "结构损坏的元素只丢弃自己，不拖垮整份历史")
+
+        // 整体不是 JSON 数组：与旧实现一致，返回 nil（整体不可还原）。
+        XCTAssertNil(UpdateHistoryStore.decode(Data("{\"not\":\"array\"}".utf8)))
     }
 
     /// M7（更新事务审计）：历史里混入一条损坏记录时，下一次 record 不得把

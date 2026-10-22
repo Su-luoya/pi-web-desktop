@@ -83,8 +83,6 @@ struct UpdateArtifactFingerprint: Equatable {
         resolvedPath ?? executablePath
     }
 
-    var hasVersionEvidence: Bool { version != nil }
-
     /// 这份指纹实际用到的证据等级。
     var evidenceLevel: UpdateArtifactEvidenceLevel {
         if contentHash != nil { return .contentHash }

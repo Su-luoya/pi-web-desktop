@@ -158,6 +158,7 @@ struct ComponentInstallationDetector {
             executablePath: probe.executablePath,
             resolvedPath: probe.resolvedPath,
             symlinkChain: probe.symlinkChain,
+            symlinkChainTruncated: probe.symlinkChainTruncated,
             packageDirectory: metadata?.directory,
             gitEvidencePath: gitEvidencePath,
             npmRoot: roots.npmRoot,
@@ -414,6 +415,8 @@ struct ComponentInstallationDetector {
         var symlinkChain: [String]
         var resolvedPath: String?
         var evidence: [String]
+        /// 符号链接链因跳数上限未解析完（区别于悬空，审计低危 #8）。
+        var symlinkChainTruncated: Bool = false
     }
 
     private func probeExecutable(candidates: [String], names: [String], probesShellPath: Bool) -> ExecutableProbe {
@@ -428,6 +431,11 @@ struct ComponentInstallationDetector {
         }
         if probesShellPath {
             for name in names {
+                // 硬化（审计低危 #6）：`name` 会被拼进 shell 字符串。当前所有构造点
+                // 都是编译期字面量，但 `ComponentDetectionRequest.executableNames` 是
+                // 可变属性，一旦未来接入外部输入（package.json / `pi list`）就可能
+                // 变成命令注入。白名单字符集不满足的候选直接跳过，不进入 shell。
+                guard name.range(of: "^[A-Za-z0-9._-]+$", options: .regularExpression) != nil else { continue }
                 guard let path = trimmed(commandRunner.run([Self.shellPath, "-lc", "command -v \(name) 2>/dev/null"], environment: commandEnvironment)) else { continue }
                 if fileSystem.isExecutableFile(atPath: path) {
                     return makeProbe(path: path)
@@ -468,6 +476,8 @@ struct ComponentInstallationDetector {
         }
         if let danglingTarget = walked.danglingTarget {
             evidence.append("符号链接链悬空：\(danglingTarget) 不存在，resolvedPath 无法确定")
+        } else if walked.truncated {
+            evidence.append("符号链接链过长：已到跳数上限，真实路径未解析")
         }
         return ExecutableProbe(
             executablePath: path,
@@ -475,7 +485,8 @@ struct ComponentInstallationDetector {
             isPresent: executableBit || walked.resolvedPath != nil,
             symlinkChain: walked.chain,
             resolvedPath: walked.resolvedPath,
-            evidence: evidence
+            evidence: evidence,
+            symlinkChainTruncated: walked.truncated
         )
     }
 
@@ -488,19 +499,23 @@ struct ComponentInstallationDetector {
         if walked.chain.count > 1 {
             evidence.append("符号链接链：\(walked.chain.joined(separator: " → "))")
         }
+        if walked.truncated {
+            evidence.append("符号链接链过长：已到跳数上限，真实路径未解析")
+        }
         return ExecutableProbe(
             executablePath: path,
             isPresent: exists,
             symlinkChain: walked.chain,
             resolvedPath: exists ? (walked.resolvedPath ?? path) : nil,
-            evidence: evidence
+            evidence: evidence,
+            symlinkChainTruncated: walked.truncated
         )
     }
 
     /// 完整符号链接链：从 `path` 开始逐跳读取链接目标（相对目标按链接所在目录
     /// 解析），最多 `maximumSymlinkHops` 跳。悬空链返回链与悬空目标、
     /// `resolvedPath` 为 nil。
-    private func followSymlinks(from path: String) -> (chain: [String], resolvedPath: String?, danglingTarget: String?) {
+    private func followSymlinks(from path: String) -> (chain: [String], resolvedPath: String?, danglingTarget: String?, truncated: Bool) {
         var chain = [path]
         var current = path
         var hops = 0
@@ -514,14 +529,16 @@ struct ComponentInstallationDetector {
             current = next
             hops += 1
             if !pathExists(current) {
-                return (chain, nil, current)
+                return (chain, nil, current, false)
             }
         }
         if hops >= Self.maximumSymlinkHops, fileSystem.symlinkDestination(atPath: current) != nil {
-            return (chain, nil, nil)
+            // 审计低危 #8：跳数用尽与悬空是两种不同情况，用 truncated 区分，
+            // 上层不再把「链过长」误报成「链悬空」。
+            return (chain, nil, nil, true)
         }
         let resolved = pathExists(current) ? current : fileSystem.resolvedPath(atPath: path)
-        return (chain, resolved, nil)
+        return (chain, resolved, nil, false)
     }
 
     /// 相对链接目标按链接所在目录解析；绝对目标原样保留。结果只做词法归一化
@@ -563,12 +580,15 @@ struct ComponentInstallationDetector {
     ///
     /// 复用 #6 的探针方法组合，不新增协议要求：目录用 `directoryExists`，可执行
     /// 文件用可执行位，其余文件用文本读取，链接本体用 `symlinkDestination`。
+    /// 末尾用 `resolvedPath`（内含 `fileExists`，只判存在不读内容）兕底：无读
+    /// 权限的既有文件不再被误判为不存在（审计低危 #7）。
     private func pathExists(_ path: String) -> Bool {
         guard !path.isEmpty else { return false }
         if fileSystem.directoryExists(atPath: path) == true { return true }
         if fileSystem.isExecutableFile(atPath: path) { return true }
         if fileSystem.readText(atPath: path) != nil { return true }
         if fileSystem.symlinkDestination(atPath: path) != nil { return true }
+        if fileSystem.resolvedPath(atPath: path) != nil { return true }
         return false
     }
 
@@ -681,24 +701,33 @@ struct ComponentInstallationDetector {
     /// 猜测。输出里没有任何可解析行时返回空数组，调用方降级为 unknown。
     static func parsePiList(_ output: String) -> [PiPackageEntry] {
         var entries: [PiPackageEntry] = []
+        // `pi` 子进程输出异常巨大时的兕底（审计次要）：条目上限与历史库同量级，
+        // 超过后停止解析，避免 entries 无界增长。
+        let maximumEntries = 4096
         for rawLine in output.components(separatedBy: .newlines) {
+            if entries.count >= maximumEntries { break }
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             guard !line.isEmpty, !line.hasPrefix("#") else { continue }
-            var name: String?
-            var version: String?
-            for token in line.split(whereSeparator: { $0.isWhitespace }) {
-                let text = String(token)
-                if let split = splitNameVersion(text) {
-                    if name == nil { name = split.name }
-                    if version == nil, let parsed = split.version { version = parsed }
+            let tokens = line.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+            guard let head = tokens.first else { continue }
+            // 审计次要：行首 token 必须是合法包名（或 `name@version` 形态且名段
+            // 合法），否则整行不是条目。旧实现按 token 顺序宽松匹配，`1.2.3
+            // package.json` 这类版本在前的行也会产出 name=`package.json` 的假条目。
+            let headSplit = splitNameVersion(head)
+            var name = headSplit?.name ?? (isPackageName(head) ? head : nil)
+            var version = headSplit?.version
+            guard let headName = name, isPackageName(headName) else { continue }
+            for token in tokens.dropFirst() {
+                if version == nil, let split = splitNameVersion(token) {
+                    if let parsed = split.version { version = parsed }
                     continue
                 }
-                if version == nil, let parsed = SemanticVersion(text) {
+                if version == nil, let parsed = SemanticVersion(token) {
                     version = parsed.description
                     continue
                 }
-                if name == nil, isPackageName(text) {
-                    name = text
+                if name == nil, isPackageName(token) {
+                    name = token
                 }
             }
             guard let name, let version else { continue }

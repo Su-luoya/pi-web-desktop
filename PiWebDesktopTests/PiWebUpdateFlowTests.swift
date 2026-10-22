@@ -11,7 +11,7 @@ import XCTest
 // 不写真实 Home、Application Support 或 `~/.pi`；唯一写 UserDefaults 的用例使用
 // suiteName 隔离的 domain，测试结束即删除。
 
-final class PiWebUpdateAdapterTests: XCTestCase {
+final class PiWebUpdateFlowTests: XCTestCase {
 
     private let referenceDate = Date(timeIntervalSince1970: 1_700_000_000)
     private let fixtureHome = "/tmp/pi-web-update-tests-home"
@@ -201,14 +201,6 @@ final class PiWebUpdateAdapterTests: XCTestCase {
             source: .npmGlobal,
             confidence: .verified
         ))
-    }
-
-    private func successResult() -> PiWebUpdateInstallResult {
-        PiWebUpdateInstallResult(
-            exitCode: 0,
-            startedAt: referenceDate,
-            finishedAt: referenceDate.addingTimeInterval(1)
-        )
     }
 
     // MARK: - 1. 设置关闭 → 不调用安装器

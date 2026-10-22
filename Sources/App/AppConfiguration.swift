@@ -219,11 +219,6 @@ struct AppConfiguration {
         UpdateHistoryStore.record(entry, to: defaults)
     }
 
-    /// 清除全部更新历史（只清除历史记录，不改动任何安装）。
-    func clearUpdateHistory() {
-        UpdateHistoryStore.clear(from: defaults)
-    }
-
     /// 「已放弃」记录（GitHub #62）：超时或放弃等待之后“启动过但已停止等待”的
     /// 命令。跨启动保留，直到用户显式清除或该组件成功完成一次更新。
     func abandonedAttempts() -> [UpdateAbandonedAttempt] {

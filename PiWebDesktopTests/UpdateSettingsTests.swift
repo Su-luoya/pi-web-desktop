@@ -323,7 +323,7 @@ final class UpdateSettingsTests: XCTestCase {
         XCTAssertEqual(intervals.interval(for: .weekly), 20)
         XCTAssertEqual(intervals.interval(for: .checkAndNotify), 30)
         XCTAssertEqual(intervals.interval(for: .askBeforeUpdate), 30)
-        XCTAssertNil(intervals.interval(for: .piPackages, policy: .off))
+        XCTAssertNil(intervals.interval(for: .off))
         // 缓存 TTL 用该分类的出厂默认策略。
         XCTAssertEqual(intervals.ttl(for: .desktopApp), 10)
         XCTAssertEqual(intervals.ttl(for: .piPackages), 30)

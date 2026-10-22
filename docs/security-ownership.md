@@ -95,7 +95,7 @@
 | --- | --- |
 | PID 复用（PID 相同、`launchedAt` 不同） | `testReusedPIDWithDifferentLaunchTimeIsExternal`、`testReusedPIDWithADifferentLaunchTimeIsNeverSignalled` |
 | 端口复用（端口相同、`instanceID`/记录不匹配） | `testReusedPortWithDifferentInstanceIsExternal`、`testRecordedPortChangeMakesTheRunningServiceExternal` |
-| 参数改变（实时命令文本摘要不匹配） | `testChangedArgumentsAreExternal`、`testChangedLiveCommandLineIsExternal`、`testReorderedArgumentsAreExternal`、`testChangedLiveCommandLineMakesTheServiceExternalAndSendsNoSignal` |
+| 参数改变（实时命令文本摘要不匹配） | `testChangedLiveCommandLineIsExternal`、`testChangedLiveCommandLineMakesTheServiceExternalAndSendsNoSignal`、`testReorderedArgumentsAreExternal` |
 | 实时命令行为空/不可解析 | `testEmptyLiveCommandLineIsExternal`、`testStartManagedServiceWithoutArgumentsProvenanceIsRejectedAndTerminated` |
 | 实时命令文本空白归一化 | `testLiveCommandLineWhitespaceRunsAreNormalized`、`testCommandDigestIsStableAndNormalizesWhitespace` |
 | 可执行标识改变 / 来源可注入 | `testChangedExecutableIsExternal`、`testChangedResolvedExecutableMakesTheServiceExternalAndSendsNoSignal`、`testProcPidPathProvenanceIsRecordedWhenAvailable`、`testFallbackExecutableSourceStillRequiresTheCommandLineToMatch` |
@@ -104,7 +104,7 @@
 | /dev/null 描述符保护（fd ≤ stderr） | `testSpawnDescriptorAboveStandardErrorIsPassedThrough`、`testSpawnDescriptorAtOrBelowStandardErrorIsDuplicatedAboveIt` |
 | 启动时间改变（`launchedAt` 不匹配） | `testChangedLaunchTimeIsExternal` |
 | 过期记录（进程不存在） | `testRecordWhoseProcessIsGoneIsExternal`、`testStaleOwnershipRecordIsRemovedWithoutSignals` |
-| 外部服务路径（从不发送信号） | `testExternalListenerIsNeverSignalled`、`testStopAllServicesLeavesAnExternalServiceRunning`、`testUnverifiableProcessFactsAreNeverSignalledAndKeepTheRecord` |
-| 托管服务停止（只对组、最多两次信号） | `testStopServiceSendsOneGroupSignalAndRemovesTheRecord`、`testStopServiceEscalatesToTheSameProcessGroupAfterTheBoundedWait`、`testStopAllServicesStopsTheVerifiedChildAndInvokesTheCompletion` |
+| 外部服务路径（从不发送信号） | `testExternalListenerIsNeverSignalled`、`testStopManagedServiceOnQuitLeavesAnExternalServiceRunning`、`testUnverifiableProcessFactsAreNeverSignalledAndKeepTheRecord` |
+| 托管服务停止（只对组、最多两次信号） | `testStopServiceSendsOneGroupSignalAndRemovesTheRecord`、`testStopServiceEscalatesToTheSameProcessGroupAfterTheBoundedWait`、`testStopManagedServiceOnQuitStopsTheVerifiedChildAndInvokesTheCompletion` |
 
 所有测试使用假的 `ps`/`lsof` 输出、注入的存活判定与可执行标识读取、注入的 `ServiceSignaling` 与临时目录，不启动、不结束任何真实进程（描述符保护测试也只复制/关闭自己创建的副本）。`ServiceSignaling` 没有单 PID 发送方法，因此测试中“向单个 PID 发送信号”无法被表达；生产实现 `kill(-pgid, ...)` 也不接受单个 PID。

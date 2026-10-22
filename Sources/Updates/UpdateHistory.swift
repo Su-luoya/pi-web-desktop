@@ -73,7 +73,7 @@ enum UpdateHistoryStore {
 
     static func load(from defaults: UserDefaults) -> [UpdateHistoryEntry] {
         guard let data = defaults.data(forKey: UpdateSettingKeys.updateHistory),
-              let entries = decode(data) else { return [] }
+              let entries = decode(data)?.entries else { return [] }
         return entries
     }
 
@@ -103,19 +103,28 @@ enum UpdateHistoryStore {
 
     /// M7（更新事务审计）：单条解码降级（同 UpdateAbandonedAttemptStore.decode）。
     /// 旧实现整体解码，任何一条损坏都会让全部历史丢失；现在逐条解码，只丢损坏的那条。
-    static func decode(_ data: Data) -> [UpdateHistoryEntry]? {
-        guard let objects = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+    ///
+    /// 审计次要：丢弃不再完全静默——返回被丢弃的条数（未知枚举原始值或结构
+    /// 损坏），排查「历史条数变少」时有迹可循。
+    static func decode(_ data: Data) -> (entries: [UpdateHistoryEntry], discardedCount: Int)? {
+        guard let objects = (try? JSONSerialization.jsonObject(with: data)) as? [Any] else {
             return nil
         }
         var entries: [UpdateHistoryEntry] = []
+        var discarded = 0
         for object in objects {
-            guard JSONSerialization.isValidJSONObject(object),
-                  let fragment = try? JSONSerialization.data(withJSONObject: object),
+            // 单个非字典元素只丢弃自己，不让整份历史失效。
+            guard let dictionary = object as? [String: Any],
+                  JSONSerialization.isValidJSONObject(dictionary),
+                  let fragment = try? JSONSerialization.data(withJSONObject: dictionary),
                   let stored = try? JSONDecoder().decode(StoredEntry.self, from: fragment),
-                  let entry = stored.entry() else { continue }
+                  let entry = stored.entry() else {
+                discarded += 1
+                continue
+            }
             entries.append(entry)
         }
-        return entries.map(sanitize).prefix(maximumEntries).map { $0 }
+        return (Array(entries.map(sanitize).prefix(maximumEntries)), discarded)
     }
 
     /// 去掉不受控内容：截断长文本、丢掉无法校验的包名与版本。

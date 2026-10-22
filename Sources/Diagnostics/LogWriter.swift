@@ -212,6 +212,10 @@ final class LogWriter {
     }
 
     /// 等写入队列排空。测试与需要落盘屏障的调用方使用；不能从写入队列内部调用。
+    ///
+    /// 并发审计次要：本方法在调用线程上 `sync` 等写入队列；写队列积压（子进程
+    /// 刷屏 + 磁盘繁忙）时主线程调用会停顿数秒——无死锁（依赖单向），但新增
+    /// 主线程调用点前需评估；移交/排空路径的异步化见审计报告，未在本轮展开。
     func flush() {
         guard DispatchQueue.getSpecific(key: queueKey) == nil else { return }
         queue.sync {}

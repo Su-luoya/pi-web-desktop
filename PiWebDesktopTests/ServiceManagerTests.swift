@@ -958,6 +958,37 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(harness.manager.currentState, .failed(expected))
     }
 
+    /// 真实生产序列的快失败（区别于上一条用假句柄覆盖的轮询分支）：真实 launcher
+    /// 的终止回调先清空 `serviceProcess`，轮询自己的 `!isRunning` 分支永远不命
+    /// 中。启动即崩溃（例如监听地址不可用的 EADDRNOTAVAIL）时，终止回调必须
+    /// 立即结束启动会话并给出可读失败，而不是继续轮询到 30 秒预算耗尽。
+    func testTerminationCallbackFastFailsAnActiveStartupSession() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        let process = ManagerFakeProcess(processIdentifier: 5150)
+        harness.launcher.result = .success(process)
+        harness.probe.ready = false
+        harness.manager.startManagedService()
+
+        XCTAssertEqual(harness.scheduler.delayedWork.count, 1, "启动后应有一条轮询链")
+        // 真实序列：子进程启动即退出，终止回调先于任何就绪探测触发。
+        harness.launcher.terminationHandlers[0](process)
+
+        let expected = "pi-web 进程已退出。请查看日志：\(harness.logURL.path)"
+        XCTAssertEqual(harness.startupFailures, [expected])
+        XCTAssertEqual(harness.pageMessages, ["正在启动 Pi Web…", "启动失败"])
+        XCTAssertEqual(harness.manager.currentState, .failed(expected))
+
+        // 会话已被终止回调结束：遗留的轮询回调只应过期一次，不再产生第二条
+        // 失败，也不再给出“30 秒内未能启动”的错误结论。
+        var ranStaleCallbacks = 0
+        while harness.scheduler.runNextDelayedWork() { ranStaleCallbacks += 1 }
+        XCTAssertEqual(ranStaleCallbacks, 1, "会话结束后遗留轮询只应过期一次，不再续链")
+        XCTAssertEqual(harness.startupFailures, [expected], "会话结束后不得重复上报")
+        XCTAssertEqual(harness.manager.currentState, .failed(expected))
+    }
+
     func testMissingExecutableReportsTheInstallHint() throws {
         let harness = try makeHarness(fileManager: ManagerFakeFileManager())
         defer { harness.cleanUp() }

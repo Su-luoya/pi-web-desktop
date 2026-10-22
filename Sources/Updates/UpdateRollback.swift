@@ -229,6 +229,42 @@ enum UpdateDegradationPlanner {
     /// 时以哈希为准（哈希已覆盖文件内容），但 inode 与身份仍必须一致；指纹没有
     /// 记录内容哈希（超限/不可读）时，退回 size/mtime 元数据检查，并在证据与
     /// 文案里明确写出“未做内容哈希”。
+    /// 重新核对更新前证据的共享逻辑（审计 H1）：主回滚路径与“版本未变化”分支
+    /// 共用同一套规则，避免两处判定漂移。返回核对到的证据；失败时返回拼进
+    /// plan.reason 的原因片段。
+    static func reverifyPreviousArtifact(
+        fingerprint: UpdateArtifactFingerprint,
+        expectedPackageName: String?,
+        previousPath: String,
+        probe: UpdateArtifactProbe
+    ) -> (evidence: UpdateRollbackEvidence?, failureNote: String?) {
+        let (evidence, issue) = evaluateRollbackEvidence(
+            fingerprint: fingerprint,
+            expectedPackageName: expectedPackageName,
+            previousPath: previousPath,
+            probe: probe
+        )
+        guard let evidence else {
+            return (nil, "更新前证据重新核对未通过（\(issue?.text ?? "证据不可用")）")
+        }
+        // 没有内容哈希（超限/不可读）时退回 size/mtime 元数据检查，并在证据与
+        // 文案里写明“未做内容哈希”。内容哈希一致时不再要求 size/mtime 相同：
+        // 哈希是更强的证据（上面明示的等价规则）。内容哈希缺失时，没有记录的
+        // 字段一律算未验证（不能默认通过），两者都没记录时就没有任何可核对的
+        // 元数据（B-7）。
+        if !evidence.contentHashVerified {
+            guard fingerprint.fileSize != nil || fingerprint.modifiedAt != nil else {
+                return (nil, "更新前的指纹没有内容哈希，也没有记录大小与 mtime，没有可核对的元数据")
+            }
+            let sizeMatches = fingerprint.fileSize.map { probe.fileSize(previousPath) == $0 } ?? false
+            let mtimeMatches = fingerprint.modifiedAt.map { probe.modificationDate(previousPath) == $0 } ?? false
+            guard sizeMatches, mtimeMatches else {
+                return (nil, "更新前的可执行文件已被覆盖或替换（大小/mtime 与指纹不一致，且未做内容哈希，只能用元数据比对）")
+            }
+        }
+        return (evidence, nil)
+    }
+
     static func evaluateRollbackEvidence(
         fingerprint: UpdateArtifactFingerprint,
         expectedPackageName: String?,
@@ -311,12 +347,38 @@ enum UpdateDegradationPlanner {
             )
         }
 
-        // 版本未变化：文件仍是更新前的版本，直接如实报告，不做任何“回滚动作”。
+        // 版本未变化：用户已经在“更新前”的版本上，没有可回滚的目标。但“文件未被
+        // 替换”是关于磁盘状态的事实断言，必须有证据支撑（审计 H1）：能核对且核对
+        // 通过时才这么说；否则按“未核对/可能已被重装覆盖”如实降级表述，不再在
+        // 证据核对之前提前返回。证据规则与主回滚路径共用 reverifyPreviousArtifact。
         if let previousVersion, let newVersion, previousVersion == newVersion {
+            let note: String
+            let eligibility: UpdateRollbackEligibility
+            if !probe.isAvailable {
+                note = "；本次运行没有可用的文件系统探针，无法核对文件是否被替换"
+                eligibility = .probeUnavailable
+            } else if let previousPath = fingerprint.evidencePath, probe.isExecutableFile(previousPath) {
+                let (evidence, failureNote) = reverifyPreviousArtifact(
+                    fingerprint: fingerprint,
+                    expectedPackageName: component.expectedPackageName,
+                    previousPath: previousPath,
+                    probe: probe
+                )
+                if let evidence {
+                    note = "；更新前路径的证据重新核对通过（\(evidence.level.rawValue)），未发现文件被替换"
+                    eligibility = .alreadyOnPreviousArtifact
+                } else {
+                    note = "；\(failureNote ?? "证据不可用")，无法断言文件未被替换，文件可能已被重装覆盖"
+                    eligibility = .evidenceChangedOrMissing
+                }
+            } else {
+                note = "；更新前记录的可执行文件路径不存在或不再可执行，文件可能已被替换"
+                eligibility = .evidenceChangedOrMissing
+            }
             return plan(
                 kind: .stillUsingPreviousArtifact,
-                eligibility: .alreadyOnPreviousArtifact,
-                reason: "验证失败（\(failureReason)）；重新检测到的版本与更新前相同（\(previousVersion)），文件未被替换"
+                eligibility: eligibility,
+                reason: "验证失败（\(failureReason)）；重新检测到的版本与更新前相同（\(previousVersion)）\(note)"
             )
         }
 
@@ -356,7 +418,9 @@ enum UpdateDegradationPlanner {
 
         // 真实边界 4（GitHub #63）：身份名称、inode 与内容哈希必须与更新前记录
         // 一致；任一读不到或不一致都只能报告“无法自动回滚”，不得声称“已降级”。
-        let (evidence, issue) = evaluateRollbackEvidence(
+        // 证据核对与“版本未变化”分支共用 reverifyPreviousArtifact（审计 H1），
+        // 避免两处判定规则漂移。
+        let (evidence, evidenceFailureNote) = reverifyPreviousArtifact(
             fingerprint: fingerprint,
             expectedPackageName: component.expectedPackageName,
             previousPath: previousPath,
@@ -366,32 +430,8 @@ enum UpdateDegradationPlanner {
             return plan(
                 kind: .cannotAutomaticallyRollback,
                 eligibility: .evidenceChangedOrMissing,
-                reason: "验证失败（\(failureReason)）；更新前证据重新核对未通过（\(issue?.text ?? "证据不可用")），不能确认旧文件仍是更新前那份，无法回滚"
+                reason: "验证失败（\(failureReason)）；\(evidenceFailureNote ?? "证据不可用")，无法回滚"
             )
-        }
-
-        // 没有内容哈希（超限/不可读）时退回 size/mtime 元数据检查，并在证据与
-        // 文案里写明“未做内容哈希”。内容哈希一致时不再要求 size/mtime 相同：
-        // 哈希是更强的证据（上面明示的等价规则）。
-        if !evidence.contentHashVerified {
-            // B-7：没有内容哈希时只能用 size/mtime 兜底；没记录的字段一律算未验证
-            // （不能默认通过），两者都没记录时就没有任何可核对的元数据。
-            guard fingerprint.fileSize != nil || fingerprint.modifiedAt != nil else {
-                return plan(
-                    kind: .cannotAutomaticallyRollback,
-                    eligibility: .evidenceChangedOrMissing,
-                    reason: "验证失败（\(failureReason)）；更新前的指纹没有内容哈希，也没有记录大小与 mtime，没有可核对的元数据，无法回滚"
-                )
-            }
-            let sizeMatches = fingerprint.fileSize.map { probe.fileSize(previousPath) == $0 } ?? false
-            let mtimeMatches = fingerprint.modifiedAt.map { probe.modificationDate(previousPath) == $0 } ?? false
-            guard sizeMatches, mtimeMatches else {
-                return plan(
-                    kind: .cannotAutomaticallyRollback,
-                    eligibility: .evidenceChangedOrMissing,
-                    reason: "验证失败（\(failureReason)）；更新前的可执行文件已被覆盖或替换（大小/mtime 与指纹不一致，且未做内容哈希，只能用元数据比对），无法回滚"
-                )
-            }
         }
 
         // 路径未变且证据一致：文件仍是更新前的版本。

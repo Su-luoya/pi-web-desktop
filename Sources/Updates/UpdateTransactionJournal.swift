@@ -93,6 +93,20 @@ struct UpdateTransactionJournal {
         record(.commit, status: .notAttempted, reason: reason)
     }
 
+    /// M8（更新事务审计）：健康检查失败路径的 commit 阶段。安装与重启动作已
+    /// 完成、新工件已在位，只是随后的健康确认失败；此前这条路径不记 commit，
+    /// 成为五阶段历史唯一缺口。如实记录：动作已完成，但健康未确认（isSuccessful
+    /// 仍为 false，因为 verify 阶段失败了）。
+    mutating func recordCommitWithUnverifiedHealth(version: String?) {
+        verifiedVersion = version ?? verifiedVersion
+        record(
+            .commit,
+            status: .succeeded,
+            reason: "新版本已安装并已尝试重启服务（\(version ?? verifiedVersion ?? "未知")），"
+                + "但健康检查失败，未确认服务可用；不做自动卸载"
+        )
+    }
+
     /// 降级阶段（GitHub #106）：`.notNeeded` 记为跳过；只有真的执行了恢复动作
     /// （`degradedToPreviousArtifact`）才算 `.applied`。安装失败、文件未变化只是
     /// 记录结论，无法回滚只是报告，都不能显示成“成功”。

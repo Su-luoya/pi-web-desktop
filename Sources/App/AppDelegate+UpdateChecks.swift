@@ -256,7 +256,15 @@ extension AppDelegate {
         ignoredVersions.ignore(version, for: category, at: Date())
         appConfiguration.save(ignoredVersions)
         updateChecker?.ignoredVersions = ignoredVersions
-        notifiedVersions[category] = version
+        // M9（更新事务审计）：notifiedVersions 改按 target（分类+包名）记录；
+        // 忽略入口只有分类，这里把该分类下命中该版本的全部 target 都标记为已提示，
+        // 保证同样不再弹窗。
+        if let updateChecker {
+            for result in updateChecker.summary.results
+            where result.target.category == category && result.latestVersion == version {
+                notifiedVersions[result.target] = version
+            }
+        }
         refreshUpdateMenuState()
         syncUpdateSettingsWindow()
         diagnosticsWindowController?.refreshUpdateStatus()
@@ -519,7 +527,7 @@ extension AppDelegate {
         )
         guard !entries.isEmpty else { return }
         for entry in entries {
-            notifiedVersions[entry.category] = entry.latestVersion
+            notifiedVersions[entry.target] = entry.latestVersion
         }
         // 运行期间发现 Pi Web 更新时，如果启动前自动更新已开启，只会安排到下次
         // 启动安装（本次运行不安装）。

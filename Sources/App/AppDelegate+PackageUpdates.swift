@@ -21,7 +21,10 @@ extension AppDelegate {
             NSApp.terminate(nil)
             return
         }
-        try? "\(ProcessInfo.processInfo.processIdentifier)\n".write(to: appConfiguration.appPIDURL, atomically: true, encoding: .utf8)
+        if (try? "\(ProcessInfo.processInfo.processIdentifier)\n".write(to: appConfiguration.appPIDURL, atomically: true, encoding: .utf8)) != nil {
+            // 记录归本进程所有：退出时才允许删除（见 `ownsPIDRecord`）。
+            ownsPIDRecord = true
+        }
         NSApp.mainMenu = nil
         installQuitShortcuts()
         installScreenChangeObserver()

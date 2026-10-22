@@ -671,9 +671,24 @@ final class ServiceManager {
                         self.serviceProcess = nil
                         self.closeLog()
                         self.logWriter.record("服务进程已退出")
-                        if !self.isStoppingService && !self.isQuitting {
-                            self.setState(.stopped)
+                        guard !self.isStoppingService && !self.isQuitting else { return }
+                        // 启动轮询期间的意外退出必须立即上报（生产实证：pi-web
+                        // 启动即崩溃时，旧的轮询链会继续探测一个已死的进程直到
+                        // 30 秒预算耗尽，再把结论误报成“未能启动”）。终止回调在
+                        // 轮询探测到 `!isRunning` 之前就清空了句柄，所以快失败
+                        // 只能在这里做：结束会话让后续轮询回调全部过期，再给出
+                        // 与轮询分支一致的可读失败。`reportStartupFailureOnce`
+                        // 保证同一会话不重复上报；代次由外层 guard 保证。
+                        if let session = self.activeStartupSession,
+                           self.activeStartupSessionGeneration == self.lifecycleGeneration {
+                            self.endStartupSession()
+                            self.reportStartupFailureOnce(
+                                "pi-web 进程已退出。请查看日志：\(self.appConfiguration.logURL.path)",
+                                session: session
+                            )
+                            return
                         }
+                        self.setState(.stopped)
                     }
                 }
                 // 应用侧事件行也走同一个 LogWriter/LogRedactor。

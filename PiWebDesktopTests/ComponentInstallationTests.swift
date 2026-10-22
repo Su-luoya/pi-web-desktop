@@ -635,6 +635,21 @@ final class ComponentInstallationTests: XCTestCase {
         XCTAssertTrue(ComponentInstallationDetector.parsePiList("nothing here\n").isEmpty)
     }
 
+    /// M10（更新事务审计）：npm 规范禁止包名以 `-`/`_` 开头；`--force`、`-g`
+    /// 之类的选项样式 token 不能通过校验，避免进入下游 CLI 的 argv 被当选项解析。
+    func testPackageNameValidationRejectsLeadingDashAndUnderscore() {
+        XCTAssertFalse(ComponentInstallationDetector.isPackageName("--force"))
+        XCTAssertFalse(ComponentInstallationDetector.isPackageName("-g"))
+        XCTAssertFalse(ComponentInstallationDetector.isPackageName("_private"))
+        XCTAssertFalse(ComponentInstallationDetector.isPackageName("@scope/--bad"))
+        // 合法名称不受影响（段内中划线/下划线仍允许）。
+        XCTAssertTrue(ComponentInstallationDetector.isPackageName("some-package"))
+        XCTAssertTrue(ComponentInstallationDetector.isPackageName("pi-web-desktop"))
+        XCTAssertTrue(ComponentInstallationDetector.isPackageName("@scope/one"))
+        // parsePiList 同样不得把选项样式 token 变成包条目。
+        XCTAssertTrue(ComponentInstallationDetector.parsePiList("--force 1.2.3\n-g 2.0.0").isEmpty)
+    }
+
     // MARK: 应用自身
 
     func testDesktopApplicationInApplicationsDirectoryIsInferredOfficialInstaller() {

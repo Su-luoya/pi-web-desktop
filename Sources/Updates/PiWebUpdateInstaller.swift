@@ -121,7 +121,12 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
     }
 
     func cancel() {
-        stateQueue.async { [weak self] in
+        // M1（更新事务审计）：同步落地。`applicationWillTerminate` 返回后进程随时
+        // 可能退出，异步投递的取消块可能永远不执行——既不对本次启动的子进程组
+        // 发终止信号（孤儿 npm 继续写全局目录），也不写「已放弃」记录。stateQueue
+        // 上的块只做信号与 UserDefaults 写入、不回等任何外部队列，调用方 sync
+        // 等待不会死锁；生产调用方只有退出路径。
+        stateQueue.sync { [weak self] in
             guard let self, let attempt = self.attempt else { return }
             // F5（GitHub #121）：排水宽限窗口内子进程已经退出，没有信号可发。取消不会生效，
             // 但也不能静默：留下标记，结果与日志都能区分「取消被忽略」与「没来得及取消」。

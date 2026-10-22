@@ -590,8 +590,16 @@ final class PiWebUpdateAdapterTests: XCTestCase {
         let plan = try makePlan()
         world.detectedInstallation = installation(version: "0.9.2")
         world.healthResults = [false]
+        var history: [UpdateHistoryEntry] = []
+        let transaction = UpdateTransactionEnvironment(
+            probe: .disabled,
+            recordHistory: { history.append($0) },
+            applyDegradation: { _ in },
+            now: { self.referenceDate }
+        )
         var outcome: PiWebUpdateRunOutcome?
-        world.makeCoordinator().run(input(installation: installation())) { outcome = $0 }
+        world.makeCoordinator(transaction: transaction)
+            .run(input(installation: installation())) { outcome = $0 }
 
         XCTAssertEqual(outcome, .healthCheckFailed(
             plan: plan,
@@ -608,6 +616,15 @@ final class PiWebUpdateAdapterTests: XCTestCase {
         XCTAssertTrue(warning.text.contains("健康检查失败"))
         XCTAssertTrue(warning.text.contains("不会自动回滚"))
         XCTAssertTrue(world.log.text.contains("健康检查失败"))
+
+        // M8（更新事务审计）：健康检查失败路径也必须有 commit 阶段（五阶段
+        // 历史唯一缺口），且不得被误判为一次成功更新。
+        let entry = try XCTUnwrap(history.first)
+        let commit = try XCTUnwrap(entry.phases.first { $0.phase == .commit })
+        XCTAssertEqual(commit.status, .succeeded)
+        XCTAssertTrue(commit.reason.contains("健康检查失败"), commit.reason)
+        XCTAssertEqual(entry.completedPhase, .commit)
+        XCTAssertFalse(entry.isSuccessful)
     }
 
     // MARK: - 6. 安装器失败：超时 / 非零退出 → 失败处理，不崩溃
@@ -1201,6 +1218,41 @@ final class PiWebUpdateAdapterTests: XCTestCase {
         XCTAssertFalse(box.value?.cancelled ?? true)
         XCTAssertNil(box.value?.failure)
         XCTAssertTrue(abandoned.isEmpty, "排水窗口里的 cancel 不得写失实的「已放弃」记录")
+    }
+
+    /// M1（更新事务审计）：退出路径的 cancel() 必须同步落地——函数返回时「已放弃」
+    /// 记录已写入、结果已按取消收尾。异步投递在 `applicationWillTerminate` 返回后
+    /// 可能永远不执行：不发终止信号（孤儿 npm 继续写全局目录）且无任何记录。
+    func testProcessInstallerCancelLandsSynchronouslyBeforeReturning() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = try makeScript(in: directory, body: "sleep 30")
+        let plan = try makePlan(
+            npmExecutablePath: script,
+            baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": directory.path]
+        )
+        var abandoned: [UpdateAbandonedAttempt] = []
+        let installer = ProcessPiWebUpdateInstaller(recordAbandonedAttempt: { abandoned.append($0) })
+        let box = ResultBox()
+        let finished = expectation(description: "installer cancelled")
+        installer.install(plan, timeout: 30) { result in
+            box.value = result
+            finished.fulfill()
+        }
+        // 等子进程真正跑起来，避免 cancel 落在空闲窗口。
+        let deadline = Date().addingTimeInterval(10)
+        while !installer.isRunning, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertTrue(installer.isRunning)
+        installer.cancel()
+        // 关键断言：cancel() 返回后**立刻**（不等任何 expectation）记录已落地。
+        XCTAssertEqual(abandoned.count, 1, "cancel() 返回时「已放弃」记录必须已同步写入（M1）")
+        XCTAssertEqual(abandoned.first?.reason, .abandonedWaiting)
+        XCTAssertNil(abandoned.first?.finishedAt)
+        wait(for: [finished], timeout: 10)
+        XCTAssertEqual(box.value?.cancelled, true)
+        withExtendedLifetime(installer) {}
     }
 
     func testProcessInstallerKeepsNonUTF8OutputChunk() throws {

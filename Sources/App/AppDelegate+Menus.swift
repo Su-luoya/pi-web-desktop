@@ -618,7 +618,19 @@ extension AppDelegate {
                 // 组装完回主线程写入剪贴板（不在后台线程碰 AppKit 之外的 UI 约定）。
                 DispatchQueue.main.async {
                     self.diagnosticsExportInProgress = false
-                    DiagnosticsClipboard.copy(text)
+                    if !DiagnosticsClipboard.copy(text) {
+                        // 复制失败（其它进程持有剪贴板等）必须可见，否则用户以为
+                        // 已复制、公开 issue 里却贴不出诊断信息。
+                        let alert = NSAlert()
+                        alert.alertStyle = .warning
+                        alert.messageText = "复制失败"
+                        alert.informativeText = "诊断信息未能写入剪贴板，请再试一次。"
+                        if let window, window.isVisible {
+                            alert.beginSheetModal(for: window, completionHandler: nil)
+                        } else {
+                            alert.runModal()
+                        }
+                    }
                 }
             }
         }

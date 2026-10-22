@@ -22,6 +22,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 等待用户退出决策的兜底计时器：决策完成或取消后立即失效。
     var quitDecisionTimer: Timer?
     var hasInstanceLock = false
+    /// 本进程是否写入过 `app.pid`：只有写入者才允许在退出时删除它。
+    /// 第二实例因单实例锁退出时，旧实现会无条件删除、连带清掉正在运行实例的
+    /// 记录（生产实证），后续启动读到空记录就通过了单实例检查。
+    var ownsPIDRecord = false
     var eventMonitor: Any?
     var screenParametersObserver: NSObjectProtocol?
     var screenFitWorkItem: DispatchWorkItem?
@@ -80,7 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 每类组件的“忽略版本”（只存版本字符串与时间戳，见 `UpdateIgnoredVersions`）。
     var ignoredVersions: UpdateIgnoredVersions = .empty
     /// 本次运行已经提示过哪些版本，避免同一个版本反复打扰；退出即丢弃。
-    var notifiedVersions: [UpdateCheckCategory: String] = [:]
+    var notifiedVersions: [UpdateCheckTarget: String] = [:]
     /// 主线程状态：是否有一次检查正在进行（用于菜单文案与重复点击防护）。
     var updateCheckInProgress = false
     /// 手动检查完成后是否弹提示；自动检查是否提示由策略与忽略版本决定。
@@ -436,14 +440,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // 应用关闭时不检查：先取消周期计时器，此后的触发一律忽略。
         updateChecker?.stop()
         // 进行中的受限自动安装也必须终止：取消按失败处理，不留孤儿进程。
+        // M1（更新事务审计）：cancel/abandon 都同步落地（终止信号 + 「已放弃」
+        // 记录在本函数返回前完成），不再依赖异步块；异步投递在退出时可能永不执行。
         piWebUpdateInstaller.cancel()
         // 依赖探针（`--version` / `command -v` / `ps` / `lsof`）不再等待：取消只会
         // 终止本次启动的子进程，不按名字或进程组发信号。
         commandRunner.cancelRunningProbe()
         // Pi CLI 更新命令只放弃等待：本应用不向任何进程发送信号。
         piCLIUpdateRunner.abandon()
+        // 扩展包更新命令同样只放弃等待（M1：退出清理原来漏掉了它，命令与记录
+        // 都悬在后台队列上）。
+        piPackageUpdateRunner.abandon()
         serviceManager.stopHealthMonitor()
-        try? FileManager.default.removeItem(at: appConfiguration.appPIDURL)
+        // 只有本进程写入过 PID 记录才删除：见 `ownsPIDRecord`。删除别人的记录
+        // 会破坏单实例检查，让下一个启动的实例与在运行实例并行。
+        if ownsPIDRecord {
+            try? FileManager.default.removeItem(at: appConfiguration.appPIDURL)
+        }
         serviceManager.closeLog()
         if let eventMonitor {
             NSEvent.removeMonitor(eventMonitor)

@@ -228,16 +228,17 @@ struct UpdateNotificationEntry: Equatable {
 ///
 /// 只挑选“可更新、未被忽略、本次运行尚未为这个版本提示过”的结果，因此：
 /// 忽略某个版本后不再提示，上游发布更高版本时会重新进入名单；关闭的分类永远
-/// 不进入名单。名单只消费 `UpdateChecker` 重建过的结果（status 按当前本机
-/// 版本现算，GitHub #74），本函数自己不读缓存、也不沿用缓存里的结论。
-/// 通知走应用内提示框（见 `docs/privacy.md` 的取舍说明），这里只
+/// 不进入名单。去重键是 target（分类+包名）：多个扩展包共用同一分类，按分类
+/// 去重会互相覆盖（M9，更新事务审计）。名单只消费 `UpdateChecker` 重建过的结果
+/// （status 按当前本机版本现算，GitHub #74），本函数自己不读缓存、也不沿用缓存
+/// 里的结论。通知走应用内提示框（见 `docs/privacy.md` 的取舍说明），这里只
 /// 决定提示哪些条目。
 enum UpdateNotificationPlanner {
     static func plan(
         results: [UpdateCheckResult],
         preferences: UpdateCheckPreferences,
         ignoredVersions: UpdateIgnoredVersions,
-        alreadyNotified: [UpdateCheckCategory: String]
+        alreadyNotified: [UpdateCheckTarget: String]
     ) -> [UpdateNotificationEntry] {
         results.compactMap { result in
             guard result.status == .updateAvailable, let latestVersion = result.latestVersion else { return nil }
@@ -245,7 +246,7 @@ enum UpdateNotificationPlanner {
             let policy = preferences.policy(for: category)
             guard policy.isEnabled else { return nil }
             guard !ignoredVersions.isIgnored(latestVersion, for: category) else { return nil }
-            guard alreadyNotified[category] != latestVersion else { return nil }
+            guard alreadyNotified[result.target] != latestVersion else { return nil }
             return UpdateNotificationEntry(
                 category: category,
                 target: result.target,

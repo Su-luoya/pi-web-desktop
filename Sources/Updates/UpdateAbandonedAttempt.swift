@@ -163,6 +163,15 @@ enum UpdateAbandonedAttemptStore {
     static let maximumPackageRecords = 20
     /// 展示文本里时间字段的可接受范围起点（早于此时间的记录视为不可信）。
     static let earliestRecordedAt = Date(timeIntervalSince1970: 1_000_000_000)
+    /// M6（更新事务审计）：时间戳的时钟容差。超过它的未来时间戳视为不可信
+    /// （时钟前调→回拨场景），否则会长期阻断该组件的自动更新。
+    static let clockTolerance: TimeInterval = 24 * 60 * 60
+
+    /// M4（更新事务审计）：扩展包槽位是「读全部 → 过滤 → 插入 → 写回」的读-改-写，
+    /// 而记录写入同时来自多个队列的回调（三个执行器各自投递队列、退出路径主线程）。
+    /// 用进程内互斥锁把同进程内的这条序列变成临界区；UserDefaults 单键写入本身
+    /// 原子，锁只保证读-改-写不被交错。
+    private static let storageLock = NSLock()
 
     /// 全部组件的记录（顺序：Pi Web、Pi CLI、扩展包按包名）。
     static func load(from defaults: UserDefaults) -> [UpdateAbandonedAttempt] {
@@ -196,6 +205,8 @@ enum UpdateAbandonedAttemptStore {
     /// 写入（或覆盖同组件的旧记录）。
     static func save(_ attempt: UpdateAbandonedAttempt, to defaults: UserDefaults) {
         guard attempt.hasRecordableComponent, let stored = valid(attempt) else { return }
+        storageLock.lock()
+        defer { storageLock.unlock() }
         switch stored.componentKind {
         case .piWeb:
             write(stored, key: UpdateSettingKeys.piWebAbandonedAttempt, to: defaults)
@@ -214,6 +225,8 @@ enum UpdateAbandonedAttemptStore {
 
     /// 清除指定组件的记录（用户显式清除，或该组件后来成功完成了一次更新）。
     static func clear(component: UpdateTransactionComponent, from defaults: UserDefaults) {
+        storageLock.lock()
+        defer { storageLock.unlock() }
         switch component.kind {
         case .piWeb:
             defaults.removeObject(forKey: UpdateSettingKeys.piWebAbandonedAttempt)
@@ -243,9 +256,24 @@ enum UpdateAbandonedAttemptStore {
         try? JSONEncoder().encode(attempts.map(StoredAttempt.init(attempt:)))
     }
 
+    /// M4（更新事务审计）：单条解码降级。旧实现整体解码 `[StoredAttempt]`，
+    /// 任何一条字段损坏（手工改过、写入中断、未来加非可选字段后读到旧数据）都
+    /// 会让全部记录消失，且「已放弃」门控随之失效（失败开放）。现在先解析成
+    /// JSON 数组再逐条解码，只丢弃损坏的那条。
     static func decode(_ data: Data) -> [UpdateAbandonedAttempt]? {
-        guard let stored = try? JSONDecoder().decode([StoredAttempt].self, from: data) else { return nil }
-        return stored.compactMap { $0.attempt() }
+        guard JSONSerialization.isValidJSONObject([]),
+              let objects = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+            return nil
+        }
+        var attempts: [UpdateAbandonedAttempt] = []
+        for object in objects {
+            guard JSONSerialization.isValidJSONObject(object),
+                  let fragment = try? JSONSerialization.data(withJSONObject: object),
+                  let stored = try? JSONDecoder().decode(StoredAttempt.self, from: fragment),
+                  let attempt = stored.attempt() else { continue }
+            attempts.append(attempt)
+        }
+        return attempts
     }
 
     // MARK: - 内部
@@ -275,7 +303,7 @@ enum UpdateAbandonedAttemptStore {
     }
 
     /// 读回/写入前的字段校验：任何一个字段不可信就整条丢弃。
-    static func valid(_ attempt: UpdateAbandonedAttempt) -> UpdateAbandonedAttempt? {
+    static func valid(_ attempt: UpdateAbandonedAttempt, at now: Date = Date()) -> UpdateAbandonedAttempt? {
         guard attempt.hasRecordableComponent else { return nil }
         // `finishedAt` 必须为空：这条记录的语义就是“结束时间未知”。写入了结束
         // 时间的记录不是本类型能表达的语义，视为不可信。
@@ -284,6 +312,16 @@ enum UpdateAbandonedAttemptStore {
         guard let summary = clippedCommandSummary(attempt.commandSummary) else { return nil }
         guard attempt.timeout > 0, attempt.timeout <= UpdateAbandonedAttempt.maximumTimeout else { return nil }
         guard attempt.startedAt >= earliestRecordedAt, attempt.recordedAt >= earliestRecordedAt else { return nil }
+        // M6（更新事务审计）：时间戳只校验下界会让时钟前调时写下的记录在回拨后
+        // 变成「未来」——而阻断是无条件按组件匹配的，该组件的自动更新会被这条
+        // 坏记录无限期卡住。两层上界：①相对一致性（startedAt 不得晚于 recordedAt
+        // 加容差——记录写入时同一时钟下的两个时间戳不可能差出容差以上）；
+        // ②绝对上界（recordedAt 不得晚于当前时钟加容差，捕获“前调→写入→回拨”
+        // 的场景）。写入与读取同校验：坏时钟下的记录要么当时就被拒收、要么回拨
+        // 后被当作不可信丢弃。`now` 可注入以便测试。
+        let futureBound = now.addingTimeInterval(clockTolerance)
+        guard attempt.startedAt <= futureBound, attempt.recordedAt <= futureBound else { return nil }
+        guard attempt.startedAt <= attempt.recordedAt.addingTimeInterval(clockTolerance) else { return nil }
         guard attempt.childProcessAction.isRecordable(for: attempt) else { return nil }
         var copy = attempt
         copy.commandSummary = summary

@@ -558,6 +558,74 @@ final class UpdateAbandonedAttemptTests: XCTestCase {
         XCTAssertTrue(UpdateAbandonedAttemptStore.load(from: defaults).isEmpty)
     }
 
+    /// M6（更新事务审计）：时钟前调→回拨场景。超过时钟容差的未来时间戳视为
+    /// 不可信——阻断是按组件无条件匹配的，坏记录会长期卡住该组件的自动更新。
+    func testStoreRejectsTimestampsTooFarInTheFuture() {
+        let beyondTolerance = referenceDate.addingTimeInterval(UpdateAbandonedAttemptStore.clockTolerance + 60)
+        XCTAssertNil(
+            UpdateAbandonedAttemptStore.valid(makeAttempt(startedAt: beyondTolerance), at: referenceDate),
+            "startedAt 超过时钟容差不可信（M6）"
+        )
+        XCTAssertNil(
+            UpdateAbandonedAttemptStore.valid(makeAttempt(recordedAt: beyondTolerance), at: referenceDate),
+            "recordedAt 超过时钟容差不可信（M6）"
+        )
+        // 容差内的未来时间戳（时钟小幅前调）仍然接受。
+        XCTAssertNotNil(
+            UpdateAbandonedAttemptStore.valid(makeAttempt(startedAt: referenceDate.addingTimeInterval(60)), at: referenceDate)
+        )
+
+        let defaults = makeDefaults()
+        UpdateAbandonedAttemptStore.save(
+            makeAttempt(kind: .piCLI, startedAt: beyondTolerance, action: .waitedWithoutSignals),
+            to: defaults
+        )
+        XCTAssertTrue(UpdateAbandonedAttemptStore.load(from: defaults).isEmpty, "超过容差的未来时间戳不得落盘")
+    }
+
+    /// M4（更新事务审计）：扩展包槽位是读-改-写，记录写入来自多个队列的回调。
+    /// 并发保存 20 个包时不得互相覆盖丢记录（容量恰好是 20）。
+    func testConcurrentPackageSavesDoNotLoseRecords() {
+        let defaults = makeDefaults()
+        let group = DispatchGroup()
+        let queue = DispatchQueue(label: "test.concurrent-saves", attributes: .concurrent)
+        for index in 0..<UpdateAbandonedAttemptStore.maximumPackageRecords {
+            group.enter()
+            queue.async {
+                let attempt = self.makeAttempt(
+                    kind: .piPackage,
+                    packageName: "pkg-\(String(format: "%02d", index))",
+                    action: .waitedWithoutSignals
+                )
+                UpdateAbandonedAttemptStore.save(attempt, to: defaults)
+                group.leave()
+            }
+        }
+        XCTAssertEqual(group.wait(timeout: .now() + 10), .success)
+        let loaded = UpdateAbandonedAttemptStore.load(from: defaults)
+        XCTAssertEqual(
+            loaded.count,
+            UpdateAbandonedAttemptStore.maximumPackageRecords,
+            "并发写入后全部记录都应存在（M4 修复前读-改-写会互相覆盖丢失）"
+        )
+        XCTAssertEqual(Set(loaded.compactMap(\.packageName)).count, UpdateAbandonedAttemptStore.maximumPackageRecords)
+    }
+
+    /// M4（更新事务审计）：单条损坏只丢那条，不再让全部记录消失
+    /// （旧实现整体解码、失败开放，门控随之失效）。
+    func testDecodeDropsOnlyCorruptedRecords() throws {
+        let good1 = makeAttempt(kind: .piCLI, action: .waitedWithoutSignals)
+        let good2 = makeAttempt(kind: .piPackage, packageName: packageName, action: .waitedWithoutSignals)
+        let encoded = try XCTUnwrap(UpdateAbandonedAttemptStore.encode([good1, good2]))
+        var objects = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [[String: Any]])
+        objects[1]["reason"] = "not-a-reason"
+        let damaged = try XCTUnwrap(JSONSerialization.data(withJSONObject: objects))
+
+        let decoded = try XCTUnwrap(UpdateAbandonedAttemptStore.decode(damaged))
+        XCTAssertEqual(decoded.count, 1, "只应丢掉损坏的那条")
+        XCTAssertEqual(decoded.first?.componentKind, .piCLI)
+    }
+
     // MARK: - 4. 脱敏
 
     func testCommandSummaryIsRedactedAndStoredRedacted() throws {

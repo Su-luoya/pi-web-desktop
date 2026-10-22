@@ -134,6 +134,82 @@ final class LogWriterTests: XCTestCase {
         return combined
     }
 
+    // MARK: 历史脱敏的跨块状态与非 UTF-8 内容
+
+    /// PEM 头行落在上一读取块尾部、正文落在下一块时仍必须被清洗：旧实现每块
+    /// 独立调用 redact，块状态不延续，裸 base64 正文没有任何规则可识别、原样
+    /// 落盘（私有钥正文泄露）。
+    func testScrubRedactsPrivateKeyBodySpanningChunkBoundaries() throws {
+        let writer = makeWriter()
+        try FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // 头行恰好是第一个 256KB 读取块的最后一行：先写一行填充（含换行），
+        // 总长减去头行后恰好对齐块边界；正文与结束行全部落在下一块。
+        let header = "-----BEGIN OPENSSH PRIVATE KEY-----\n"  // scan-secrets: allow(reason=redaction fixture)
+        let filler = String(repeating: "f", count: 256 * 1024 - header.utf8.count - 1) + "\n"
+        let body = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n"  // scan-secrets: allow(reason=redaction fixture)
+            + "QyNTUxOQAAACD1234567890abcdefghijklmnopqrstuvwxyz\n"  // scan-secrets: allow(reason=redaction fixture)
+            + "-----END OPENSSH PRIVATE KEY-----\n"  // scan-secrets: allow(reason=redaction fixture)
+        try (filler + header + body).write(to: logURL, atomically: true, encoding: .utf8)
+
+        XCTAssertTrue(writer.scrubExistingLog())
+        let log = text(at: logURL)
+        XCTAssertFalse(log.contains("b3BlbnNzaC1rZXktdjE"), "私钥正文跨块时泄露：\(log.prefix(200))")
+        XCTAssertFalse(log.contains("QyNTUxOQAAACD"), "私钥正文跨块时泄露")
+        XCTAssertFalse(log.contains("BEGIN OPENSSH PRIVATE KEY"))
+        XCTAssertTrue(log.contains("ffff"), "填充内容保留，说明清洗确实重写了文件")
+    }
+
+    /// 非 UTF-8 字节不再让历史清洗整个静默放弃：坏字节按替换字符解码，它之前
+    /// 与之后的既有秘密都必须被清洗掉。
+    func testScrubStillRedactsSecretsAroundInvalidUTF8Bytes() throws {
+        let writer = makeWriter()
+        try FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var bytes = Data("token=old-binary-secret\n".utf8)  // scan-secrets: allow(reason=redaction fixture)
+        bytes.append(contentsOf: [0xFF, 0xFE])
+        bytes.append(contentsOf: Data("plain after binary\n".utf8))
+        try bytes.write(to: logURL)
+
+        XCTAssertTrue(writer.scrubExistingLog())
+        let log = text(at: logURL)
+        XCTAssertFalse(log.contains("old-binary-secret"), log)
+        XCTAssertTrue(log.contains("plain after binary"), log)
+    }
+
+    /// 日志文件、轮转文件与日志目录只允许当前用户访问：脱敏存在不可覆盖的
+    /// 边界（超长行强制切块等），权限收紧把残余风险限制在本用户。
+    func testLogFilesAndDirectoryArePrivateToTheUser() throws {
+        let writer = makeWriter(policy: LogRotationPolicy(maximumBytes: 64, retainedFileCount: 2))
+        XCTAssertTrue(writer.append(String(repeating: "x", count: 100) + "\n"))
+        XCTAssertTrue(writer.append("entry\n"))
+        writer.flush()
+
+        func permissions(_ path: String) throws -> Int {
+            (try FileManager.default.attributesOfItem(atPath: path)[.posixPermissions] as? Int) ?? -1
+        }
+        XCTAssertEqual(try permissions(logURL.path), 0o600, "当前日志")
+        XCTAssertEqual(try permissions(rotatedURL(1).path), 0o600, "轮转文件")
+        XCTAssertEqual(try permissions(logURL.deletingLastPathComponent().path), 0o700, "日志目录")
+    }
+
+    /// 超长行强制切块优先切在值边界上：紧邻切点之前的 `,` 让完整秘密留在
+    /// 同一块里，脱敏规则能整体命中（M3：秘密切成两半）。
+    func testForcedSplitPrefersAValueBoundary() {
+        let prefix = String(repeating: "a", count: 40)
+        let data = Data((prefix + ",\"token\":\"eyJsecret-value\"").utf8)  // scan-secrets: allow(reason=redaction fixture)
+        let end = LogWriter.forcedSplitEndIndex(in: data, limit: 48)
+        let head = String(decoding: data[data.startIndex..<end], as: UTF8.self)
+        let tail = String(decoding: data[end...], as: UTF8.self)
+        XCTAssertFalse(head.contains("eyJsecret-value"), head)
+        XCTAssertTrue(tail.contains("eyJsecret-value"), tail)
+    }
+
+    /// 找不到值边界（极端密集输出）时退回硬切，保证内存有界与推进保证。
+    func testForcedSplitFallsBackToTheHardLimit() {
+        let data = Data(String(repeating: "a", count: 100).utf8)
+        XCTAssertEqual(LogWriter.forcedSplitEndIndex(in: data, limit: 48), 48)
+        XCTAssertEqual(LogWriter.forcedSplitEndIndex(in: Data("short".utf8), limit: 48), 5)
+    }
+
     // MARK: 写入与脱敏
 
     func testAppendCreatesTheDirectoryAndRedactsEveryLine() {

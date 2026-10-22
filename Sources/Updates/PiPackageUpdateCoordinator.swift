@@ -212,8 +212,12 @@ final class PiPackageUpdateCoordinator {
             environment.deliver { completion(PiPackageUpdateBatchOutcome(outcomes: [])) }
             return
         }
-        runPlans(plans, at: 0, collected: []) { outcomes in
-            self.environment.deliver { completion(PiPackageUpdateBatchOutcome(outcomes: outcomes)) }
+        // M2（更新事务审计）：包与包之间的进程复查、版本重检测与历史写入都在投递
+        // 队列上进行（生产为主队列），入口同样跳到投递队列，保证整条链的队列纪律。
+        environment.deliver {
+            self.runPlans(plans, at: 0, collected: []) { outcomes in
+                self.environment.deliver { completion(PiPackageUpdateBatchOutcome(outcomes: outcomes)) }
+            }
         }
     }
 
@@ -274,124 +278,151 @@ final class PiPackageUpdateCoordinator {
         )
         journal.recordPreflight()
         environment.runner.run(plan, timeout: environment.timeout) { [weak self] result in
+            // M2（更新事务审计）：执行器在后台投递队列上回调，而此后的工作都会触碰
+            // 主线程状态——执行前进程复查会写 piProcessInspection，版本重检测读
+            // dependencyReport，历史/降级/放弃记录走 UserDefaults 读-改-写。统一先跳
+            // 到投递队列（生产为主队列，与 Web/CLI 协调器同纪律）再继续；测试注入
+            // 的立即投递替身保持原有同步语义。
             guard let self else { return }
-            // B-1：执行器拒绝执行时（同一实例上还有一次运行没结束）也必须回调。
-            // 这里如实记录「未执行」：不写安装失败，也不断言旧版本是否还在原位。
-            if result.notAttempted {
-                let reason = result.awaitingAbandonedChildExit
-                    ? PiPackageUpdateRefusal.executorBusyAwaitingAbandonedChildExit
-                    : PiPackageUpdateRefusal.executorBusy
-                self.logOutcome(
-                    "Pi 扩展包更新（\(plan.packageName)）：未执行（\(reason.text)）；"
-                        + "当前版本 \(plan.installedVersion)，目标版本 \(plan.targetVersion ?? "未知")。"
-                )
-                completion(.notAttempted(packageName: plan.packageName, reason: reason))
-                return
-            }
-            let record = PiPackageUpdateCommandRecord(
-                exitCode: result.exitCode,
-                duration: result.duration,
-                failure: result.failure
-            )
-            if let failure = result.failure {
-                let degradation = UpdateDegradationPlanner.installFailure(
-                    component: component,
-                    source: plan.source,
-                    fingerprint: journal.configuration.fingerprint,
-                    targetVersion: plan.targetVersion,
-                    failureReason: failure.text
-                )
-                journal.recordInstallFailed(failure.text)
-                journal.recordCommitNotAttempted(reason: "执行阶段失败，未启用新版本")
-                journal.recordDegradation(degradation)
-                // GitHub #107（W2B B-13）：与验证失败分支走同一条降级应用路径。
-                // 扩展包没有可重新指向的可执行文件，生产注入的 applyDegradation
-                // 对这个 kind 是 no-op（只改配置/重检测路径的组件才有实际动作），
-                // 但仍要调用：三条失败路径的降级语义必须一致，测试替身按调用断言。
-                self.environment.transaction.applyDegradation(degradation)
-                let tail = Self.outputTailText(result, redactingWith: self.environment.redactor)
-                self.recordTransaction(
-                    journal,
-                    degradation: degradation,
+            self.environment.deliver {
+                self.finishExecute(
+                    plan: plan,
+                    result: result,
+                    journal: journal,
                     advice: advice,
-                    resultingVersion: nil
+                    component: component,
+                    completion: completion
                 )
-                self.logOutcome(
-                    "Pi 扩展包更新（\(plan.packageName)）失败：\(failure.text)；退出码 "
-                        + "\(result.exitCode.map(String.init) ?? "无")，耗时 \(record.durationText)，"
-                        + "当前版本 \(plan.installedVersion)，目标版本 \(plan.targetVersion ?? "未知")。"
-                        + "应用不声称更新成功，也未核对更新前的文件是否被改动。"
-                )
-                if let tail {
-                    self.logOutcome("Pi 扩展包更新命令输出片段（已脱敏）：\(tail)")
-                }
-                completion(.commandFailed(plan: plan, failure: failure, record: record, outputTail: tail))
-                return
             }
-            journal.recordInstallSucceeded()
-            let detected = self.environment.detectPackageVersion(plan.packageName)
-            let verificationInput = UpdateVerificationInput(
-                component: .piPackage,
-                packageName: plan.packageName,
-                previousVersion: plan.installedVersion,
+        }
+    }
+
+    /// 执行器结果处理。M2 之后保证在投递队列上运行（生产为主线程）。
+    private func finishExecute(
+        plan: PiPackageUpdatePlan,
+        result: PiPackageUpdateCommandResult,
+        journal journalInput: UpdateTransactionJournal,
+        advice: UpdateManualAdvice,
+        component: UpdateTransactionComponent,
+        completion: @escaping (PiPackageUpdateRunOutcome) -> Void
+    ) {
+        var journal = journalInput
+        // B-1：执行器拒绝执行时（同一实例上还有一次运行没结束）也必须回调。
+        // 这里如实记录「未执行」：不写安装失败，也不断言旧版本是否还在原位。
+        if result.notAttempted {
+            let reason = result.awaitingAbandonedChildExit
+                ? PiPackageUpdateRefusal.executorBusyAwaitingAbandonedChildExit
+                : PiPackageUpdateRefusal.executorBusy
+            self.logOutcome(
+                "Pi 扩展包更新（\(plan.packageName)）：未执行（\(reason.text)）；"
+                    + "当前版本 \(plan.installedVersion)，目标版本 \(plan.targetVersion ?? "未知")。"
+            )
+            completion(.notAttempted(packageName: plan.packageName, reason: reason))
+            return
+        }
+        let record = PiPackageUpdateCommandRecord(
+            exitCode: result.exitCode,
+            duration: result.duration,
+            failure: result.failure
+        )
+        if let failure = result.failure {
+            let degradation = UpdateDegradationPlanner.installFailure(
+                component: component,
+                source: plan.source,
+                fingerprint: journal.configuration.fingerprint,
                 targetVersion: plan.targetVersion,
-                detectedVersion: detected,
-                // B-3：不能用计划里的期望包名冒充「检测到的包名」——那会让身份检查
-                // 同义反复地恒真，却把未验证的结论写进历史。传 nil，如实记为「未验证」。
-                detectedPackageName: nil,
-                detectedExecutablePath: nil,
-                detectedResolvedPath: nil,
-                detectedPackageJSONPath: nil,
-                fingerprint: journal.configuration.fingerprint
+                failureReason: failure.text
             )
-            let report = UpdateVerifier.verify(
-                verificationInput,
-                probe: self.environment.transaction.probe
-            )
-            guard journal.recordVerification(report, detectedVersion: detected) else {
-                let degradation = UpdateDegradationPlanner.verificationFailure(
-                    component: component,
-                    source: plan.source,
-                    fingerprint: journal.configuration.fingerprint,
-                    newVersion: detected,
-                    newResolvedPath: nil,
-                    failureReason: report.failureReason ?? "验证未通过",
-                    probe: self.environment.transaction.probe
-                )
-                journal.recordCommitNotAttempted(reason: "验证阶段失败，未启用新版本")
-                journal.recordDegradation(degradation)
-                self.environment.transaction.applyDegradation(degradation)
-                self.recordTransaction(
-                    journal,
-                    degradation: degradation,
-                    advice: advice,
-                    resultingVersion: detected
-                )
-                self.logOutcome(
-                    "Pi 扩展包更新（\(plan.packageName)）未通过版本验证：命令退出码 0，但重新检测到的版本是 "
-                        + "\(detected ?? "未知")，目标版本 \(plan.targetVersion ?? "未知")。"
-                        + UpdateWarningText.oldVersionClaimText(detectedVersion: detected)
-                        + "应用不会自动重试无上限，也不声称更新成功。"
-                )
-                completion(.versionUnchanged(plan: plan, detectedVersion: detected, record: record))
-                return
-            }
-            let newVersion = detected ?? plan.targetVersion ?? plan.installedVersion
-            journal.recordDegradationNotNeeded()
-            journal.recordCommit(version: newVersion)
+            journal.recordInstallFailed(failure.text)
+            journal.recordCommitNotAttempted(reason: "执行阶段失败，未启用新版本")
+            journal.recordDegradation(degradation)
+            // GitHub #107（W2B B-13）：与验证失败分支走同一条降级应用路径。
+            // 扩展包没有可重新指向的可执行文件，生产注入的 applyDegradation
+            // 对这个 kind 是 no-op（只改配置/重检测路径的组件才有实际动作），
+            // 但仍要调用：三条失败路径的降级语义必须一致，测试替身按调用断言。
+            self.environment.transaction.applyDegradation(degradation)
+            let tail = Self.outputTailText(result, redactingWith: self.environment.redactor)
             self.recordTransaction(
                 journal,
-                degradation: nil,
+                degradation: degradation,
                 advice: advice,
-                resultingVersion: newVersion
+                resultingVersion: nil
             )
-            // 该组件成功完成了一次更新：清除它的「已放弃」记录（GitHub #62）。
-            self.environment.clearAbandonedAttempt(component)
             self.logOutcome(
-                "Pi 扩展包更新（\(plan.packageName)）完成：\(plan.installedVersion) → \(newVersion)，耗时 \(record.durationText)。"
+                "Pi 扩展包更新（\(plan.packageName)）失败：\(failure.text)；退出码 "
+                    + "\(result.exitCode.map(String.init) ?? "无")，耗时 \(record.durationText)，"
+                    + "当前版本 \(plan.installedVersion)，目标版本 \(plan.targetVersion ?? "未知")。"
+                    + "应用不声称更新成功，也未核对更新前的文件是否被改动。"
             )
-            completion(.succeeded(plan: plan, newVersion: newVersion, record: record))
+            if let tail {
+                self.logOutcome("Pi 扩展包更新命令输出片段（已脱敏）：\(tail)")
+            }
+            completion(.commandFailed(plan: plan, failure: failure, record: record, outputTail: tail))
+            return
         }
+        journal.recordInstallSucceeded()
+        let detected = self.environment.detectPackageVersion(plan.packageName)
+        let verificationInput = UpdateVerificationInput(
+            component: .piPackage,
+            packageName: plan.packageName,
+            previousVersion: plan.installedVersion,
+            targetVersion: plan.targetVersion,
+            detectedVersion: detected,
+            // B-3：不能用计划里的期望包名冒充「检测到的包名」——那会让身份检查
+            // 同义反复地恒真，却把未验证的结论写进历史。传 nil，如实记为「未验证」。
+            detectedPackageName: nil,
+            detectedExecutablePath: nil,
+            detectedResolvedPath: nil,
+            detectedPackageJSONPath: nil,
+            fingerprint: journal.configuration.fingerprint
+        )
+        let report = UpdateVerifier.verify(
+            verificationInput,
+            probe: self.environment.transaction.probe
+        )
+        guard journal.recordVerification(report, detectedVersion: detected) else {
+            let degradation = UpdateDegradationPlanner.verificationFailure(
+                component: component,
+                source: plan.source,
+                fingerprint: journal.configuration.fingerprint,
+                newVersion: detected,
+                newResolvedPath: nil,
+                failureReason: report.failureReason ?? "验证未通过",
+                probe: self.environment.transaction.probe
+            )
+            journal.recordCommitNotAttempted(reason: "验证阶段失败，未启用新版本")
+            journal.recordDegradation(degradation)
+            self.environment.transaction.applyDegradation(degradation)
+            self.recordTransaction(
+                journal,
+                degradation: degradation,
+                advice: advice,
+                resultingVersion: detected
+            )
+            self.logOutcome(
+                "Pi 扩展包更新（\(plan.packageName)）未通过版本验证：命令退出码 0，但重新检测到的版本是 "
+                    + "\(detected ?? "未知")，目标版本 \(plan.targetVersion ?? "未知")。"
+                    + UpdateWarningText.oldVersionClaimText(detectedVersion: detected)
+                    + "应用不会自动重试无上限，也不声称更新成功。"
+            )
+            completion(.versionUnchanged(plan: plan, detectedVersion: detected, record: record))
+            return
+        }
+        let newVersion = detected ?? plan.targetVersion ?? plan.installedVersion
+        journal.recordDegradationNotNeeded()
+        journal.recordCommit(version: newVersion)
+        self.recordTransaction(
+            journal,
+            degradation: nil,
+            advice: advice,
+            resultingVersion: newVersion
+        )
+        // 该组件成功完成了一次更新：清除它的「已放弃」记录（GitHub #62）。
+        self.environment.clearAbandonedAttempt(component)
+        self.logOutcome(
+            "Pi 扩展包更新（\(plan.packageName)）完成：\(plan.installedVersion) → \(newVersion)，耗时 \(record.durationText)。"
+        )
+            completion(.succeeded(plan: plan, newVersion: newVersion, record: record))
     }
 
     /// 记录统一更新历史（GitHub #23）并写一条脱敏日志。

@@ -733,6 +733,10 @@ struct ComponentInstallationDetector {
 
     private static func isNameSegment(_ text: Substring) -> Bool {
         guard !text.isEmpty else { return false }
+        // M10（更新事务审计）：npm 规范禁止名称以 `-`/`_` 开头（如 `--force`、
+        // `-g`）。此前只排除点开头，让选项样式的 token 能通过校验并进入 CLI
+        // argv（不会 shell 注入，但可能被下游 CLI 当选项解析）。
+        guard text.first != "-", text.first != "_" else { return false }
         guard !text.hasPrefix("."), !text.hasSuffix(".") else { return false }
         return text.allSatisfy { character in
             character.isASCII && (character.isLetter || character.isNumber || character == "-" || character == "_" || character == ".")

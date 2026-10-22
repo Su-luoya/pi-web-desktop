@@ -328,9 +328,11 @@ final class LogWriter {
     }
 
     private func createLogDirectory() throws {
+        // 0700：日志目录只允许当前用户进入（纵深防御，见下方 0600 的说明）。
         try fileManager.createDirectory(
             at: logFileURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
         )
     }
 
@@ -339,11 +341,13 @@ final class LogWriter {
     private func verifyLogFileIsWritable() throws {
         let path = logFileURL.path
         if !fileManager.fileExists(atPath: path),
-           !fileManager.createFile(atPath: path, contents: nil) {
+           !fileManager.createFile(atPath: path, contents: nil, attributes: [.posixPermissions: 0o600]) {
             throw WriterError.cannotCreateLogFile(path)
         }
-        let descriptor = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o644)
+        let descriptor = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else { throw WriterError.cannotOpenLogFile(path) }
+        // 旧版本以 0644 创建过日志：打开时一律收紧到 0600，存量文件也被覆盖。
+        _ = fchmod(descriptor, 0o600)
         close(descriptor)
     }
 
@@ -357,13 +361,17 @@ final class LogWriter {
         closeWriterHandle()
         let path = logFileURL.path
         if !fileManager.fileExists(atPath: path),
-           !fileManager.createFile(atPath: path, contents: nil) {
+           !fileManager.createFile(atPath: path, contents: nil, attributes: [.posixPermissions: 0o600]) {
             throw WriterError.cannotCreateLogFile(path)
         }
         // O_APPEND：追加位置由内核维护，多个写入方（应用侧各线程与应用侧唯一的
         // 写入队列）永远不会互相覆盖或丢行，也不需要 seekToEnd。
-        let descriptor = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o644)
+        let descriptor = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else { throw WriterError.cannotOpenLogFile(path) }
+        // 0600（含对旧版 0644 存量文件的收紧）：落盘内容以“已脱敏”为前提，但
+        // 脱敏存在不可覆盖的边界（超长行的强制切块等），权限收紧把残余风险
+        // 限制在本用户，不给其他本机用户读日志的机会。
+        _ = fchmod(descriptor, 0o600)
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
         writerHandle = handle
         writerIdentity = Self.fileIdentity(ofDescriptor: descriptor)
@@ -415,7 +423,7 @@ final class LogWriter {
             // 句柄即将跟着文件名走：先关上，下一次写入按新路径重新打开。
             closeWriterHandle()
             try fileManager.moveItem(at: logFileURL, to: first)
-            if !fileManager.createFile(atPath: logFileURL.path, contents: nil) {
+            if !fileManager.createFile(atPath: logFileURL.path, contents: nil, attributes: [.posixPermissions: 0o600]) {
                 throw WriterError.cannotCreateLogFile(logFileURL.path)
             }
             rotationNoteBytes = 0
@@ -443,8 +451,9 @@ final class LogWriter {
     }
 
     /// 流式就地脱敏：分块读、按行脱敏、写同目录临时文件，最后改名覆盖。整份日志
-    /// 不会被一次性读进内存；非 UTF-8 内容保持原样。返回 false 表示这次没有完成
-    /// （已记录失败），调用方可以下次重试。
+    /// 不会被一次性读进内存；非 UTF-8 字节按替换字符解码后仍然清洗（静默放弃会把
+    /// 坏字节前后的秘密留在盘上）。返回 false 表示这次没有完成（已记录失败），
+    /// 调用方可以下次重试。
     private func scrubOnQueue() -> Bool {
         let path = logFileURL.path
         guard let attributes = try? fileManager.attributesOfItem(atPath: path),
@@ -455,7 +464,8 @@ final class LogWriter {
         needsHistoricalScrub = false
         let temporaryURL = logFileURL.deletingLastPathComponent()
             .appendingPathComponent(".\(logFileURL.lastPathComponent).scrub-\(UUID().uuidString)")
-        guard fileManager.createFile(atPath: temporaryURL.path, contents: nil) else {
+        // 临时文件在清洗完成前含有未脱敏内容：0600，不给其他用户可乘之机。
+        guard fileManager.createFile(atPath: temporaryURL.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
             needsHistoricalScrub = true
             recordFailure(
                 operation: "脱敏历史日志失败",
@@ -480,6 +490,8 @@ final class LogWriter {
 
         var changed = false
         var pending = Data()
+        // 块状态（PEM 私钥块）跨读取块延续：头行与正文分属不同块时正文仍被清洗。
+        var streamState = LogRedactor.Continuation()
         do {
             while true {
                 let chunk = try input.read(upToCount: Self.scrubChunkBytes) ?? Data()
@@ -489,17 +501,19 @@ final class LogWriter {
                 let end = pending.index(after: newline)
                 let complete = Data(pending[..<end])
                 pending = Data(pending[end...])
-                guard let text = String(data: complete, encoding: .utf8) else {
-                    // 非 UTF-8：不猜测、不重写，保持原样（与旧实现一致）。
-                    return true
-                }
-                let redacted = redactor.redact(text)
+                // 非 UTF-8 字节按替换字符解码后继续清洗。旧实现整个静默放弃
+                // （返回“成功”），坏字节前后既有的秘密全部留在盘上；替换字符
+                // 只损失显示效果，不能损失安全。
+                let text = String(data: complete, encoding: .utf8)
+                    ?? String(decoding: complete, as: UTF8.self)
+                let redacted = redactor.redact(text, continuation: &streamState)
                 if redacted != text { changed = true }
                 try output.write(contentsOf: Data(redacted.utf8))
             }
             if !pending.isEmpty {
-                guard let text = String(data: pending, encoding: .utf8) else { return true }
-                let redacted = redactor.redact(text)
+                let text = String(data: pending, encoding: .utf8)
+                    ?? String(decoding: pending, as: UTF8.self)
+                let redacted = redactor.redact(text, continuation: &streamState)
                 if redacted != text { changed = true }
                 try output.write(contentsOf: Data(redacted.utf8))
             }
@@ -542,6 +556,9 @@ final class LogWriter {
         var source: DispatchSourceRead?
         /// 只在读取队列上访问。
         var pendingLine = Data()
+        /// 跨读取块的脱敏状态（PEM 私钥块）：与 `pendingLine` 一样只在读取队列上
+        /// 访问，头行与正文分属不同读取块时正文仍被屏蔽。
+        var redactionState = LogRedactor.Continuation()
 
         private let stateLock = NSLock()
         private var stopped = false
@@ -682,6 +699,28 @@ final class LogWriter {
     }
 
     /// 把缓冲区里完整的行（或 EOF 时的尾部、超长行的前一段）交给写入队列。
+    /// 超长行强制切块的切点：在前 `limit` 字节的后半段里找最后一个“值边界”字节
+    /// （`,` `;` `&`、空白、引号）之后切开。未加引号的敏感值与命令行值在这些
+    /// 字节处结束，JWT / base64 秘密本身不含它们，因此秘密切成两半从“取决于
+    /// 读取边界落在哪”变成“仅当秘密恰好横跨切点附近才可能”；找不到（极端
+    /// 密集输出）时退回硬切。这是概率性防御，不是完备保证：引号值内部没有
+    /// 绝对安全的切点。
+    static func forcedSplitEndIndex(in data: Data, limit: Int) -> Data.Index {
+        let start = data.startIndex
+        let hardEnd = data.index(start, offsetBy: limit, limitedBy: data.endIndex) ?? data.endIndex
+        let half = data.index(hardEnd, offsetBy: -limit / 2, limitedBy: start) ?? start
+        var index = data.index(before: hardEnd)
+        while index >= half {
+            let byte = data[index]
+            if byte == UInt8(ascii: ",") || byte == UInt8(ascii: ";") || byte == UInt8(ascii: "&")
+                || byte == UInt8(ascii: "\"") || byte == UInt8(ascii: " ") || byte == UInt8(ascii: "\t") {
+                return data.index(after: index)
+            }
+            index = data.index(before: index)
+        }
+        return hardEnd
+    }
+
     private func emitChildOutput(_ pipe: ChildOutputPipe, endOfStream: Bool) {
         while !pipe.pendingLine.isEmpty {
             let end: Data.Index
@@ -690,7 +729,7 @@ final class LogWriter {
             } else if let newline = pipe.pendingLine.lastIndex(of: UInt8(ascii: "\n")) {
                 end = pipe.pendingLine.index(after: newline)
             } else if pipe.pendingLine.count >= Self.childReadChunkBytes {
-                end = pipe.pendingLine.endIndex
+                end = Self.forcedSplitEndIndex(in: pipe.pendingLine, limit: Self.childReadChunkBytes)
             } else {
                 return
             }
@@ -702,8 +741,12 @@ final class LogWriter {
 
     private func submitChildOutput(_ pipe: ChildOutputPipe, _ data: Data) {
         // 按 UTF-8 解码（非法字节替换为 U+FFFD）后脱敏：脱敏不会因为非 UTF-8 输入
-        // 被绕过，字节级异常也不会让日志写入失败。
-        let redacted = redactor.redact(String(decoding: data, as: UTF8.self))
+        // 被绕过，字节级异常也不会让日志写入失败。块状态跨读取块延续（PEM 正文
+        // 跨块时仍被屏蔽）。
+        let redacted = redactor.redact(
+            String(decoding: data, as: UTF8.self),
+            continuation: &pipe.redactionState
+        )
         let payload = Data(redacted.utf8)
         // 背压：写入队列积压超过上限时先等，管道随即对子进程形成反压，内存有界。
         // 闭包**强引用**管道：它必须活到 `signal()` 执行完，否则信号量会在还有未归还

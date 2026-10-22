@@ -203,7 +203,10 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
     }
 
     func abandon() {
-        stateQueue.async { [weak self] in
+        // M1（更新事务审计）：同步落地（同 PiWebUpdateInstaller.cancel）。退出路径
+        // 的异步投递可能永远不执行——「已放弃」记录与放弃结果都丢失。本类型不发
+        // 任何信号，stateQueue 块只写记录与收尾，sync 等待不会死锁。
+        stateQueue.sync { [weak self] in
             guard let self, self.running, !self.finished else { return }
             // B-3：放弃等待落在「进程已结束、只是在等管道读到 EOF」的宽限窗口里时，
             // 并不算放弃等待：子进程已经退出、结果会照常投递。此时写一条

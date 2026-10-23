@@ -635,6 +635,37 @@ final class ComponentInstallationTests: XCTestCase {
         XCTAssertTrue(ComponentInstallationDetector.parsePiList("nothing here\n").isEmpty)
     }
 
+    /// M10（更新事务审计）：npm 规范禁止包名以 `-`/`_` 开头；`--force`、`-g`
+    /// 之类的选项样式 token 不能通过校验，避免进入下游 CLI 的 argv 被当选项解析。
+    func testPackageNameValidationRejectsLeadingDashAndUnderscore() {
+        XCTAssertFalse(ComponentInstallationDetector.isPackageName("--force"))
+        XCTAssertFalse(ComponentInstallationDetector.isPackageName("-g"))
+        XCTAssertFalse(ComponentInstallationDetector.isPackageName("_private"))
+        XCTAssertFalse(ComponentInstallationDetector.isPackageName("@scope/--bad"))
+        // 合法名称不受影响（段内中划线/下划线仍允许）。
+        XCTAssertTrue(ComponentInstallationDetector.isPackageName("some-package"))
+        XCTAssertTrue(ComponentInstallationDetector.isPackageName("pi-web-desktop"))
+        XCTAssertTrue(ComponentInstallationDetector.isPackageName("@scope/one"))
+        // parsePiList 同样不得把选项样式 token 变成包条目。
+        XCTAssertTrue(ComponentInstallationDetector.parsePiList("--force 1.2.3\n-g 2.0.0").isEmpty)
+    }
+
+    /// 批次3（审计次要）：行首 token 必须是合法包名，否则整行不是条目。
+    /// 旧实现按 token 顺序宽松匹配，版本在前的行也会产出假条目。
+    func testParsePiListRequiresLeadingPackageNameToken() {
+        // 版本在前的行：不是条目。
+        XCTAssertTrue(ComponentInstallationDetector.parsePiList("1.2.3 some-package").isEmpty)
+        // 名段不合法（- 开头）：即便带版本也不是条目。
+        XCTAssertTrue(ComponentInstallationDetector.parsePiList("-g@1.2.3").isEmpty)
+        // 文档形态不受影响：行首包名 + 行尾版本，或 name@version。
+        let parsed = ComponentInstallationDetector.parsePiList("some-package 1.2.3\n@scope/one@2.0.0")
+        XCTAssertEqual(parsed.count, 2)
+        XCTAssertEqual(parsed.first?.name, "some-package")
+        XCTAssertEqual(parsed.first?.version, "1.2.3")
+        XCTAssertEqual(parsed.last?.name, "@scope/one")
+        XCTAssertEqual(parsed.last?.version, "2.0.0")
+    }
+
     // MARK: 应用自身
 
     func testDesktopApplicationInApplicationsDirectoryIsInferredOfficialInstaller() {
@@ -727,6 +758,83 @@ final class ComponentInstallationTests: XCTestCase {
     }
 
     // MARK: 只读约束
+
+    /// 批次3 审计低危 #6（L6）：`name` 会被拼进 shell 字符串。候选名单必须过
+    /// 白名单；含 shell 元字符的名字直接跳过，不进入 `command -v`。
+    func testShellLookupSkipsNamesWithShellMetacharacters() {
+        let fixture = ComponentFixture()
+        defer { fixture.cleanUp() }
+
+        let runner = ComponentFakeRunner()
+        let installation = makeDetector(fixture: fixture, runner: runner).detect(
+            ComponentInstallationDetector.ComponentDetectionRequest(
+                kind: .piCLI,
+                packageName: nil,
+                executableNames: ["pi; rm -rf /", "pi$(whoami)", "pi`id`", "pi"],
+                candidates: [],
+                probesShellPath: true
+            )
+        )
+
+        // 只有白名单内的 "pi" 进入了 shell；注入形状全部被跳过。
+        let shellLookups = runner.invocationLines.filter { $0.contains("command -v") }
+        XCTAssertEqual(shellLookups, ["/bin/zsh -lc command -v pi 2>/dev/null"])
+        XCTAssertNil(installation.executablePath)
+    }
+
+    /// 批次3 审计低危 #7（L7）：pathExists 的多探针判定。普通文件不可读且不可
+    /// 执行时，仍应通过 resolvedPath 判存在（曾经只测可读/可执行/链接，会误判
+    /// 不存在）；应用包探测的 evidence 直接断言「存在」。
+    func testPathExistsFallsBackToResolvedPathForUnreadableRegularFile() {
+        let fixture = ComponentFixture()
+        defer { fixture.cleanUp() }
+
+        let unreadable = fixture.makeFile("home/Applications/Pi Web Desktop.app", contents: "payload")
+        try? FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: unreadable)
+
+        let runner = ComponentFakeRunner()
+        let installation = makeDetector(fixture: fixture, runner: runner).detect(
+            ComponentInstallationDetector.ComponentDetectionRequest(
+                kind: .desktopApp,
+                packageName: nil,
+                executableNames: [],
+                candidates: [unreadable],
+                runsVersionCommand: false,
+                isApplicationBundle: true,
+                probesShellPath: false
+            )
+        )
+
+        XCTAssertTrue(
+            installation.evidence.contains { $0.contains("（存在）") },
+            "不可读普通文件仍存在（resolvedPath 兑底）：\(installation.evidence.joined(separator: "\n"))"
+        )
+        XCTAssertEqual(installation.executablePath, unreadable)
+    }
+
+    /// 批次3 审计低危 #8（L8）：链长超过上限时是「过长截断」，不是「悬空」。
+    func testExcessivelyLongSymlinkChainIsTruncatedNotReportedAsDangling() {
+        let fixture = ComponentFixture()
+        defer { fixture.cleanUp() }
+
+        let target = fixture.makeExecutable("home/dev/tool/real/cli.js")
+        let hopLimit = ComponentInstallationDetector.maximumSymlinkHops
+        // 建 hopLimit + 1 跳链：link_N -> link_(N-1) -> ... -> link_1 -> target。
+        fixture.makeSymlink("home/dev/tool/hop1", to: "real/cli.js")
+        for index in 2...hopLimit + 1 {
+            fixture.makeSymlink("home/dev/tool/hop\(index)", to: "hop\(index - 1)")
+        }
+        let entry = fixture.makeSymlink("home/dev/tool/bin/tool", to: "../hop\(hopLimit + 1)")
+
+        let runner = ComponentFakeRunner()
+        let installation = makeDetector(fixture: fixture, runner: runner)
+            .detect(request(candidates: [entry]))
+
+        XCTAssertTrue(installation.evidence.contains { $0.contains("过长") }, installation.evidence.joined(separator: "\n"))
+        XCTAssertFalse(installation.evidence.contains { $0.contains("悬空") }, "过长不等于悬空：\(installation.evidence.joined(separator: "\n"))")
+        XCTAssertNil(installation.resolvedPath)
+        _ = target
+    }
 
     /// 调用方已解析过可执行文件（`probesShellPath: false`）时不得再执行 `command -v`；
     /// 候选路径都不存在时也不得凭空造出路径。

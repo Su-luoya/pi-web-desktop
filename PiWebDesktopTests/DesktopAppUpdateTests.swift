@@ -173,4 +173,119 @@ final class DesktopAppUpdateTests: XCTestCase {
         XCTAssertNil(DesktopAppReleaseAssetSelector.signedFileName(in: URL(string:
             "https://release-assets.githubusercontent.com/a/b?sig=opaque")!))
     }
+
+    // MARK: - 入口闸控与轮次归属（outD-2）
+
+    /// 旧实现只用 `desktopAppUpdateInstaller == nil` 当闸控，安装器对象要到「发布页 +
+    /// 资产 + .sha256 全都核对完」才创建，整个下载窗口期菜单仍可点，重复点击会再
+    /// 下一遍整包。这里锁住：确认框、联网核对、安装三个阶段都算「在跑」。
+    func testEntryStaysBlockedThroughTheWholeUpdateRound() {
+        var round = DesktopAppUpdateRound()
+        XCTAssertFalse(round.isBusy)
+        XCTAssertTrue(DesktopAppUpdateEntryPolicy.isEntryEnabled(
+            installable: true, activity: round.activity, installerPresent: false
+        ))
+
+        XCTAssertTrue(round.beginConfirming(releaseTag: "v2.5.0"))
+        XCTAssertTrue(round.isBusy)
+        XCTAssertFalse(DesktopAppUpdateEntryPolicy.isEntryEnabled(
+            installable: true, activity: round.activity, installerPresent: false
+        ))
+
+        XCTAssertTrue(round.beginResolving(releaseTag: "v2.5.0"))
+        XCTAssertTrue(round.isBusy)
+        XCTAssertFalse(DesktopAppUpdateEntryPolicy.isEntryEnabled(
+            installable: true, activity: round.activity, installerPresent: false
+        ))
+
+        // 「刚刚核对完校验值」那段：安装器还没创建，旧实现的闸控在这一瞬间是开的。
+        if case .resolvingRelease = round.activity {} else { XCTFail("应在联网核对阶段") }
+        XCTAssertFalse(DesktopAppUpdateEntryPolicy.isEntryEnabled(
+            installable: true, activity: round.activity, installerPresent: false
+        ))
+
+        XCTAssertTrue(round.markInstalling(releaseTag: "v2.5.0"))
+        XCTAssertEqual(round.activity, .installing)
+        XCTAssertFalse(DesktopAppUpdateEntryPolicy.isEntryEnabled(
+            installable: true, activity: round.activity, installerPresent: false
+        ))
+
+        XCTAssertTrue(round.finish(releaseTag: "v2.5.0"))
+        XCTAssertFalse(round.isBusy)
+        XCTAssertNil(round.releaseTag)
+        XCTAssertTrue(DesktopAppUpdateEntryPolicy.isEntryEnabled(
+            installable: true, activity: round.activity, installerPresent: false
+        ))
+    }
+
+    /// 确认框本身也占位：否则确认框还开着时再点一次菜单会再弹一个，两个「更新」都
+    /// 确认就并行跑两轮下载。
+    func testSecondConfirmDialogIsRejectedWhileOneIsOpen() {
+        var round = DesktopAppUpdateRound()
+        XCTAssertTrue(round.beginConfirming(releaseTag: "v2.5.0"))
+        XCTAssertFalse(round.beginConfirming(releaseTag: "v2.5.0"))
+        XCTAssertFalse(round.beginConfirming(releaseTag: "v2.6.0"))
+        XCTAssertEqual(round.releaseTag, "v2.5.0")
+    }
+
+    /// 用户取消确认框、或某个网络请求失败：阶段位必须复位，否则入口永久置灰。
+    func testCancellingOrFailingARoundReleasesTheEntry() {
+        var round = DesktopAppUpdateRound()
+        XCTAssertTrue(round.beginConfirming(releaseTag: "v2.5.0"))
+        XCTAssertTrue(round.finish(releaseTag: "v2.5.0"))
+        XCTAssertFalse(round.isBusy)
+        XCTAssertTrue(DesktopAppUpdateEntryPolicy.isEntryEnabled(
+            installable: true, activity: round.activity, installerPresent: false
+        ))
+        // 空闲时再结束一次不应算作变化（调用方据此避免无谓刷新）
+        XCTAssertFalse(round.finish(releaseTag: nil))
+    }
+
+    /// 晚到的旧回调不得复位新一轮：否则新一轮在下载中途入口会重新变成可点。
+    func testLateCallbackFromAnEarlierRoundCannotReleaseTheNewRound() {
+        var round = DesktopAppUpdateRound()
+        XCTAssertTrue(round.beginConfirming(releaseTag: "v2.5.0"))
+        XCTAssertTrue(round.beginResolving(releaseTag: "v2.5.0"))
+        XCTAssertTrue(round.finish(releaseTag: "v2.5.0"))
+
+        XCTAssertTrue(round.beginConfirming(releaseTag: "v2.6.0"))
+        XCTAssertTrue(round.beginResolving(releaseTag: "v2.6.0"))
+        // 上一轮的网络回调迟到
+        XCTAssertFalse(round.finish(releaseTag: "v2.5.0"))
+        XCTAssertTrue(round.isBusy)
+        XCTAssertEqual(round.releaseTag, "v2.6.0")
+    }
+
+    /// 只能按自己那一轮推进：tag 不匹配时既不能开始联网核对、也不能开安装器。
+    func testRoundOnlyAdvancesForItsOwnReleaseTag() {
+        var round = DesktopAppUpdateRound()
+        XCTAssertTrue(round.beginConfirming(releaseTag: "v2.5.0"))
+        XCTAssertFalse(round.beginResolving(releaseTag: "v2.6.0"))
+        XCTAssertEqual(round.activity, .confirming)
+        XCTAssertTrue(round.beginResolving(releaseTag: "v2.5.0"))
+        XCTAssertFalse(round.markInstalling(releaseTag: "v2.6.0"))
+        XCTAssertEqual(round.activity, .resolvingRelease)
+        XCTAssertTrue(round.markInstalling(releaseTag: "v2.5.0"))
+        // 已在安装阶段，重复标记不算推进
+        XCTAssertFalse(round.markInstalling(releaseTag: "v2.5.0"))
+    }
+
+    /// 菜单项：忙时置灰但标题里带可见原因（不静默置灰）；安装器对象单独存在也算忙。
+    func testMenuEntryShowsWhyItIsDisabled() {
+        XCTAssertNil(DesktopAppUpdateEntryPolicy.menuTitleSuffix(activity: .idle, installerPresent: false))
+        XCTAssertEqual(DesktopAppUpdateEntryPolicy.menuTitleSuffix(activity: .confirming, installerPresent: false),
+                       "（等待确认）")
+        XCTAssertEqual(DesktopAppUpdateEntryPolicy.menuTitleSuffix(activity: .resolvingRelease, installerPresent: false),
+                       "（正在下载）")
+        XCTAssertEqual(DesktopAppUpdateEntryPolicy.menuTitleSuffix(activity: .installing, installerPresent: false),
+                       "（正在安装）")
+        // 安装器对象存在但阶段位已复位（回调晚到的那种）：仍按安装中挡住并解释原因。
+        XCTAssertEqual(DesktopAppUpdateEntryPolicy.menuTitleSuffix(activity: .idle, installerPresent: true),
+                       "（正在安装）")
+        XCTAssertTrue(DesktopAppUpdateEntryPolicy.isBusy(activity: .idle, installerPresent: true))
+        // 不可安装时一律关（哪怕空闲）
+        XCTAssertFalse(DesktopAppUpdateEntryPolicy.isEntryEnabled(
+            installable: false, activity: .idle, installerPresent: false
+        ))
+    }
 }

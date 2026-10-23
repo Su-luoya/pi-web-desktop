@@ -1,6 +1,7 @@
 /// Application termination: pending work confirmation, service teardown and exit.
 
 import Cocoa
+import Darwin
 
 extension AppDelegate {
     // MARK: - 退出（GitHub #72）
@@ -149,23 +150,40 @@ extension AppDelegate {
         _ = logWriter.append(logRedactor.redact(message))
     }
 
+    /// 单实例互斥：逻辑在 `SingleInstanceLock`（可测试类型），这里只负责把它
+    /// 拿到的句柄接进 AppDelegate 的既有状态位（`instanceLockHandle` /
+    /// `hasInstanceLock`），退出路径的释放逻辑保持不变。
     func acquireSingleInstanceLock() -> Bool {
-        let existingPID = (try? String(contentsOf: appConfiguration.appPIDURL, encoding: .utf8))
-            .flatMap { ProcessInspector.parsePIDRecord($0) }
-        if let existingPID, processInspector.isProcessAlive(existingPID) {
+        let lock = SingleInstanceLock(
+            pidRecordURL: appConfiguration.appPIDURL,
+            lockFileURL: appConfiguration.instanceLockURL,
+            processInspector: processInspector
+        )
+        guard lock.acquire() else {
+            singleInstanceLockFailure = lock.failure
             return false
         }
-        if FileManager.default.fileExists(atPath: appConfiguration.instanceLockURL.path) {
-            try? FileManager.default.removeItem(at: appConfiguration.instanceLockURL)
-        }
-        FileManager.default.createFile(atPath: appConfiguration.instanceLockURL.path, contents: nil)
-        do {
-            instanceLockHandle = try FileHandle(forWritingTo: appConfiguration.instanceLockURL)
-            hasInstanceLock = true
-            return true
-        } catch {
-            return false
-        }
+        instanceLockHandle = lock.handle
+        hasInstanceLock = true
+        return true
+    }
+
+    /// 锁不可用属于环境故障，不是“另一个实例在跑”：后者应当静默退出（用户本来
+    /// 就是想打开那一个），前者必须告知用户，否则双击只有 Dock 图标一闪，
+    /// 而日志文件此时可能还没准备好。
+    ///
+    /// 此时主窗口尚未创建，因此用 `runModal()` 而不是 sheet：这是启动早期、
+    /// 没有任何其他运行循环活动的唯一窗口，不存在嵌套模态循环风险。
+    func reportSingleInstanceRefusalIfEnvironmental() {
+        guard case .lockUnavailable(let detail) = singleInstanceLockFailure else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "无法启动 Pi Web Desktop"
+        alert.informativeText = "应用无法建立单实例锁，因此不能启动。\n\n"
+            + detail
+            + "\n\n请检查“\(appConfiguration.supportURL.path)”目录是否存在且可写，然后重试。"
+        alert.addButton(withTitle: "好")
+        alert.runModal()
     }
 
     func installQuitShortcuts() {

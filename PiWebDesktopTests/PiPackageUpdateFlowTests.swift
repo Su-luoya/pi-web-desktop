@@ -10,7 +10,12 @@ import XCTest
 //
 // 唯一写 UserDefaults 的用例使用 suiteName 隔离的 domain，测试结束即删除。
 
-final class PiPackageUpdateAdapterTests: XCTestCase {
+/// M2：当前队列是否带有投递队列标记（queue-specific 在队列上的块内可读）。
+private func onCoordinatorDeliveryChecked(_ key: DispatchSpecificKey<Bool>) -> Bool {
+    DispatchQueue.getSpecific(key: key) == true
+}
+
+final class PiPackageUpdateFlowTests: XCTestCase {
 
     private let fixtureHome = "/tmp/pi-package-update-tests-home"
     private let piPath = "/opt/homebrew/bin/pi"
@@ -258,7 +263,7 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
         XCTAssertFalse(PiPackageUpdatePolicy.off.notifiesAboutUpdates)
         XCTAssertFalse(PiPackageUpdatePolicy.off.offersExecutionEntry)
         // 调度层同样不为关闭策略安排复查（#17/#18 的间隔表）。
-        XCTAssertNil(UpdateCheckIntervals.standard.interval(for: .piPackages, policy: .off))
+        XCTAssertNil(UpdateCheckIntervals.standard.interval(for: .off))
         // 单个包的决策此时也只是 `.disabled`。
         let single = PiPackageUpdatePlanner.decide(
             candidate(),
@@ -1125,6 +1130,110 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
         XCTAssertEqual(loaded?.targetVersion, "2.0.0")
     }
 
+    // MARK: - M2（更新事务审计）：投递队列纪律
+
+    private final class LabelRecorder {
+        private let lock = NSLock()
+        private var storage: [String: [Bool]] = [:]
+        func append(_ key: String, _ onDelivery: Bool) {
+            lock.lock()
+            defer { lock.unlock() }
+            storage[key, default: []].append(onDelivery)
+        }
+        func labels(_ key: String) -> [Bool] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage[key] ?? []
+        }
+    }
+
+    static func onCoordinatorDelivery(_ key: DispatchSpecificKey<Bool>) -> Bool {
+        onCoordinatorDeliveryChecked(key)
+    }
+
+    /// 在专用后台队列上回调的执行器替身（模拟 ProcessPiPackageUpdateCommand 的投递队列）。
+    private final class BackgroundQueueRunner: PiPackageUpdateRunning {
+        let queue: DispatchQueue
+        init(queue: DispatchQueue) { self.queue = queue }
+        var isRunning: Bool { false }
+        var abandonedChildrenUnconfirmed: Bool { false }
+        func run(
+            _ plan: PiPackageUpdatePlan,
+            timeout: TimeInterval,
+            completion: @escaping (PiPackageUpdateCommandResult) -> Void
+        ) {
+            queue.async {
+                completion(PiPackageUpdateCommandResult(
+                    exitCode: 0,
+                    startedAt: Date(),
+                    finishedAt: Date()
+                ))
+            }
+        }
+        func abandon() {}
+    }
+
+    /// M2（更新事务审计）：执行器在后台投递队列上回调时，协调器后续触碰主线程
+    /// 状态的工作——进程复查（写 piProcessInspection）、版本重检测（读
+    /// dependencyReport）、历史写入与放弃记录清除（UserDefaults 读-改-写）——必须
+    /// 全部已跳到投递队列（生产为主队列）执行，不得留在执行器的后台队列上。
+    func testCoordinatorRunsSharedStateWorkOnTheDeliveryQueueNotTheRunnerQueue() throws {
+        let runnerDelivery = DispatchQueue(label: "test.executor-delivery")
+        let coordinatorDelivery = DispatchQueue(label: "test.coordinator-delivery")
+        let deliveryKey = DispatchSpecificKey<Bool>()
+        coordinatorDelivery.setSpecific(key: deliveryKey, value: true)
+        let recorder = LabelRecorder()
+
+        let firstPlan = try XCTUnwrap(plan(name: "pkg-a"))
+        let secondPlan = try XCTUnwrap(plan(name: "pkg-b"))
+
+        let coordinator = PiPackageUpdateCoordinator(environment: PiPackageUpdateCoordinator.Environment(
+            inspectProcesses: {
+                recorder.append("inspect", Self.onCoordinatorDelivery(deliveryKey))
+                return .noProcesses
+            },
+            runner: BackgroundQueueRunner(queue: runnerDelivery),
+            detectPackageVersion: { _ in
+                recorder.append("detect", Self.onCoordinatorDelivery(deliveryKey))
+                return "2.0.0"
+            },
+            redactor: LogRedactor(homeDirectory: fixtureHome),
+            log: { _ in },
+            deliver: { work in coordinatorDelivery.async(execute: work) },
+            timeout: 30,
+            transaction: UpdateTransactionEnvironment(
+                probe: .disabled,
+                recordHistory: { _ in recorder.append("history", Self.onCoordinatorDelivery(deliveryKey)) },
+                applyDegradation: { _ in },
+                now: Date.init
+            ),
+            clearAbandonedAttempt: { _ in recorder.append("clear", Self.onCoordinatorDelivery(deliveryKey)) }
+        ))
+
+        let done = Locked<Bool>()
+        coordinator.runConfirmed([firstPlan, secondPlan]) { _ in
+            recorder.append("complete", Self.onCoordinatorDelivery(deliveryKey))
+            done.value = true
+        }
+        let deadline = Date().addingTimeInterval(10)
+        while done.value != true, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertEqual(done.value, true, "批量更新应在超时前完成")
+
+        // 入口 1 次 + 第二个包执行前 1 次 = 2 次进程复查；每包各 1 次重检测/历史/清除。
+        XCTAssertEqual(recorder.labels("inspect").count, 2)
+        XCTAssertEqual(recorder.labels("detect").count, 2)
+        XCTAssertEqual(recorder.labels("history").count, 2)
+        XCTAssertEqual(recorder.labels("clear").count, 2)
+
+        for key in ["inspect", "detect", "history", "clear", "complete"] {
+            let labels = recorder.labels(key)
+            XCTAssertFalse(labels.contains(false), "\(key) 不得在执行器投递队列或调用线程上运行（M2）")
+            XCTAssertTrue(labels.allSatisfy { $0 == true }, "\(key) 必须全部在投递队列上运行（M2），实际：\(labels)")
+        }
+    }
+
     // MARK: - 8. 真执行器（只执行临时目录里的假脚本）
 
     private final class Locked<T> {
@@ -1213,6 +1322,33 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
         let result = try XCTUnwrap(waitForValue(box, timeout: 10))
         XCTAssertEqual(result.failure, .abandoned)
         XCTAssertTrue(waitForFile(marker.path, timeout: 10), "放弃等待不得向子进程发送信号")
+    }
+
+    /// M1（更新事务审计）：退出路径的 abandon() 必须同步落地——返回时「已放弃」
+    /// 记录已写入；异步投递在 `applicationWillTerminate` 返回后可能永远不执行。
+    func testRealExecutorAbandonWritesAbandonedRecordSynchronously() throws {
+        let directory = try tempDirectory()
+        let script = try makeFakePi(in: directory, body: "sleep 30")
+        var abandoned: [UpdateAbandonedAttempt] = []
+        let command = ProcessPiPackageUpdateCommand(
+            baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome],
+            recordAbandonedAttempt: { abandoned.append($0) }
+        )
+        let box = Locked<PiPackageUpdateCommandResult>()
+        command.run(try plan(forScript: script), timeout: 30) { box.value = $0 }
+        // 等命令真正跑起来再放弃，避免落在空闲/启动前的窗口。
+        let deadline = Date().addingTimeInterval(10)
+        while !command.isRunning, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertTrue(command.isRunning)
+        command.abandon()
+        // 关键断言：abandon() 返回后立刻（不等任何 expectation）记录已落地。
+        XCTAssertEqual(abandoned.count, 1, "abandon() 返回时「已放弃」记录必须已同步写入（M1）")
+        XCTAssertEqual(abandoned.first?.reason, .abandonedWaiting)
+        XCTAssertNil(abandoned.first?.finishedAt)
+        let result = try XCTUnwrap(waitForValue(box, timeout: 10))
+        XCTAssertEqual(result.failure, .abandoned)
     }
 
     /// F1（GitHub #121）：结果投递不在状态队列上——completion 自己阻塞时，状态查询
@@ -1334,6 +1470,12 @@ final class PiPackageUpdateAdapterTests: XCTestCase {
         let timedOut = try XCTUnwrap(waitForValue(first, timeout: 10))
         XCTAssertEqual(timedOut.failure, .timedOut)
         XCTAssertNil(timedOut.exitCode)
+        // 回调投递时子进程必定已被 fork（startLocked 同步启动），但高负载下
+        // `/bin/sh` 执行第一条 echo 可能晚于断言——轮询等它落盘，不绑定时序。
+        let startDeadline = Date().addingTimeInterval(10)
+        while spawnCount("start") < 1, Date() < startDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
         XCTAssertEqual(spawnCount("start"), 1, "第一次运行只应启动一个子进程")
 
         // 2. 旧子进程还没退出：第二次 run 必须被拒绝，且真的没有再启动子进程。

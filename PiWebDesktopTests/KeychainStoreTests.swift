@@ -194,6 +194,34 @@ final class KeychainStoreTests: XCTestCase {
         XCTAssertNil(outcome.error)
     }
 
+    /// 读取失败必须能与“确实未设置”区分开（审计 S3 / F5）。
+    ///
+    /// 两者都让 `isSet` 为 false（fail closed，远程监听仍被拒），但 UI 需要
+    /// 不同的文案：把锁定钥匙串报成“未设置”会让用户以为密码丢了。
+    func testUnreadableKeychainIsReportedDistinctlyFromAnAbsentPassword() {
+        let keychain = InMemoryKeychainStore()
+        XCTAssertEqual(RemoteAccessPassword.status(in: keychain), .notSet)
+        XCTAssertEqual(RemoteAccessPassword.statusText(for: .notSet), "未设置")
+
+        keychain.loadError = KeychainStoreError.status(errSecInteractionNotAllowed)
+        XCTAssertEqual(
+            RemoteAccessPassword.status(in: keychain),
+            .unreadable,
+            "锁定/授权被拒不得被压成“未设置”"
+        )
+        XCTAssertFalse(RemoteAccessPassword.isSet(in: keychain), "读不到仍按无密码处理（fail closed）")
+        let text = RemoteAccessPassword.statusText(for: .unreadable)
+        XCTAssertTrue(text.contains("无法读取"), text)
+        XCTAssertTrue(text.contains("钥匙串"), text)
+
+        keychain.loadError = KeychainStoreError.undecodableData
+        XCTAssertEqual(RemoteAccessPassword.status(in: keychain), .unreadable)
+
+        keychain.loadError = nil
+        keychain.items[RemoteAccessPassword.account] = secret
+        XCTAssertEqual(RemoteAccessPassword.status(in: keychain), .set)
+    }
+
     /// 删除本来就不存在的条目是幂等的；读取失败按“未设置”处理（fail closed）。
     func testDeletingMissingPasswordIsIdempotentAndReadFailuresCountAsUnset() throws {
         let keychain = InMemoryKeychainStore()

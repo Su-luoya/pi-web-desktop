@@ -244,16 +244,40 @@ private final class ManagerFakeSignaler: ServiceSignaling {
     var aliveProcessGroups: Set<pid_t> = []
     /// When true the group survives signals, which exercises the SIGKILL path.
     var groupSurvivesSignals = false
+    /// When true, a group that survives SIGKILL stops as soon as the caller
+    /// starts confirming — exercises the "SIGKILL took effect" branch.
+    var groupGoneOnConfirmation = false
+    /// Number of liveness probes performed after SIGKILL was sent.
+    private(set) var postKillProbes = 0
+    private var killedGroups: Set<pid_t> = []
 
-    func sendGroupSignal(_ signal: Int32, toProcessGroup processGroupID: pid_t) {
+    func sendGroupSignal(_ signal: Int32, toProcessGroup processGroupID: pid_t) -> Bool {
         groupSignals.append(GroupSignal(signal: signal, processGroupID: processGroupID))
         if !groupSurvivesSignals {
             aliveProcessGroups.remove(processGroupID)
+        } else if signal == SIGKILL {
+            killedGroups.insert(processGroupID)
         }
+        return true
     }
 
     func isProcessGroupAlive(_ processGroupID: pid_t) -> Bool {
-        aliveProcessGroups.contains(processGroupID)
+        if killedGroups.contains(processGroupID) {
+            postKillProbes += 1
+            if groupGoneOnConfirmation {
+                aliveProcessGroups.remove(processGroupID)
+                killedGroups.remove(processGroupID)
+            }
+        }
+        return aliveProcessGroups.contains(processGroupID)
+    }
+
+    /// Start of a new stop cycle: the previous cycle's pending SIGKILL bookkeeping
+    /// no longer applies, so the next `isProcessGroupAlive` probe is counted as a
+    /// post-kill confirmation of *this* cycle.
+    func beginNewStopCycle() {
+        killedGroups.removeAll()
+        postKillProbes = 0
     }
 }
 
@@ -476,10 +500,6 @@ private final class ServiceManagerHarness {
         // files; mirror that so the harness can seed a record directly.
         try FileManager.default.createDirectory(at: legacyPIDFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try "\(pid)\n".write(to: legacyPIDFileURL, atomically: true, encoding: .utf8)
-    }
-
-    func readLegacyPIDRecord() -> String? {
-        try? String(contentsOf: legacyPIDFileURL, encoding: .utf8)
     }
 
     /// Creates a real executable file in the temporary root.
@@ -722,6 +742,48 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertTrue(harness.startupFailures.first?.hasPrefix("无法登记 pi-web 的所有权信息") == true)
     }
 
+    func testTransientlyUnreadableCommandLineKeepsTheRecordAndTheStopPath() throws {
+        // 启动后 `ps -o args=` 偶尔读不到（瞬时空输出）不得当作“命令变了”：旧实现
+        // 把它判成 `.argumentsMismatch` 并删掉记录，于是本应用自己启动的进程永久
+        // 降级为外部服务，用户再也停不掉它。现在按“事实暂时不可读”处理：记录保留、
+        // 本次不发信号，`ps` 恢复后同一个进程又回到可管理状态。
+        var liveCommandLine = fakeCommandLine
+        let harness = try makeHarness(
+            alive: { $0 == 5150 },
+            processOutput: processOutput(for: 5150, liveCommandLine: { liveCommandLine })
+        )
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = false
+        harness.manager.startManagedService()
+        XCTAssertEqual(harness.manager.managedServicePID(), 5150)
+
+        liveCommandLine = ""
+
+        XCTAssertNil(harness.manager.managedServicePID())
+        // The record survived the unreadable read, so it is not re-acquirable
+        // proof for a different process either.
+        XCTAssertNotNil(harness.readOwnershipRecord())
+
+        harness.manager.setState(.running)
+        harness.manager.stopService()
+        harness.scheduler.runAllBackgroundWork()
+        XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
+        XCTAssertEqual(harness.manager.currentState, .running)
+        XCTAssertNotNil(harness.readOwnershipRecord())
+
+        // `ps` answers again: the very same process is managed and stoppable.
+        liveCommandLine = fakeCommandLine
+        XCTAssertEqual(harness.manager.managedServicePID(), 5150)
+        harness.manager.stopService()
+        harness.scheduler.runAllBackgroundWork()
+        XCTAssertEqual(
+            harness.signaler.groupSignals,
+            [ManagerFakeSignaler.GroupSignal(signal: SIGTERM, processGroupID: 5150)]
+        )
+    }
+
     func testStartManagedServiceWritesAVerifiableOwnershipRecord() throws {
         let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
         defer { harness.cleanUp() }
@@ -884,8 +946,61 @@ final class ServiceManagerTests: XCTestCase {
             fileManager: fakeFileManager
         )
         defer { harness.cleanUp() }
+        // 回退路径只采信真的可执行的文件：登录 shell 的 stdout 里可能混进
+        // `.zshenv` 的 echo（只重定向了 stderr），整段当路径会让 posix_spawn ENOENT。
+        fakeFileManager.executablePaths = ["/custom/bin/pi-web"]
 
         XCTAssertEqual(harness.manager.resolvePiWebPath(), "/custom/bin/pi-web")
+    }
+
+    /// 登录 shell 的 stdout 混进别的内容时，不能把整段当作可执行路径。
+    ///
+    /// 旧实现只做 `trimmingCharacters(in: .whitespacesAndNewlines)`——它不去掉
+    /// 中间换行，于是 `posix_spawn` 拿到多行字符串直接 ENOENT，报“无法启动
+    /// pi-web（errno 2）”。现在只取最后一行，并且必须确认它可执行。
+    func testResolvePiWebPathIgnoresNoiseFromLoginShellOutput() throws {
+        let fakeFileManager = ManagerFakeFileManager()
+        let harness = try makeHarness(
+            processOutput: { arguments in
+                arguments.first == "/bin/zsh"
+                    ? "Welcome to zsh\nNVM loaded\n/custom/bin/pi-web\n"
+                    : nil
+            },
+            fileManager: fakeFileManager
+        )
+        defer { harness.cleanUp() }
+        fakeFileManager.executablePaths = ["/custom/bin/pi-web"]
+
+        XCTAssertEqual(harness.manager.resolvePiWebPath(), "/custom/bin/pi-web")
+    }
+
+    /// 登录 shell 报告了一个不可执行的路径：不得采信。
+    func testResolvePiWebPathRejectsANonExecutableShellResult() throws {
+        let fakeFileManager = ManagerFakeFileManager()
+        let harness = try makeHarness(
+            processOutput: { arguments in arguments.first == "/bin/zsh" ? "/custom/bin/pi-web\n" : nil },
+            fileManager: fakeFileManager
+        )
+        defer { harness.cleanUp() }
+        // 未登记为可执行：应当按“找不到”处理，而不是盲信 stdout。
+        XCTAssertNil(harness.manager.resolvePiWebPath())
+    }
+
+    /// 用户配置的 pi-web 路径带 `~` 时必须展开后判定（审计 S3 / F7）。
+    ///
+    /// 写入侧只做 trim，`isExecutableFile(atPath: "~/bin/pi-web")` 对字面 `~` 恒为
+    /// false，诊断只会报“未找到”，用户于是反复重装而真因是路径写法。
+    func testResolvePiWebPathExpandsTildeInTheConfiguredPath() throws {
+        let fakeFileManager = ManagerFakeFileManager()
+        let harness = try makeHarness(fileManager: fakeFileManager)
+        defer { harness.cleanUp() }
+        var configuration = configured(try harness.makeExecutable())
+        configuration.piWebPath = "~/bin/pi-web"
+        harness.manager.updateConfiguration(configuration)
+        let expanded = ("~/bin/pi-web" as NSString).expandingTildeInPath
+        fakeFileManager.executablePaths = [expanded]
+
+        XCTAssertEqual(harness.manager.resolvePiWebPath(), expanded)
     }
 
     func testStartDecisionIsIgnoredWhileStopping() throws {
@@ -958,6 +1073,37 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(harness.manager.currentState, .failed(expected))
     }
 
+    /// 真实生产序列的快失败（区别于上一条用假句柄覆盖的轮询分支）：真实 launcher
+    /// 的终止回调先清空 `serviceProcess`，轮询自己的 `!isRunning` 分支永远不命
+    /// 中。启动即崩溃（例如监听地址不可用的 EADDRNOTAVAIL）时，终止回调必须
+    /// 立即结束启动会话并给出可读失败，而不是继续轮询到 30 秒预算耗尽。
+    func testTerminationCallbackFastFailsAnActiveStartupSession() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        let process = ManagerFakeProcess(processIdentifier: 5150)
+        harness.launcher.result = .success(process)
+        harness.probe.ready = false
+        harness.manager.startManagedService()
+
+        XCTAssertEqual(harness.scheduler.delayedWork.count, 1, "启动后应有一条轮询链")
+        // 真实序列：子进程启动即退出，终止回调先于任何就绪探测触发。
+        harness.launcher.terminationHandlers[0](process)
+
+        let expected = "pi-web 进程已退出。请查看日志：\(harness.logURL.path)"
+        XCTAssertEqual(harness.startupFailures, [expected])
+        XCTAssertEqual(harness.pageMessages, ["正在启动 Pi Web…", "启动失败"])
+        XCTAssertEqual(harness.manager.currentState, .failed(expected))
+
+        // 会话已被终止回调结束：遗留的轮询回调只应过期一次，不再产生第二条
+        // 失败，也不再给出“30 秒内未能启动”的错误结论。
+        var ranStaleCallbacks = 0
+        while harness.scheduler.runNextDelayedWork() { ranStaleCallbacks += 1 }
+        XCTAssertEqual(ranStaleCallbacks, 1, "会话结束后遗留轮询只应过期一次，不再续链")
+        XCTAssertEqual(harness.startupFailures, [expected], "会话结束后不得重复上报")
+        XCTAssertEqual(harness.manager.currentState, .failed(expected))
+    }
+
     func testMissingExecutableReportsTheInstallHint() throws {
         let harness = try makeHarness(fileManager: ManagerFakeFileManager())
         defer { harness.cleanUp() }
@@ -1022,6 +1168,8 @@ final class ServiceManagerTests: XCTestCase {
         harness.manager.startManagedService()
         harness.signaler.aliveProcessGroups = [5150]
         harness.signaler.groupSurvivesSignals = true
+        // SIGKILL 之后复查发现进程组确实消失：这才是“停止成功”。
+        harness.signaler.groupGoneOnConfirmation = true
 
         harness.manager.stopService()
         harness.scheduler.runAllBackgroundWork()
@@ -1035,6 +1183,62 @@ final class ServiceManagerTests: XCTestCase {
         )
         XCTAssertEqual(harness.scheduler.sleeps.count, ServiceManager.stopPollAttempts)
         XCTAssertEqual(harness.manager.currentState, .stopped)
+        XCTAssertNil(harness.readOwnershipRecord())
+    }
+
+    /// SIGKILL 后仍未能确认消失时，不得删掉唯一的所有权证据（GitHub #158 复审）。
+    ///
+    /// 旧实现发完 SIGKILL 就返回，上层无条件 `removeRecord` + 置 `.stopped`：
+    /// 不可中断睡眠里的组因此让应用对自己启动、仍然活着的进程失去全部管理路径
+    /// （`managedServicePID()` 恒为 nil，退出也不会再碰它），日志里只留下“已发送
+    /// SIGKILL”这一行，事后无法判断停止是否真的成功。
+    func testStopServiceKeepsOwnershipRecordWhenTheGroupSurvivesSIGKILL() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.manager.startManagedService()
+        harness.signaler.aliveProcessGroups = [5150]
+        harness.signaler.groupSurvivesSignals = true
+        // 连 SIGKILL 都没生效：组仍然存活。
+        harness.signaler.groupGoneOnConfirmation = false
+
+        var completionRan = false
+        harness.manager.stopService { completionRan = true }
+        harness.scheduler.runAllBackgroundWork()
+        harness.drainLogWrites()
+
+        XCTAssertEqual(harness.signaler.groupSignals.map(\.signal), [SIGTERM, SIGKILL])
+        // 必须真的复查过，而不是发完就算。
+        XCTAssertGreaterThanOrEqual(harness.signaler.postKillProbes, 1)
+        // 记录留着当停止证据，下一次停止/退出仍会重试。
+        XCTAssertNotNil(harness.readOwnershipRecord(), "未确认退出时不得删掉所有权记录")
+        XCTAssertNotNil(harness.manager.managedServicePID())
+        // 不谎称已停止：状态保持运行中，由后续重试或人工处置收敛。
+        XCTAssertNotEqual(harness.manager.currentState, .stopped)
+        // 完成回调仍要送达，否则退出/重启序列会挂住。
+        XCTAssertTrue(completionRan)
+        let log = (try? String(contentsOf: harness.logURL, encoding: .utf8)) ?? ""
+        XCTAssertTrue(log.contains(QuitTimelineStage.serviceStillAlive.rawValue), log)
+        XCTAssertTrue(log.contains("保留所有权记录"), log)
+        // 停止标志已收回，且保留的记录仍可用于重试：第二次停止会再次对同一组
+        // 发信号（旧实现删了记录后彻底无法重试）。
+        harness.signaler.beginNewStopCycle()
+        harness.signaler.groupGoneOnConfirmation = true
+        harness.manager.stopService()
+        harness.scheduler.runAllBackgroundWork()
+        XCTAssertEqual(harness.signaler.groupSignals.count, 4, "第二次停止应再次 SIGTERM+SIGKILL")
+        XCTAssertNil(harness.readOwnershipRecord())
+        XCTAssertEqual(harness.manager.currentState, .stopped)
+    }
+
+    /// SIGKILL 后的复查轮数必须有界，否则会把 GitHub #158 修的 Cmd+Q 卡顿
+    /// 以另一种形式加回来。
+    func testPostKillConfirmationStaysBoundedWellBelowTheStopWait() {
+        XCTAssertGreaterThan(ServiceManager.postKillConfirmationPollAttempts, 0)
+        // 每轮 10ms：上界远小于 1 秒的停止等待本身。
+        let upperBound = TimeInterval(ServiceManager.postKillConfirmationPollAttempts) * 0.01
+        XCTAssertLessThanOrEqual(upperBound, 0.2, "SIGKILL 后的复查不得拖慢退出")
     }
 
     // MARK: 退出/停止等待上界（GitHub #158）
@@ -1077,6 +1281,7 @@ final class ServiceManagerTests: XCTestCase {
         harness.manager.startManagedService()
         harness.signaler.aliveProcessGroups = [5150]
         harness.signaler.groupSurvivesSignals = true
+        harness.signaler.groupGoneOnConfirmation = true
 
         harness.manager.stopService()
         harness.scheduler.runAllBackgroundWork()
@@ -1792,6 +1997,48 @@ final class ServiceManagerTests: XCTestCase {
         for line in healthLines {
             XCTAssertFalse(line.contains("http"), "健康检查日志不得打印可能含凭据的探测 URL：\(line)")
         }
+    }
+
+    /// 审计 S1（中）：健康检查“受托管重启”必须真的重启进程。
+    ///
+    /// 旧实现调的是 `startManagedService()` 而不是 `restartManagedService()`：
+    /// `startDecision()` 在 `managedServicePID() != nil`（所有权记录仍校验通过）
+    /// 或子进程还活着（`serviceProcess.isRunning`）时返回 `.existingProcess`，
+    /// 于是只挂一条 30 秒就绪轮询、**不发任何信号**——那个不响应的进程从头到尾
+    /// 没被杀过，而“已触发重启”的日志已经写下了。末尾的 `launchCount` 断言看不
+    /// 出这个区别：两条路径都不会新增启动。这里断言信号真的发出。
+    func testHealthCheckRestartStopsTheUnresponsiveProcessBeforeStartingAgain() throws {
+        let liveness = ManagerFakeLiveness()
+        let harness = try makeHarness(
+            alive: { pid in pid == 5150 ? liveness.isAlive : true },
+            processOutput: processOutput(for: 5150)
+        )
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = true
+        harness.manager.startManagedService()
+        XCTAssertTrue(harness.scheduler.runNextDelayedWork())
+        harness.manager.startHealthMonitor()
+        XCTAssertTrue(harness.signaler.groupSignals.isEmpty, "前置：启动流程不发信号")
+
+        // 关键场景：进程**仍存活**但健康探测一直不响应（不是已退出的情形）。
+        // 这种状态下 `startManagedService()` 会走 `.existingProcess` 快速路径。
+        liveness.isAlive = true
+        harness.probe.ready = false
+        harness.signaler.aliveProcessGroups = [5150]
+
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertTrue(harness.scheduler.runHealthCheck(), "第三次连续失败触发重启")
+        // 停止/启动的后续动作在后台队列上：必须让它跑完才能看到信号。
+        harness.scheduler.runAllBackgroundWork()
+
+        XCTAssertFalse(
+            harness.signaler.groupSignals.isEmpty,
+            "健康检查重启必须先停止那个不响应的进程（旧实现走 start 路径，从不发信号）"
+        )
+        XCTAssertEqual(harness.signaler.groupSignals.first?.signal, SIGTERM, "先 SIGTERM")
     }
 
     /// GitHub #147：探测成功把连续失败计数清零，之后必须重新累计两次才再次判定断开。

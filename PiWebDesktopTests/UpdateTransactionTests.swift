@@ -483,6 +483,9 @@ final class UpdateTransactionTests: XCTestCase {
     func testVersionUnchangedIsStillUsingPreviousArtifact() throws {
         let probe = FakeProbe()
         probe.executables.insert(newExecutable)
+        // H1（更新事务审计）：版本未变化分支也要先做证据核对，探针必须能读到
+        // 旧路径附近的 package.json 名称才能声称“文件未被替换”。
+        probe.packageNamesNear[newExecutable] = InstallCommandManifest.piWebPackageName
         probe.sizes[newExecutable] = 100
         probe.mtimes[newExecutable] = referenceDate
         let plan = UpdateDegradationPlanner.verificationFailure(
@@ -506,6 +509,86 @@ final class UpdateTransactionTests: XCTestCase {
         XCTAssertFalse(plan.performedAutomaticDegradation)
         XCTAssertTrue(plan.warningText.contains("仍在使用更新前的版本"))
         XCTAssertTrue(plan.warningText.contains("0.9.0"))
+        XCTAssertTrue(plan.reason.contains("未发现文件被替换"), plan.reason)
+    }
+
+    /// H1（更新事务审计）：版本未变化时不得在证据核对之前断言“文件未被替换”。
+    /// 身份名称读不到（探针无法读取旧路径附近 package.json）→ 如实报告
+    /// “无法断言文件未被替换”，降级为 evidenceChangedOrMissing。
+    func testVersionUnchangedWithoutIdentityEvidenceDoesNotClaimUnreplacedFile() throws {
+        let probe = FakeProbe()
+        probe.executables.insert(newExecutable)
+        probe.sizes[newExecutable] = 100
+        probe.mtimes[newExecutable] = referenceDate
+        let plan = UpdateDegradationPlanner.verificationFailure(
+            component: .piWeb,
+            source: .npmGlobal,
+            fingerprint: UpdateArtifactFingerprint(
+                executablePath: newExecutable,
+                resolvedPath: newExecutable,
+                version: "0.9.0",
+                packageName: InstallCommandManifest.piWebPackageName,
+                fileSize: 100,
+                modifiedAt: referenceDate
+            ),
+            newVersion: "0.9.0",
+            newResolvedPath: newExecutable,
+            failureReason: "版本重新检测达到目标失败：重新检测到 0.9.0（更新前 0.9.0；版本需达到目标）",
+            probe: probe.make()
+        )
+        XCTAssertEqual(plan.kind, .stillUsingPreviousArtifact)
+        XCTAssertEqual(plan.rollbackEligibility, .evidenceChangedOrMissing)
+        XCTAssertTrue(plan.reason.contains("无法断言文件未被替换"), plan.reason)
+        XCTAssertFalse(plan.reason.contains("未发现文件被替换"), plan.reason)
+    }
+
+    /// H1：本次运行没有可用探针时，版本未变化分支必须明说“无法核对”，
+    /// 不得假装证据核对过（eligibility 为 probeUnavailable）。
+    func testVersionUnchangedWithoutProbeReportsUnverifiableFileState() throws {
+        let plan = UpdateDegradationPlanner.verificationFailure(
+            component: .piWeb,
+            source: .npmGlobal,
+            fingerprint: UpdateArtifactFingerprint(
+                executablePath: newExecutable,
+                resolvedPath: newExecutable,
+                version: "0.9.0",
+                packageName: InstallCommandManifest.piWebPackageName,
+                fileSize: 100,
+                modifiedAt: referenceDate
+            ),
+            newVersion: "0.9.0",
+            newResolvedPath: newExecutable,
+            failureReason: "版本重新检测达到目标失败：重新检测到 0.9.0（更新前 0.9.0；版本需达到目标）",
+            probe: .disabled
+        )
+        XCTAssertEqual(plan.kind, .stillUsingPreviousArtifact)
+        XCTAssertEqual(plan.rollbackEligibility, .probeUnavailable)
+        XCTAssertTrue(plan.reason.contains("无法核对文件是否被替换"), plan.reason)
+    }
+
+    /// H1：更新前路径已不存在（被重装覆盖后删除/变更路径）时，版本未变化
+    /// 分支不得声称“文件未被替换”。
+    func testVersionUnchangedWithMissingPreviousPathReportsPossibleReplacement() throws {
+        let probe = FakeProbe()  // 不登记任何可执行文件：旧路径不可见
+        let plan = UpdateDegradationPlanner.verificationFailure(
+            component: .piWeb,
+            source: .npmGlobal,
+            fingerprint: UpdateArtifactFingerprint(
+                executablePath: newExecutable,
+                resolvedPath: newExecutable,
+                version: "0.9.0",
+                packageName: InstallCommandManifest.piWebPackageName,
+                fileSize: 100,
+                modifiedAt: referenceDate
+            ),
+            newVersion: "0.9.0",
+            newResolvedPath: newExecutable,
+            failureReason: "版本重新检测达到目标失败：重新检测到 0.9.0（更新前 0.9.0；版本需达到目标）",
+            probe: probe.make()
+        )
+        XCTAssertEqual(plan.kind, .stillUsingPreviousArtifact)
+        XCTAssertEqual(plan.rollbackEligibility, .evidenceChangedOrMissing)
+        XCTAssertTrue(plan.reason.contains("文件可能已被替换"), plan.reason)
     }
 
     /// B-3：指纹里没有路径证据时，它记录的包名只是计划里的期望值，不能拿来当
@@ -631,7 +714,9 @@ final class UpdateTransactionTests: XCTestCase {
         XCTAssertEqual(outcome?.isSucceeded, false)
         let entry = try XCTUnwrap(history.entries.first)
         XCTAssertEqual(entry.degradationKind, .degradedToPreviousArtifact)
-        XCTAssertEqual(entry.completedPhase, .install)
+        // M8（更新事务审计）：健康检查失败时安装与重启动作已完成，commit 阶段
+        // 如实记为完成（附“健康未确认”原因），不再缺席。
+        XCTAssertEqual(entry.completedPhase, .commit)
         XCTAssertEqual(entry.phases.first { $0.phase == .verify }?.status, .failed)
         XCTAssertEqual(entry.rollbackDescription?.contains("已降级"), true)
         let plan = try XCTUnwrap(applied.firstObject as? UpdateDegradationPlan)
@@ -819,13 +904,107 @@ final class UpdateTransactionTests: XCTestCase {
           "manualCommandText":null,"manualGuidanceText":null,"rollbackDescription":null}]
         """.utf8)
         let decoded = UpdateHistoryStore.decode(handcrafted)
-        XCTAssertEqual(decoded?.count, 1)
-        XCTAssertNil(decoded?.first?.fromVersion)
-        XCTAssertNil(decoded?.first?.completedPhase)
-        XCTAssertEqual(decoded?.first?.phases.count, 1)
+        XCTAssertEqual(decoded?.entries.count, 1)
+        XCTAssertEqual(decoded?.discardedCount, 0, "字段值无法校验时条目仍保留（sanitize 降级），不算丢弃")
+        XCTAssertNil(decoded?.entries.first?.fromVersion)
+        XCTAssertNil(decoded?.entries.first?.completedPhase)
+        XCTAssertEqual(decoded?.entries.first?.phases.count, 1)
 
         UpdateHistoryStore.clear(from: defaults)
         XCTAssertTrue(UpdateHistoryStore.load(from: defaults).isEmpty)
+    }
+
+    /// 批次3 审计次要：decode 返回被丢弃的条数——损坏结构（非字典元素）或未知
+    /// 枚举原始值等不可还原的条目逐条丢弃，排查「历史条数变少」有迹可循。
+    func testHistoryDecodeReportsDiscardedEntryCount() throws {
+        let goodObject: [String: Any] = [
+            "recordedAt": 0.0,
+            "componentKind": "pi",
+            "source": "npm-global",
+            "toVersion": "1.2.3",
+            "phases": [[String: Any]](),
+        ]
+        // 结构损坏：数组里混入字符串（只丢弃该条，不影响其余）。
+        // 未知枚举原始值：componentKind 无法映射，条目不可还原，计入丢弃。
+        var unknownKind = goodObject
+        unknownKind["componentKind"] = "mystery-component"
+        let mixed: [[String: Any]] = [goodObject, unknownKind]
+        let data = try JSONSerialization.data(withJSONObject: mixed)
+
+        let decoded = UpdateHistoryStore.decode(data)
+        XCTAssertEqual(decoded?.entries.count, 1)
+        XCTAssertEqual(decoded?.discardedCount, 1, "未知枚举原始值算丢弃")
+        XCTAssertEqual(decoded?.entries.first?.toVersion, "1.2.3")
+
+        // 非字典元素：只丢弃自己。
+        let withJunk: [Any] = ["not-an-object", goodObject]
+        let junkData = try JSONSerialization.data(withJSONObject: withJunk)
+        let junkDecoded = UpdateHistoryStore.decode(junkData)
+        XCTAssertEqual(junkDecoded?.entries.count, 1)
+        XCTAssertEqual(junkDecoded?.discardedCount, 1, "结构损坏的元素只丢弃自己，不拖垮整份历史")
+
+        // 整体不是 JSON 数组：与旧实现一致，返回 nil（整体不可还原）。
+        XCTAssertNil(UpdateHistoryStore.decode(Data("{\"not\":\"array\"}".utf8)))
+    }
+
+    /// M7（更新事务审计）：历史里混入一条损坏记录时，下一次 record 不得把
+    /// 其余历史一起清掉（旧实现整体解码失败 → 空数组 → 整段覆盖）。
+    func testRecordAfterCorruptedHistoryKeepsRemainingEntries() throws {
+        let suiteName = "pi-web-desktop-update-transaction-m7-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        func makeEntry(at date: Date) -> UpdateHistoryEntry {
+            UpdateHistoryEntry(
+                recordedAt: date,
+                component: .piWeb,
+                source: .npmGlobal,
+                fromVersion: "0.9.0",
+                toVersion: "0.9.2",
+                completedPhase: .commit,
+                terminationPhase: .commit,
+                phases: [],
+                degradationKind: nil,
+                failureReason: nil,
+                manualCommandText: nil,
+                manualGuidanceText: nil,
+                rollbackDescription: nil
+            )
+        }
+        UpdateHistoryStore.record(makeEntry(at: referenceDate), to: defaults)
+        UpdateHistoryStore.record(makeEntry(at: referenceDate.addingTimeInterval(1)), to: defaults)
+
+        // 手工损坏最新一条（phases 字段类型坏掉）。
+        let data = try XCTUnwrap(defaults.data(forKey: UpdateSettingKeys.updateHistory))
+        var objects = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+        XCTAssertEqual(objects.count, 2)
+        objects[0]["phases"] = "damaged"
+        defaults.set(
+            try XCTUnwrap(JSONSerialization.data(withJSONObject: objects)),
+            forKey: UpdateSettingKeys.updateHistory
+        )
+
+        // 再记录一条新的：旧实现会把剩下的好记录一起丢掉，只剩新的这条。
+        let newest = makeEntry(at: referenceDate.addingTimeInterval(2))
+        UpdateHistoryStore.record(newest, to: defaults)
+        let loaded = UpdateHistoryStore.load(from: defaults)
+        XCTAssertEqual(loaded.count, 2, "损坏条丢弃后，其余历史必须保留（M7）")
+        XCTAssertEqual(loaded.first, newest)
+        XCTAssertEqual(loaded.last?.recordedAt, referenceDate, "最早的完好记录不得丢失")
+    }
+
+    /// M7（更新事务审计）：上游带 v 前缀的版本写法（常见于 git tag）应存归一化
+    /// 形式，不再把历史条目丢成「未知 → 未知」；欠段写法（如 `1.2`）规范化会失实，
+    /// 仍拒绝。
+    func testHistoryVersionValidationAcceptsVPrefix() {
+        XCTAssertEqual(UpdateHistoryStore.validVersion("1.2.3"), "1.2.3")
+        XCTAssertEqual(UpdateHistoryStore.validVersion("v1.2.3"), "1.2.3")
+        XCTAssertEqual(UpdateHistoryStore.validVersion("V22.19.0"), "22.19.0")
+        XCTAssertEqual(UpdateHistoryStore.validVersion("v1.2.3-rc.1"), "1.2.3-rc.1")
+        XCTAssertNil(UpdateHistoryStore.validVersion("1.2"), "欠段写法规范化会失实，仍拒绝")
+        XCTAssertNil(UpdateHistoryStore.validVersion("v1.2"))
+        XCTAssertNil(UpdateHistoryStore.validVersion("not-a-version"))
+        XCTAssertNil(UpdateHistoryStore.validVersion(nil))
     }
 
     func testCoordinatorHistoryAndLogsRedactHomeSecretsAndEnvironmentValues() throws {

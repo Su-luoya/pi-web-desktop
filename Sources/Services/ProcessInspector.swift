@@ -33,8 +33,20 @@ struct ProcessInspector {
     // MARK: - Pure parsing
 
     /// `kill(pid, 0)` liveness probe. PIDs 0 and 1 are never treated as app-owned.
+    ///
+    /// `EPERM` 也必须算“存活”：它意味着进程存在、只是当前用户没有权限发信号。
+    /// 旧实现只认 `== 0`，把其他用户的进程判成已死，所有权记录因此校验失败、
+    /// 服务被当成外部进程（不误杀，但会留下孤儿 pi-web）。
     static func defaultProcessIsAlive(_ pid: pid_t) -> Bool {
-        pid > 1 && kill(pid, 0) == 0
+        guard pid > 1 else { return false }
+        if kill(pid, 0) == 0 { return true }
+        return errno == EPERM
+    }
+
+    /// 进程的真实可执行镜像路径（`proc_pidpath`），失败时 nil。
+    /// 供身份比对使用（例如单实例锁判断 PID 记录是否指向本应用）。
+    func executablePath(of pid: pid_t) -> String? {
+        processExecutablePath(pid)
     }
 
     /// Real executable image path through libproc (`proc_pidpath`).
@@ -164,7 +176,7 @@ struct ProcessInspector {
     ///
     /// `pgid`, `lstart` and an executable identity are required; `commandLine`
     /// may be empty when `ps -o args=` yields nothing, and the verifier then
-    /// treats the record as a mismatch (an empty argv is not ownership proof).
+    /// treats the facts as unreadable (an empty argv is not ownership proof).
     func processFacts(of pid: pid_t) -> ServiceProcessFacts? {
         guard pid > 1,
               let processGroupID = processGroupID(of: pid),

@@ -12,16 +12,20 @@ import Foundation
 /// 1. `Authorization:` / `Proxy-Authorization:` 头的值；
 /// 2. `Bearer <token>`；
 /// 3. 代理凭据 `scheme://user:pass@host` 中的 userinfo；
-/// 4. URL 查询串（`?a=b&c=d` 整体替换为 `?<redacted>`）；
+/// 4. URL 查询串（`?a=b&c=d` / `?a=1;b=2` 整体替换为 `?<redacted>`；`;` 同样是
+///    分隔符，老式 `;jsessionid` 形态不能漏）；
 /// 5. JWT 形态字符串（`eyJ` 开头的三段 base64url）；
 /// 6. 敏感键值（`token` / `password` / `secret` / `api_key` / `apikey` 等）：
 ///    键可带引号（JSON）或不带引号，`=` / `:` 两侧允许空白，大小写不敏感，
 ///    覆盖 `PI_WEB_PASSWORD` 这类带前缀的环境变量名；值可以是双引号、单引号
-///    （都允许含空格）或到 `,` `;` `&` 之前的未加引号文本；
+///    （都允许含空格）或到行尾的未加引号文本（含 `,` `;` `&` 的真实凭据不能
+///    只屏蔽前半段；代价是同一行敏感键之后的其它键值对被一并涂掉）；
 /// 7. 命令行参数形式 `--password <value>`（值可以是带引号字符串或单个词）；
 /// 8. `key:` 后没有值时的续行：紧随其后的续行整体按“值”处理（YAML、换行 JSON）；
-/// 9. 私钥：`-----BEGIN ... PRIVATE KEY-----` 头以及同一次输入中它到
-///    `-----END ... PRIVATE KEY-----` 之间的每一行；
+/// 9. 私钥：`-----BEGIN ... PRIVATE KEY-----` 头以及它到
+///    `-----END ... PRIVATE KEY-----` 之间的每一行。块状态可由分块调用方
+///    （历史日志按块清洗、子进程输出按行块到达）持有并跨调用传递，否则头行
+///    与正文落在不同块时正文没有任何规则可识别、会原样落盘；
 /// 10. Home 路径：注入的 Home 前缀与任何 `/Use`+`rs/<name>` 前缀替换为 `~`。
 ///
 /// 多行输入逐行处理，行数与换行结构保持不变，不因换行漏判。
@@ -58,11 +62,14 @@ final class LogRedactor {
     private static let quotedKey = "[\"'][a-z0-9_.\\-]*" + sensitiveKey + "[a-z0-9_.\\-]*[\"']"
     /// 不带引号的键：敏感词必须收尾，`tokens=` / `passwordless=` 因此不命中。
     private static let plainKey = "\\b[a-z0-9_.\\-]*" + sensitiveKey
-    /// 值：双引号（支持 `\"`）、单引号（支持 `''`）、或到 `,` `;` `&` 之前
-    /// （允许空格，也覆盖未闭合引号），避免吞掉同一行的后续键值。
-    private static let value = "(?:\"(?:\\\\.|[^\"\\\\])*\"|'(?:''|[^'])*'|[^\n,;&]+)"
-    /// 命令行形式的值：带引号字符串或单个词，后续参数保持原样。
-    private static let commandLineValue = "(?:\"(?:\\\\.|[^\"\\\\])*\"|'(?:''|[^'])*'|[^\\s,;&\"']+)"
+    /// 值：双引号（支持 `\"`）、单引号（支持 `''`）、或到行尾的未加引号文本
+    /// （允许空格与 `,` `;` `&`，也覆盖未闭合引号）。不再在 `,` `;` `&` 处截断：
+    /// 含这些字符的真实凭据旧版只屏蔽前半段，留下半个秘密；代价是敏感键之后
+    /// 同一行的其它键值对被一并涂掉（过度遮蔽，方向安全）。
+    private static let value = "(?:\"(?:\\\\.|[^\"\\\\])*\"|'(?:''|[^'])*'|[^\n]+)"
+    /// 命令行形式的值：带引号字符串或到下一空白为止的连续文本，后续参数保持原样。
+    /// `,` `;` `&` 不再截断（`--password one,two` 旧版留下 `,two`）。
+    private static let commandLineValue = "(?:\"(?:\\\\.|[^\"\\\\])*\"|'(?:''|[^'])*'|[^\\s\"']+)"
 
     private static let sensitiveValuePattern =
         "(?i)(?<key>" + quotedKey + "|" + plainKey + ")"
@@ -95,14 +102,28 @@ final class LogRedactor {
         self.rules = LogRedactor.makeRules()
     }
 
+    /// 跨 `redact` 调用的流式状态：分块调用方（历史日志按块清洗、子进程输出按
+    /// 行块到达）必须持有并传入同一个实例。私钥块的屏蔽状态必须跨调用存活，
+    /// 否则 PEM 头行与正文落在不同块时，正文没有任何规则可识别、原样落盘。
+    struct Continuation {
+        var isInsidePrivateKeyBlock = false
+    }
+
     /// 脱敏入口。纯函数语义：同样的输入总是得到同样的输出，重复调用不会二次破坏
     /// 已经写入的占位符（幂等，GitHub #38）。
     func redact(_ text: String) -> String {
+        var continuation = Continuation()
+        return redact(text, continuation: &continuation)
+    }
+
+    /// 流式脱敏入口：`continuation` 由调用方持有，跨多次调用传递块状态。
+    /// 空输入不改状态（空文本不可能改变块内/块外）。
+    func redact(_ text: String, continuation: inout Continuation) -> String {
         guard !text.isEmpty else { return text }
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         var output: [String] = []
         output.reserveCapacity(lines.count)
-        var insidePrivateKeyBlock = false
+        var insidePrivateKeyBlock = continuation.isInsidePrivateKeyBlock
         var index = 0
         while index < lines.count {
             let line = lines[index]
@@ -124,6 +145,7 @@ final class LogRedactor {
             }
             index += 1
         }
+        continuation.isInsidePrivateKeyBlock = insidePrivateKeyBlock
         return output.joined(separator: "\n")
     }
 
@@ -277,7 +299,7 @@ final class LogRedactor {
             ("(?i)\\b(authorization|proxy-authorization)([ \\t]*:[ \\t]*).*", .template("$1$2" + marker)),
             ("(?i)\\b(bearer)([ \\t]+)[A-Za-z0-9._~+/=:-]+", .template("$1$2" + marker)),
             ("(?i)\\b([a-z][a-z0-9+.\\-]*://)([^/?#\\s@]+)@", .template("$1" + marker + "@")),
-            ("(\\?)([^\\s\"'`()\\[\\]{}<>,;]*=[^\\s\"'`()\\[\\]{}<>,;]*)", .template("$1" + marker)),
+            ("(\\?)([^\\s\"'`()\\[\\]{}<>,]*=[^\\s\"'`()\\[\\]{}<>,]*)", .template("$1" + marker)),
             ("\\beyJ[A-Za-z0-9_-]{4,}\\.[A-Za-z0-9_-]{4,}\\.[A-Za-z0-9_-]{4,}", .template(marker)),
             (sensitiveValuePattern, .sensitiveValue),
             (commandLinePattern, .sensitiveValue),

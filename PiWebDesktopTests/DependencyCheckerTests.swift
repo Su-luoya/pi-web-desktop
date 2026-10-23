@@ -939,6 +939,43 @@ final class DependencyCheckerTests: XCTestCase {
         XCTAssertNil(SemanticVersion.firstVersion(in: "1.2.3.4.5"))
     }
 
+    /// 监听地址/日期形态的 token 不得抢在真版本前面（GitHub #6 复审）。
+    ///
+    /// 旧实现返回第一个能解析的 token，而 `SemanticVersion.init?` 接受 1–4 段
+    /// 纯数字，于是 `127.0.0.1` 会被当成版本：`status` 从 unknown 变成 .ok，
+    /// 诊断报“正常”但从未读到真实版本；node 比较也变成 `127.0.0.1 < 22.19.0`
+    /// 为 false，直接算“够新”。
+    func testFirstVersionPrefersARealVersionOverAnAddressOrDateToken() {
+        XCTAssertEqual(
+            SemanticVersion.firstVersion(in: "pi-web listening on 127.0.0.1 version 1.2.3")?.description,
+            "1.2.3"
+        )
+        XCTAssertEqual(
+            SemanticVersion.firstVersion(in: "published 2024.10.22 build 3.4.5")?.description,
+            "3.4.5"
+        )
+        // 四段但首段 < 100 仍是合法版本号，不得误伤。
+        XCTAssertEqual(SemanticVersion.firstVersion(in: "1.2.3.4")?.description, "1.2.3.4")
+    }
+
+    /// 全文只找到“形似地址”的 token 时仍然回退采信它，不比旧行为更严格：
+    /// 把真版本误判成 unknown 会卡住启动门控，比选错 token 更糟。
+    func testFirstVersionStillFallsBackToAnAddressShapedTokenWhenItIsTheOnlyCandidate() {
+        XCTAssertEqual(SemanticVersion.firstVersion(in: "127.0.0.1")?.description, "127.0.0.1")
+        XCTAssertEqual(SemanticVersion.firstVersion(in: "see 192.168.0.1")?.description, "192.168.0.1")
+    }
+
+    func testLooksLikeAddressOrDateIsNarrowEnoughToAvoidFalseRejects() {
+        XCTAssertTrue(SemanticVersion.looksLikeAddressOrDate("127.0.0.1", version: SemanticVersion("127.0.0.1")!))
+        XCTAssertTrue(SemanticVersion.looksLikeAddressOrDate("2024.10.22", version: SemanticVersion("2024.10.22")!))
+        // 首段在年份区间之外、或月份/日期越界的三段式：当真版本。
+        XCTAssertFalse(SemanticVersion.looksLikeAddressOrDate("1.2.3", version: SemanticVersion("1.2.3")!))
+        XCTAssertFalse(SemanticVersion.looksLikeAddressOrDate("1899.10.22", version: SemanticVersion("1899.10.22")!))
+        XCTAssertFalse(SemanticVersion.looksLikeAddressOrDate("2024.13.1", version: SemanticVersion("2024.13.1")!))
+        // 四段小首段：真版本而非地址。
+        XCTAssertFalse(SemanticVersion.looksLikeAddressOrDate("1.2.3.4", version: SemanticVersion("1.2.3.4")!))
+    }
+
     // MARK: - 安装来源推断与脱敏
 
     /// Homebrew 前缀但不在 Cellar 下：来源可推断，置信度只能是 inferred。

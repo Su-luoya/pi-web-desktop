@@ -124,6 +124,16 @@ extension AppDelegate {
             _ = self.logWriter.append(self.logRedactor.redact(message))
             controller.showErrorPage(message: message)
         }
+        // outD-5：协议不在外开白名单内的导航一律拒绝，但必须留下日志证据——
+        // 静默丢弃会让“页面被注入/被水坑”这一类事件在诊断里看不见。日志
+        // 只记协议与脱敏后的 URL，不记录页面内容。
+        controller.onBlockedExternalNavigation = { [weak self] url in
+            guard let self else { return }
+            let scheme = url.scheme ?? "（无协议）"
+            _ = self.logWriter.append(
+                self.logRedactor.redact("已拒绝打开非白名单协议的链接（\(scheme)）：\(url.absoluteString)")
+            )
+        }
 
         let newWindow = NSWindow(
             contentRect: preferredWindowFrame(for: NSScreen.main),

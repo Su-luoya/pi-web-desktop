@@ -15,6 +15,9 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKD
     var onNavigationFailure: ((WebViewNavigationFailure) -> Void)?
     /// Called when WebKit starts a download. AppDelegate may observe it.
     var onDownloadStarted: (() -> Void)?
+    /// 被协议白名单拒绝的外开请求（outD-5）。AppDelegate 接上日志，
+    /// 留出拒绝证据而不是静默失败。
+    var onBlockedExternalNavigation: ((URL) -> Void)?
 
     private var serviceURL: URL
     /// 找到**本实例所在**的窗口（查找栏、下载保存面板、文件面板用）。
@@ -174,9 +177,23 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKD
         case .allow:
             decisionHandler(.allow)
         case .openExternally:
-            NSWorkspace.shared.open(url)
+            // 白名单已在策略里判过（http/https/mailto）；执行侧再判一次，
+            // 保证任何新增的 `.openExternally` 分支都不会绕过闸控（outD-5）。
+            openExternally(url)
+            decisionHandler(.cancel)
+        case .block:
+            onBlockedExternalNavigation?(url)
             decisionHandler(.cancel)
         }
+    }
+
+    /// 交给系统默认 handler 打开；协议不在白名单内时只上报，不调用 `NSWorkspace`。
+    private func openExternally(_ url: URL) {
+        guard WebViewNavigationPolicy.canOpenExternally(url) else {
+            onBlockedExternalNavigation?(url)
+            return
+        }
+        NSWorkspace.shared.open(url)
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
@@ -220,7 +237,9 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKD
             if WebViewNavigationPolicy.isAllowedURL(url, serviceURL: serviceURL) {
                 webView.load(URLRequest(url: url))
             } else {
-                NSWorkspace.shared.open(url)
+                // 弹窗路径与主框架路径共用同一个协议白名单（outD-5）：`file:` 与
+                // 自定义 scheme 既不加载也不交给 LaunchServices。
+                openExternally(url)
             }
         }
         return nil

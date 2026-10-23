@@ -153,7 +153,29 @@ enum RemoteAccessPassword {
         return password
     }
 
-    /// 是否存在可用的非空密码。
+    /// 三态结论：界面必须能区分“确实没设”与“读不到”。
+    ///
+    /// 旧实现把两者压成同一个 `false`，于是登录钥匙串被锁定时界面显示“未设置”、
+    /// 删除按钮也被禁用，而条目其实就存在——用户会以为密码丢了并重新设置一次。
+    enum Status: Equatable {
+        case set
+        case notSet
+        /// 读取失败（钥匙串锁定、交互不允许、授权被拒、数据损坏等）。
+        case unreadable
+    }
+
+    static func status(in keychain: KeychainStoring, account: String = account) -> Status {
+        do {
+            let password = try keychain.load(for: account)
+            return password.isEmpty ? .notSet : .set
+        } catch KeychainStoreError.notFound {
+            return .notSet
+        } catch {
+            return .unreadable
+        }
+    }
+
+    /// 是否存在可用的非空密码。读取失败一律算“不可用”（fail closed）。
     static func isSet(in keychain: KeychainStoring, account: String = account) -> Bool {
         load(from: keychain, account: account) != nil
     }
@@ -161,6 +183,15 @@ enum RemoteAccessPassword {
     /// 只用于界面和诊断的状态文案：不含密码值、密码长度或 Keychain 原始数据。
     static func statusText(isSet: Bool) -> String {
         isSet ? "已设置（仅存于 Keychain）" : "未设置"
+    }
+
+    /// 三态版本的界面文案。
+    static func statusText(for status: Status) -> String {
+        switch status {
+        case .set: return "已设置（仅存于 Keychain）"
+        case .notSet: return "未设置"
+        case .unreadable: return "无法读取（请解锁登录钥匙串后重试）"
+        }
     }
 }
 
@@ -314,6 +345,16 @@ enum RemoteAccessPolicy {
             return .rejected(
                 hostname: hostname,
                 message: "监听地址只能包含字母、数字、点、连字符、下划线和 IPv6 方括号；不要填写协议、路径或空格。"
+            )
+        }
+        // 首字符为 `-` 会被下游 argparse/minimist 当作**选项**而不是取值：
+        // `--hostname --no-open` 让 pi-web 收起 `--no-open`（或直接报错），而应用
+        // 侧仍按该文本拼 URL。上面的字符集本身允许连字符（IPv6/主机名需要），
+        // 因此必须单独拦首字符。
+        guard !trimmed.hasPrefix("-") else {
+            return .rejected(
+                hostname: hostname,
+                message: "监听地址不能以连字符开头：它会被当作命令行选项解析，请填写主机名或 IP 地址。"
             )
         }
         // 空标签（前导/尾随点、连续点）不是合法写法：`0.0.0.0.` 会被系统解析成

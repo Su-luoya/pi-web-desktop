@@ -143,6 +143,14 @@ extension AppDelegate {
             // 检查期间即使有异步回调到达，服务启动入口也必须保持关闭。
             serviceManager.isDependencyGateOpen = false
         }
+        // 用户主动“重新检测”时丢掉一次性的工具 PATH 解析结果：登录 shell 首次
+        // 超时（rc 文件首次编译、nvm 冷启动）会让 node/npm prefix 都解不出，
+        // 而 provider 是同一个实例注入的，不失效则“重新检测”拿到的永远是那份
+        // nil（node/pi/pi-web 全判缺失、服务门控关闭），只能重启应用。
+        // 只在用户触发时失效：自动重试会在没装 node 的机器上反复 spawn 登录 shell。
+        if triggeredByUser {
+            toolPathProvider.invalidateResolution()
+        }
         dependencyCheckGeneration += 1
         let generation = dependencyCheckGeneration
         // 在主线程读配置和注入的 runner，后台只执行只读探测。

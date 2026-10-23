@@ -41,11 +41,16 @@ enum DesktopAppUpdateFailure: String, Error, Equatable {
     case notWritable, replacementFailed, relaunchFailed
     /// 菜单入口拿到的结论不满足 `DesktopAppUpdateInstallPolicy` 的准入条件。
     case unconfirmedUpdate
+    /// 已经有一轮更新在跑（含下载窗口期与等待确认）：拒绝重复开始。
+    case updateAlreadyInProgress
 
     var text: String {
         switch self {
         case .unsupportedInstallation: return "当前应用不是从 /Applications 安装，无法自动更新。"
         case .unconfirmedUpdate: return "本次检查结果不是本轮从上游确认的可用更新，或目标版本不比当前版本新；请重新检查更新后再试。"
+        case .updateAlreadyInProgress:
+            return "桌面应用更新已在进行中（等待确认、下载、校验或替换），请等它完成后再试；"
+                + "重复开始只会再下一遍同样的安装包。"
         case .missingAsset: return "该版本没有可用的桌面应用 ZIP 发布包。"
         case .invalidAssetURL: return "更新包地址不在允许的 GitHub 主机上。"
         case .downloadFailed: return "更新包下载失败。"
@@ -64,6 +69,125 @@ enum DesktopAppUpdateFailure: String, Error, Equatable {
 struct DesktopAppUpdateInstallTarget: Equatable {
     var version: String
     var releaseTag: String
+}
+
+// MARK: - 入口闸控状态（outD-2）
+
+/// 桌面 App 自更新的进行中阶段。
+///
+/// 下载窗口期（用户确认之后、`desktopAppUpdateInstaller` 对象被创建之前）没有安装器
+/// 可查：旧实现只用 `desktopAppUpdateInstaller == nil` 判断，于是菜单入口在整个
+/// 「重新取发布页 → 取校验文件 → 下整包」期间一直可点。第二次点击会再走一轮同样的
+/// 网络请求与整包下载，两条流程最后都撞到「安装器已存在」的 guard：后到者静默丢弃
+/// （用户既看不到进度也看不到错误），先到者失败时还会先后弹两个失败框。
+///
+/// 用显式阶段覆盖整轮流程，入口判据与菜单标题都读它。
+enum DesktopAppUpdateActivity: Equatable {
+    case idle
+    /// 确认框已经弹出、用户还没答复：也算「一轮已经开始」，否则确认框还开着时
+    /// 再点菜单会再弹一个确认框（AppKit 会把它们堆成队列）。
+    case confirming
+    /// 已确认，正在按 tag 重新取发布页（含资产与 `.sha256` 校验值请求）。
+    case resolvingRelease
+    /// 安装器已接手：下包、校验、替换与重新启动。
+    case installing
+
+    var isBusy: Bool { self != .idle }
+
+    /// 菜单标题后缀：进行中时给出可见原因。
+    var menuTitleSuffix: String? {
+        switch self {
+        case .idle: return nil
+        case .confirming: return "（等待确认）"
+        case .resolvingRelease: return "（正在下载）"
+        case .installing: return "（正在安装）"
+        }
+    }
+}
+
+/// 桌面 App 自更新入口（菜单项与 `updateDesktopAppNow(_:)`）的准入判定。
+///
+/// 两条判据缺一不可：① 本次网络往返核实过、且目标版本比当前版本新（由
+/// `DesktopAppUpdateInstallPolicy` 判）；② 没有任何一轮更新在跑。② 旧实现只看安装器
+/// 对象，覆盖不到下载窗口期（见 `DesktopAppUpdateActivity`）。
+enum DesktopAppUpdateEntryPolicy {
+    /// 是否准许进入一轮新的更新：可安装且没有一轮在跑。
+    static func isEntryEnabled(
+        installable: Bool,
+        activity: DesktopAppUpdateActivity,
+        installerPresent: Bool
+    ) -> Bool {
+        installable && !isBusy(activity: activity, installerPresent: installerPresent)
+    }
+
+    /// 是否有一轮更新在跑。安装器对象与阶段位任一为真即算：退出路径会把安装器置
+    /// nil，而阶段位由整轮流程自己复位，两者相互兜底。
+    static func isBusy(activity: DesktopAppUpdateActivity, installerPresent: Bool) -> Bool {
+        installerPresent || activity.isBusy
+    }
+
+    /// 菜单标题后缀：被挡住时给出可见原因（不静默置灰）。空闲返回 nil。
+    static func menuTitleSuffix(activity: DesktopAppUpdateActivity, installerPresent: Bool) -> String? {
+        if let suffix = activity.menuTitleSuffix { return suffix }
+        return installerPresent ? DesktopAppUpdateActivity.installing.menuTitleSuffix : nil
+    }
+}
+
+/// 一轮桌面 App 自更新的阶段机（outD-2）。
+///
+/// 旧实现用 `desktopAppUpdateInstaller == nil` 当唯一闸控，而安装器对象直到发布页、
+/// 资产列表与 `.sha256` 全部核对完才创建，于是整个「确认 → 取发布页 → 取校验值 →
+/// 下整包」窗口期都看不出「进行中」。这个状态机把整轮占位，并记住「哪一轮」：一轮
+/// 结束只能复位自己那一轮，否则一个晚到的旧回调会把新一轮的阶段位清掉，让入口在
+/// 下载中途重新可点。
+struct DesktopAppUpdateRound: Equatable {
+    private(set) var activity: DesktopAppUpdateActivity = .idle
+    /// 当前这一轮对应的发布 tag：回调晚到时的归属判据。
+    private(set) var releaseTag: String?
+
+    var isBusy: Bool { activity.isBusy }
+
+    /// 准备弹确认框：占住入口，避免确认框还开着时再弹一个（两个「更新」都确认就会
+    /// 并行跑两轮下载）。已有一轮在跑时拒绝。
+    mutating func beginConfirming(releaseTag: String) -> Bool {
+        guard activity == .idle else { return false }
+        activity = .confirming
+        self.releaseTag = releaseTag
+        return true
+    }
+
+    /// 用户确认后进入联网核对：只允许推进自己这一轮（同一 tag），否则拒绝。
+    mutating func beginResolving(releaseTag: String) -> Bool {
+        switch activity {
+        case .idle:
+            activity = .resolvingRelease
+            self.releaseTag = releaseTag
+            return true
+        case .confirming where self.releaseTag == releaseTag:
+            activity = .resolvingRelease
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// 安装器已接手下载/校验/替换。
+    mutating func markInstalling(releaseTag: String) -> Bool {
+        guard self.releaseTag == releaseTag, activity == .resolvingRelease else { return false }
+        activity = .installing
+        return true
+    }
+
+    /// 结束一轮（成功、失败或用户取消）。只有发起方那一轮才能复位：旧一轮晚到的回调
+    /// 不得把新一轮的阶段位清掉。返回是否真的变了（供调用方决定是否刷新菜单）。
+    @discardableResult
+    mutating func finish(releaseTag: String?) -> Bool {
+        guard releaseTag == nil || self.releaseTag == releaseTag else { return false }
+        guard activity != .idle else { return false }
+        activity = .idle
+        self.releaseTag = nil
+        return true
+    }
 }
 
 /// 人工「更新桌面应用」流程的准入判定（GitHub #176）。
@@ -103,7 +227,6 @@ enum DesktopAppUpdateInstallPolicy {
 }
 
 enum DesktopAppReleaseAssetSelector {
-    static let allowedHost = UpdateCheckUpstream.githubHost
     static let allowedAssetHost = "github.com"
     static let allowedRedirectHosts: Set<String> = [
         "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"
@@ -369,9 +492,6 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
         return true
     }
 
-    static func isRunningFromApplications(_ url: URL) -> Bool {
-        canReplaceInstalledApp(url)
-    }
     static func canWriteApplicationDirectory(applicationURL: URL, fileManager: FileManager = .default) -> Bool {
         guard canReplaceInstalledApp(applicationURL, fileManager: fileManager) else { return false }
         let probe = applicationURL.deletingLastPathComponent().appendingPathComponent(".PiWebDesktop-write-test-\(UUID().uuidString)")
@@ -395,14 +515,3 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }
-
-#if DEBUG
-private enum DesktopAppUpdateSelfCheck {
-    static func verify() {
-        assert(DesktopAppReleaseAssetSelector.isReleaseTag("v2.5.0"))
-        assert(!DesktopAppReleaseAssetSelector.isReleaseTag("v2/5.0"))
-        assert(DesktopAppReleaseAssetSelector.normalizedChecksum(String(repeating: "A", count: 64)) != nil)
-        assert(DesktopAppReleaseAssetSelector.normalizedChecksum("not-a-checksum") == nil)
-    }
-}
-#endif

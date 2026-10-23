@@ -274,4 +274,63 @@ final class LogRedactorTests: XCTestCase {
         XCTAssertEqual(text, "env: HOME=~")
         XCTAssertFalse(text.contains(name))
     }
+
+    // MARK: 分块脱敏状态（PEM 私钥跨调用）
+
+    /// PEM 头行与正文分属两次 redact 调用（历史日志按 256KB 切块、子进程输出
+    /// 按行块到达）时，正文仍必须被屏蔽：块状态由调用方持有并传回。
+    func testPrivateKeyBlockStateSurvivesAcrossCalls() {
+        var continuation = LogRedactor.Continuation()
+        // 输入均不带尾随换行，避免拆分伪影参与断言；真实分块路径由
+        // LogWriterTests 的整文件场景覆盖。
+        let header = redactor.redact(
+            "-----BEGIN OPENSSH PRIVATE KEY-----",  // scan-secrets: allow(reason=redaction fixture)
+            continuation: &continuation
+        )
+        XCTAssertEqual(header, "\(LogRedactor.marker)")
+        XCTAssertTrue(continuation.isInsidePrivateKeyBlock)
+
+        let body = redactor.redact(
+            "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ\nQyNTUxOQAAACD1234567890",  // scan-secrets: allow(reason=redaction fixture)
+            continuation: &continuation
+        )
+        XCTAssertFalse(body.contains("b3BlbnNzaC1rZXktdjE"), body)
+        XCTAssertFalse(body.contains("QyNTUxOQAAACD"), body)
+
+        let terminator = redactor.redact(
+            "-----END OPENSSH PRIVATE KEY-----\nafter",  // scan-secrets: allow(reason=redaction fixture)
+            continuation: &continuation
+        )
+        XCTAssertFalse(continuation.isInsidePrivateKeyBlock)
+        XCTAssertEqual(terminator, "\(LogRedactor.marker)\nafter")
+    }
+
+    /// 默认入口不携带状态：每次调用独立，行为与旧版一致。
+    func testDefaultRedactCallsAreIndependent() {
+        _ = redactor.redact("-----BEGIN OPENSSH PRIVATE KEY-----\n")  // scan-secrets: allow(reason=redaction fixture)
+        let body = redactor.redact("b3BlbnNzaC1rZXktdjEAAAAABG5vbmU\n")  // scan-secrets: allow(reason=redaction fixture)
+        XCTAssertEqual(body, "b3BlbnNzaC1rZXktdjEAAAAABG5vbmU\n")  // scan-secrets: allow(reason=redaction fixture)
+    }
+
+    // MARK: 未加引号值里的 `,` `;` `&`（半个秘密回归）
+
+    /// 未加引号的敏感值不再在 `,` `;` `&` 处截断：含这些字符的真实凭据
+    /// （shell 导出、环境变量 dump）旧版只屏蔽前半段、留下半个秘密。代价是
+    /// 敏感键之后同一行的其它键值对被一并涂掉（过度遮蔽，方向安全）。
+    func testUnquotedValuesWithSeparatorsAreRedactedToEndOfLine() {
+        XCTAssertEqual(redactor.redact("export PASSWORD=one,two"), "export PASSWORD=\(LogRedactor.marker)")
+        XCTAssertEqual(redactor.redact("password=ab;cd"), "password=\(LogRedactor.marker)")
+        XCTAssertEqual(redactor.redact("token=abc&def"), "token=\(LogRedactor.marker)")
+        XCTAssertEqual(
+            redactor.redact("--password one,two --port 30141"),
+            "--password \(LogRedactor.marker) --port 30141"
+        )
+    }
+
+    /// `;` 也是查询串分隔符：整条 query 都视为秘密（老式 `;jsessionid` 形态）。
+    func testQueryStringsSeparatedBySemicolonsAreRedactedAsAWhole() {
+        let text = redactor.redact("GET https://pi.example.invalid/p?a=1;b=2")
+        XCTAssertTrue(text.contains("https://pi.example.invalid/p?\(LogRedactor.marker)"), text)
+        XCTAssertFalse(text.contains("b=2"))
+    }
 }

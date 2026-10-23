@@ -1,6 +1,6 @@
 # 贡献指南
 
-Pi Web Desktop 是 [`agegr/pi-web`](https://github.com/agegr/pi-web) 的**非官方** macOS companion app，与上游维护者没有隶属关系。它负责启动、管理和显示本机 Pi Web，不维护上游 Web 服务；上游问题请先到上游仓库确认。支持范围与“未承诺”事项见 [README 支持矩阵](README.md#支持矩阵)。
+Pi Web Desktop 是 [`agegr/pi-web`](https://github.com/agegr/pi-web) 的**非官方** macOS companion app，与上游维护者没有隶属关系。它负责启动、管理和显示本机 Pi Web，不维护上游 Web 服务；上游问题请先到上游仓库确认。支持范围与“未承诺”事项见 [README 已知限制](README.md#已知限制)。
 
 ## Issue
 

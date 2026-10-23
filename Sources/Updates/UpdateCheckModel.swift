@@ -43,6 +43,13 @@ struct UpdateCheckTarget: Equatable, Hashable {
         }
         return category.displayName
     }
+
+    /// 非扩展包目标的便捷常量（包名为 nil）。扩展包按包名逐个构造；
+    /// 字典键（alreadyNotified）里可用 `.piWeb` 等简写。
+    static let desktopApp = UpdateCheckTarget(category: .desktopApp, packageName: nil)
+    static let piCLI = UpdateCheckTarget(category: .piCLI, packageName: nil)
+    static let piWeb = UpdateCheckTarget(category: .piWeb, packageName: nil)
+    static let piPackages = UpdateCheckTarget(category: .piPackages, packageName: nil)
 }
 
 /// `pi list` 报告的一个扩展包及其本机版本。

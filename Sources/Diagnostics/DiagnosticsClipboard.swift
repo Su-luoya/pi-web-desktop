@@ -43,10 +43,17 @@ enum DiagnosticsClipboard {
         }
     }
 
-    /// 把已经确认过的文本写入剪贴板；空文本不写入。
-    static func copy(_ text: String) {
-        guard !text.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+    /// 把已经确认过的文本写入剪贴板；空文本不写入。返回是否成功写入：
+    /// `setString` 可能失败（其它进程持有剪贴板等），失败时调用方应给出提示，
+    /// 否则用户以为已复制、公开 issue 里却贴不出诊断信息。
+    @discardableResult
+    static func copy(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        guard NSPasteboard.general.clearContents() != 0,
+              NSPasteboard.general.setString(text, forType: .string) else {
+            NSSound.beep()
+            return false
+        }
+        return true
     }
 }

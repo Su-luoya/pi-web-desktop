@@ -94,6 +94,8 @@ enum PiCLIUpdateDeferral: Equatable {
     /// 同一组件存在未清除的「已放弃」记录（GitHub #62）：推迟到下次启动；手动
     /// 入口不受影响，但必须在确认框里先看到这条记录。
     case abandonedAttemptPending(UpdateAbandonedAttempt)
+    /// 已经有一轮 Pi CLI 更新在跑（含手动入口）（outD-4）。
+    case updateInProgress
 
     var text: String {
         switch self {
@@ -105,6 +107,9 @@ enum PiCLIUpdateDeferral: Equatable {
             return "无法确定 Pi 进程状态（\(reason.text)）：按不安全处理，推迟到下一次判定。应用不会结束任何进程。"
         case .abandonedAttemptPending(let attempt):
             return UpdateAbandonedAttemptPresenter.automaticRefusalText(attempt)
+        case .updateInProgress:
+            return "已有一轮 Pi CLI 更新在执行（可能是手动触发的）：推迟到它结束后的下一次判定，"
+                + "本次不消耗「每次运行只自动更新一次」的机会。"
         }
     }
 
@@ -288,4 +293,7 @@ struct PiCLIUpdatePlanningInput: Equatable {
     /// （推迟到下次启动）；手动入口仍然可用但必须先看到这条记录。
     /// 默认 nil，旧调用点保持不变。
     var abandonedAttempt: UpdateAbandonedAttempt? = nil
+    /// 已经有一轮 Pi CLI 更新在跑（outD-4）：值来自手动/自动两条路径共用的入口闸控。
+    /// 默认 false，旧调用点保持不变。
+    var updateInProgress: Bool = false
 }

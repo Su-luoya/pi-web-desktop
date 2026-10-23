@@ -24,6 +24,10 @@ import Foundation
 /// 线程约定：`start` / `stop` / `updateInventory` / `checkNow` / `checkIfDue` /
 /// `preferences` / `ignoredVersions` / `summary` 在主线程调用；检查主体在调度器
 /// 提供的执行队列上运行，结果经 `deliver` 回到主线程后回调 `onResultsChanged`。
+///
+/// 例外：`preferences` 与 `ignoredVersions` 虽由主线程写入，但检查队列会读
+/// （策略过滤、到期判断、忽略版本判定、汇总构建）。这两处访问经
+/// `settingsLock` 内部同步（并发审计 S1：裸属性构成真实数据竞争）。
 final class UpdateChecker {
     /// 单次请求超时（秒）。
     static let requestTimeout: TimeInterval = 15
@@ -44,12 +48,24 @@ final class UpdateChecker {
 
     /// 用户策略。改变后（已 `start` 时）立即按新策略重建周期计时器，因此关闭
     /// 某一类后该分类不再被调度。
+    ///
+    /// 主线程写、检查队列读：经 `settingsLock` 保护（见类文档线程约定）。
+    /// 初始化不触发计时器重建，与原 `didSet` 语义一致。
     var preferences: UpdateCheckPreferences {
-        didSet {
+        get {
+            settingsLock.lock()
+            defer { settingsLock.unlock() }
+            return preferencesValue
+        }
+        set {
+            settingsLock.lock()
+            preferencesValue = newValue
+            settingsLock.unlock()
             guard started, !stopped else { return }
             restartTimers()
         }
     }
+    private var preferencesValue: UpdateCheckPreferences
 
     /// 被用户忽略的版本。只影响提示与状态标记，不影响已写入的缓存；改变后
     /// 下一次检查立即生效。
@@ -87,7 +103,26 @@ final class UpdateChecker {
 
     /// 忽略版本。由调用方（`AppDelegate`）从 UserDefaults 读入并在界面里更新；
     /// `UpdateChecker` 自己从不写 UserDefaults。
-    var ignoredVersions: UpdateIgnoredVersions = .empty
+    ///
+    /// 主线程写、检查队列读（`evaluate` 的忽略判定）：经 `settingsLock` 保护。
+    var ignoredVersions: UpdateIgnoredVersions {
+        get {
+            settingsLock.lock()
+            defer { settingsLock.unlock() }
+            return ignoredVersionsValue
+        }
+        set {
+            settingsLock.lock()
+            ignoredVersionsValue = newValue
+            settingsLock.unlock()
+        }
+    }
+    private var ignoredVersionsValue: UpdateIgnoredVersions = .empty
+
+    /// 保护 `preferencesValue` / `ignoredVersionsValue` 跨线程访问的锁。
+    /// 写在主线程，读在检查队列；锁内只做取值/赋值，不调用任何会再加锁的方法
+    ///（NSLock 不可重入，`restartTimers` 在锁外调用）。
+    private let settingsLock = NSLock()
 
     init(
         httpClient: UpdateHTTPClient,
@@ -106,8 +141,8 @@ final class UpdateChecker {
         self.scheduler = scheduler
         self.identity = identity
         self.intervals = intervals
-        self.preferences = preferences
-        self.ignoredVersions = ignoredVersions
+        self.preferencesValue = preferences
+        self.ignoredVersionsValue = ignoredVersions
         self.log = log
     }
 
@@ -149,6 +184,9 @@ final class UpdateChecker {
             return
         }
         scheduler.perform { [weak self] in
+            // 并发审计次要：self 已释放时 completion 无法投递（scheduler 属于 self，
+            // 没有可达的投递队列）。当前 checker 是应用级对象、不释放，分支不可达；
+            // 记录为防御性缺口，停止路径（stopped）已在下方 completion 补偿。
             guard let self, !self.stopped else {
                 if let self { self.scheduler.deliver { completion?() } }
                 return
@@ -207,7 +245,7 @@ final class UpdateChecker {
         // 产生请求。
         var intervalsInUse: [TimeInterval] = []
         for category in UpdateCheckCategory.allCases {
-            guard let interval = intervals.interval(for: category, policy: preferences.policy(for: category)) else { continue }
+            guard let interval = intervals.interval(for: preferences.policy(for: category)) else { continue }
             guard !intervalsInUse.contains(interval) else { continue }
             intervalsInUse.append(interval)
         }
@@ -279,6 +317,9 @@ final class UpdateChecker {
         activeCompletions = completions
         loadCacheIfNeeded()
 
+        // 快照一份策略：检查主体后续多次读取（到期判断、汇总构建），逐次取值
+        // 虽已线程安全，但同一轮检查用同一份策略更可预测。
+        let preferences = self.preferences
         let enabled = UpdateCheckCategory.allCases.filter { preferences.isEnabled($0) }
         let now = clock.now()
         let items = plan(enabledCategories: enabled, onlyDueAt: onlyDue ? now : nil)
@@ -298,7 +339,7 @@ final class UpdateChecker {
                 trigger: trigger,
                 enabledCategories: enabled,
                 categoryStatuses: UpdateCategoryStatusBuilder.statuses(
-                    preferences: self.preferences,
+                    preferences: preferences,
                     intervals: self.intervals,
                     cache: self.cache,
                     ignoredVersions: self.ignoredVersions,
@@ -425,7 +466,7 @@ final class UpdateChecker {
         let cached = cache.entry(for: target.id)
         if let onlyDueAt {
             // 关闭的分类没有间隔，永远不会成为到期对象。
-            guard let interval = intervals.interval(for: category, policy: preferences.policy(for: category)) else {
+            guard let interval = intervals.interval(for: preferences.policy(for: category)) else {
                 return
             }
             if let lastAttempt = cached?.lastAttemptAt, onlyDueAt.timeIntervalSince(lastAttempt) < interval {

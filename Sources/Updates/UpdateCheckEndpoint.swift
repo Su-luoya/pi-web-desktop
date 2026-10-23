@@ -149,6 +149,11 @@ protocol UpdateHTTPClient: AnyObject {
 final class URLSessionUpdateHTTPClient: NSObject, UpdateHTTPClient, URLSessionTaskDelegate {
     private let defaultTimeout: TimeInterval
 
+    /// 应用级单例（AppDelegate 创建）：`perform` 只被 UpdateChecker 的串行队列
+    /// 调用，`lazy var session` 的惰性初始化因此无竞争。并发审计次要：若未来被
+    /// 第二个队列复用，lazy 初始化即竞争——新增调用方前必须保持单队列纪律。
+    /// URLSession 强持有 delegate，client↔session 互持且不 invalidate；对应用级
+    /// 单例无实际泄漏，勿改成按需重建（会泄漏旧 session）。
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieAcceptPolicy = .never

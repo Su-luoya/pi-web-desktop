@@ -29,11 +29,18 @@ struct UpdateCheckIdentity: Equatable {
 
     /// `Pi-Web-Desktop/<版本> (<bundle id>)` 形态（不在源码里写版本字面值）；
     /// 缺字段时省略对应片段，至少保留应用名。
+    ///
+    /// 审计次要：拼接前过滤控制字符（含 CR/LF）。数据源是 Info.plist，但请求头
+    /// 不得含换行，防御性清洗一处完成。
     var userAgent: String {
-        var token = appName.replacingOccurrences(of: " ", with: "-")
-        if let version, !version.isEmpty { token += "/\(version)" }
+        func sanitized(_ text: String) -> String {
+            let filtered = text.unicodeScalars.filter { $0.value >= 0x20 && $0.value != 0x7F }
+            return String(String.UnicodeScalarView(filtered))
+        }
+        var token = sanitized(appName.replacingOccurrences(of: " ", with: "-"))
+        if let version, !version.isEmpty { token += "/\(sanitized(version))" }
         if let bundleIdentifier, !bundleIdentifier.isEmpty {
-            token += " (\(bundleIdentifier))"
+            token += " (\(sanitized(bundleIdentifier)))"
         }
         return token
     }

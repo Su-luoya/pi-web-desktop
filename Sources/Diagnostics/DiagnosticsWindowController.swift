@@ -378,8 +378,17 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
     @objc private func copyInstallCommands(_ sender: Any?) {
         let commands = DependencyReportPresenter.installCommandsText(for: report)
         guard !commands.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(commands, forType: .string)
+        if !DiagnosticsClipboard.copy(commands) {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "复制失败"
+            alert.informativeText = "安装命令未能写入剪贴板，请再试一次。"
+            if let window, window.isVisible {
+                alert.beginSheetModal(for: window, completionHandler: nil)
+            } else {
+                alert.runModal()
+            }
+        }
     }
 
     /// 与菜单“复制诊断”同一份提醒文本、同一条导出路径（W4 M3）：窗口只转发，

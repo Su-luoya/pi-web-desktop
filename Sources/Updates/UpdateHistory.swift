@@ -68,14 +68,21 @@ enum UpdateHistoryStore {
     static let maximumEntries = 20
     /// 单条文本字段的长度上限（防止把不受控内容写进历史）。
     static let maximumTextFieldLength = 300
+    /// M7（更新事务审计）：历史写入/清除的进程内互斥锁（同 UpdateAbandonedAttemptStore）。
+    private static let storageLock = NSLock()
 
     static func load(from defaults: UserDefaults) -> [UpdateHistoryEntry] {
         guard let data = defaults.data(forKey: UpdateSettingKeys.updateHistory),
-              let entries = decode(data) else { return [] }
+              let entries = decode(data)?.entries else { return [] }
         return entries
     }
 
     static func record(_ entry: UpdateHistoryEntry, to defaults: UserDefaults) {
+        // M7（更新事务审计）：record 是「读全部 → 插入 → 写回」的读-改-写，且调用方
+        // 分布在多个队列（协调器投递队列、主线程）；与 UpdateAbandonedAttemptStore
+        // 同理加进程内互斥锁，避免并发记录互相覆盖丢失。
+        storageLock.lock()
+        defer { storageLock.unlock() }
         var entries = load(from: defaults)
         entries.insert(sanitize(entry), at: 0)
         entries = Array(entries.prefix(maximumEntries))
@@ -83,7 +90,10 @@ enum UpdateHistoryStore {
         defaults.set(data, forKey: UpdateSettingKeys.updateHistory)
     }
 
+    /// M7（更新事务审计）：与 record 的读-改-写共用同一把锁，避免清除与写入交错。
     static func clear(from defaults: UserDefaults) {
+        storageLock.lock()
+        defer { storageLock.unlock() }
         defaults.removeObject(forKey: UpdateSettingKeys.updateHistory)
     }
 
@@ -91,9 +101,30 @@ enum UpdateHistoryStore {
         try? JSONEncoder().encode(entries.map(StoredEntry.init(entry:)))
     }
 
-    static func decode(_ data: Data) -> [UpdateHistoryEntry]? {
-        guard let stored = try? JSONDecoder().decode([StoredEntry].self, from: data) else { return nil }
-        return stored.compactMap { $0.entry() }.map(sanitize).prefix(maximumEntries).map { $0 }
+    /// M7（更新事务审计）：单条解码降级（同 UpdateAbandonedAttemptStore.decode）。
+    /// 旧实现整体解码，任何一条损坏都会让全部历史丢失；现在逐条解码，只丢损坏的那条。
+    ///
+    /// 审计次要：丢弃不再完全静默——返回被丢弃的条数（未知枚举原始值或结构
+    /// 损坏），排查「历史条数变少」时有迹可循。
+    static func decode(_ data: Data) -> (entries: [UpdateHistoryEntry], discardedCount: Int)? {
+        guard let objects = (try? JSONSerialization.jsonObject(with: data)) as? [Any] else {
+            return nil
+        }
+        var entries: [UpdateHistoryEntry] = []
+        var discarded = 0
+        for object in objects {
+            // 单个非字典元素只丢弃自己，不让整份历史失效。
+            guard let dictionary = object as? [String: Any],
+                  JSONSerialization.isValidJSONObject(dictionary),
+                  let fragment = try? JSONSerialization.data(withJSONObject: dictionary),
+                  let stored = try? JSONDecoder().decode(StoredEntry.self, from: fragment),
+                  let entry = stored.entry() else {
+                discarded += 1
+                continue
+            }
+            entries.append(entry)
+        }
+        return (Array(entries.map(sanitize).prefix(maximumEntries)), discarded)
     }
 
     /// 去掉不受控内容：截断长文本、丢掉无法校验的包名与版本。
@@ -119,8 +150,18 @@ enum UpdateHistoryStore {
     }
 
     static func validVersion(_ text: String?) -> String? {
-        guard let text, let version = SemanticVersion(text), version.description == text else { return nil }
-        return text
+        guard let text, let version = SemanticVersion(text) else { return nil }
+        // M7（更新事务审计）：接受上游带 v/V 前缀的写法（存剥掉前缀后的规范形式），
+        // 不再因 `v1.2.3` ≠ `1.2.3` 把历史条目丢成「未知 → 未知」。欠段写法（如
+        // `1.2`）会被规范化成 `1.2.0`，存下来会失实，仍按不可信丢弃。
+        let normalized = version.description
+        if text == normalized { return text }
+        if text.count == normalized.count + 1,
+           let first = text.first, first == "v" || first == "V",
+           text.dropFirst() == normalized {
+            return normalized
+        }
+        return nil
     }
 
     /// 截断到上限并去除控制字符；空串视为 nil。

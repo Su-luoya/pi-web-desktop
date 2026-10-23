@@ -59,6 +59,9 @@ struct ComponentSourceEvidence: Equatable {
     var executablePath: String?
     var resolvedPath: String?
     var symlinkChain: [String] = []
+    /// 符号链接链因跳数上限未解析完（区别于悬空，审计低危 #8）。
+    /// 默认 false：测试构造点无需逐一传值。
+    var symlinkChainTruncated: Bool = false
     /// 最近一层 package.json 所在目录。
     var packageDirectory: String?
     /// 包目录（或向上）里 `.git` 的路径；nil 表示没有 git 证据。
@@ -194,9 +197,14 @@ enum ComponentSourceResolver {
             notes.append("路径位于 Homebrew 前缀（\(homebrewPrefixDescription(for: resolved) ?? homebrewPrefixDescription(for: executable) ?? "未知")）但没有 Cellar/opt 结构或 formula 证据：仅凭前缀不判定为 Homebrew")
         }
 
-        // 真实路径无法确定（符号链接链悬空）：只能 unknown，不拿链接路径当地址。
+        // 真实路径无法确定：只能 unknown，不拿链接路径当地址。区分悬空与链过长
+        // （审计低危 #8），避免把「跳数上限」误报成「链接链悬空」。
         if input.resolvedPath == nil, input.executablePath != nil {
-            notes.append("可执行文件的符号链接链悬空：真实路径无法确定")
+            notes.append(
+                input.symlinkChainTruncated
+                    ? "可执行文件的符号链接链过长：已到跳数上限，真实路径未解析"
+                    : "可执行文件的符号链接链悬空：真实路径无法确定"
+            )
         }
 
         // 10. 本地路径：真实路径在 Home 下、文件存在且没有其它证据。

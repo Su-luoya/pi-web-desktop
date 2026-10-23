@@ -323,7 +323,7 @@ final class UpdateSettingsTests: XCTestCase {
         XCTAssertEqual(intervals.interval(for: .weekly), 20)
         XCTAssertEqual(intervals.interval(for: .checkAndNotify), 30)
         XCTAssertEqual(intervals.interval(for: .askBeforeUpdate), 30)
-        XCTAssertNil(intervals.interval(for: .piPackages, policy: .off))
+        XCTAssertNil(intervals.interval(for: .off))
         // 缓存 TTL 用该分类的出厂默认策略。
         XCTAssertEqual(intervals.ttl(for: .desktopApp), 10)
         XCTAssertEqual(intervals.ttl(for: .piPackages), 30)
@@ -686,5 +686,57 @@ final class UpdateSettingsTests: XCTestCase {
             XCTAssertEqual(configuration.updateCheckPreferences(), preferences)
             XCTAssertEqual(configuration.updateCheckIgnoredVersions().ignored(for: .piCLI)?.version, "1.2.3")
         }
+    }
+
+    // MARK: - M11/M12（更新事务审计）：设置窗口布局
+
+    /// 唯一构造 AppKit 对象的用例：只创建窗口控制器（不 show、不进 runloop），
+    /// 断言 AutoLayout 约束本身的健全性。
+    func testSettingsWindowLayoutConstraintsAreSound() throws {
+        let controller = UpdateSettingsWindowController()
+        let window = try XCTUnwrap(controller.window)
+        let content = try XCTUnwrap(window.contentView)
+
+        // M11：abandonedStatusLabel 是可换行长文本（Pi 命令超时/被放弃后才有内容），
+        // 必须像其余长文本 label 一样有 620 宽度约束，否则出现长文本时用
+        // intrinsic width，与 stack 尾部 -24 固定边距冲突（约束冲突 + 文本溢出窗口）。
+        let label = controller.abandonedStatusLabel
+        // 宽度常量约束安装在最近公共祖先（自引用约束即 label 自身或其父视图）；
+        // 多层范围可能重复报出同一条约束，按身份去重。
+        let scope = content.constraints + content.subviews.flatMap { $0.constraints } + label.constraints
+        var seen = Set<ObjectIdentifier>()
+        let widthConstraints = scope.filter { constraint in
+            guard constraint.firstItem as? NSView === label, constraint.firstAttribute == .width else { return false }
+            if seen.contains(ObjectIdentifier(constraint)) { return false }
+            seen.insert(ObjectIdentifier(constraint))
+            return true
+        }
+        // 对照组：既有长文本 label（piPackageStatusLabel）同样存在一条 620 宽度
+        // 约束（另有 AppKit 自加的 width==0 约束，与本修复无关，不作断言）。
+        let packageStatusLabel: NSView = controller.piPackageStatusLabel
+        let pkgScope = content.constraints + content.subviews.flatMap { $0.constraints } + packageStatusLabel.constraints
+        let packageSixTwenty = pkgScope.filter { constraint in
+            constraint.firstItem as? NSView === packageStatusLabel
+                && constraint.firstAttribute == .width && constraint.constant == 620
+        }
+        XCTAssertEqual(packageSixTwenty.count, 1, "对照组应恰有一条 620 宽度约束")
+
+        // M11 主断言：abandonedStatusLabel 与其他长文本 label 一致，恰有一条 620。
+        let sixTwenty = widthConstraints.filter { $0.constant == 620 && $0.relation == .equal }
+        XCTAssertEqual(sixTwenty.count, 1, "abandonedStatusLabel 必须恰有一条 620 宽度约束（M11）")
+        XCTAssertFalse(
+            widthConstraints.contains { $0.constant != 620 && $0.constant != 0 },
+            "不应有其他非预期宽度的显式约束（M11）"
+        )
+
+        // M12：minSize 高度必须覆盖内容固有高度，否则拉到最小会触发不可满足约束
+        // 并裁掉底部按钮（旧实现固定 620 < 静态内容需要的约 700）。
+        let fittingHeight = content.fittingSize.height
+        XCTAssertGreaterThan(fittingHeight, 0, "内容应有非零固有高度")
+        XCTAssertGreaterThanOrEqual(
+            window.minSize.height,
+            fittingHeight,
+            "minSize \(window.minSize.height) 不得小于内容固有高度 \(fittingHeight)（M12）"
+        )
     }
 }

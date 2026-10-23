@@ -21,6 +21,9 @@ final class UpdateSettingsWindowController: NSWindowController {
     private var ignorableVersions: [UpdateCheckCategory: String] = [:]
     private var piCLIStatusText = ""
     private var piPackageStatusText = ""
+    /// 最近一次外部推送的放弃状态文本；内部动作触发的局部刷新用它回填，
+    /// 不再依赖外部“恰好会再同步一次”（审计次要）。
+    private var abandonedStatusText = ""
 
     private var policyPopups: [UpdateCheckCategory: NSPopUpButton] = [:]
     private var statusLabels: [UpdateCheckCategory: NSTextField] = [:]
@@ -47,9 +50,11 @@ final class UpdateSettingsWindowController: NSWindowController {
         + "并在菜单“服务 → 更新检查设置 → 查看 Pi 扩展包更新…”里显示包名、当前/目标版本、"
         + "完整参数数组与风险说明，取消是默认按钮；只调用 Pi 官方命令 pi update npm:<包名>。"
         + "检测到运行中的 Pi 进程或进程状态不确定时拒绝执行；应用不会结束或信号任何 Pi 进程。")
-    private let piPackageStatusLabel = NSTextField(labelWithString: "")
+    /// internal：布局回归测试需要对照其他长文本 label 的约束（M11）。
+    let piPackageStatusLabel = NSTextField(labelWithString: "")
     /// 「已放弃」记录（GitHub #62）：超时/放弃等待之后可能仍在运行的命令。
-    private let abandonedStatusLabel = NSTextField(labelWithString: "")
+    /// internal：回归测试需要检查它的宽度约束（M11）。
+    let abandonedStatusLabel = NSTextField(labelWithString: "")
 
     private static let timestampFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -81,6 +86,7 @@ final class UpdateSettingsWindowController: NSWindowController {
         self.ignorableVersions = ignorableVersions
         self.piCLIStatusText = piCLIStatus
         self.piPackageStatusText = piPackageStatus
+        self.abandonedStatusText = abandonedStatus
         for category in UpdateCheckCategory.allCases {
             let policy = preferences.policy(for: category)
             let popup = policyPopups[category]
@@ -239,6 +245,10 @@ final class UpdateSettingsWindowController: NSWindowController {
             piCLIStatusLabel.widthAnchor.constraint(equalToConstant: 620),
             piPackageHintLabel.widthAnchor.constraint(equalToConstant: 620),
             piPackageStatusLabel.widthAnchor.constraint(equalToConstant: 620),
+            // M11（更新事务审计）：abandonedStatusLabel 也是可换行长文本，缺宽度
+            // 约束时用 intrinsic width，与 stack.trailingAnchor 的 -24 固定边距冲突
+            // （长文本在 Pi 命令超时/被放弃后出现，症状是约束冲突+文本溢出窗口）。
+            abandonedStatusLabel.widthAnchor.constraint(equalToConstant: 620),
             buttons.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
         for category in UpdateCheckCategory.allCases {
@@ -254,7 +264,12 @@ final class UpdateSettingsWindowController: NSWindowController {
         window.title = "更新检查偏好设置"
         window.contentView = content
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 668, height: 620)
+        // M12（更新事务审计）：minSize 不得小于内容固有高度——固定值 620 低于静态
+        // 内容需要的高度，拉到最小会触发不可满足约束并裁掉底部按钮。按 stack 的
+        // fittingSize 现算（可换行 label 宽度固定 620，文本高度即可确定），再外加上
+        // 下各 24 的边距；高度随文案调整自动跟踪，不再需要人工同步两个魔数。
+        let minimumWindowHeight = stack.fittingSize.height + 48
+        window.minSize = NSSize(width: 668, height: minimumWindowHeight)
         window.center()
         self.window = window
     }
@@ -275,7 +290,8 @@ final class UpdateSettingsWindowController: NSWindowController {
             statuses: statuses,
             ignorableVersions: ignorableVersions,
             piCLIStatus: piCLIStatusText,
-            piPackageStatus: piPackageStatusText
+            piPackageStatus: piPackageStatusText,
+            abandonedStatus: abandonedStatusText
         )
         onPreferencesChanged?(updated)
     }
@@ -290,7 +306,8 @@ final class UpdateSettingsWindowController: NSWindowController {
             statuses: statuses,
             ignorableVersions: ignorableVersions,
             piCLIStatus: piCLIStatusText,
-            piPackageStatus: piPackageStatusText
+            piPackageStatus: piPackageStatusText,
+            abandonedStatus: abandonedStatusText
         )
         onPreferencesChanged?(updated)
     }
@@ -306,7 +323,8 @@ final class UpdateSettingsWindowController: NSWindowController {
             statuses: statuses,
             ignorableVersions: ignorableVersions,
             piCLIStatus: piCLIStatusText,
-            piPackageStatus: piPackageStatusText
+            piPackageStatus: piPackageStatusText,
+            abandonedStatus: abandonedStatusText
         )
         onPreferencesChanged?(updated)
     }

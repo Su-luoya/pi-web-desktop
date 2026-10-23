@@ -32,6 +32,14 @@ final class ServiceManager {
 
     static let maxStartupAttempts = 150
     static let startupPollInterval: TimeInterval = 0.2
+    /// 启动就绪轮询的真实时长上界（秒）。
+    ///
+    /// 旧实现只按“次数”记账（150 × 0.2 秒 ≈ 30 秒），但每轮还要叠加一次探测的
+    /// 实际耗时（`probeTimeout` = 3 秒），端口能连但不回应 HTTP 时 150 次全超时
+    /// 就是 150 × 3.2 ≈ 480 秒，界面停在“正在启动…”可达 8 分钟，最后弹的文案
+    /// 却写“30 秒内未能启动”。现在以真实墙钟为准：`maxStartupAttempts` 仍作
+    /// 安全上限，30 秒到期无论剩余多少次都收尾。
+    static let startupBudget: TimeInterval = 30
     static let healthCheckInterval: TimeInterval = 4
     /// HTTP 健康探测的超时（GitHub #147）。1 秒在系统负载波动或休眠唤醒后过短，
     /// 会让一次正常的慢响应被当成断开，因此放宽到 3 秒。
@@ -81,6 +89,11 @@ final class ServiceManager {
     static func stopPollDelay(forAttempt attempt: Int) -> TimeInterval {
         TimeInterval(stopPollDelayMilliseconds(forAttempt: attempt)) / 1000
     }
+
+    /// SIGKILL 之后的确认轮数（GitHub #158 复审）。每轮 `stopPollDelay(0..)` = 10ms，
+    /// 因此上界 100ms：SIGKILL 正常在毫秒级生效，绝大多数情况第一次探测就返回。
+    /// 这一上界远小于停止等待本身，不会重新引入 Cmd+Q 卡顿。
+    static let postKillConfirmationPollAttempts = 10
     // 日志上限/保留份数的唯一来源是 `LogRotationPolicy`（GitHub #10），这里不保留第二套常量。
 
     private(set) var configuration: ServiceConfiguration
@@ -163,7 +176,10 @@ final class ServiceManager {
     private var nextStartupSessionID = 0
     /// 一次启动会话的轮询预算：每次开启新会话都清零，超时/成功/进程退出时结束会话。
     /// 因此“重试”总是重新开始轮询与预算，绝不会复用上一轮的失败结论（M1）。
+    /// 与 `startupBudgetDeadline` 一起生效：次数是安全上限，墙钟才是真实上界。
     private var startupAttempts = 0
+    /// 本次启动会话的墙钟截止时间（`startupBudget` 秒）。每次开启新会话重新计算。
+    private var startupBudgetDeadline: Date?
     /// 已经报过启动失败提示的会话号：同一会话只提示一次，避免弹窗循环（M1/M3）。
     private var startupFailureReportedSession: Int?
     /// 停止中标志按代次记账：只有它仍等于当前代次时才算“有停止在途”。任何一次
@@ -453,7 +469,13 @@ final class ServiceManager {
 
     func resolvePiWebPath() -> String? {
         if let configured = configuration.piWebPath.nilIfEmpty {
-            return fileManager.isExecutableFile(atPath: configured) ? configured : nil
+            // 用户配置的路径可能是 `~/bin/pi-web` 或带前后空白：不展开/不 trim 就
+            // 对字面字符串 `isExecutableFile` 恒为 false，诊断只会报“未找到”，
+            // 用户于是反复重装而真因是路径写法。存储侧（PreferencesWindowController）
+            // 只做 trim，`~` 展开必须在这里补上。
+            let expanded = (configured.trimmingCharacters(in: .whitespacesAndNewlines) as NSString)
+                .expandingTildeInPath
+            return fileManager.isExecutableFile(atPath: expanded) ? expanded : nil
         }
         let candidates = [
             "/opt/homebrew/bin/pi-web",
@@ -463,9 +485,17 @@ final class ServiceManager {
         if let path = candidates.first(where: { fileManager.isExecutableFile(atPath: $0) }) {
             return path
         }
-        return commandRunner.run(["/bin/zsh", "-lc", "command -v pi-web 2>/dev/null"])?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .nilIfEmpty
+        // `command -v` 的输出不能整段当路径：用户 `.zshenv`/`.zprofile` 里的任何
+        // `echo` 都会混进 stdout（只重定向了 stderr），`trimmingCharacters` 不会
+        // 去掉中间换行，得到多行字符串后 `posix_spawn` 直接 ENOENT。只取最后一
+        // 行，并且只有确认它真的是可执行文件才采信。
+        guard let output = commandRunner.run(["/bin/zsh", "-lc", "command -v pi-web 2>/dev/null"]) else {
+            return nil
+        }
+        return output
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .last(where: { fileManager.isExecutableFile(atPath: $0) })
     }
 
     /// 便捷入口：读一次凭证后交给 `startDecision(credentials:)`。
@@ -671,9 +701,24 @@ final class ServiceManager {
                         self.serviceProcess = nil
                         self.closeLog()
                         self.logWriter.record("服务进程已退出")
-                        if !self.isStoppingService && !self.isQuitting {
-                            self.setState(.stopped)
+                        guard !self.isStoppingService && !self.isQuitting else { return }
+                        // 启动轮询期间的意外退出必须立即上报（生产实证：pi-web
+                        // 启动即崩溃时，旧的轮询链会继续探测一个已死的进程直到
+                        // 30 秒预算耗尽，再把结论误报成“未能启动”）。终止回调在
+                        // 轮询探测到 `!isRunning` 之前就清空了句柄，所以快失败
+                        // 只能在这里做：结束会话让后续轮询回调全部过期，再给出
+                        // 与轮询分支一致的可读失败。`reportStartupFailureOnce`
+                        // 保证同一会话不重复上报；代次由外层 guard 保证。
+                        if let session = self.activeStartupSession,
+                           self.activeStartupSessionGeneration == self.lifecycleGeneration {
+                            self.endStartupSession()
+                            self.reportStartupFailureOnce(
+                                "pi-web 进程已退出。请查看日志：\(self.appConfiguration.logURL.path)",
+                                session: session
+                            )
+                            return
                         }
+                        self.setState(.stopped)
                     }
                 }
                 // 应用侧事件行也走同一个 LogWriter/LogRedactor。
@@ -682,7 +727,7 @@ final class ServiceManager {
                 // A process without a verifiable ownership record can never be
                 // managed: kill the fresh group and report the startup failure
                 // instead of leaving an unmanageable service behind.
-                let recorded = writeOwnershipRecord(for: specification, process: process)
+                let recorded = writeOwnershipRecord(for: process)
                 guard recorded, verifiedOwnershipRecord() != nil else {
                     abandonUnhostedLaunch(process: process)
                     return
@@ -725,27 +770,25 @@ final class ServiceManager {
     /// A PID that is not a process group leader, unreadable `ps` facts, or a
     /// failed write all mean "unhosted": the caller terminates the fresh
     /// process group, because an unverifiable service must never survive as a
-    /// half-managed child. The digest is over the normalized command text:
-    /// the live `ps -o args=` text when it is readable, otherwise the canonical
-    /// `executablePath + arguments` text (which a later verification then
-    /// rejects, since an empty live command line is a mismatch).
-    private func writeOwnershipRecord(for specification: ServiceLaunchSpecification, process: ServiceProcessHandle) -> Bool {
+    /// half-managed child. The digest is over the normalized command text: the
+    /// live `ps -o args=` text when it is readable. When nothing readable was
+    /// observed at launch, the launch has no arguments provenance at all and
+    /// returns false here — recording the locally constructed
+    /// `executablePath + arguments` text would be an unverified digest that the
+    /// process can never re-produce (npm/shebang installs report the
+    /// interpreter), so the record would only be deleted later for nothing.
+    private func writeOwnershipRecord(for process: ServiceProcessHandle) -> Bool {
         guard process.processIdentifier > 1,
               let facts = processInspector.processFacts(of: process.processIdentifier),
-              facts.processGroupID == process.processIdentifier else { return false }
-        let commandText = facts.commandLine.isEmpty
-            ? ServiceOwnershipRecord.commandText(
-                executablePath: specification.executablePath,
-                arguments: specification.arguments
-            )
-            : facts.commandLine
+              facts.processGroupID == process.processIdentifier,
+              !facts.commandLine.isEmpty else { return false }
         let record = ServiceOwnershipRecord(
             pid: process.processIdentifier,
             processGroupID: facts.processGroupID,
             launchedAt: facts.launchedAt,
             resolvedExecutable: facts.resolvedExecutable,
             resolvedExecutableSource: facts.resolvedExecutableSource,
-            argumentsDigest: ServiceOwnershipRecord.commandDigest(ofCommandText: commandText),
+            argumentsDigest: ServiceOwnershipRecord.commandDigest(ofCommandText: facts.commandLine),
             port: configuration.port,
             instanceID: instanceID,
             recordedAt: ISO8601DateFormatter().string(from: Date())
@@ -763,9 +806,11 @@ final class ServiceManager {
     ///
     /// This path owns the cleanup of that launch (`lifecycleGeneration` is bumped
     /// so its termination callback is ignored), signals only the fresh process
-    /// group and reports a startup failure. A child that survives the kill is
-    /// kept as the current handle, so `startDecision()` still sees a live child
-    /// and refuses to launch a second service.
+    /// group and reports a startup failure. A child that survives the kill keeps
+    /// its ownership record and its log channel, so `startDecision()` still sees
+    /// a live child and refuses to launch a second service, and the surviving
+    /// process stays stoppable (it must not lose its stop path or get EPIPE on
+    /// the next log write).
     private func abandonUnhostedLaunch(process: ServiceProcessHandle) {
         lifecycleGeneration &+= 1
         let generation = lifecycleGeneration
@@ -780,12 +825,25 @@ final class ServiceManager {
                     self.discardStaleCallback("放弃半托管启动", generation: generation)
                     return
                 }
-                // The launch is gone and its record (if one was written before
-                // the immediate verification failed) must not linger.
-                self.ownershipStore.removeRecord(at: self.appConfiguration.serviceOwnerURL)
-                self.closeLog()
-                if self.serviceProcess === process, !process.isRunning {
-                    self.serviceProcess = nil
+                // 子进程是否真的被终止是这个分支的分岔点：上面的注释声明“活下来的
+                // 子进程保留为当前句柄”，但旧实现无条件删记录 + 关管道，于是幸存
+                // 进程 (a) 永久失去停止路径（`stopService` 靠记录验证，`managedServicePID()`
+                // 恒 nil，退出也不会停它），(b) stdout/stderr 写端被关，下一次写日志
+                // 就 EPIPE。只有确认已退出才清理。
+                if process.isRunning {
+                    // 记录（若已写）留着当停止证据；日志写端也保留，否则幸存子进程
+                    // 下一次写日志就变成未处理的 EPIPE。
+                    self.logWriter.record(
+                        "半托管启动的进程未响应终止信号，保留所有权记录与日志通道（PID \(process.processIdentifier)）"
+                    )
+                } else {
+                    // The launch is gone and its record (if one was written before
+                    // the immediate verification failed) must not linger.
+                    self.ownershipStore.removeRecord(at: self.appConfiguration.serviceOwnerURL)
+                    self.closeLog()
+                    if self.serviceProcess === process {
+                        self.serviceProcess = nil
+                    }
                 }
                 self.clearStopping()
                 self.reportStartupFailure(
@@ -817,6 +875,7 @@ final class ServiceManager {
     private func beginStartupSession() -> Int {
         nextStartupSessionID &+= 1
         startupAttempts = 0
+        startupBudgetDeadline = Date().addingTimeInterval(Self.startupBudget)
         activeStartupSession = nextStartupSessionID
         activeStartupSessionGeneration = lifecycleGeneration
         return nextStartupSessionID
@@ -851,15 +910,18 @@ final class ServiceManager {
 
     /// 启动轮询的唯一实现。
     ///
-    /// 预算按一次启动会话记账：每次调用消耗一次（150 × 0.2 秒 ≈ 30 秒）；耗尽
-    /// 时结束会话并只报一次失败，下一次启动入口以新会话重新开始。所有延迟回调与
-    /// 探测回调都先校验代次与会话号，过期回调只写日志（M1/M2/M3）。
+    /// 预算按一次启动会话记账，两条同时生效：真实墙钟 `startupBudget`（30 秒）
+    /// 与次数上限 `maxStartupAttempts`（安全上限）。耗尽时结束会话并只报一次
+    /// 失败，下一次启动入口以新会话重新开始。所有延迟回调与探测回调都先校验代次
+    /// 与会话号，过期回调只写日志（M1/M2/M3）。
     private func pollUntilReady(session: Int, generation: Int) {
         startupAttempts += 1
-        guard startupAttempts <= Self.maxStartupAttempts else {
+        // 墙钟优先：一次探测就可能吃掉 3 秒，只看次数会把 30 秒变成 8 分钟。
+        let budgetExhausted = startupBudgetDeadline.map { Date() >= $0 } ?? false
+        guard !budgetExhausted, startupAttempts <= Self.maxStartupAttempts else {
             endStartupSession()
             reportStartupFailureOnce(
-                "Pi Web 在 30 秒内未能启动。请查看日志：\(appConfiguration.logURL.path)",
+                "Pi Web 在 \(Int(Self.startupBudget)) 秒内未能启动。请查看日志：\(appConfiguration.logURL.path)",
                 session: session
             )
             return
@@ -921,13 +983,25 @@ final class ServiceManager {
         stoppingGeneration = generation
         scheduler.onBackground { [weak self] in
             guard let self else { return }
-            self.terminate(processGroupID: record.processGroupID)
+            let confirmedGone = self.terminate(processGroupID: record.processGroupID)
             self.scheduler.onMain {
                 guard self.lifecycleGeneration == generation else {
                     // 停止期间发生的新生命周期转换拥有当前状态：不重复改状态、
                     // 不删除可能已属于新启动的记录；完成回调仍要送达，否则
                     // 重启/退出流程会挂住。
                     self.discardStaleCallback("停止服务", generation: generation)
+                    completion?()
+                    return
+                }
+                if !confirmedGone {
+                    // 进程组在 SIGKILL 后仍存活（GitHub #158 复审）：保留所有权记录
+                    // 作为唯一可用的证据，下一次停止/退出仍会重试。旧实现无条件删
+                    // 记录并把状态置 stopped，于是应用对自己启动、还活着的进程从此
+                    // 失去全部管理路径。完成回调仍要送达，否则退出序列会卡住。
+                    self.logWriter.record(
+                        "未能确认 pi-web 进程组已退出，保留所有权记录以便重试（PID \(record.pid)）"
+                    )
+                    self.clearStopping()
                     completion?()
                     return
                 }
@@ -941,27 +1015,54 @@ final class ServiceManager {
     /// group. The wait is bounded by `stopWaitUpperBound` (1 秒，GitHub #158），
     /// so at most two signals are ever sent, both to the group. PIDs and
     /// groups 0 and 1 are refused.
-    private func terminate(processGroupID: pid_t) {
-        guard processGroupID > 1 else { return }
+    ///
+    /// 返回值表示“调用结束时是否确认该进程组已消失”。旧实现发完 SIGKILL 就立即
+    /// 返回而不复查，于是不可中断睡眠里的组（SIGKILL 挂起未生效）会让上层删掉
+    /// 所有权记录并把状态置 `.stopped`：应用从此对自己启动、仍然活着的进程失去
+    /// 全部证据，`managedServicePID()` 恒为 nil，停止和退出都不再碰它。
+    @discardableResult
+    private func terminate(processGroupID: pid_t) -> Bool {
+        guard processGroupID > 1 else { return false }
         let startedAt = Date()
-        signaler.sendGroupSignal(SIGTERM, toProcessGroup: processGroupID)
+        // 这里不看 `sendGroupSignal` 的返回值：kill 失败（`ESRCH` / `EPERM`）只说明
+        // “没送达”，而送达与否接下来的存活探测会给出权威结论（组已经不存在时
+        // 探测立即返回，得到和“发送成功”一样的正确结果）；若据此提前判失败，
+        // 反而会让一个刚刚自行退出的服务被当成停止失败。
+        _ = signaler.sendGroupSignal(SIGTERM, toProcessGroup: processGroupID)
         logQuitTimeline(.sigtermSent)
         // 先探测再睡眠：进程组已经消失时立刻返回，不额外睡一个探测间隔。
         for attempt in 0..<Self.stopPollAttempts {
             guard signaler.isProcessGroupAlive(processGroupID) else {
                 let waited = QuitTimeline.elapsedMilliseconds(from: startedAt, to: Date())
                 logQuitTimeline(.serviceExited, detail: "SIGTERM 之后等待 \(waited)ms")
-                return
+                return true
             }
             scheduler.sleep(seconds: Self.stopPollDelay(forAttempt: attempt))
         }
-        if signaler.isProcessGroupAlive(processGroupID) {
-            signaler.sendGroupSignal(SIGKILL, toProcessGroup: processGroupID)
-            logQuitTimeline(
-                .sigkillSent,
-                detail: "等待超过 \(Self.stopWaitUpperBoundMilliseconds)ms（睡眠上界）"
-            )
+        guard signaler.isProcessGroupAlive(processGroupID) else {
+            logQuitTimeline(.serviceExited, detail: "SIGTERM 之后等待到达上界")
+            return true
         }
+        _ = signaler.sendGroupSignal(SIGKILL, toProcessGroup: processGroupID)
+        logQuitTimeline(
+            .sigkillSent,
+            detail: "等待超过 \(Self.stopWaitUpperBoundMilliseconds)ms（睡眠上界）"
+        )
+        // SIGKILL 之后做一次有界复查：通常毫秒内生效，因此这一轮几乎不耗时；
+        // 真的没生效时至少留下可诊断的日志行，而不是默认停止成功。
+        for attempt in 0..<Self.postKillConfirmationPollAttempts {
+            if !signaler.isProcessGroupAlive(processGroupID) {
+                let waited = QuitTimeline.elapsedMilliseconds(from: startedAt, to: Date())
+                logQuitTimeline(.serviceExited, detail: "SIGKILL 之后确认退出（共 \(waited)ms）")
+                return true
+            }
+            scheduler.sleep(seconds: Self.stopPollDelay(forAttempt: attempt))
+        }
+        logQuitTimeline(
+            .serviceStillAlive,
+            detail: "SIGKILL 之后进程组仍存活（保留所有权记录）"
+        )
+        return false
     }
 
     /// 记录退出/停止序列的一个节点（GitHub #158）。行内容只含阶段名、毫秒时钟和
@@ -1093,7 +1194,12 @@ final class ServiceManager {
                            self.didLaunchService, self.restartAttempts < 1 {
                             self.restartAttempts += 1
                             self.logWriter.record("健康检查触发受托管重启（连续失败 \(failures) 次）")
-                            self.startManagedService()
+                            // 必须走 `restartManagedService()`（先 stop 再 start）：
+                            // `startManagedService()` 在 `startDecision()` 里看到
+                            // `managedServicePID() != nil` 或子进程仍存活就返回
+                            // `.existingProcess`，只挂一条就绪轮询、不发任何信号，
+                            // 结果是“宣告重启”而那个不响应的进程从头到尾没被杀过。
+                            self.restartManagedService()
                         }
                     }
                 }
@@ -1204,6 +1310,8 @@ enum QuitTimelineStage: String {
     case sigtermSent = "已发送 SIGTERM"
     case sigkillSent = "已发送 SIGKILL"
     case serviceExited = "子进程已退出"
+    /// SIGKILL 之后复查仍未消失：停止并未真正生效（GitHub #158 复审）。
+    case serviceStillAlive = "进程组在 SIGKILL 后仍存活"
     case applicationTerminating = "应用即将终止"
 }
 

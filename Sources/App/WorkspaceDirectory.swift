@@ -103,8 +103,17 @@ enum WorkspaceDirectoryValidation: Equatable {
 /// “不存在/不可写 → 阻止启动并给出修复提示”，也不需要真实目录。
 enum WorkspaceDirectory {
     /// 生效的工作目录：配置里的绝对路径优先，空字符串表示默认目录。
+    ///
+    /// 返回值必须与存储侧一致地规范化：旧实现把 trim 后的**判定**和未 trim 的
+    /// **原值**混用（`isEmpty` 判定用 trimmed，返回值用原值），且不展开 `~`。
+    /// 结果是手工改过 defaults、或历史版本写入的 `" /home/me/work"`、`"~/work"`
+    /// 会拿到一个不存在的路径，`prepare` 报“工作目录不存在”，而目录实际可用。
+    /// 这里只做 trim + `~` 展开（不解析符号链接：那是 `RecentWorkspace` 存储
+    /// 路径的职责，改变它会影响“当前目录”的比较语义）。
     static func resolvedPath(configured: String, defaultPath: String) -> String {
-        configured.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? defaultPath : configured
+        let trimmed = configured.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return defaultPath }
+        return (trimmed as NSString).expandingTildeInPath
     }
 
     /// 配置是否显式选择了目录（而不是“跟随默认目录”）。

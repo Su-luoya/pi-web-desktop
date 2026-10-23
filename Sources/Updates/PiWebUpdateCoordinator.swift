@@ -320,6 +320,9 @@ final class PiWebUpdateCoordinator {
                         probe: self.environment.transaction.probe
                     )
                     journal.recordDegradation(degradation)
+                    // M8（更新事务审计）：健康检查失败路径此前漏记 commit 阶段，
+                    // 成为五阶段历史唯一缺口；补记（动作已完成、健康未确认）。
+                    journal.recordCommitWithUnverifiedHealth(version: newVersion)
                     self.environment.transaction.applyDegradation(degradation)
                     self.recordTransaction(
                         journal,

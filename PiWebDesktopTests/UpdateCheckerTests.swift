@@ -43,6 +43,18 @@ final class UpdateCheckerTests: XCTestCase {
         }
     }
 
+    /// 线程安全的收集器：并发回归里从多个队列记录观察结果。
+    private final class SynchronizedList<Element> {
+        private var lock = NSLock()
+        private(set) var items: [Element] = []
+
+        func append(_ item: Element) {
+            lock.lock()
+            items.append(item)
+            lock.unlock()
+        }
+    }
+
     private final class RecordingUpdateHTTPClient: UpdateHTTPClient {
         private(set) var requests: [UpdateHTTPRequest] = []
         var responder: ((UpdateHTTPRequest) -> Result<UpdateHTTPResponse, UpdateHTTPFailure>)?
@@ -1387,6 +1399,24 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertFalse(world.client.requests.contains { $0.url.query?.contains("password") == true })
     }
 
+    /// 批次3 审计次要：User-Agent 拼接前过滤控制字符（含 CR/LF）。数据源是
+    /// Info.plist，但请求头不得含换行，防御性清洗要有回归断言。
+    func testUserAgentStripsControlCharactersFromIdentityFields() {
+        let identity = UpdateCheckIdentity(
+            appName: "Pi Web Desktop",
+            version: "1.2.3\r\nX-Injected: yes",
+            bundleIdentifier: "com.example\u{7F}app"
+        )
+        let userAgent = identity.userAgent
+        XCTAssertFalse(userAgent.contains("\r"))
+        XCTAssertFalse(userAgent.contains("\n"))
+        XCTAssertFalse(userAgent.contains("\u{7F}"))
+        // 控制字符被剥掉，余下文本原样保留（头不换行即安全）。
+        XCTAssertEqual(userAgent, "Pi-Web-Desktop/1.2.3X-Injected: yes (com.exampleapp)")
+        // 控制字符清洗后仍是单行头，可安全拼进 HTTP 请求。
+        XCTAssertFalse(userAgent.contains(where: { $0.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7F } }))
+    }
+
     func testSanitizedRequestDropsForbiddenHeadersAndForcesGet() {
         var request = UpdateHTTPRequest(
             url: URL(string: "https://api.github.com/repos/a/b/releases")!,
@@ -1893,7 +1923,7 @@ final class UpdateCheckerTests: XCTestCase {
 
             let enabled = UpdateCheckCategory.allCases.filter { preferences.isEnabled($0) }
             let expectedIntervals = Set(enabled.map {
-                UpdateCheckIntervals.standard.interval(for: $0, policy: preferences.policy(for: $0)) ?? -1
+                UpdateCheckIntervals.standard.interval(for: preferences.policy(for: $0)) ?? -1
             })
             XCTAssertEqual(Set(world.scheduler.activeIntervals), expectedIntervals, "计时器应与开启分类的策略一致")
         }
@@ -2027,11 +2057,69 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertEqual(newerPlans.filter { $0.category == .piWeb }.map(\.latestVersion), ["2.1.0"])
     }
 
+    /// M9（更新事务审计）：通知去重键必须是 target（分类+包名）而不是分类。
+    /// 多个扩展包共用同一分类，按分类去重会互相覆盖，导致未记录到的包在下一次
+    /// 周期检查里重复弹「可用更新」。
+    func testNotificationDedupIsPerTargetNotPerCategory() {
+        let world = makeWorld(responder: automaticResponder())
+        let inventory = UpdateCheckInventory(
+            desktopAppVersion: desktopInstalledVersion,
+            piCLIVersion: piCLIInstalledVersion,
+            piWebVersion: piWebInstalledVersion,
+            piPackages: [
+                UpdateCheckPackage(name: "@example/first", installedVersion: "1.0.0"),
+                UpdateCheckPackage(name: "@example/second", installedVersion: "1.0.0")
+            ]
+        )
+        world.checker.start(inventory: inventory)
+
+        let first = UpdateNotificationPlanner.plan(
+            results: world.checker.summary.results,
+            preferences: world.checker.preferences,
+            ignoredVersions: .empty,
+            alreadyNotified: [:]
+        )
+        let firstPackages = first.filter { $0.category == .piPackages }
+        XCTAssertEqual(
+            Set(firstPackages.map { $0.target.packageName ?? "" }),
+            ["@example/first", "@example/second"],
+            "两个扩展包都应进入首次通知名单"
+        )
+
+        // 只记录第一个包：第二个包仍应进入名单（这正是按分类去重会丢掉的语义）。
+        var partial: [UpdateCheckTarget: String] = [:]
+        if let firstEntry = firstPackages.first(where: { $0.target.packageName == "@example/first" }) {
+            partial[firstEntry.target] = firstEntry.latestVersion
+        }
+        let partialPlan = UpdateNotificationPlanner.plan(
+            results: world.checker.summary.results,
+            preferences: world.checker.preferences,
+            ignoredVersions: .empty,
+            alreadyNotified: partial
+        )
+        XCTAssertEqual(
+            partialPlan.filter { $0.category == .piPackages }.map { $0.target.packageName ?? "" },
+            ["@example/second"],
+            "未提示过的包必须仍进入名单（M9：按 target 去重，不互相覆盖）"
+        )
+
+        // 两个包都记录后，同版本不再重复提示。
+        var notified: [UpdateCheckTarget: String] = [:]
+        for entry in firstPackages { notified[entry.target] = entry.latestVersion }
+        let second = UpdateNotificationPlanner.plan(
+            results: world.checker.summary.results,
+            preferences: world.checker.preferences,
+            ignoredVersions: .empty,
+            alreadyNotified: notified
+        )
+        XCTAssertTrue(second.filter { $0.category == .piPackages }.isEmpty, "两个扩展包都已提示过：不应再提示")
+    }
+
     func testScheduledResultsProduceAtMostOneNotificationPerVersion() {
         let world = makeWorld(responder: automaticResponder())
         world.checker.start(inventory: fullInventory())
 
-        var notified: [UpdateCheckCategory: String] = [:]
+        var notified: [UpdateCheckTarget: String] = [:]
         let first = UpdateNotificationPlanner.plan(
             results: world.checker.summary.results,
             preferences: world.checker.preferences,
@@ -2039,7 +2127,7 @@ final class UpdateCheckerTests: XCTestCase {
             alreadyNotified: notified
         )
         XCTAssertEqual(first.count, 4)
-        for entry in first { notified[entry.category] = entry.latestVersion }
+        for entry in first { notified[entry.target] = entry.latestVersion }
 
         world.clock.now = referenceDate.addingTimeInterval(24 * 3600)
         world.scheduler.fireTimers()
@@ -2247,5 +2335,111 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertTrue(on.client.requests.allSatisfy { $0.method == "GET" })
         XCTAssertEqual(on.client.requests.count, off.client.requests.count)
         XCTAssertTrue(UpdateAutomationBoundary.restrictedExplanation.contains("npm 全局"))
+    }
+
+    // MARK: - 并发审计 S1 回归：preferences / ignoredVersions 跨线程同步
+
+    /// 主线程写（设置界面契约）× 后台线程读（等价于检查队列的读取路径）：
+    /// 修复前是裸属性的真实数据竞争。读者断言每个读到的值都是完整写入过的
+    /// 之一——撕裂读会得到写入集合之外的混合值。确定性判定靠下面的结构
+    /// 断言兜底；本用例保证锁路径被并发执行、且最终写入可见。
+    func testSettingsReadWriteAcrossThreadsStaysConsistent() {
+        let world = makeWorld()
+        let writtenPreferences: [UpdateCheckPreferences] = [
+            .factoryDefaults,
+            UpdateCheckPreferences(policies: [.desktopApp: .off]),
+            UpdateCheckPreferences(policies: [.piCLI: .off, .piWeb: .off]),
+            UpdateCheckPreferences(autoUpdatePiWebBeforeLaunch: true),
+        ]
+        var ignoredCLI = UpdateIgnoredVersions.empty
+        ignoredCLI.ignore("1.2.3", for: .piCLI, at: referenceDate)
+        var ignoredDesktop = UpdateIgnoredVersions.empty
+        ignoredDesktop.ignore("2.0.0", for: .desktopApp, at: referenceDate)
+        let writtenIgnored: [UpdateIgnoredVersions] = [.empty, ignoredCLI, ignoredDesktop]
+
+        let iterations = 2_000
+        let tornReads = SynchronizedList<String>()
+        let readers = DispatchGroup()
+        for _ in 0..<4 {
+            readers.enter()
+            DispatchQueue.global().async {
+                defer { readers.leave() }
+                for i in 0..<iterations {
+                    if !writtenPreferences.contains(world.checker.preferences) {
+                        tornReads.append("preferences[\(i)]")
+                    }
+                    if !writtenIgnored.contains(world.checker.ignoredVersions) {
+                        tornReads.append("ignoredVersions[\(i)]")
+                    }
+                }
+            }
+        }
+        // 写者在当前（主）线程进行，符合生产调用约定。
+        for i in 0..<(iterations / 2) {
+            world.checker.preferences = writtenPreferences[i % writtenPreferences.count]
+            world.checker.ignoredVersions = writtenIgnored[i % writtenIgnored.count]
+        }
+        readers.wait()
+
+        XCTAssertTrue(tornReads.items.isEmpty, "读到写入集合之外的值（撕裂读）：\(tornReads.items.prefix(5))")
+        XCTAssertEqual(world.checker.preferences, writtenPreferences[(iterations / 2 - 1) % writtenPreferences.count])
+        XCTAssertEqual(world.checker.ignoredVersions, writtenIgnored[(iterations / 2 - 1) % writtenIgnored.count])
+    }
+
+    /// 检查主体（排队后执行）必须读到主线程最新的设置：修复后经 settingsLock
+    /// 同步，排队期间改策略对这一轮检查可见（piPackages 关闭 → 不发请求、
+    /// 不在启用分类里）。
+    func testCheckBodyObservesPreferencesWrittenAfterEnqueue() {
+        let clock = FixedClock(referenceDate)
+        let client = RecordingUpdateHTTPClient()
+        client.responder = { _ in Self.npmHTTPResponse(version: "9.9.9") }
+        let scheduler = ControlledUpdateCheckScheduler()
+        let checker = UpdateChecker(
+            httpClient: client,
+            clock: clock.clock,
+            cacheStore: InMemoryUpdateCacheStore(),
+            scheduler: scheduler,
+            identity: UpdateCheckIdentity(
+                appName: "Pi Web Desktop",
+                version: desktopInstalledVersion,
+                bundleIdentifier: "io.github.su-luoya.pi-web-desktop"
+            )
+        )
+        checker.start(inventory: fullInventory())
+        XCTAssertEqual(client.requests.count, 0, "受控调度器：检查主体应已入队但未执行")
+
+        var preferences = UpdateCheckPreferences.factoryDefaults
+        XCTAssertTrue(preferences.setPolicy(.off, for: .piPackages))
+        checker.preferences = preferences
+
+        while scheduler.pendingCount > 0 { scheduler.runNext() }
+
+        XCTAssertEqual(checker.summary.enabledCategories, [.desktopApp, .piCLI, .piWeb])
+        XCTAssertEqual(client.requests.count, 3, "关闭的分类不得发请求")
+        XCTAssertTrue(checker.summary.results.allSatisfy { $0.target.category != .piPackages })
+    }
+
+    /// 结构防线：两个跨线程访问的属性必须仍由 settingsLock 保护，不允许退回
+    /// 裸存储或 didSet 模式。
+    func testSettingsStorageRemainsGuardedBySettingsLock() throws {
+        let source = SourceScan.codeText(of: try SourceScan.text(named: "UpdateChecker.swift"))
+        XCTAssertTrue(source.contains("private let settingsLock = NSLock()"),
+                      "settingsLock 必须存在：preferences/ignoredVersions 主线程写、检查队列读")
+        XCTAssertFalse(source.contains("didSet"), "策略属性不允许退回裸 didSet 模式（见并发审计 S1）")
+
+        let lines = source.split(separator: "\n").map(String.init)
+        for (index, line) in lines.enumerated()
+        where line.contains("preferencesValue") || line.contains("ignoredVersionsValue") {
+            let isDeclaration = line.contains("private var preferencesValue")
+                || line.contains("private var ignoredVersionsValue")
+            let isInitAssignment = line.contains("self.preferencesValue =")
+                || line.contains("self.ignoredVersionsValue =")
+            let window = lines[max(0, index - 2)...min(lines.count - 1, index + 2)].joined(separator: "\n")
+            XCTAssertTrue(
+                isDeclaration || isInitAssignment || window.contains("settingsLock"),
+                "preferencesValue/ignoredVersionsValue 必须在 settingsLock 保护下访问："
+                    + "\(line.trimmingCharacters(in: .whitespaces))"
+            )
+        }
     }
 }

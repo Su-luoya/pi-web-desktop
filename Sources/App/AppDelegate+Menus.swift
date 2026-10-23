@@ -3,11 +3,40 @@
 import Cocoa
 
 extension AppDelegate {
+    /// 清空所有缓存的菜单项/子菜单引用（菜单重建前调用）。
+    ///
+    /// 分组只为可读性：服务控件、手机访问、更新检查、告警项与状态行都必须在同一
+    /// 处被清空，避免某一条被遗忘后写到已经不在屏幕上的旧菜单上。新增缓存引用
+    /// 时必须加到这里。
+    private func resetCachedMenuReferences() {
+        // 服务控件与手机访问子菜单
+        serviceControlMenuItems.removeAll()
+        phoneAccessMenus.removeAll()
+        statusMenuItem = nil
+        systemProxyWarningMenuItem = nil
+        recentWorkspacesMenu = nil
+        // 更新检查：状态行、设置子菜单、四类快捷开关与各组件菜单项
+        updateStatusMenuItem = nil
+        updateSettingsMenu = nil
+        updateCategoryMenuItems.removeAll()
+        desktopAppUpdateMenuItem = nil
+        piWebUpdateMenuItem = nil
+        piCLIUpdateMenuItem = nil
+        piPackageUpdateMenuItem = nil
+        abandonedAttemptsMenuItem = nil
+        // 持久告警项
+        piWebUpdateWarningMenuItem = nil
+        piCLIUpdateWarningMenuItem = nil
+        piPackageUpdateWarningMenuItem = nil
+    }
+
     // MARK: - Menus
 
     func installMainMenu() {
-        serviceControlMenuItems.removeAll()
-        phoneAccessMenus.removeAll()
+        // outD-次要-2：重建主菜单会换掉整个 `NSMenu` 树，旧菜单项引用如果不清掉，
+        // 后续状态刷新就会写到一个已经不在屏幕上的孤儿对象里（表现为“菜单不
+        // 更新”）。这里统一把本类缓存的**所有**菜单项/子菜单引用一并清空。
+        resetCachedMenuReferences()
         let mainMenu = NSMenu()
 
         let appMenuItem = NSMenuItem()
@@ -62,8 +91,10 @@ extension AppDelegate {
         viewMenu.addItem(withTitle: "缩小", action: #selector(zoomOut(_:)), keyEquivalent: "-")
         viewMenu.addItem(withTitle: "实际大小", action: #selector(resetZoom(_:)), keyEquivalent: "0")
         viewMenu.addItem(.separator())
-        let fullScreenItem = viewMenu.addItem(withTitle: "进入全屏幕", action: #selector(toggleFullScreen(_:)), keyEquivalent: "f")
-        fullScreenItem.keyEquivalentModifierMask = [.command, .control]
+        // outD-6：⌃⌘F 的唯一绑定点是“窗口”菜单里的系统全屏幕项（AppKit 会把
+        // 它移到窗口菜单并自动更新标题）。这里再去绑同一个快捷键会让两个菜单项
+        // 争夺同一个组合键，只有一个能触发。显示菜单的该项因此不带快捷键。
+        viewMenu.addItem(withTitle: "进入全屏幕", action: #selector(toggleFullScreen(_:)), keyEquivalent: "")
         viewMenuItem.submenu = viewMenu
 
         let serviceMenuItem = NSMenuItem()
@@ -618,7 +649,19 @@ extension AppDelegate {
                 // 组装完回主线程写入剪贴板（不在后台线程碰 AppKit 之外的 UI 约定）。
                 DispatchQueue.main.async {
                     self.diagnosticsExportInProgress = false
-                    DiagnosticsClipboard.copy(text)
+                    if !DiagnosticsClipboard.copy(text) {
+                        // 复制失败（其它进程持有剪贴板等）必须可见，否则用户以为
+                        // 已复制、公开 issue 里却贴不出诊断信息。
+                        let alert = NSAlert()
+                        alert.alertStyle = .warning
+                        alert.messageText = "复制失败"
+                        alert.informativeText = "诊断信息未能写入剪贴板，请再试一次。"
+                        if let window, window.isVisible {
+                            alert.beginSheetModal(for: window, completionHandler: nil)
+                        } else {
+                            alert.runModal()
+                        }
+                    }
                 }
             }
         }

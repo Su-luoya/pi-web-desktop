@@ -8,13 +8,28 @@ extension AppDelegate {
     /// 允许本次网络往返确认过的结果（含条件请求命中 304 的重验证结果）进入下载
     /// 流程；准入条件与理由见 `DesktopAppUpdateInstallPolicy`。
     @objc func updateDesktopAppNow(_ sender: Any?) {
-        guard desktopAppUpdateInstaller == nil else { return }
+        // 入口闸控（outD-2）：整轮占位（含确认框、取发布页、下载、替换）。重复点击
+        // 不得静默丢弃，必须给出可见原因；先判忙，消息才是「已在进行中」而不是
+        // 误导性的「结果未核实」。
+        guard !DesktopAppUpdateEntryPolicy.isBusy(
+            activity: desktopAppUpdateRound.activity,
+            installerPresent: desktopAppUpdateInstaller != nil
+        ) else {
+            presentDesktopUpdateFailure(.updateAlreadyInProgress)
+            return
+        }
         let result = updateChecker?.summary.result(for: UpdateCheckCategory.desktopApp.rawValue)
         let runningVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
         guard let target = DesktopAppUpdateInstallPolicy.installTarget(
                   for: result, runningVersion: runningVersion
               ) else {
             presentDesktopUpdateFailure(.unconfirmedUpdate)
+            return
+        }
+        // 确认框本身也占住入口：否则确认框还开着时再点菜单会再弹一个，两个「更新」
+        // 都确认就会并行跑两轮下载。
+        guard desktopAppUpdateRound.beginConfirming(releaseTag: target.releaseTag) else {
+            presentDesktopUpdateFailure(.updateAlreadyInProgress)
             return
         }
         let alert = NSAlert()
@@ -24,13 +39,38 @@ extension AppDelegate {
         alert.addButton(withTitle: "更新")
         alert.addButton(withTitle: "取消")
         alert.alertStyle = .warning
+        refreshUpdateMenuState()
         alert.beginSheetModal(for: window) { [weak self] response in
-            guard response == .alertFirstButtonReturn else { return }
-            self?.downloadAndInstallDesktopApp(version: target.version, releaseTag: target.releaseTag)
+            guard let self else { return }
+            guard response == .alertFirstButtonReturn else {
+                // 用户取消：阶段位必须复位（否则入口永久置灰、菜单永久显示「等待确认」）。
+                self.finishDesktopAppUpdateRound(releaseTag: target.releaseTag)
+                return
+            }
+            self.downloadAndInstallDesktopApp(version: target.version, releaseTag: target.releaseTag)
         }
     }
 
+    /// 从「等待确认」推进到「重新核对发布页」：只允许推进自己那一轮（同一 tag），
+    /// 其他任何情况的重复开始一律拒绝并给出可见原因。
+    private func beginDesktopAppUpdateActivity(releaseTag: String) -> Bool {
+        guard desktopAppUpdateRound.beginResolving(releaseTag: releaseTag) else {
+            presentDesktopUpdateFailure(.updateAlreadyInProgress)
+            return false
+        }
+        refreshUpdateMenuState()
+        return true
+    }
+
+    /// 一轮更新结束（成功/失败/被拒）：复位阶段位并刷新菜单，否则入口会永久置灰。
+    /// 只复位自己那一轮：已经开始新一轮时，旧一轮的回调不得清掉它的阶段位。
+    private func finishDesktopAppUpdateRound(releaseTag: String?) {
+        guard desktopAppUpdateRound.finish(releaseTag: releaseTag) else { return }
+        refreshUpdateMenuState()
+    }
+
     private func downloadAndInstallDesktopApp(version: String, releaseTag: String) {
+        guard beginDesktopAppUpdateActivity(releaseTag: releaseTag) else { return }
         let tagCharacters = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
         guard DesktopAppReleaseAssetSelector.isReleaseTag(releaseTag),
               let encodedTag = releaseTag.addingPercentEncoding(withAllowedCharacters: tagCharacters),
@@ -41,6 +81,7 @@ extension AppDelegate {
               components.path == "/repos/\(UpdateCheckUpstream.desktopRepository)/releases/tags/\(encodedTag)",
               components.query == nil,
               components.fragment == nil else {
+            finishDesktopAppUpdateRound(releaseTag: releaseTag)
             presentDesktopUpdateFailure(.invalidAssetURL)
             return
         }
@@ -58,7 +99,10 @@ extension AppDelegate {
                   let tag = json["tag_name"] as? String,
                   tag == releaseTag,
                   let assets = json["assets"] as? [[String: Any]] else {
-                DispatchQueue.main.async { self?.presentDesktopUpdateFailure(.downloadFailed) }
+                DispatchQueue.main.async {
+                    self?.finishDesktopAppUpdateRound(releaseTag: releaseTag)
+                    self?.presentDesktopUpdateFailure(.downloadFailed)
+                }
                 return
             }
             let parsedAssets = assets.compactMap { asset -> (name: String, url: URL)? in
@@ -77,7 +121,10 @@ extension AppDelegate {
                   DesktopAppReleaseAssetSelector.allowsChecksumDownloadURL(
                       checksumAsset.url, assetName: checksumAsset.name, releaseTag: releaseTag
                   ) else {
-                DispatchQueue.main.async { self?.presentDesktopUpdateFailure(.missingAsset) }
+                DispatchQueue.main.async {
+                    self?.finishDesktopAppUpdateRound(releaseTag: releaseTag)
+                    self?.presentDesktopUpdateFailure(.missingAsset)
+                }
                 return
             }
 
@@ -109,13 +156,28 @@ extension AppDelegate {
                 }
                 checksumSession.finishTasksAndInvalidate()
                 DispatchQueue.main.async { [weak self] in
-                    guard let self, self.desktopAppUpdateInstaller == nil else { return }
+                    guard let self else { return }
+                    guard self.desktopAppUpdateInstaller == nil else {
+                        // 安装器已存在（入口闸控已挡住第二轮，这里只是兜底）：这轮
+                        // 到此结束，不创建第二个安装器。
+                        self.finishDesktopAppUpdateRound(releaseTag: releaseTag)
+                        return
+                    }
+                    guard self.desktopAppUpdateRound.markInstalling(releaseTag: releaseTag) else {
+                        // 这一轮已被取消或已被新一轮顶掉：不要再开一个安装器。
+                        self.finishDesktopAppUpdateRound(releaseTag: releaseTag)
+                        return
+                    }
                     let installer = DesktopAppUpdateInstaller()
                     self.desktopAppUpdateInstaller = installer
+                    self.refreshUpdateMenuState()
                     installer.install(asset: verifiedAsset) { [weak self, weak installer] result in
                         if self?.desktopAppUpdateInstaller === installer {
                             self?.desktopAppUpdateInstaller = nil
                         }
+                        // 安装器交付结果即整轮结束：成功时应用即将被替换，失败时入口
+                        // 必须重新可用（否则菜单永久置灰）。
+                        self?.finishDesktopAppUpdateRound(releaseTag: releaseTag)
                         if case .failed(let failure) = result {
                             self?.presentDesktopUpdateFailure(failure)
                         }
@@ -256,7 +318,15 @@ extension AppDelegate {
         ignoredVersions.ignore(version, for: category, at: Date())
         appConfiguration.save(ignoredVersions)
         updateChecker?.ignoredVersions = ignoredVersions
-        notifiedVersions[category] = version
+        // M9（更新事务审计）：notifiedVersions 改按 target（分类+包名）记录；
+        // 忽略入口只有分类，这里把该分类下命中该版本的全部 target 都标记为已提示，
+        // 保证同样不再弹窗。
+        if let updateChecker {
+            for result in updateChecker.summary.results
+            where result.target.category == category && result.latestVersion == version {
+                notifiedVersions[result.target] = version
+            }
+        }
         refreshUpdateMenuState()
         syncUpdateSettingsWindow()
         diagnosticsWindowController?.refreshUpdateStatus()
@@ -421,12 +491,22 @@ extension AppDelegate {
             piPackageUpdateWarningMenuItem.title = piPackageUpdateWarning?.shortText ?? ""
             piPackageUpdateWarningMenuItem.isHidden = piPackageUpdateWarning == nil
         }
-        // 桌面 App 自更新入口：只有「本次网络检查 + 已核实 + 有可用版本」才显示；安装器
-        // 运行期间置灰，避免同一时刻进入两次下载/替换流程。
+        // 桌面 App 自更新入口：只有「本次网络检查 + 已核实 + 有可用版本」才显示；整轮
+        // 更新（等待确认、下载、校验、替换）期间置灰并带可见原因：旧实现只看安装器
+        // 对象，下载窗口期看不出「进行中」，用户能再点一次再下一遍整包（outD-2）。
         let desktopResult = updateChecker?.summary.result(for: UpdateCheckCategory.desktopApp.rawValue)
         let desktopInstallable = desktopResult?.status == .updateAvailable
         desktopAppUpdateMenuItem?.isHidden = !desktopInstallable
-        desktopAppUpdateMenuItem?.isEnabled = desktopInstallable && desktopAppUpdateInstaller == nil
+        desktopAppUpdateMenuItem?.title = "下载并安装桌面应用更新…"
+            + (DesktopAppUpdateEntryPolicy.menuTitleSuffix(
+                activity: desktopAppUpdateRound.activity,
+                installerPresent: desktopAppUpdateInstaller != nil
+            ) ?? "")
+        desktopAppUpdateMenuItem?.isEnabled = DesktopAppUpdateEntryPolicy.isEntryEnabled(
+            installable: desktopInstallable,
+            activity: desktopAppUpdateRound.activity,
+            installerPresent: desktopAppUpdateInstaller != nil
+        )
         // 扩展包入口与上面两个组件同一套闸控（GitHub #107）：忙或上一次命令已放弃等待、
         // 退出未确认时，菜单项直接带可见原因置灰，而不是让用户点下去才被拒。
         let packageEntry = piPackageUpdateEntryState
@@ -519,7 +599,7 @@ extension AppDelegate {
         )
         guard !entries.isEmpty else { return }
         for entry in entries {
-            notifiedVersions[entry.category] = entry.latestVersion
+            notifiedVersions[entry.target] = entry.latestVersion
         }
         // 运行期间发现 Pi Web 更新时，如果启动前自动更新已开启，只会安排到下次
         // 启动安装（本次运行不安装）。

@@ -84,7 +84,23 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 
 ## Xcode 工程构建与测试
 
-标准 Xcode 工程使用 Apple Silicon、macOS 14 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让测试在没有 host app 的情况下仍可编译，target 会把被测源码直接加入测试源：`Sources/App/ServiceConfiguration.swift`、`Sources/App/ServiceAddresses.swift`、`Sources/App/AppConfiguration.swift`、`Sources/App/AppPaths.swift`、`Sources/Services/ProcessInspector.swift`、`Sources/Diagnostics/DiagnosticsCollector.swift`、`Sources/Services/DependencyChecker.swift`、`Sources/Services/ToolPath.swift`、`Sources/Updates/ComponentInstallationModel.swift`、`Sources/Updates/UpdateChecker.swift`、`Sources/Updates/UpdateSettingsModel.swift`、`Sources/Updates/PiWebUpdateCoordinator.swift`、`Sources/Diagnostics/FirstLaunchDiagnostics.swift`、`Sources/Services/InstallCommandManifest.swift`、`Sources/Services/ServiceManager.swift`、`Sources/Services/ServiceOwnership.swift`、`Sources/App/WebViewNavigationPolicy.swift`、`Sources/Services/KeychainStore.swift`、`Sources/App/WorkspaceDirectory.swift`、`Sources/App/QuitPolicy.swift`、`Sources/Diagnostics/LogRedactor.swift`、`Sources/Diagnostics/LogWriter.swift`、`Sources/App/AppWindowRegistry.swift`；因此测试文件直接使用该 target 内编译的这些类型，不通过 `@testable import PiWebDesktop` 引入 app target。`Sources/App/WebViewController.swift` 与 `Sources/Diagnostics/DiagnosticsWindowController.swift` 依赖 AppKit/WebKit 且需要真实窗口，只进 app target；依赖诊断的纯文本呈现（`DependencyReportPresenter`）与首次启动路由、控件映射、路径选择因此分别放在 `DependencyChecker.swift` 和 `FirstLaunchDiagnostics.swift` 里，可以在 unhosted 目标里测试。这些测试使用假的 `ps`/`lsof` 输出、注入的存活判定、假的进程启动器、即时执行的调度器、假依赖探针、假网络地址提供者和临时目录，不访问真实进程、网络、Keychain、真实端口或 `~/.pi`。
+标准 Xcode 工程使用 Apple Silicon、macOS 14 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让测试在没有 host app 的情况下仍可编译，target 会把被测源码直接加入测试源（当前 `Sources/` 共 89 个 Swift 文件，其中 **74 个**直接进测试 target，15 个只进 app target）；因此测试文件直接使用该 target 内编译的这些类型，不通过 `@testable import PiWebDesktop` 引入 app target。
+
+只进 app target 的 15 个文件全部依赖 AppKit/WebKit、需要真实窗口，或是 `AppDelegate` 的扩展与入口：
+
+```text
+Sources/App/AppDelegate.swift + AppDelegate+{CLIUpdate,Diagnostics,Menus,PackageUpdates,
+  PreLaunchUpdates,Quit,Service,UpdateChecks,Window}.swift
+Sources/App/main.swift
+Sources/App/WebViewController.swift
+Sources/App/PreferencesWindowController.swift
+Sources/Diagnostics/DiagnosticsWindowController.swift
+Sources/Diagnostics/DiagnosticsClipboard.swift
+```
+
+这条边界决定了几条设计约束：需要测试的纯逻辑必须放进能被 unhosted target 编译的文件里，例如依赖诊断的纯文本呈现（`DependencyReportPresenter`）在 `DependencyChecker.swift`、首次启动路由在 `FirstLaunchDiagnostics.swift`、菜单与设置窗口的判定在 `PreferencesRefreshPolicy.swift`。`AppDelegate` 的扩展不进测试 target，所以涉及菜单绑定、设置窗口追平这类只在 app target 里成立的约束，测试用**源码级断言**（`AppMenuHygieneTests.swift`、`SourceScanSupport.swift`）而不是运行时断言；这类测试只证明代码写成什么样，不证明运行时观感，观感仍需人工验证。
+
+这些测试使用假的 `ps`/`lsof` 输出、注入的存活判定、假的进程启动器、即时执行的调度器、假依赖探针、假网络地址提供者和临时目录，不访问真实进程、网络、Keychain、真实端口或 `~/.pi`。
 
 ```bash
 DERIVED_DATA_PATH="$(mktemp -d /tmp/PiWebDesktopDerivedData.XXXXXX)"

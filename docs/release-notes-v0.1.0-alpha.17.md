@@ -55,7 +55,9 @@ ZIP 下载后请先使用配套的 `.zip.sha256` 校验，再将应用放入 `~/
 - `./Scripts/scan-secrets.sh`：PASS；
 - `git diff --check`：通过。
 
-真机 smoke、CI run 与 checksum 记录在本版本 Release Issue 中回填；不使用本地演练值代替发布值。
+真机 smoke、CI run 与 checksum 记录已回填到 `docs/alpha-release-checklist.md` 的「Release v0.1.0-alpha.17 执行记录」；不使用本地演练值代替发布值。
+
+端到端更新验证（真实发布资产）：按发布页直链下载 → `shasum -a 256 -c` `OK` → 生产 ditto 参数解包 → `CFBundleIdentifier`/`CFBundleShortVersionString=0.1.0-alpha.17` 校验 → `codesign --verify --deep --strict` 通过 → 在沙盒里用生产替换脚本逻辑把 alpha.16 换成 alpha.17（staging 与备份均清理干净）。剩下唯一未做的是在 `/Applications` 里用菜单点击跑一次真实自更新。
 
 ## 变更边界
 
@@ -63,7 +65,9 @@ ZIP 下载后请先使用配套的 `.zip.sha256` 校验，再将应用放入 `~/
 
 ## 校验值
 
-发布资产、SHA-256、CI run、真机 smoke 和最终 Release 链接将在发布草稿生成后从实际资产与 Release Issue 回填；不使用本地演练值代替发布值。
+- 资产：`Pi-Web-Desktop-0.1.0-alpha.17+build.17.zip`（`1731217` 字节）
+- SHA-256：`60610064370a8ec0d17764a3f2b727c300e22c4d1ae10411f6a63e8c55b8102a`
+- 校验命令（下载目录执行）：`shasum -a 256 -c Pi-Web-Desktop-0.1.0-alpha.17+build.17.zip.sha256`
 
 ## 回退
 

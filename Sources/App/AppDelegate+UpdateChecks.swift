@@ -151,7 +151,15 @@ extension AppDelegate {
                           releaseTag: releaseTag
                       ) else {
                     checksumSession.finishTasksAndInvalidate()
-                    DispatchQueue.main.async { self?.presentDesktopUpdateFailure(.checksumUnavailable) }
+                    // 必须同时结束这一轮：`beginDesktopAppUpdateActivity` 已经把
+                    // `desktopAppUpdateRound.activity` 置成忙碌，而菜单入口的闸控
+                    // （`DesktopAppUpdateEntryPolicy.isBusy`）只看 activity 与安装器
+                    // 是否在场。少了这一句，校验和下载失败后整轮永远停在忙碌态，
+                    // 菜单项永久置灰，只能重启应用才能再试。
+                    DispatchQueue.main.async {
+                        self?.finishDesktopAppUpdateRound(releaseTag: releaseTag)
+                        self?.presentDesktopUpdateFailure(.checksumUnavailable)
+                    }
                     return
                 }
                 checksumSession.finishTasksAndInvalidate()

@@ -43,8 +43,17 @@ final class DispatchUpdateCheckScheduler: UpdateCheckScheduling {
         DispatchQueue.main.async(execute: work)
     }
 
+    /// 计时器必须挂在 `.common` 模式上，不能只用 `Timer.scheduledTimer`。
+    ///
+    /// `scheduledTimer` 只把计时器加入默认 `RunLoop.Mode.default`；而菜单跟
+    /// 踪、拖动滑杆、sheet 与 `runModal()` 期间主运行循环跑在
+    /// `eventTracking` / `modalPanel` 等模式，默认模式上的计时器在那段时间
+    /// 完全不触发。对每日/每周复查来说，表现为「用户在菜单里按住一会儿，
+    /// 当天的到期检查就不发生」——静默漏掉一次检查，且没有任何日志。
+    /// `AppDelegate+Quit.swift` 的退出超时计时器有同样的注释与同样的处理。
     func startRepeating(interval: TimeInterval, _ work: @escaping () -> Void) -> UpdateTimerToken {
-        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in work() }
+        let timer = Timer(timeInterval: interval, repeats: true) { _ in work() }
+        RunLoop.main.add(timer, forMode: .common)
         return TimerUpdateToken(timer: timer)
     }
 }

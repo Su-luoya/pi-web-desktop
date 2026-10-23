@@ -89,6 +89,11 @@ final class ServiceManager {
     static func stopPollDelay(forAttempt attempt: Int) -> TimeInterval {
         TimeInterval(stopPollDelayMilliseconds(forAttempt: attempt)) / 1000
     }
+
+    /// SIGKILL 之后的确认轮数（GitHub #158 复审）。每轮 `stopPollDelay(0..)` = 10ms，
+    /// 因此上界 100ms：SIGKILL 正常在毫秒级生效，绝大多数情况第一次探测就返回。
+    /// 这一上界远小于停止等待本身，不会重新引入 Cmd+Q 卡顿。
+    static let postKillConfirmationPollAttempts = 10
     // 日志上限/保留份数的唯一来源是 `LogRotationPolicy`（GitHub #10），这里不保留第二套常量。
 
     private(set) var configuration: ServiceConfiguration
@@ -980,13 +985,25 @@ final class ServiceManager {
         stoppingGeneration = generation
         scheduler.onBackground { [weak self] in
             guard let self else { return }
-            self.terminate(processGroupID: record.processGroupID)
+            let confirmedGone = self.terminate(processGroupID: record.processGroupID)
             self.scheduler.onMain {
                 guard self.lifecycleGeneration == generation else {
                     // 停止期间发生的新生命周期转换拥有当前状态：不重复改状态、
                     // 不删除可能已属于新启动的记录；完成回调仍要送达，否则
                     // 重启/退出流程会挂住。
                     self.discardStaleCallback("停止服务", generation: generation)
+                    completion?()
+                    return
+                }
+                if !confirmedGone {
+                    // 进程组在 SIGKILL 后仍存活（GitHub #158 复审）：保留所有权记录
+                    // 作为唯一可用的证据，下一次停止/退出仍会重试。旧实现无条件删
+                    // 记录并把状态置 stopped，于是应用对自己启动、还活着的进程从此
+                    // 失去全部管理路径。完成回调仍要送达，否则退出序列会卡住。
+                    self.logWriter.record(
+                        "未能确认 pi-web 进程组已退出，保留所有权记录以便重试（PID \(record.pid)）"
+                    )
+                    self.clearStopping()
                     completion?()
                     return
                 }
@@ -1000,8 +1017,14 @@ final class ServiceManager {
     /// group. The wait is bounded by `stopWaitUpperBound` (1 秒，GitHub #158），
     /// so at most two signals are ever sent, both to the group. PIDs and
     /// groups 0 and 1 are refused.
-    private func terminate(processGroupID: pid_t) {
-        guard processGroupID > 1 else { return }
+    ///
+    /// 返回值表示“调用结束时是否确认该进程组已消失”。旧实现发完 SIGKILL 就立即
+    /// 返回而不复查，于是不可中断睡眠里的组（SIGKILL 挂起未生效）会让上层删掉
+    /// 所有权记录并把状态置 `.stopped`：应用从此对自己启动、仍然活着的进程失去
+    /// 全部证据，`managedServicePID()` 恒为 nil，停止和退出都不再碰它。
+    @discardableResult
+    private func terminate(processGroupID: pid_t) -> Bool {
+        guard processGroupID > 1 else { return false }
         let startedAt = Date()
         signaler.sendGroupSignal(SIGTERM, toProcessGroup: processGroupID)
         logQuitTimeline(.sigtermSent)
@@ -1010,17 +1033,34 @@ final class ServiceManager {
             guard signaler.isProcessGroupAlive(processGroupID) else {
                 let waited = QuitTimeline.elapsedMilliseconds(from: startedAt, to: Date())
                 logQuitTimeline(.serviceExited, detail: "SIGTERM 之后等待 \(waited)ms")
-                return
+                return true
             }
             scheduler.sleep(seconds: Self.stopPollDelay(forAttempt: attempt))
         }
-        if signaler.isProcessGroupAlive(processGroupID) {
-            signaler.sendGroupSignal(SIGKILL, toProcessGroup: processGroupID)
-            logQuitTimeline(
-                .sigkillSent,
-                detail: "等待超过 \(Self.stopWaitUpperBoundMilliseconds)ms（睡眠上界）"
-            )
+        guard signaler.isProcessGroupAlive(processGroupID) else {
+            logQuitTimeline(.serviceExited, detail: "SIGTERM 之后等待到达上界")
+            return true
         }
+        signaler.sendGroupSignal(SIGKILL, toProcessGroup: processGroupID)
+        logQuitTimeline(
+            .sigkillSent,
+            detail: "等待超过 \(Self.stopWaitUpperBoundMilliseconds)ms（睡眠上界）"
+        )
+        // SIGKILL 之后做一次有界复查：通常毫秒内生效，因此这一轮几乎不耗时；
+        // 真的没生效时至少留下可诊断的日志行，而不是默认停止成功。
+        for attempt in 0..<Self.postKillConfirmationPollAttempts {
+            if !signaler.isProcessGroupAlive(processGroupID) {
+                let waited = QuitTimeline.elapsedMilliseconds(from: startedAt, to: Date())
+                logQuitTimeline(.serviceExited, detail: "SIGKILL 之后确认退出（共 \(waited)ms）")
+                return true
+            }
+            scheduler.sleep(seconds: Self.stopPollDelay(forAttempt: attempt))
+        }
+        logQuitTimeline(
+            .serviceStillAlive,
+            detail: "SIGKILL 之后进程组仍存活（保留所有权记录）"
+        )
+        return false
     }
 
     /// 记录退出/停止序列的一个节点（GitHub #158）。行内容只含阶段名、毫秒时钟和
@@ -1268,6 +1308,8 @@ enum QuitTimelineStage: String {
     case sigtermSent = "已发送 SIGTERM"
     case sigkillSent = "已发送 SIGKILL"
     case serviceExited = "子进程已退出"
+    /// SIGKILL 之后复查仍未消失：停止并未真正生效（GitHub #158 复审）。
+    case serviceStillAlive = "进程组在 SIGKILL 后仍存活"
     case applicationTerminating = "应用即将终止"
 }
 

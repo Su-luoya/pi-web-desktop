@@ -122,11 +122,44 @@ struct SemanticVersion: Equatable, Comparable, CustomStringConvertible {
 
     /// 从命令输出里取第一个可解析的版本，例如 `v22.19.0`、`pi-web 1.2.3`、
     /// `1.2.3 (node 22.19.0)`。取不到时返回 nil（对应诊断的 unknown）。
+    ///
+    /// 优先采信“看起来真是版本号”的 token（GitHub #6 复审）：旧实现返回**第一个**
+    /// 能解析的 token，而 `SemanticVersion.init?` 接受 1–4 段纯数字，所以
+    /// `pi-web listening on 127.0.0.1 (version 1.2.3)` 这类输出会把监听地址当成
+    /// 版本，而 `127.0.0.1 < 22.19.0` 为 false 会让 node 比较直接算“够新”——
+    /// 诊断报“正常”但真实版本从未被读到。
+    ///
+    /// 回退保留：全文只找到一个“形似地址/日期”的 token 时仍然返回它（不比旧行为
+    /// 更严格，避免把真版本误判成 unknown 而卡住启动门控）。
     static func firstVersion(in output: String) -> SemanticVersion? {
+        var fallback: SemanticVersion?
         for token in output.split(whereSeparator: { $0.isWhitespace }) {
             let cleaned = token.trimmingCharacters(in: CharacterSet(charactersIn: "vV()[]{},;:=<>"))
-            if let version = SemanticVersion(cleaned) { return version }
+            guard let version = SemanticVersion(cleaned) else { continue }
+            if !looksLikeAddressOrDate(cleaned, version: version) { return version }
+            if fallback == nil { fallback = version }
         }
-        return nil
+        return fallback
+    }
+
+    /// 这个 token 更可能是地址/日期而不是版本号。
+    ///
+    /// 两条判据都只用于“多个候选里选哪个”，不用于拒绝：
+    /// - 4 段且每段 ≤ 255、首段 ≥ 100：`127.0.0.1`、`10.0.0.255` 形态。首段 ≥ 100
+    ///   把常见 IPv4 与真正的 `1.2.3.4` 区分开（后者首段总是小数字）。
+    /// - 3 段且首段在年份区间、后两段能当月份/日期：`2024.10.22`。
+    static func looksLikeAddressOrDate(_ text: String, version: SemanticVersion) -> Bool {
+        let parts = text.split(separator: ".").compactMap { Int($0) }
+        guard (1...4).contains(parts.count) else { return false }
+        if parts.count == 4, parts.allSatisfy({ $0 <= 255 }), parts[0] >= 100 {
+            return true
+        }
+        if parts.count >= 3,
+           (1900...2100).contains(parts[0]),
+           parts[1] <= 12,
+           parts[2] <= 31 {
+            return true
+        }
+        return false
     }
 }

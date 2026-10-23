@@ -271,20 +271,26 @@ final class FileServiceOwnershipStore: ServiceOwnershipStoring {
 /// helper processes of the service are covered as well.
 protocol ServiceSignaling: AnyObject {
     /// Sends `signal` to the whole process group. Implementations must refuse
-    /// non-positive group identifiers.
-    func sendGroupSignal(_ signal: Int32, toProcessGroup processGroupID: pid_t)
+    /// non-positive group identifiers. Returns whether the signal was delivered
+    /// (`kill` returned 0); a false result means the group was already gone
+    /// (`ESRCH`) or is not ours to signal (`EPERM`), and the caller must not
+    /// assume the group stopped.
+    func sendGroupSignal(_ signal: Int32, toProcessGroup processGroupID: pid_t) -> Bool
     /// `kill(-pgid, 0)`: true while the group still has at least one member.
     func isProcessGroupAlive(_ processGroupID: pid_t) -> Bool
 }
 
 final class POSIXServiceSignaler: ServiceSignaling {
-    func sendGroupSignal(_ signal: Int32, toProcessGroup processGroupID: pid_t) {
-        guard processGroupID > 1 else { return }
-        _ = kill(-processGroupID, signal)
+    func sendGroupSignal(_ signal: Int32, toProcessGroup processGroupID: pid_t) -> Bool {
+        guard processGroupID > 1 else { return false }
+        return kill(-processGroupID, signal) == 0
     }
 
     func isProcessGroupAlive(_ processGroupID: pid_t) -> Bool {
         guard processGroupID > 1 else { return false }
-        return kill(-processGroupID, 0) == 0
+        if kill(-processGroupID, 0) == 0 { return true }
+        // `EPERM` 意味着进程组存在、只是当前用户无权发信号；旧实现只认 `== 0`，
+        // 会把它当成“已退出”并删掉所有权记录，从此无法再管理自己启动的进程。
+        return errno == EPERM
     }
 }

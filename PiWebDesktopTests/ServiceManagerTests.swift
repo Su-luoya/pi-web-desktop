@@ -244,16 +244,40 @@ private final class ManagerFakeSignaler: ServiceSignaling {
     var aliveProcessGroups: Set<pid_t> = []
     /// When true the group survives signals, which exercises the SIGKILL path.
     var groupSurvivesSignals = false
+    /// When true, a group that survives SIGKILL stops as soon as the caller
+    /// starts confirming — exercises the "SIGKILL took effect" branch.
+    var groupGoneOnConfirmation = false
+    /// Number of liveness probes performed after SIGKILL was sent.
+    private(set) var postKillProbes = 0
+    private var killedGroups: Set<pid_t> = []
 
-    func sendGroupSignal(_ signal: Int32, toProcessGroup processGroupID: pid_t) {
+    func sendGroupSignal(_ signal: Int32, toProcessGroup processGroupID: pid_t) -> Bool {
         groupSignals.append(GroupSignal(signal: signal, processGroupID: processGroupID))
         if !groupSurvivesSignals {
             aliveProcessGroups.remove(processGroupID)
+        } else if signal == SIGKILL {
+            killedGroups.insert(processGroupID)
         }
+        return true
     }
 
     func isProcessGroupAlive(_ processGroupID: pid_t) -> Bool {
-        aliveProcessGroups.contains(processGroupID)
+        if killedGroups.contains(processGroupID) {
+            postKillProbes += 1
+            if groupGoneOnConfirmation {
+                aliveProcessGroups.remove(processGroupID)
+                killedGroups.remove(processGroupID)
+            }
+        }
+        return aliveProcessGroups.contains(processGroupID)
+    }
+
+    /// Start of a new stop cycle: the previous cycle's pending SIGKILL bookkeeping
+    /// no longer applies, so the next `isProcessGroupAlive` probe is counted as a
+    /// post-kill confirmation of *this* cycle.
+    func beginNewStopCycle() {
+        killedGroups.removeAll()
+        postKillProbes = 0
     }
 }
 
@@ -1102,6 +1126,8 @@ final class ServiceManagerTests: XCTestCase {
         harness.manager.startManagedService()
         harness.signaler.aliveProcessGroups = [5150]
         harness.signaler.groupSurvivesSignals = true
+        // SIGKILL 之后复查发现进程组确实消失：这才是“停止成功”。
+        harness.signaler.groupGoneOnConfirmation = true
 
         harness.manager.stopService()
         harness.scheduler.runAllBackgroundWork()
@@ -1115,6 +1141,62 @@ final class ServiceManagerTests: XCTestCase {
         )
         XCTAssertEqual(harness.scheduler.sleeps.count, ServiceManager.stopPollAttempts)
         XCTAssertEqual(harness.manager.currentState, .stopped)
+        XCTAssertNil(harness.readOwnershipRecord())
+    }
+
+    /// SIGKILL 后仍未能确认消失时，不得删掉唯一的所有权证据（GitHub #158 复审）。
+    ///
+    /// 旧实现发完 SIGKILL 就返回，上层无条件 `removeRecord` + 置 `.stopped`：
+    /// 不可中断睡眠里的组因此让应用对自己启动、仍然活着的进程失去全部管理路径
+    /// （`managedServicePID()` 恒为 nil，退出也不会再碰它），日志里只留下“已发送
+    /// SIGKILL”这一行，事后无法判断停止是否真的成功。
+    func testStopServiceKeepsOwnershipRecordWhenTheGroupSurvivesSIGKILL() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.manager.startManagedService()
+        harness.signaler.aliveProcessGroups = [5150]
+        harness.signaler.groupSurvivesSignals = true
+        // 连 SIGKILL 都没生效：组仍然存活。
+        harness.signaler.groupGoneOnConfirmation = false
+
+        var completionRan = false
+        harness.manager.stopService { completionRan = true }
+        harness.scheduler.runAllBackgroundWork()
+        harness.drainLogWrites()
+
+        XCTAssertEqual(harness.signaler.groupSignals.map(\.signal), [SIGTERM, SIGKILL])
+        // 必须真的复查过，而不是发完就算。
+        XCTAssertGreaterThanOrEqual(harness.signaler.postKillProbes, 1)
+        // 记录留着当停止证据，下一次停止/退出仍会重试。
+        XCTAssertNotNil(harness.readOwnershipRecord(), "未确认退出时不得删掉所有权记录")
+        XCTAssertNotNil(harness.manager.managedServicePID())
+        // 不谎称已停止：状态保持运行中，由后续重试或人工处置收敛。
+        XCTAssertNotEqual(harness.manager.currentState, .stopped)
+        // 完成回调仍要送达，否则退出/重启序列会挂住。
+        XCTAssertTrue(completionRan)
+        let log = (try? String(contentsOf: harness.logURL, encoding: .utf8)) ?? ""
+        XCTAssertTrue(log.contains(QuitTimelineStage.serviceStillAlive.rawValue), log)
+        XCTAssertTrue(log.contains("保留所有权记录"), log)
+        // 停止标志已收回，且保留的记录仍可用于重试：第二次停止会再次对同一组
+        // 发信号（旧实现删了记录后彻底无法重试）。
+        harness.signaler.beginNewStopCycle()
+        harness.signaler.groupGoneOnConfirmation = true
+        harness.manager.stopService()
+        harness.scheduler.runAllBackgroundWork()
+        XCTAssertEqual(harness.signaler.groupSignals.count, 4, "第二次停止应再次 SIGTERM+SIGKILL")
+        XCTAssertNil(harness.readOwnershipRecord())
+        XCTAssertEqual(harness.manager.currentState, .stopped)
+    }
+
+    /// SIGKILL 后的复查轮数必须有界，否则会把 GitHub #158 修的 Cmd+Q 卡顿
+    /// 以另一种形式加回来。
+    func testPostKillConfirmationStaysBoundedWellBelowTheStopWait() {
+        XCTAssertGreaterThan(ServiceManager.postKillConfirmationPollAttempts, 0)
+        // 每轮 10ms：上界远小于 1 秒的停止等待本身。
+        let upperBound = TimeInterval(ServiceManager.postKillConfirmationPollAttempts) * 0.01
+        XCTAssertLessThanOrEqual(upperBound, 0.2, "SIGKILL 后的复查不得拖慢退出")
     }
 
     // MARK: 退出/停止等待上界（GitHub #158）
@@ -1157,6 +1239,7 @@ final class ServiceManagerTests: XCTestCase {
         harness.manager.startManagedService()
         harness.signaler.aliveProcessGroups = [5150]
         harness.signaler.groupSurvivesSignals = true
+        harness.signaler.groupGoneOnConfirmation = true
 
         harness.manager.stopService()
         harness.scheduler.runAllBackgroundWork()

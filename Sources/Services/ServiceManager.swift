@@ -1024,7 +1024,11 @@ final class ServiceManager {
     private func terminate(processGroupID: pid_t) -> Bool {
         guard processGroupID > 1 else { return false }
         let startedAt = Date()
-        signaler.sendGroupSignal(SIGTERM, toProcessGroup: processGroupID)
+        // 这里不看 `sendGroupSignal` 的返回值：kill 失败（`ESRCH` / `EPERM`）只说明
+        // “没送达”，而送达与否接下来的存活探测会给出权威结论（组已经不存在时
+        // 探测立即返回，得到和“发送成功”一样的正确结果）；若据此提前判失败，
+        // 反而会让一个刚刚自行退出的服务被当成停止失败。
+        _ = signaler.sendGroupSignal(SIGTERM, toProcessGroup: processGroupID)
         logQuitTimeline(.sigtermSent)
         // 先探测再睡眠：进程组已经消失时立刻返回，不额外睡一个探测间隔。
         for attempt in 0..<Self.stopPollAttempts {
@@ -1039,7 +1043,7 @@ final class ServiceManager {
             logQuitTimeline(.serviceExited, detail: "SIGTERM 之后等待到达上界")
             return true
         }
-        signaler.sendGroupSignal(SIGKILL, toProcessGroup: processGroupID)
+        _ = signaler.sendGroupSignal(SIGKILL, toProcessGroup: processGroupID)
         logQuitTimeline(
             .sigkillSent,
             detail: "等待超过 \(Self.stopWaitUpperBoundMilliseconds)ms（睡眠上界）"

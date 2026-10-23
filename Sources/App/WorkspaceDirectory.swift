@@ -106,7 +106,7 @@ enum WorkspaceDirectory {
     ///
     /// 返回值必须与存储侧一致地规范化：旧实现把 trim 后的**判定**和未 trim 的
     /// **原值**混用（`isEmpty` 判定用 trimmed，返回值用原值），且不展开 `~`。
-    /// 结果是手工改过 defaults、或历史版本写入的 `" /Users/me/work"`、`"~/work"`
+    /// 结果是手工改过 defaults、或历史版本写入的 `" /home/me/work"`、`"~/work"`
     /// 会拿到一个不存在的路径，`prepare` 报“工作目录不存在”，而目录实际可用。
     /// 这里只做 trim + `~` 展开（不解析符号链接：那是 `RecentWorkspace` 存储
     /// 路径的职责，改变它会影响“当前目录”的比较语义）。

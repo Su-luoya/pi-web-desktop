@@ -27,7 +27,7 @@ final class PreferencesRefreshPolicyTests: XCTestCase {
 
     func testEditedWindowKeepsUserInput() {
         var edited = baseline
-        edited[2] = "100.64.0.7" // 用户正在把监听地址改成 VPN 地址，还没保存
+        edited[2] = "10.99.0.7" // 用户正在把监听地址改成 VPN 地址，还没保存
         XCTAssertFalse(
             PreferencesRefreshPolicy.shouldReload(currentValues: edited, loadedValues: baseline),
             "有未保存编辑时刷新控件会抹掉用户输入"

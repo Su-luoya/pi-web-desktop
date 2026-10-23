@@ -37,14 +37,22 @@ final class SingleInstanceLockTests: XCTestCase {
     private var lockPath: String { lockURL.path }
     private var pidPath: String { pidURL.path }
 
-    /// 真实进程活体检测（`kill(pid, 0)`）。本进程对自己必然存活；已退出的
-    /// `sleep 0` 子进程必然死亡——两者覆盖默认探针的两条分支，不需要注入。
-    private func makeInspector() -> ProcessInspector {
-        ProcessInspector(runner: NeverRunningCommandRunner())
+    /// 真实进程活体检测（`kill(pid, 0)`）。已退出的 `sleep 0` 子进程必然死亡。
+    /// 可执行镜像路径可注入：生产语义要求“存活 + 镜像 identical”两项都成立，
+    /// 测试用假探针覆盖各种组合，不去启动真实实例。
+    private func makeInspector(executablePath: String? = nil) -> ProcessInspector {
+        ProcessInspector(
+            runner: NeverRunningCommandRunner(),
+            processExecutablePath: { _ in executablePath }
+        )
     }
 
-    private func makeLock() -> SingleInstanceLock {
-        SingleInstanceLock(pidRecordURL: pidURL, lockFileURL: lockURL, processInspector: makeInspector())
+    private func makeLock(executablePath: String? = nil) -> SingleInstanceLock {
+        SingleInstanceLock(
+            pidRecordURL: pidURL,
+            lockFileURL: lockURL,
+            processInspector: makeInspector(executablePath: executablePath)
+        )
     }
 
     private func inode(at path: String) -> UInt64? {
@@ -112,17 +120,77 @@ final class SingleInstanceLockTests: XCTestCase {
 
     // MARK: - PID 记录与锁的关系
 
-    func testLivePidRecordBlocksAcquisitionBeforeTouchingTheLock() throws {
+    /// PID 记录不是身份证据：崩溃残留 + PID 复用会让文件里那个 PID 被无关进程
+    /// 复用。旧实现在 `flock` 之前就凭它权威拒绝，结果是用户永久无法启动。
+    /// 现在只有“存活 + 镜像与本应用相同”两项都成立才当作已有实例；拿不到镜像
+    /// 证据就交给 `flock`——那才是权威互斥物。
+    func testLivePidRecordOnlyBlocksWhenTheImageMatchesThisApplication() throws {
         FileManager.default.createFile(atPath: lockPath, contents: nil)
         let lockInode = try XCTUnwrap(inode(at: lockPath))
+        // 用真实存活的子进程 PID（不是本进程）：本进程 PID 在记录里会被当作
+        // “可能是我自己”并让给 flock，不能用来验证镜像比对分支。
+        let liveChild = try spawnLiveProcess()
+        defer { liveChild.terminate() }
+        try writePIDRecord(liveChild.processIdentifier)
+
+        // 镜像与本应用不同：不得凭 PID 记录拒绝，交给 flock。
+        let foreign = makeLock(executablePath: "/usr/libexec/foreign-binary")
+        XCTAssertTrue(foreign.acquire(), "镜像不匹配的 PID 记录不是身份证据，必须交给 flock 判定")
+        foreign.release()
+        XCTAssertEqual(inode(at: lockPath), lockInode, "获取不得动锁文件")
+
+        // 镜像与本应用相同：这才是“另一个本应用实例”，可以快速拒绝。
+        let own = makeLock(executablePath: SingleInstanceLock.currentExecutablePath)
+        XCTAssertFalse(own.acquire(), "镜像相同的存活进程必须被识别为已有实例")
+        XCTAssertNil(own.handle, "快速路径失败不得持有句柄")
+        XCTAssertEqual(own.failure, .alreadyRunning)
+        XCTAssertEqual(inode(at: lockPath), lockInode, "失败的获取不得动锁文件")
+    }
+
+    /// 一个真实在跑的短命子进程（`/bin/sleep 30`），测试结束时终止。
+    private func spawnLiveProcess() throws -> Process {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["30"]
+        try process.run()
+        return process
+    }
+
+    /// 拿不到镜像路径时不认记录（宁可多试一次内核锁，也不要把用户挡在外面）。
+    func testUnverifiablePidRecordFallsBackToFlock() throws {
+        FileManager.default.createFile(atPath: lockPath, contents: nil)
         try writePIDRecord(ProcessInfo.processInfo.processIdentifier)
 
+        let unverifiable = makeLock(executablePath: nil)
+        XCTAssertTrue(unverifiable.acquire(), "拿不到镜像证据时必须交给 flock")
+    }
+
+    /// 真实持有的 flock 仍然权威：记录无法验证也不得双实例并行。
+    func testFlockStillRefusesWhenThePidRecordIsUnverifiable() throws {
+        let first = makeLock(executablePath: nil)
+        XCTAssertTrue(first.acquire(), "首个实例拿到锁")
+        XCTAssertTrue(first.isAcquired)
+
+        try writePIDRecord(ProcessInfo.processInfo.processIdentifier)
+        let second = makeLock(executablePath: nil)
+        XCTAssertFalse(second.acquire(), "内核锁被持有时第二实例必须失败")
+        XCTAssertEqual(second.failure, .alreadyRunning, "EWOULDBLOCK 是正常互斥，不是环境故障")
+    }
+
+    /// 锁文件打不开是环境故障，必须与“另一个实例在跑”区分开。
+    ///
+    /// 旧实现两者都返回 `false`，AppDelegate 于是对前者也静默退出：support
+    /// 目录只读/被同名文件占据时，双击无任何提示，用户只能重装。
+    func testUnopenableLockFileReportsAnEnvironmentalFailure() throws {
+        // 用目录占据锁文件路径：open(O_RDWR) 必然失败（EISDIR）。
+        try FileManager.default.createDirectory(at: lockURL, withIntermediateDirectories: true)
+
         let lock = makeLock()
-        XCTAssertFalse(lock.acquire(),
-                       "PID 记录指向存活进程时必须直接失败")
-        XCTAssertNil(lock.handle, "快速路径失败不得持有句柄")
-        XCTAssertEqual(inode(at: lockPath), lockInode,
-                       "失败的获取不得动锁文件（旧实现在这里删除重建）")
+        XCTAssertFalse(lock.acquire())
+        guard case .lockUnavailable(let detail) = lock.failure else {
+            return XCTFail("必须报环境故障，实际：\(String(describing: lock.failure))")
+        }
+        XCTAssertTrue(detail.contains("errno"), "原因里必须带 errno 便于支持排查：\(detail)")
     }
 
     func testStalePidOfDeadProcessDoesNotBlockAcquisition() throws {

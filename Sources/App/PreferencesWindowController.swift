@@ -329,12 +329,18 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         }
     }
 
-    /// 刷新“已设置/未设置”和与 hostname 联动的提示。只读结论来自 Keychain，
+    /// 刷新“已设置/未设置/无法读取”和与 hostname 联动的提示。只读结论来自 Keychain，
     /// 已保存的密码不会出现在任何控件里。
+    ///
+    /// 必须保留“无法读取”这一态：登录钥匙串锁定时读失败，旧实现把它当成
+    /// “未设置”，同时把删除按钮禁用——条目实际存在，用户却无法删掉它，也没
+    /// 有任何“解锁钥匙串”的提示。读不到时不提供删除（无法确认目标），但文案
+    /// 会明确指向钥匙串解锁这一动作。
     private func refreshRemoteAccessState() {
-        hasStoredPassword = RemoteAccessPassword.isSet(in: keychain)
-        passwordStatusLabel.stringValue = RemoteAccessPassword.statusText(isSet: hasStoredPassword)
-        deletePasswordButton.isEnabled = hasStoredPassword
+        let status = RemoteAccessPassword.status(in: keychain)
+        hasStoredPassword = status == .set
+        passwordStatusLabel.stringValue = RemoteAccessPassword.statusText(for: status)
+        deletePasswordButton.isEnabled = status == .set
         remoteAccessHintLabel.stringValue = remoteAccessHintText()
     }
 

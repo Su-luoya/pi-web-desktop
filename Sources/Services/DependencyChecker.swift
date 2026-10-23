@@ -545,6 +545,11 @@ struct DependencyChecker {
 
     /// Pi Web 的可执行文件路径。用户显式配置的路径不可执行时按缺失报告，
     /// 不悄悄改用其它副本。
+    ///
+    /// 配置值先 trim 再展开 `~`：写入侧（`PreferencesWindowController`）只做 trim，
+    /// 而用户粘贴 `~/bin/pi-web` 是常态。不展开时 `isExecutableFile` 对字面 `~`
+    /// 恒为 false，诊断报“未找到”、下一步提示“安装 Pi Web 或点击选择路径”，
+    /// 真正的原因（路径写法）永远不会出现。
     private func resolvePiWebExecutable(in context: ProbeContext) -> String? {
         let configured = configuredPiWebPath.trimmingCharacters(in: .whitespacesAndNewlines)
         if configured.isEmpty {
@@ -554,7 +559,8 @@ struct DependencyChecker {
                 environment: context.environment
             )
         }
-        return fileSystem.isExecutableFile(atPath: configured) ? configured : nil
+        let expanded = (configured as NSString).expandingTildeInPath
+        return fileSystem.isExecutableFile(atPath: expanded) ? expanded : nil
     }
 
     private func makePiFinding(

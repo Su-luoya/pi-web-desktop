@@ -27,9 +27,17 @@ final class SystemCommandRunner: CommandRunning {
     let environment: [String: String]?
     private let spawn: ([String], [String: String]?) throws -> ProbeProcess
     private let lock = NSLock()
-    /// 最近一次正在进行的探针与它的取消标记；取消只针对这一次子进程。
+    /// 最近一次正在进行的探针（取消时发信号的对象）。
     private var activeProcess: ProbeProcess?
-    private var activeIsCancelled = false
+    /// 每个进行中的探针各自一个 token：取消标记按 token 记账。
+    ///
+    /// 旧实现用一个共享布尔：新探针注册时无条件把它清零，于是并发时 A 的取消
+    /// 意图会被 B 注册清掉，B 也可能读到 A 留下的 true 把一次正常探测报成
+    /// cancelled（诊断导出在后台跑 `ps`、主线程菜单校验同时也跑 `ps`，用的是
+    /// 同一个实例）。按 token 记账后，取消只影响“取消那一刻真的在跑”的探针。
+    private var nextRunToken: UInt64 = 0
+    private var runningTokens: Set<UInt64> = []
+    private var cancelledTokens: Set<UInt64> = []
 
     init(
         timeout: TimeInterval = SystemCommandRunner.defaultTimeout,
@@ -65,21 +73,26 @@ final class SystemCommandRunner: CommandRunning {
             return CommandRunResult(output: nil)
         }
         lock.lock()
+        let token = nextRunToken
+        nextRunToken &+= 1
+        runningTokens.insert(token)
         activeProcess = process
-        activeIsCancelled = false
         lock.unlock()
         defer {
             lock.lock()
+            // token 在这里回收：`wasCancelled` 已经在下面读过了，所以不会丢。
+            runningTokens.remove(token)
+            cancelledTokens.remove(token)
             if activeProcess === process {
                 activeProcess = nil
-                activeIsCancelled = false
             }
             lock.unlock()
         }
 
         let exited = process.waitForExit(timeout: timeout)
         lock.lock()
-        let wasCancelled = activeIsCancelled
+        // 只看自己这个 token 的标记：并发探针之间不得串味。
+        let wasCancelled = cancelledTokens.contains(token)
         lock.unlock()
         if wasCancelled {
             // 取消只表示“不再等”；不再等宽限、不再补 SIGKILL，退出由子进程自己决定。
@@ -98,8 +111,9 @@ final class SystemCommandRunner: CommandRunning {
 
     func cancelRunningProbe() {
         lock.lock()
+        // 取消“现在真的在跑”的全部探针，不碰之后才启动的。
+        cancelledTokens.formUnion(runningTokens)
         let process = activeProcess
-        if process != nil { activeIsCancelled = true }
         lock.unlock()
         // 只对本次启动的子进程发 SIGTERM；不按名字或进程组发信号。
         _ = process?.terminate()

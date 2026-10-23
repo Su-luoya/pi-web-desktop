@@ -92,6 +92,14 @@ extension AppDelegate {
                     "启动前自动更新完成：\(oldVersion) → \(newVersion)。"
                 )
                 proceed()
+            case .skipped(let reason, _):
+                // `.skipped` 的 warning 为 nil，不能交给失败路径：那里会直接
+                // return，把应用永久留在“正在更新”执行页（此时既没有成功、
+                // 也没有任何提示），服务永不启动。跳过不是失败：记一行日志、
+                // 给出可见说明，然后照常启动服务。
+                self.logPiWebUpdate("启动前自动更新未执行：\(reason.text)")
+                self.presentPreLaunchUpdateSkipped(reason: reason)
+                proceed()
             default:
                 self.presentPiWebUpdateFailure(outcome)
             }
@@ -188,9 +196,28 @@ extension AppDelegate {
         _ = logWriter.append(logRedactor.redact(message))
     }
 
+    /// 启动前自动更新被拒绝（`.skipped`）时的可见说明。
+    ///
+    /// 与失败路径的区别：没有任何安装动作发生、也没有持久告警要记，但用户必须
+    /// 能看到“为什么这次没有自动更新”，而不是一个沉默的加载页。提示只在真正
+    /// 走向启动前更新的路径上出现，且不阻断服务启动。
+    private func presentPreLaunchUpdateSkipped(reason: PiWebUpdateRefusal) {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "本次启动没有自动更新 Pi Web"
+        alert.informativeText = "原因：\(reason.text)。\n\n服务会照常启动；需要更新时可以用菜单「立即更新 Pi Web…」。"
+        alert.addButton(withTitle: "好")
+        alert.beginSheetModal(for: window)
+    }
+
     /// 失败路径：记录持久告警、进入诊断状态、保留可用 UI；不启动服务、不声称回滚。
     private func presentPiWebUpdateFailure(_ outcome: PiWebUpdateRunOutcome) {
-        guard let warning = outcome.warning else { return }
+        guard let warning = outcome.warning else {
+            // 其余结果（含将来新增的 case）必须仍然让启动继续走完，否则会
+            // 重现“停在执行页、服务永不启动”的卡死。
+            logPiWebUpdate("启动前自动更新未产生告警：\(outcome)；继续启动服务。")
+            return
+        }
         piWebUpdateWarning = warning
         appConfiguration.savePiWebUpdateWarning(warning)
         logPiWebUpdate(warning.text)

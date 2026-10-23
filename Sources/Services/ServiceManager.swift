@@ -32,6 +32,14 @@ final class ServiceManager {
 
     static let maxStartupAttempts = 150
     static let startupPollInterval: TimeInterval = 0.2
+    /// 启动就绪轮询的真实时长上界（秒）。
+    ///
+    /// 旧实现只按“次数”记账（150 × 0.2 秒 ≈ 30 秒），但每轮还要叠加一次探测的
+    /// 实际耗时（`probeTimeout` = 3 秒），端口能连但不回应 HTTP 时 150 次全超时
+    /// 就是 150 × 3.2 ≈ 480 秒，界面停在“正在启动…”可达 8 分钟，最后弹的文案
+    /// 却写“30 秒内未能启动”。现在以真实墙钟为准：`maxStartupAttempts` 仍作
+    /// 安全上限，30 秒到期无论剩余多少次都收尾。
+    static let startupBudget: TimeInterval = 30
     static let healthCheckInterval: TimeInterval = 4
     /// HTTP 健康探测的超时（GitHub #147）。1 秒在系统负载波动或休眠唤醒后过短，
     /// 会让一次正常的慢响应被当成断开，因此放宽到 3 秒。
@@ -163,7 +171,10 @@ final class ServiceManager {
     private var nextStartupSessionID = 0
     /// 一次启动会话的轮询预算：每次开启新会话都清零，超时/成功/进程退出时结束会话。
     /// 因此“重试”总是重新开始轮询与预算，绝不会复用上一轮的失败结论（M1）。
+    /// 与 `startupBudgetDeadline` 一起生效：次数是安全上限，墙钟才是真实上界。
     private var startupAttempts = 0
+    /// 本次启动会话的墙钟截止时间（`startupBudget` 秒）。每次开启新会话重新计算。
+    private var startupBudgetDeadline: Date?
     /// 已经报过启动失败提示的会话号：同一会话只提示一次，避免弹窗循环（M1/M3）。
     private var startupFailureReportedSession: Int?
     /// 停止中标志按代次记账：只有它仍等于当前代次时才算“有停止在途”。任何一次
@@ -453,7 +464,13 @@ final class ServiceManager {
 
     func resolvePiWebPath() -> String? {
         if let configured = configuration.piWebPath.nilIfEmpty {
-            return fileManager.isExecutableFile(atPath: configured) ? configured : nil
+            // 用户配置的路径可能是 `~/bin/pi-web` 或带前后空白：不展开/不 trim 就
+            // 对字面字符串 `isExecutableFile` 恒为 false，诊断只会报“未找到”，
+            // 用户于是反复重装而真因是路径写法。存储侧（PreferencesWindowController）
+            // 只做 trim，`~` 展开必须在这里补上。
+            let expanded = (configured.trimmingCharacters(in: .whitespacesAndNewlines) as NSString)
+                .expandingTildeInPath
+            return fileManager.isExecutableFile(atPath: expanded) ? expanded : nil
         }
         let candidates = [
             "/opt/homebrew/bin/pi-web",
@@ -463,9 +480,17 @@ final class ServiceManager {
         if let path = candidates.first(where: { fileManager.isExecutableFile(atPath: $0) }) {
             return path
         }
-        return commandRunner.run(["/bin/zsh", "-lc", "command -v pi-web 2>/dev/null"])?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .nilIfEmpty
+        // `command -v` 的输出不能整段当路径：用户 `.zshenv`/`.zprofile` 里的任何
+        // `echo` 都会混进 stdout（只重定向了 stderr），`trimmingCharacters` 不会
+        // 去掉中间换行，得到多行字符串后 `posix_spawn` 直接 ENOENT。只取最后一
+        // 行，并且只有确认它真的是可执行文件才采信。
+        guard let output = commandRunner.run(["/bin/zsh", "-lc", "command -v pi-web 2>/dev/null"]) else {
+            return nil
+        }
+        return output
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .last(where: { fileManager.isExecutableFile(atPath: $0) })
     }
 
     /// 便捷入口：读一次凭证后交给 `startDecision(credentials:)`。
@@ -778,9 +803,11 @@ final class ServiceManager {
     ///
     /// This path owns the cleanup of that launch (`lifecycleGeneration` is bumped
     /// so its termination callback is ignored), signals only the fresh process
-    /// group and reports a startup failure. A child that survives the kill is
-    /// kept as the current handle, so `startDecision()` still sees a live child
-    /// and refuses to launch a second service.
+    /// group and reports a startup failure. A child that survives the kill keeps
+    /// its ownership record and its log channel, so `startDecision()` still sees
+    /// a live child and refuses to launch a second service, and the surviving
+    /// process stays stoppable (it must not lose its stop path or get EPIPE on
+    /// the next log write).
     private func abandonUnhostedLaunch(process: ServiceProcessHandle) {
         lifecycleGeneration &+= 1
         let generation = lifecycleGeneration
@@ -795,12 +822,25 @@ final class ServiceManager {
                     self.discardStaleCallback("放弃半托管启动", generation: generation)
                     return
                 }
-                // The launch is gone and its record (if one was written before
-                // the immediate verification failed) must not linger.
-                self.ownershipStore.removeRecord(at: self.appConfiguration.serviceOwnerURL)
-                self.closeLog()
-                if self.serviceProcess === process, !process.isRunning {
-                    self.serviceProcess = nil
+                // 子进程是否真的被终止是这个分支的分岔点：上面的注释声明“活下来的
+                // 子进程保留为当前句柄”，但旧实现无条件删记录 + 关管道，于是幸存
+                // 进程 (a) 永久失去停止路径（`stopService` 靠记录验证，`managedServicePID()`
+                // 恒 nil，退出也不会停它），(b) stdout/stderr 写端被关，下一次写日志
+                // 就 EPIPE。只有确认已退出才清理。
+                if process.isRunning {
+                    // 记录（若已写）留着当停止证据；日志写端也保留，否则幸存子进程
+                    // 下一次写日志就变成未处理的 EPIPE。
+                    self.logWriter.record(
+                        "半托管启动的进程未响应终止信号，保留所有权记录与日志通道（PID \(process.processIdentifier)）"
+                    )
+                } else {
+                    // The launch is gone and its record (if one was written before
+                    // the immediate verification failed) must not linger.
+                    self.ownershipStore.removeRecord(at: self.appConfiguration.serviceOwnerURL)
+                    self.closeLog()
+                    if self.serviceProcess === process {
+                        self.serviceProcess = nil
+                    }
                 }
                 self.clearStopping()
                 self.reportStartupFailure(
@@ -832,6 +872,7 @@ final class ServiceManager {
     private func beginStartupSession() -> Int {
         nextStartupSessionID &+= 1
         startupAttempts = 0
+        startupBudgetDeadline = Date().addingTimeInterval(Self.startupBudget)
         activeStartupSession = nextStartupSessionID
         activeStartupSessionGeneration = lifecycleGeneration
         return nextStartupSessionID
@@ -866,15 +907,18 @@ final class ServiceManager {
 
     /// 启动轮询的唯一实现。
     ///
-    /// 预算按一次启动会话记账：每次调用消耗一次（150 × 0.2 秒 ≈ 30 秒）；耗尽
-    /// 时结束会话并只报一次失败，下一次启动入口以新会话重新开始。所有延迟回调与
-    /// 探测回调都先校验代次与会话号，过期回调只写日志（M1/M2/M3）。
+    /// 预算按一次启动会话记账，两条同时生效：真实墙钟 `startupBudget`（30 秒）
+    /// 与次数上限 `maxStartupAttempts`（安全上限）。耗尽时结束会话并只报一次
+    /// 失败，下一次启动入口以新会话重新开始。所有延迟回调与探测回调都先校验代次
+    /// 与会话号，过期回调只写日志（M1/M2/M3）。
     private func pollUntilReady(session: Int, generation: Int) {
         startupAttempts += 1
-        guard startupAttempts <= Self.maxStartupAttempts else {
+        // 墙钟优先：一次探测就可能吃掉 3 秒，只看次数会把 30 秒变成 8 分钟。
+        let budgetExhausted = startupBudgetDeadline.map { Date() >= $0 } ?? false
+        guard !budgetExhausted, startupAttempts <= Self.maxStartupAttempts else {
             endStartupSession()
             reportStartupFailureOnce(
-                "Pi Web 在 30 秒内未能启动。请查看日志：\(appConfiguration.logURL.path)",
+                "Pi Web 在 \(Int(Self.startupBudget)) 秒内未能启动。请查看日志：\(appConfiguration.logURL.path)",
                 session: session
             )
             return
@@ -1108,7 +1152,12 @@ final class ServiceManager {
                            self.didLaunchService, self.restartAttempts < 1 {
                             self.restartAttempts += 1
                             self.logWriter.record("健康检查触发受托管重启（连续失败 \(failures) 次）")
-                            self.startManagedService()
+                            // 必须走 `restartManagedService()`（先 stop 再 start）：
+                            // `startManagedService()` 在 `startDecision()` 里看到
+                            // `managedServicePID() != nil` 或子进程仍存活就返回
+                            // `.existingProcess`，只挂一条就绪轮询、不发任何信号，
+                            // 结果是“宣告重启”而那个不响应的进程从头到尾没被杀过。
+                            self.restartManagedService()
                         }
                     }
                 }

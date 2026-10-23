@@ -168,6 +168,13 @@ enum LibprocPiProcessProbe {
 
         var info = proc_bsdinfo()
         let infoSize = Int32(MemoryLayout<proc_bsdinfo>.size)
+        // `errno` 必须先清零：`proc_pidinfo` 在“返回值不够一个结构体”这条路径上
+        // 并不保证设置 errno（SDK 结构体比运行内核的新时就会这样），残值可能是
+        // 上一个 PID 留下的 ESRCH——`classify` 会据此判 `.processGone`，而
+        // `inspect()` 对 `.processGone` 是直接跳过该 PID。跳过的若是唯一的 Pi
+        // 进程，检查就变成 `.noProcesses`，而 `allowsAutomaticUpdate` 随之为真：
+        // 在本可阻止的时候去覆盖正在运行的 CLI 文件。失败的开放方向，代价一行。
+        errno = 0
         let infoBytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, infoSize)
         if infoBytes != infoSize {
             let failure = classify(errno)

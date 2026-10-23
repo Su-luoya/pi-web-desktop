@@ -159,10 +159,31 @@ extension AppDelegate {
             lockFileURL: appConfiguration.instanceLockURL,
             processInspector: processInspector
         )
-        guard lock.acquire() else { return false }
+        guard lock.acquire() else {
+            singleInstanceLockFailure = lock.failure
+            return false
+        }
         instanceLockHandle = lock.handle
         hasInstanceLock = true
         return true
+    }
+
+    /// 锁不可用属于环境故障，不是“另一个实例在跑”：后者应当静默退出（用户本来
+    /// 就是想打开那一个），前者必须告知用户，否则双击只有 Dock 图标一闪，
+    /// 而日志文件此时可能还没准备好。
+    ///
+    /// 此时主窗口尚未创建，因此用 `runModal()` 而不是 sheet：这是启动早期、
+    /// 没有任何其他运行循环活动的唯一窗口，不存在嵌套模态循环风险。
+    func reportSingleInstanceRefusalIfEnvironmental() {
+        guard case .lockUnavailable(let detail) = singleInstanceLockFailure else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "无法启动 Pi Web Desktop"
+        alert.informativeText = "应用无法建立单实例锁，因此不能启动。\n\n"
+            + detail
+            + "\n\n请检查“\(appConfiguration.supportURL.path)”目录是否存在且可写，然后重试。"
+        alert.addButton(withTitle: "好")
+        alert.runModal()
     }
 
     func installQuitShortcuts() {

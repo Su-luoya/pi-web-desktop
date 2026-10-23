@@ -17,6 +17,7 @@ extension AppDelegate {
         try? FileManager.default.createDirectory(at: appConfiguration.supportURL, withIntermediateDirectories: true)
         guard acquireSingleInstanceLock() else {
             // 已经决定直接退出：不再弹退出确认（此时窗口尚未创建），也不停止任何服务。
+            reportSingleInstanceRefusalIfEnvironmental()
             quitCoordinator.handle(.directQuitRequested)
             NSApp.terminate(nil)
             return

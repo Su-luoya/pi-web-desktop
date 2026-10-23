@@ -26,6 +26,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 第二实例因单实例锁退出时，旧实现会无条件删除、连带清掉正在运行实例的
     /// 记录（生产实证），后续启动读到空记录就通过了单实例检查。
     var ownsPIDRecord = false
+    /// 单实例锁获取失败的分类（nil = 成功，或尚未尝试）。
+    ///
+    /// 调用方必须用区分“另一个实例在跑”（正常拒绝、静默退出）与“锁文件
+    /// 打不开”（环境故障、必须告知用户），否则两种情形都变成双击无反应。
+    var singleInstanceLockFailure: SingleInstanceLock.Failure?
     var eventMonitor: Any?
     var screenParametersObserver: NSObjectProtocol?
     var screenFitWorkItem: DispatchWorkItem?

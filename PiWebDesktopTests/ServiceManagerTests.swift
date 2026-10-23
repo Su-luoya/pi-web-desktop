@@ -880,8 +880,61 @@ final class ServiceManagerTests: XCTestCase {
             fileManager: fakeFileManager
         )
         defer { harness.cleanUp() }
+        // 回退路径只采信真的可执行的文件：登录 shell 的 stdout 里可能混进
+        // `.zshenv` 的 echo（只重定向了 stderr），整段当路径会让 posix_spawn ENOENT。
+        fakeFileManager.executablePaths = ["/custom/bin/pi-web"]
 
         XCTAssertEqual(harness.manager.resolvePiWebPath(), "/custom/bin/pi-web")
+    }
+
+    /// 登录 shell 的 stdout 混进别的内容时，不能把整段当作可执行路径。
+    ///
+    /// 旧实现只做 `trimmingCharacters(in: .whitespacesAndNewlines)`——它不去掉
+    /// 中间换行，于是 `posix_spawn` 拿到多行字符串直接 ENOENT，报“无法启动
+    /// pi-web（errno 2）”。现在只取最后一行，并且必须确认它可执行。
+    func testResolvePiWebPathIgnoresNoiseFromLoginShellOutput() throws {
+        let fakeFileManager = ManagerFakeFileManager()
+        let harness = try makeHarness(
+            processOutput: { arguments in
+                arguments.first == "/bin/zsh"
+                    ? "Welcome to zsh\nNVM loaded\n/custom/bin/pi-web\n"
+                    : nil
+            },
+            fileManager: fakeFileManager
+        )
+        defer { harness.cleanUp() }
+        fakeFileManager.executablePaths = ["/custom/bin/pi-web"]
+
+        XCTAssertEqual(harness.manager.resolvePiWebPath(), "/custom/bin/pi-web")
+    }
+
+    /// 登录 shell 报告了一个不可执行的路径：不得采信。
+    func testResolvePiWebPathRejectsANonExecutableShellResult() throws {
+        let fakeFileManager = ManagerFakeFileManager()
+        let harness = try makeHarness(
+            processOutput: { arguments in arguments.first == "/bin/zsh" ? "/custom/bin/pi-web\n" : nil },
+            fileManager: fakeFileManager
+        )
+        defer { harness.cleanUp() }
+        // 未登记为可执行：应当按“找不到”处理，而不是盲信 stdout。
+        XCTAssertNil(harness.manager.resolvePiWebPath())
+    }
+
+    /// 用户配置的 pi-web 路径带 `~` 时必须展开后判定（审计 S3 / F7）。
+    ///
+    /// 写入侧只做 trim，`isExecutableFile(atPath: "~/bin/pi-web")` 对字面 `~` 恒为
+    /// false，诊断只会报“未找到”，用户于是反复重装而真因是路径写法。
+    func testResolvePiWebPathExpandsTildeInTheConfiguredPath() throws {
+        let fakeFileManager = ManagerFakeFileManager()
+        let harness = try makeHarness(fileManager: fakeFileManager)
+        defer { harness.cleanUp() }
+        var configuration = configured(try harness.makeExecutable())
+        configuration.piWebPath = "~/bin/pi-web"
+        harness.manager.updateConfiguration(configuration)
+        let expanded = ("~/bin/pi-web" as NSString).expandingTildeInPath
+        fakeFileManager.executablePaths = [expanded]
+
+        XCTAssertEqual(harness.manager.resolvePiWebPath(), expanded)
     }
 
     func testStartDecisionIsIgnoredWhileStopping() throws {
@@ -1819,6 +1872,48 @@ final class ServiceManagerTests: XCTestCase {
         for line in healthLines {
             XCTAssertFalse(line.contains("http"), "健康检查日志不得打印可能含凭据的探测 URL：\(line)")
         }
+    }
+
+    /// 审计 S1（中）：健康检查“受托管重启”必须真的重启进程。
+    ///
+    /// 旧实现调的是 `startManagedService()` 而不是 `restartManagedService()`：
+    /// `startDecision()` 在 `managedServicePID() != nil`（所有权记录仍校验通过）
+    /// 或子进程还活着（`serviceProcess.isRunning`）时返回 `.existingProcess`，
+    /// 于是只挂一条 30 秒就绪轮询、**不发任何信号**——那个不响应的进程从头到尾
+    /// 没被杀过，而“已触发重启”的日志已经写下了。末尾的 `launchCount` 断言看不
+    /// 出这个区别：两条路径都不会新增启动。这里断言信号真的发出。
+    func testHealthCheckRestartStopsTheUnresponsiveProcessBeforeStartingAgain() throws {
+        let liveness = ManagerFakeLiveness()
+        let harness = try makeHarness(
+            alive: { pid in pid == 5150 ? liveness.isAlive : true },
+            processOutput: processOutput(for: 5150)
+        )
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = true
+        harness.manager.startManagedService()
+        XCTAssertTrue(harness.scheduler.runNextDelayedWork())
+        harness.manager.startHealthMonitor()
+        XCTAssertTrue(harness.signaler.groupSignals.isEmpty, "前置：启动流程不发信号")
+
+        // 关键场景：进程**仍存活**但健康探测一直不响应（不是已退出的情形）。
+        // 这种状态下 `startManagedService()` 会走 `.existingProcess` 快速路径。
+        liveness.isAlive = true
+        harness.probe.ready = false
+        harness.signaler.aliveProcessGroups = [5150]
+
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertTrue(harness.scheduler.runHealthCheck())
+        XCTAssertTrue(harness.scheduler.runHealthCheck(), "第三次连续失败触发重启")
+        // 停止/启动的后续动作在后台队列上：必须让它跑完才能看到信号。
+        harness.scheduler.runAllBackgroundWork()
+
+        XCTAssertFalse(
+            harness.signaler.groupSignals.isEmpty,
+            "健康检查重启必须先停止那个不响应的进程（旧实现走 start 路径，从不发信号）"
+        )
+        XCTAssertEqual(harness.signaler.groupSignals.first?.signal, SIGTERM, "先 SIGTERM")
     }
 
     /// GitHub #147：探测成功把连续失败计数清零，之后必须重新累计两次才再次判定断开。

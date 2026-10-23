@@ -323,6 +323,12 @@ final class LoginShellPathQuery {
     }
 
     /// 登录 shell 报告的 PATH；查询失败、超时或输出为空时返回 nil。
+    ///
+    /// 失败（nil）**不缓存**：登录 shell 在首次登录/首次编译 rc 文件、nvm 冷启动时
+    /// 提前超时是常态，而缓存的 nil 会让 provider 永久停在 bootstrap 目录上
+    /// （node/pi/pi-web 全判缺失、服务门控关闭），且它注入的是同一个实例，
+    /// “重新检测”拿到的还是那份 nil——只能重启应用。成功才缓存：那才是
+    /// “登录 shell 报告的 PATH”这一可复用的事实。
     func path() -> String? {
         lock.lock()
         defer { lock.unlock() }
@@ -338,7 +344,9 @@ final class LoginShellPathQuery {
             // 时候试一次，并且同样有超时；拿不到值就是值，不会阻塞诊断页。
             result = Self.parse(output: runner.run([shell, "-ilc", Self.command]))
         }
-        cached = .some(result)
+        // 只有非 nil 才记住：失败是暂时状态，下一次调用（例如用户点“重新检测”）
+        // 必须真的重新查询一次。
+        if let result { cached = .some(result) }
         return result
     }
 
@@ -394,6 +402,9 @@ final class ToolPathProvider {
 
     private let lock = NSLock()
     private var cachedBootstrap: Bootstrap?
+    /// 解析器已经尝试过（无论成败）。置位后不再自动重试，避免“没装 node”的
+    /// 机器上每次 `probeEnvironment()` 都重新 spawn 登录 shell（最坏 26 秒）。
+    /// 需要重试时由调用方显式 `invalidateResolution()`（用户点“重新检测”）。
     private var didResolve = false
     private var cachedNodePath: String?
     private var cachedNPMPrefix: String?
@@ -542,7 +553,7 @@ final class ToolPathProvider {
         return bootstrap
     }
 
-    /// 两个解析器各自最多调用一次；解析失败只留下 nil，不抛错也不阻塞。
+    /// 解析器各自最多调用一次；解析失败只留下 nil，不抛错也不阻塞。
     ///
     /// `didResolve` 在调用解析器之前置位：即使解析器意外回调本提供者，也只会
     /// 读到“还没解析出结果”的 nil，不会递归加锁。
@@ -552,6 +563,25 @@ final class ToolPathProvider {
         let bootstrap = bootstrapLocked()
         cachedNPMPrefix = npmPrefixResolver(bootstrap)
         cachedNodePath = nodePathResolver(bootstrap)
+    }
+
+    /// 丢掉一次性的解析结果，让下一次查询重新走登录 shell / node / npm prefix
+    /// 探测（用户点“重新检测”时用）。
+    ///
+    /// 必须存在的理由：登录 shell 首次超时（rc 文件首次编译、nvm 冷启动）会让
+    /// 两个解析器都返回 nil，而这个 provider 是**同一个实例**注入给依赖探测的，
+    /// 所以没有失效入口时“重新检测”拿到的永远是同一份 nil——用户只能重启应用。
+    /// 同时也不能把失败自动重试：真的没装 node 的机器上每次查询都会 spawn 三次
+    /// 外部命令（最坏 26 秒），必须由用户显式触发。
+    ///
+    /// `cachedBootstrap` 一并清掉：它里面嵌的 PATH 可能来自那次超时的登录 shell。
+    func invalidateResolution() {
+        lock.lock()
+        defer { lock.unlock() }
+        didResolve = false
+        cachedBootstrap = nil
+        cachedNodePath = nil
+        cachedNPMPrefix = nil
     }
 
     private func builderLocked() -> ToolPathBuilder {
@@ -573,6 +603,14 @@ final class ToolPathProvider {
 ///
 /// 应用级 runner 因此与依赖探测、组件识别共用同一份 PATH；环境已由构建器去掉
 /// 凭据类键，只覆盖 PATH 与既有键，不新增变量。
+///
+/// 必须转发**全部四个执行入口**（含带超时的两条与 `cancelRunningProbe`）。
+/// 旧实现只实现了两个返回 `String?` 的入口，带超时的调用因此落到协议默认
+/// 实现（`CommandRunning.swift`）——“忽略环境也必须保留超时语义”的兜底在那里
+/// 只保留了超时入口、丢掉了环境，更关键的是 `cancelRunningProbe()` 落成空实现：
+/// 生产链路上 `TimedProbeCommandRunner` 包的就是本类型，于是
+/// `timedOutArguments` 永远为空（所有探针超时都被报成普通失败），退出时的
+/// `cancelRunningProbe()` 也变成空操作。
 struct ToolEnvironmentCommandRunner: CommandRunning {
     var base: CommandRunning
     var environment: [String: String]
@@ -583,5 +621,17 @@ struct ToolEnvironmentCommandRunner: CommandRunning {
 
     func run(_ arguments: [String], environment: [String: String]?) -> String? {
         base.run(arguments, environment: environment ?? self.environment)
+    }
+
+    func run(_ arguments: [String], timeout: TimeInterval) -> CommandRunResult {
+        base.run(arguments, environment: environment, timeout: timeout)
+    }
+
+    func run(_ arguments: [String], environment: [String: String]?, timeout: TimeInterval) -> CommandRunResult {
+        base.run(arguments, environment: environment ?? self.environment, timeout: timeout)
+    }
+
+    func cancelRunningProbe() {
+        base.cancelRunningProbe()
     }
 }

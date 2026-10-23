@@ -487,6 +487,67 @@ final class ToolPathTests: XCTestCase {
         XCTAssertEqual(provider.resolvedNPMPrefix(), "/custom/npm")
     }
 
+    /// 失败的一次性解析必须能被显式失效重试。
+    ///
+    /// 回归场景（审计 S2）：登录 shell 首次超时（rc 首次编译、nvm 冷启动）会让
+    /// node/npm prefix 都解不出，而 provider 是**同一个实例**注入给依赖探测的。
+    /// 没有失效入口时，用户点“重新检测”拿到的还是那一次缓存的 nil——node/pi/pi-web
+    /// 全判缺失、服务门控关闭，只能重启应用。
+    func testInvalidateResolutionRetriesAFailedResolution() {
+        var nodeCalls = 0
+        var npmCalls = 0
+        let provider = ToolPathProvider(
+            environment: ["PATH": "/app/bin", "HOME": "/home/test"],
+            homeDirectory: "/home/test",
+            commandRunner: ToolPathFakeRunner(),
+            directoryIsUsable: { _ in false },
+            fileIsExecutable: { _ in false },
+            loginShellPath: { nil },
+            nodePathResolver: { _ in
+                nodeCalls += 1
+                return nodeCalls == 1 ? nil : "/retry/node/bin/node"
+            },
+            npmPrefixResolver: { _ in
+                npmCalls += 1
+                return npmCalls == 1 ? nil : "/retry/npm"
+            }
+        )
+
+        XCTAssertNil(provider.resolvedNodePath(), "首次解析失败")
+        XCTAssertNil(provider.resolvedNPMPrefix(), "首次解析失败")
+        XCTAssertEqual(nodeCalls, 1, "失败后不自动重试（避免在没装 node 的机器上反复 spawn 登录 shell）")
+
+        provider.invalidateResolution()
+
+        XCTAssertEqual(provider.resolvedNodePath(), "/retry/node/bin/node", "失效后必须真的重新解析")
+        XCTAssertEqual(provider.resolvedNPMPrefix(), "/retry/npm")
+        XCTAssertEqual(nodeCalls, 2)
+        XCTAssertEqual(npmCalls, 2)
+        XCTAssertEqual(provider.directories().suffix(2), ["/retry/node/bin", "/retry/npm/bin"])
+    }
+
+    /// 失效还会丢掉 bootstrap 缓存：它的 PATH 可能来自那次超时的登录 shell。
+    func testInvalidateResolutionDropsTheCachedBootstrap() {
+        var shellQueries = 0
+        let provider = ToolPathProvider(
+            environment: ["PATH": "/app/bin", "HOME": "/home/test"],
+            homeDirectory: "/home/test",
+            commandRunner: ToolPathFakeRunner(),
+            directoryIsUsable: { _ in false },
+            fileIsExecutable: { _ in false },
+            loginShellPath: {
+                shellQueries += 1
+                return shellQueries == 1 ? nil : "/late/shell/bin"
+            },
+            nodePathResolver: { _ in nil },
+            npmPrefixResolver: { _ in nil }
+        )
+
+        XCTAssertFalse(provider.bootstrap().directories.contains("/late/shell/bin"), "首次查询失败")
+        provider.invalidateResolution()
+        XCTAssertTrue(provider.bootstrap().directories.contains("/late/shell/bin"), "失效后必须重新查询登录 shell")
+    }
+
     // MARK: - 5. 服务启动环境与探测环境同源（GitHub #89 第 2 项）
 
     func testServiceLaunchPathComesFromTheSameBuilderAsTheProbeEnvironment() throws {
@@ -1022,5 +1083,86 @@ final class ToolPathHomebrewInstallationTests: XCTestCase {
         let reader = fixture.rootURL.appendingPathComponent("reader")
         try fixture.write(reader, contents: "#!/bin/sh\nread line\nprintf 'got:%s' \"$line\"\n")
         XCTAssertEqual(SystemCommandRunner(timeout: 3).run([reader.path]), "got:")
+    }
+
+    // MARK: - 环境注入器必须转发全部四个执行入口
+
+    /// 旧实现（审计 S4）只实现了两个返回 `String?` 的入口，带超时的调用因此落到
+    /// 协议默认实现：环境被丢掉，更关键的是 `cancelRunningProbe()` 落成空实现。
+    /// 生产链路上 `TimedProbeCommandRunner` 包的就是本类型，于是所有探针超时都被
+    /// 报成普通失败（`timedOutArguments` 永远为空），退出时的取消也变成空操作。
+    func testEnvironmentRunnerForwardsTimeoutsAndCancellation() {
+        let base = FakeProbeRecorder(result: CommandRunResult(output: nil, timedOut: true))
+        let runner = ToolEnvironmentCommandRunner(
+            base: base,
+            environment: ["PATH": "/injected/bin", "HOME": "/home/test"]
+        )
+
+        let timedOut = runner.run(["probe", "--version"], timeout: 2)
+        XCTAssertTrue(timedOut.timedOut, "超时语义必须原样传递")
+        XCTAssertEqual(base.calls.last?.arguments, ["probe", "--version"])
+        XCTAssertEqual(base.calls.last?.environment?["PATH"], "/injected/bin", "默认环境必须注入")
+        XCTAssertEqual(base.calls.last?.timeout, 2)
+
+        // 显式环境覆盖注入的默认环境。
+        _ = runner.run(["probe"], environment: ["PATH": "/explicit/bin"], timeout: 1)
+        XCTAssertEqual(base.calls.last?.environment?["PATH"], "/explicit/bin")
+
+        runner.cancelRunningProbe()
+        XCTAssertEqual(base.cancelCount, 1, "取消不得落成空实现")
+    }
+
+    /// 不带超时的两个入口也要带上注入的环境（GitHub #89 的本意）。
+    func testEnvironmentRunnerForwardsEnvironmentOnUntimedCalls() {
+        let base = FakeProbeRecorder(result: CommandRunResult(output: "ok"))
+        let runner = ToolEnvironmentCommandRunner(base: base, environment: ["PATH": "/injected/bin"])
+
+        XCTAssertEqual(runner.run(["a"]), "ok")
+        XCTAssertEqual(base.calls.last?.environment?["PATH"], "/injected/bin")
+
+        // 显式传 nil 表示“沿用注入的环境”，不是“清空环境”。
+        XCTAssertEqual(runner.run(["b"], environment: nil), "ok")
+        XCTAssertEqual(base.calls.last?.environment?["PATH"], "/injected/bin")
+    }
+}
+
+/// 记录所有调用参数的假 runner（`ToolPathTests` 专用）。
+private final class FakeProbeRecorder: CommandRunning {
+    struct Call {
+        var arguments: [String]
+        var environment: [String: String]?
+        var timeout: TimeInterval?
+    }
+
+    private let result: CommandRunResult
+    private(set) var calls: [Call] = []
+    private(set) var cancelCount = 0
+
+    init(result: CommandRunResult) {
+        self.result = result
+    }
+
+    func run(_ arguments: [String]) -> String? {
+        calls.append(Call(arguments: arguments, environment: nil, timeout: nil))
+        return result.output
+    }
+
+    func run(_ arguments: [String], environment: [String: String]?) -> String? {
+        calls.append(Call(arguments: arguments, environment: environment, timeout: nil))
+        return result.output
+    }
+
+    func run(_ arguments: [String], timeout: TimeInterval) -> CommandRunResult {
+        calls.append(Call(arguments: arguments, environment: nil, timeout: timeout))
+        return result
+    }
+
+    func run(_ arguments: [String], environment: [String: String]?, timeout: TimeInterval) -> CommandRunResult {
+        calls.append(Call(arguments: arguments, environment: environment, timeout: timeout))
+        return result
+    }
+
+    func cancelRunningProbe() {
+        cancelCount += 1
     }
 }

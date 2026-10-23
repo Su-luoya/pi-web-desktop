@@ -123,7 +123,7 @@ shasum -a 256 -c Pi-Web-Desktop-*.zip.sha256
 - 提 Issue 与 PR 的流程：[贡献指南](CONTRIBUTING.md)
 - 安全漏洞请按[安全政策](SECURITY.md)私密报告，不要在公开 Issue、PR 或日志里粘贴凭据或未脱敏内容
 - 其他文档：[架构说明](docs/architecture.md)、[安全设计](docs/security-ownership.md)、[设置、工作目录与退出行为](docs/settings-and-workspace.md)
-- 尚未发版修复的汇总：[第二阶段审计修复汇总](docs/bugfix-round-2.md) 与[对应的安全评审](docs/security-review-2026-10-post-alpha.16.md)（alpha.16 之后、下一次发版之前）
+- 已发版修复的汇总：[`v0.1.0-alpha.17` 发布说明](docs/release-notes-v0.1.0-alpha.17.md)、[第二阶段审计修复汇总](docs/bugfix-round-2.md) 与[本轮安全评审](docs/security-review-alpha.17.md)（含 alpha.16 之后的全部修复）
 
 Pi Web、Pi CLI、Pi packages 自身的问题请先到对应上游仓库确认；本仓库是社区维护的非官方项目，与上游维护者没有隶属、赞助或背书关系，也不分发上游代码。
 

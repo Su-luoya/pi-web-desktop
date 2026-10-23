@@ -69,6 +69,17 @@ extension AppDelegate {
         refreshUpdateMenuState()
     }
 
+    /// 这一轮已占位后失败：必须同时复位阶段位并给出可见原因。
+    ///
+    /// 把两件事绑在一个入口，是因为它们漏一个就是故障：只弹提示会留下永远停在忙碌
+    /// 态的菜单项（只能重启应用才能再试，alpha.17 修的正是这个）；只复位不提示则是
+    /// 静默失败。调用方一律走这里，而不是先 `present…` 再指望自己记得 `finish…`。
+    /// 调用方负责确保已在主线程（`desktopAppUpdateRound` 是主线程独占的状态）。
+    private func failDesktopAppUpdateRound(_ failure: DesktopAppUpdateFailure, releaseTag: String?) {
+        finishDesktopAppUpdateRound(releaseTag: releaseTag)
+        presentDesktopUpdateFailure(failure)
+    }
+
     private func downloadAndInstallDesktopApp(version: String, releaseTag: String) {
         guard beginDesktopAppUpdateActivity(releaseTag: releaseTag) else { return }
         let tagCharacters = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
@@ -81,8 +92,7 @@ extension AppDelegate {
               components.path == "/repos/\(UpdateCheckUpstream.desktopRepository)/releases/tags/\(encodedTag)",
               components.query == nil,
               components.fragment == nil else {
-            finishDesktopAppUpdateRound(releaseTag: releaseTag)
-            presentDesktopUpdateFailure(.invalidAssetURL)
+            failDesktopAppUpdateRound(.invalidAssetURL, releaseTag: releaseTag)
             return
         }
 
@@ -100,8 +110,7 @@ extension AppDelegate {
                   tag == releaseTag,
                   let assets = json["assets"] as? [[String: Any]] else {
                 DispatchQueue.main.async {
-                    self?.finishDesktopAppUpdateRound(releaseTag: releaseTag)
-                    self?.presentDesktopUpdateFailure(.downloadFailed)
+                    self?.failDesktopAppUpdateRound(.downloadFailed, releaseTag: releaseTag)
                 }
                 return
             }
@@ -122,8 +131,7 @@ extension AppDelegate {
                       checksumAsset.url, assetName: checksumAsset.name, releaseTag: releaseTag
                   ) else {
                 DispatchQueue.main.async {
-                    self?.finishDesktopAppUpdateRound(releaseTag: releaseTag)
-                    self?.presentDesktopUpdateFailure(.missingAsset)
+                    self?.failDesktopAppUpdateRound(.missingAsset, releaseTag: releaseTag)
                 }
                 return
             }
@@ -154,11 +162,10 @@ extension AppDelegate {
                     // 必须同时结束这一轮：`beginDesktopAppUpdateActivity` 已经把
                     // `desktopAppUpdateRound.activity` 置成忙碌，而菜单入口的闸控
                     // （`DesktopAppUpdateEntryPolicy.isBusy`）只看 activity 与安装器
-                    // 是否在场。少了这一句，校验和下载失败后整轮永远停在忙碌态，
+                    // 是否在场。少了结束这一步，校验和下载失败后整轮永远停在忙碌态，
                     // 菜单项永久置灰，只能重启应用才能再试。
                     DispatchQueue.main.async {
-                        self?.finishDesktopAppUpdateRound(releaseTag: releaseTag)
-                        self?.presentDesktopUpdateFailure(.checksumUnavailable)
+                        self?.failDesktopAppUpdateRound(.checksumUnavailable, releaseTag: releaseTag)
                     }
                     return
                 }
@@ -185,9 +192,11 @@ extension AppDelegate {
                         }
                         // 安装器交付结果即整轮结束：成功时应用即将被替换，失败时入口
                         // 必须重新可用（否则菜单永久置灰）。
-                        self?.finishDesktopAppUpdateRound(releaseTag: releaseTag)
-                        if case .failed(let failure) = result {
-                            self?.presentDesktopUpdateFailure(failure)
+                        switch result {
+                        case .updated:
+                            self?.finishDesktopAppUpdateRound(releaseTag: releaseTag)
+                        case .failed(let failure):
+                            self?.failDesktopAppUpdateRound(failure, releaseTag: releaseTag)
                         }
                     }
                 }

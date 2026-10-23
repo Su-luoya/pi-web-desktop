@@ -407,14 +407,26 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
                 guard try Self.sha256(of: file) == expectedHash else { self.finish(.failed(.checksumMismatch)); return }
                 let staging = self.fileManager.temporaryDirectory.appendingPathComponent("PiWebDesktop-update-\(UUID().uuidString)", isDirectory: true)
                 try self.fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
-                try self.unzip(file, into: staging)
+                // 解压失败（包括下载到的“zip”其实不是 zip）必须清掉 staging 目录。
+                // 下载包约 1.6MB，每次失败都不清理就会在 /tmp 里留下一个个
+                // `PiWebDesktop-update-<uuid>/`；用户反复重试就在无提示地堆积。
+                // 成功路径把 staging 移交给替换脚本，由脚本收尾，不在这里删。
+                do {
+                    try self.unzip(file, into: staging)
+                } catch {
+                    try? self.fileManager.removeItem(at: staging)
+                    throw error
+                }
                 let staged = try Self.findBundle(in: staging, fileManager: self.fileManager)
                 guard Self.isValidBundle(staged, fileManager: self.fileManager, expectedBundleIdentifier: id, expectedVersion: asset.version) else {
                     try? self.fileManager.removeItem(at: staging); self.finish(.failed(.invalidBundle)); return
                 }
                 try self.launchReplacement(stagedApp: staged, staging: staging)
                 self.finish(.updated(version: asset.version))
-            } catch let failure as DesktopAppUpdateFailure { self.finish(.failed(failure)) }
+            } catch let failure as DesktopAppUpdateFailure {
+                // staging 在抛错前已清；这里只负责给出结论。
+                self.finish(.failed(failure))
+            }
             catch { self.finish(.failed(.invalidArchive)) }
         }
         task.resume()
@@ -458,11 +470,19 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
             stateLock.lock(); replacementProcessDidStart = false; stateLock.unlock()
             try? fileManager.removeItem(at: script); throw DesktopAppUpdateFailure.replacementFailed
         }
-        NSApp.terminate(nil)
+        // `URLSession.downloadTask` 的完成回调不在主线程（实测 completionQueue 为
+        // nil 时落在一个 NSThread 上，不是 Thread.isMainThread），而 `NSApp.terminate`
+        // 是 AppKit 调用，必须在主线程。直接调会在子线程上动 AppKit 状态，轻则
+        // 退出时不跑 `applicationWillTerminate`（服务收尾、日志落盘、退出状态机
+        // 全部跳过），重则崩溃。换出脚本已经在等待本进程结束，所以这里只是把
+        // 退出请求交给主线程。
+        DispatchQueue.main.async { NSApp.terminate(nil) }
     }
 
     private static func shellQuote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
     private func unzip(_ archive: URL, into directory: URL) throws {
+        // `-k` 是“按 PKZip 归档处理”（不是 --keep-parent）：缺了它 ditto 会按 CPIO 解析
+        // .zip 并失败。`-x` 解包会拒绝条目名越界（`../`）的归档，不会写到目标目录外。
         let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
         process.arguments = ["-x", "-k", archive.path, directory.path]
         try process.run(); process.waitUntilExit()

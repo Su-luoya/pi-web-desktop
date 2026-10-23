@@ -1,12 +1,14 @@
 # 第二阶段审计修复汇总（alpha.16 之后）
 
-本文档记录 `v0.1.0-alpha.16`（发布提交 `761f783`）之后、尚未随任何版本发布的一轮审计修复。
+本文档记录 `v0.1.0-alpha.16`（发布提交 `761f783`）之后的一轮审计修复。
 范围是六份只读审计报告列出的 `outA`–`outE` 条目中判定为真实缺陷的部分。
 
-**本文档不是发布说明**。`docs/release-notes-v0.1.0-alpha.16.md` 与 `docs/alpha-release-checklist.md`
-里的 alpha.16 执行记录是发布当时的快照，描述的是 `761f783` 上的状态，本轮的改动不属于那一版，
-因此**没有回改**它们（包括其中的「859 个测试」——那是发布提交上的准确计数）。下一次发版时，
-本轮的改动应写进新的发布说明与新的 `security-review-alpha.N.md`。
+**这份改动已随 `v0.1.0-alpha.17` 发布**（发布说明见
+[release-notes-v0.1.0-alpha.17.md](release-notes-v0.1.0-alpha.17.md)，安全评审见
+[security-review-alpha.17.md](security-review-alpha.17.md)）。
+`docs/release-notes-v0.1.0-alpha.16.md` 与 `docs/alpha-release-checklist.md`
+里的 alpha.16 执行记录仍是发布当时的快照，描述的是 `761f783` 上的状态，本轮的改动不属于那一版，
+因此**没有回改**它们（包括其中的「859 个测试」——那是发布提交上的准确计数）。
 
 ## 变更边界
 
@@ -140,7 +142,7 @@ static let externalSchemes: Set<String> = ["http", "https", "mailto"]
 
 | 检查 | 结果 |
 | --- | --- |
-| `xcodebuild test` | 943 个测试，0 失败 |
+| `xcodebuild test` | 943 个测试，0 失败（本轮结束时的值；alpha.17 发布时为 951，多出的 8 个来自 `UpdateCheckTimerModeTests.swift` 的 3 个与 `DesktopAppUpdateFailurePathTests.swift` 的 5 个） |
 | `./Scripts/build.sh` | 成功，0 warning |
 | `./Scripts/check-identity.sh` | `PASSED (45 checks)` |
 | `./Scripts/scan-secrets.sh` | PASS |
@@ -148,7 +150,7 @@ static let externalSchemes: Set<String> = ["http", "https", "mailto"]
 | `git diff --check` | 通过 |
 
 跨版本对照：alpha.16 发布提交 `761f783` 上 `PiWebDesktopTests/` 有 33 个文件、859 个 `func test`；
-本轮结束（`c430c0f`）为 36 个文件、943 个 `func test`。
+本轮结束（`c430c0f`）为 36 个文件、943 个；随后更新链路稳定化提交 `10f9244` 增至 37 个文件、946 个，alpha.17 发布提交补上失败路径守卫后为 38 个文件、951 个。
 
 **未验证项**：以下需要真机或人工操作，本轮没有执行，不能声称已验证——
 

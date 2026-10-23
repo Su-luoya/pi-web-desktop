@@ -42,11 +42,39 @@ final class WebViewNavigationPolicyTests: XCTestCase {
         }
     }
 
-    func testNonHTTPSchemesOpenExternally() throws {
-        for raw in ["file:///tmp/index.html", "ftp://127.0.0.1/file", "mailto:someone@example.invalid"] {
+    /// outD-5：只有 http/https/mailto 允许交给系统默认 handler。`file:` 会让
+    /// LaunchServices 直接启动任意 .app，自定义 scheme 会拉起任意第三方 handler。
+    func testOnlyWebAndMailSchemesMayOpenExternally() throws {
+        XCTAssertEqual(try decision("https://example.com/a", service: defaultService), .openExternally)
+        XCTAssertEqual(try decision("http://example.com/a", service: defaultService), .openExternally)
+        XCTAssertEqual(try decision("mailto:someone@example.invalid", service: defaultService), .openExternally)
+        // 大小写不敏感（URL scheme 规范化后仍是小写，这里同时把原始字符串写大写验证）。
+        XCTAssertTrue(WebViewNavigationPolicy.canOpenExternally(try url("MAILTO:a@b.invalid")))
+
+        let blocked = [
+            "file:///System/Applications/Calculator.app",
+            "file:///etc/hosts",
+            "x-apple.systempreferences:com.apple.preference.security",
+            "ssh://someone@example.invalid",
+            "ftp://127.0.0.1/file",
+            "tel:+123456",
+            "javascript:alert(1)"
+        ]
+        for raw in blocked {
+            let candidate = try url(raw)
+            XCTAssertEqual(try decision(raw, service: defaultService), .block, raw)
+            XCTAssertFalse(WebViewNavigationPolicy.canOpenExternally(candidate), raw)
+            XCTAssertFalse(WebViewNavigationPolicy.isAllowedURL(candidate, serviceURL: try url(defaultService)), raw)
+        }
+        // 没有 scheme 的相对 URL 不能外开。
+        XCTAssertEqual(try decision("relative/path", service: defaultService), .block)
+    }
+
+    /// 外开白名单不能把 loopback 其它端口 / 外部主机的 http(s) 收回来：它们仍然是外开。
+    func testExternalHTTPSStillOpensExternally() throws {
+        for raw in ["https://example.com/", "http://192.168.0.10:\(port)/"] {
             XCTAssertEqual(try decision(raw, service: defaultService), .openExternally, raw)
         }
-        XCTAssertFalse(WebViewNavigationPolicy.isLocalURL(try url("ftp://127.0.0.1/file"), port: port))
     }
 
     func testInlineSchemesStayInTheWebView() throws {
@@ -204,5 +232,30 @@ final class WebViewNavigationPolicyTests: XCTestCase {
     func testNonURLLoadingErrorsAreReportedAsPageLoadFailures() {
         let error = NSError(domain: "ExampleDomain", code: 1, userInfo: [NSLocalizedDescriptionKey: "解析失败"])
         XCTAssertEqual(WebViewNavigationPolicy.navigationFailure(for: error), .loadFailed("解析失败"))
+    }
+
+    // MARK: - 外开白名单的接线（源码级，outD-5）
+
+    /// 执行侧唯一允许调用 `NSWorkspace.open` 的入口必须过白名单。
+    /// 回归点：修复前两条路径都是裸调 `NSWorkspace.shared.open(url)`。
+    func testWebViewControllerGatesEveryExternalOpen() throws {
+        let source = SourceScan.codeText(of: try SourceScan.text(named: "WebViewController.swift"))
+        let opens = source.components(separatedBy: "NSWorkspace.shared.open(")
+        XCTAssertEqual(opens.count - 1, 1, "外开只能集中在一处，否则闸控会被绕过")
+        let helper = try XCTUnwrap(source.range(of: "private func openExternally"))
+        let helperBody = String(source[helper.lowerBound...].prefix(400))
+        XCTAssertTrue(
+            helperBody.contains("guard WebViewNavigationPolicy.canOpenExternally(url)"),
+            "外开前必须过协议白名单"
+        )
+        XCTAssertTrue(source.contains("onBlockedExternalNavigation?(url)"), "被拒绝时必须上报，不能静默")
+        XCTAssertTrue(source.contains("case .block:"), "策略的 `.block` 分支必须有处理")
+    }
+
+    /// AppDelegate 必须把拒绝事件接上日志（否则拒绝证据在诊断里不可见）。
+    func testAppDelegateLogsBlockedExternalNavigation() throws {
+        let app = try SourceScan.codeText(of: try SourceScan.text(ofFamily: "AppDelegate"))
+        XCTAssertTrue(app.contains("controller.onBlockedExternalNavigation = {"))
+        XCTAssertTrue(app.contains("已拒绝打开非白名单协议的链接"))
     }
 }

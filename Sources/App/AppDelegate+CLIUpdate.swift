@@ -30,7 +30,10 @@ extension AppDelegate {
             targetOrigin: result?.origin ?? .unavailable,
             targetCacheWrittenAt: result?.cacheWrittenAt,
             processes: piProcessInspection ?? .unknown(.enumerationFailed),
-            abandonedAttempt: abandonedAttempt(for: .piCLI)
+            abandonedAttempt: abandonedAttempt(for: .piCLI),
+            // outD-4：把「已有一轮在跑」也纳入决策。只看自动路径自己的标记不够——
+            // 手动入口、事务尾段、放弃等待未确认都不会置它。
+            updateInProgress: piCLIUpdateInProgress || piCLIUpdateEntryState.isBlocked
         )
     }
 
@@ -53,6 +56,14 @@ extension AppDelegate {
               updateChecker.preferences.autoUpdatePiBeforeLaunch,
               !piCLIUpdateInProgress,
               !preLaunchUpdateInProgress else { return }
+        // 手动入口 / 事务尾段 / 放弃等待未确认都算「已有一轮在跑」（outD-4）：这些
+        // 状态不经过 `piCLIUpdateInProgress`，只看它会先白白烧掉本次运行的自动更新
+        // 额度，再去被编排器拒绝。这里与手动入口用同一条判据。
+        let cliEntry = piCLIUpdateEntryState
+        guard !cliEntry.isBlocked else {
+            logPiCLIUpdate("Pi CLI 自动更新推迟：" + cliEntry.rejectionDetail)
+            return
+        }
         // 判定前刷新一次进程检查：决策必须基于“刚刚”的事实，而不是上一次打开诊断页
         // 时的缓存（设置关闭时不会走到这里，也就不做任何进程枚举）。
         _ = refreshPiProcessInspection()
@@ -142,16 +153,24 @@ extension AppDelegate {
 
     private func performPiCLIManualUpdate(plan: PiCLIUpdatePlan) {
         let cliEntry = piCLIUpdateEntryState
-        guard !cliEntry.isBlocked else {
+        guard !cliEntry.isBlocked, !piCLIUpdateInProgress else {
             presentPiCLIUpdateInfo("更新正在进行", detail: cliEntry.rejectionDetail)
             return
         }
         guard let coordinator = piCLIUpdateCoordinator else { return }
+        // outD-4：手动路径也必须置位。否则手动更新执行期间到达的一次检查结果会把
+        // 决策判成 `.automatic`，先烧掉「本次运行只自动更新一次」的额度，再被编排
+        // 器拒绝——自动更新在本整次运行里静默失效。
+        piCLIUpdateInProgress = true
         piCLIUpdateRedetectionPath = plan.executablePath
         logPiCLIUpdate("手动更新 Pi CLI：用户已确认（参数数组 \(plan.arguments.joined(separator: " "))）。")
         showPiCLIUpdateProgressPage(plan: plan)
+        refreshUpdateMenuState()
         coordinator.runManual(plan) { [weak self] outcome in
-            self?.handlePiCLIUpdateOutcome(outcome, manual: true)
+            guard let self else { return }
+            self.piCLIUpdateInProgress = false
+            self.refreshUpdateMenuState()
+            self.handlePiCLIUpdateOutcome(outcome, manual: true)
         }
     }
 

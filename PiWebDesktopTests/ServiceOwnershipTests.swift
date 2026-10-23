@@ -210,11 +210,14 @@ final class ServiceOwnershipTests: XCTestCase {
     }
 
     func testEmptyLiveCommandLineIsExternal() {
-        // `ps -o args=` yielded nothing: unreadable output is a mismatch, never
-        // a pass, even though every other fact matches.
+        // `ps -o args=` yielded nothing: unreadable output is never a pass, even
+        // though every other fact matches. It is reported as unreadable facts,
+        // not as a mismatch, so a transient `ps` hiccup cannot delete the only
+        // ownership proof of a service this app launched.
         let verdict = verify(record: makeRecord(), facts: makeFacts(commandLine: ""))
-        XCTAssertEqual(verdict, .external(.argumentsMismatch))
-        XCTAssertTrue(verdict.shouldRemoveRecord)
+        XCTAssertEqual(verdict, .external(.processFactsUnavailable))
+        XCTAssertFalse(verdict.shouldRemoveRecord)
+        XCTAssertEqual(ServiceOwnershipVerifier.adoption(record: makeRecord(), verdict: verdict), .external(.processFactsUnavailable))
     }
 
     func testLiveCommandLineWhitespaceRunsAreNormalized() throws {
@@ -245,15 +248,11 @@ final class ServiceOwnershipTests: XCTestCase {
     }
 
     func testCommandTextIsTheCanonicalExecutablePlusArgumentsForm() {
-        // Native executables report exactly this text through `ps -o args=`;
-        // npm/shebang installs report the interpreter instead, which is why the
-        // launch path records the observed live text.
+        // Native executables report exactly this text through `ps -o args=`. The
+        // launch path never records it: only the observed live text is an
+        // ownership proof (npm/shebang installs report the interpreter).
         XCTAssertEqual(
-            ServiceOwnershipRecord.commandText(executablePath: executable, arguments: launchArguments),
-            "/opt/homebrew/bin/pi-web --hostname 127.0.0.1 --port 30141 --no-open"
-        )
-        XCTAssertEqual(
-            ServiceOwnershipRecord.commandDigest(executablePath: executable, arguments: launchArguments),
+            ServiceOwnershipRecord.commandDigest(ofCommandText: "\(executable) \(launchArguments.joined(separator: " "))"),
             ServiceOwnershipRecord.commandDigest(ofCommandText: "/opt/homebrew/bin/pi-web --hostname 127.0.0.1 --port 30141 --no-open")
         )
     }

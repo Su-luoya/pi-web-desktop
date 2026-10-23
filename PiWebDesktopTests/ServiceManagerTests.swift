@@ -742,6 +742,48 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertTrue(harness.startupFailures.first?.hasPrefix("无法登记 pi-web 的所有权信息") == true)
     }
 
+    func testTransientlyUnreadableCommandLineKeepsTheRecordAndTheStopPath() throws {
+        // 启动后 `ps -o args=` 偶尔读不到（瞬时空输出）不得当作“命令变了”：旧实现
+        // 把它判成 `.argumentsMismatch` 并删掉记录，于是本应用自己启动的进程永久
+        // 降级为外部服务，用户再也停不掉它。现在按“事实暂时不可读”处理：记录保留、
+        // 本次不发信号，`ps` 恢复后同一个进程又回到可管理状态。
+        var liveCommandLine = fakeCommandLine
+        let harness = try makeHarness(
+            alive: { $0 == 5150 },
+            processOutput: processOutput(for: 5150, liveCommandLine: { liveCommandLine })
+        )
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.probe.ready = false
+        harness.manager.startManagedService()
+        XCTAssertEqual(harness.manager.managedServicePID(), 5150)
+
+        liveCommandLine = ""
+
+        XCTAssertNil(harness.manager.managedServicePID())
+        // The record survived the unreadable read, so it is not re-acquirable
+        // proof for a different process either.
+        XCTAssertNotNil(harness.readOwnershipRecord())
+
+        harness.manager.setState(.running)
+        harness.manager.stopService()
+        harness.scheduler.runAllBackgroundWork()
+        XCTAssertTrue(harness.signaler.groupSignals.isEmpty)
+        XCTAssertEqual(harness.manager.currentState, .running)
+        XCTAssertNotNil(harness.readOwnershipRecord())
+
+        // `ps` answers again: the very same process is managed and stoppable.
+        liveCommandLine = fakeCommandLine
+        XCTAssertEqual(harness.manager.managedServicePID(), 5150)
+        harness.manager.stopService()
+        harness.scheduler.runAllBackgroundWork()
+        XCTAssertEqual(
+            harness.signaler.groupSignals,
+            [ManagerFakeSignaler.GroupSignal(signal: SIGTERM, processGroupID: 5150)]
+        )
+    }
+
     func testStartManagedServiceWritesAVerifiableOwnershipRecord() throws {
         let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
         defer { harness.cleanUp() }

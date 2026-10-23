@@ -142,6 +142,8 @@ final class PiCLIUpdateFlowTests: XCTestCase {
         targetOrigin: UpdateCheckOrigin = .network,
         targetCacheWrittenAt: Date? = nil,
         processes: PiProcessInspection = .noProcesses,
+        abandonedAttempt: UpdateAbandonedAttempt? = nil,
+        updateInProgress: Bool = false,
         autoUpdate: Bool = true
     ) -> PiCLIUpdatePlanningInput {
         var preferences = UpdateCheckPreferences.factoryDefaults
@@ -154,7 +156,9 @@ final class PiCLIUpdateFlowTests: XCTestCase {
             targetConfidence: targetConfidence,
             targetOrigin: targetOrigin,
             targetCacheWrittenAt: targetCacheWrittenAt,
-            processes: processes
+            processes: processes,
+            abandonedAttempt: abandonedAttempt,
+            updateInProgress: updateInProgress
         )
     }
 
@@ -403,6 +407,41 @@ final class PiCLIUpdateFlowTests: XCTestCase {
             XCTAssertTrue(reason.text.contains("按不安全处理"))
             XCTAssertTrue(reason.text.contains("应用不会结束任何进程"))
         }
+    }
+
+    /// outD-4：手动更新在跑时，一次检查结果不得白白烧掉本次运行的自动更新额度。
+    /// 这条是回归测试：修复前 `PiCLIUpdatePlanner.decide` 的输入没有「进行中」这一维，
+    /// 因此这里会返回 `.automatic`，上游先把 `piCLIUpdateAttemptedInThisRun` 置 true，
+    /// 再去被协调器拒绝，命令没执行但额度已用尽。
+    func testUpdateInProgressDefersAndNeverConsumesTheAttempt() {
+        let world = World(fixtureHome: fixtureHome)
+        let request = input(installation: installation(), updateInProgress: true)
+
+        let decision = PiCLIUpdatePlanner.decide(request)
+        guard case .deferred(let plan, let reason) = decision else {
+            return XCTFail("已有一轮更新在跑时必须推迟，实际是 \(decision)")
+        }
+        XCTAssertEqual(reason, .updateInProgress)
+        XCTAssertTrue(reason.text.contains("不消耗"))
+        XCTAssertEqual(reason.records, [], "这条推迟不是「有 Pi 进程在跑」")
+        XCTAssertEqual(plan.arguments, ["update", "--self"], "推迟也要给出计划，之后还能用")
+        XCTAssertFalse(decision.isAutomatic)
+
+        var outcome: PiCLIUpdateRunOutcome?
+        world.makeCoordinator().run(request) { outcome = $0 }
+        guard case .deferred(let delivered) = outcome else {
+            return XCTFail("协调器不应执行命令，实际是 \(String(describing: outcome))")
+        }
+        XCTAssertEqual(delivered, .updateInProgress)
+        XCTAssertTrue(world.runner.plans.isEmpty, "已有一轮在跑时绝不执行第二条 pi update --self")
+        XCTAssertEqual(world.inspectCount, 0, "决策已推迟，不需要再做进程复查")
+    }
+
+    /// 默认为 false：旧调用点（不传这个字段）行为不变，进程状态是唯一闸控。
+    func testUpdateInProgressDefaultsToFalse() {
+        let bare = input(installation: installation())
+        XCTAssertFalse(bare.updateInProgress)
+        XCTAssertTrue(PiCLIUpdatePlanner.decide(bare).isAutomatic)
     }
 
     /// 决策与执行之间可能有新的 Pi 进程启动：执行前必须复查，复查不通过就推迟。
@@ -703,6 +742,39 @@ final class PiCLIUpdateFlowTests: XCTestCase {
         XCTAssertTrue(directories.contains("/usr/bin"))
         XCTAssertTrue(directories.contains("/bin"))
         XCTAssertEqual(Set(directories).count, directories.count, "PATH 不应有重复目录")
+    }
+
+    /// outD-4 的接线回归（源码级）：手动路径必须自己置位并清理 `piCLIUpdateInProgress`，
+    /// 自动路径必须在烧掉「本次运行只一次」额度**之前**用共用的入口闸控判忙。
+    func testAppDelegateWiresTheInProgressGateOnBothPaths() throws {
+        let source = SourceScan.codeText(of: try SourceScan.text(named: "AppDelegate+CLIUpdate.swift"))
+
+        // 手动路径：置位、清理（含菜单刷新）。修复前 `performPiCLIManualUpdate` 两者都没有。
+        let manualStart = try XCTUnwrap(source.range(of: "private func performPiCLIManualUpdate"))
+        let manualTail = String(source[manualStart.lowerBound...].prefix(1200))
+        XCTAssertTrue(
+            manualTail.contains("piCLIUpdateInProgress = true"),
+            "手动路径必须置位进行中标记，否则同一时间的检查结果会白烧自动更新额度"
+        )
+        XCTAssertTrue(
+            manualTail.contains("piCLIUpdateInProgress = false"),
+            "手动路径必须在回调里清理标记，否则后续自动更新永久失效"
+        )
+
+        // 自动路径：闸控必须在 `piCLIUpdateAttemptedInThisRun = true` 之前。
+        let guardIndex = try XCTUnwrap(source.range(of: "guard !cliEntry.isBlocked"))
+        let burnIndex = try XCTUnwrap(source.range(of: "piCLIUpdateAttemptedInThisRun = true"))
+        XCTAssertLessThan(
+            source.distance(from: source.startIndex, to: guardIndex.lowerBound),
+            source.distance(from: source.startIndex, to: burnIndex.lowerBound),
+            "必须先判忙再烧额度：顺序颠倒时被拒的那次仍然消费掉了本次运行的一次机会"
+        )
+
+        // 决策输入必须把「已有一轮在跑」交给规划器（纯值判据，不依赖 UI 状态）。
+        XCTAssertTrue(
+            source.contains("updateInProgress: piCLIUpdateInProgress || piCLIUpdateEntryState.isBlocked"),
+            "决策输入必须包含进行中维度"
+        )
     }
 
     // MARK: - 5. 持久警告

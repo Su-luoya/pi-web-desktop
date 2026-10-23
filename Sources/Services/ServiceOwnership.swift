@@ -45,18 +45,6 @@ struct ServiceOwnershipRecord: Codable, Equatable {
     /// ISO-8601 timestamp of the record write.
     var recordedAt: String
 
-    /// Canonical command text for a launch: executable path plus arguments
-    /// joined with single spaces, with whitespace runs collapsed.
-    ///
-    /// For a native executable this is exactly what `ps -o args=` reports. For
-    /// npm/shebang installs the kernel replaces `argv[0]` with the interpreter
-    /// (`node /opt/homebrew/bin/pi-web …`), so the launch path records the
-    /// observed live text instead; this function is the fallback used when the
-    /// live text cannot be read.
-    static func commandText(executablePath: String, arguments: [String]) -> String {
-        normalizedCommandText(([executablePath] + arguments).joined(separator: " "))
-    }
-
     /// Whitespace-normalized form of a command line: leading/trailing whitespace
     /// removed and internal whitespace runs collapsed to single spaces. `ps`
     /// does not preserve quoting, so this is the strongest canonical form the
@@ -70,11 +58,6 @@ struct ServiceOwnershipRecord: Codable, Equatable {
         let digest = SHA256.hash(data: Data(normalizedCommandText(commandText).utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
-
-    /// SHA-256 of the canonical command text for an executable and arguments.
-    static func commandDigest(executablePath: String, arguments: [String]) -> String {
-        commandDigest(ofCommandText: commandText(executablePath: executablePath, arguments: arguments))
-    }
 }
 
 /// Facts read from `ps`/libproc for one live process.
@@ -85,7 +68,7 @@ struct ServiceProcessFacts: Equatable {
     var resolvedExecutable: String
     var resolvedExecutableSource: ServiceExecutableSource
     /// Normalized `ps -o args=` text; empty when the command line could not be
-    /// read, which the verifier treats as a mismatch.
+    /// read, which the verifier treats as unreadable facts (never a match).
     var commandLine: String
 }
 
@@ -121,7 +104,9 @@ enum ServiceOwnershipVerdict: Equatable {
     ///
     /// A transient `ps` failure must not destroy the only ownership proof, so
     /// `.processFactsUnavailable` keeps the record and simply refuses to claim
-    /// ownership for that check.
+    /// ownership for that check. A mismatch that only reflects a failed read is
+    /// handled where it happens: an empty live command line is reported as
+    /// `.processFactsUnavailable` rather than deleted (see `verify`).
     var shouldRemoveRecord: Bool {
         switch self {
         case .managed: return false
@@ -203,10 +188,15 @@ enum ServiceOwnershipVerifier {
         guard facts.processGroupID == record.processGroupID else { return .external(.processGroupMismatch) }
         guard facts.launchedAt == record.launchedAt else { return .external(.launchTimeMismatch) }
         // Live command line: the recorded digest must match what the process
-        // currently reports through `ps -o args=`. Empty or unparsable output
-        // is a mismatch, not a pass.
-        guard !facts.commandLine.isEmpty,
-              ServiceOwnershipRecord.commandDigest(ofCommandText: facts.commandLine) == record.argumentsDigest else {
+        // currently reports through `ps -o args=`.
+        //
+        // Empty output is `ps` failing to answer, not the process having no
+        // argv: deleting the record on it would permanently downgrade a service
+        // this app launched (it could never be stopped again). Report it as
+        // unreadable facts so the record survives for the next check, exactly
+        // like a directly unreadable fact set — and still never signal on it.
+        guard !facts.commandLine.isEmpty else { return .external(.processFactsUnavailable) }
+        guard ServiceOwnershipRecord.commandDigest(ofCommandText: facts.commandLine) == record.argumentsDigest else {
             return .external(.argumentsMismatch)
         }
         // When the executable path came from the `ps -o comm=` fallback it is

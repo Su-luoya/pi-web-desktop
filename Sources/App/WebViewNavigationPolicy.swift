@@ -5,8 +5,13 @@ import Foundation
 /// Local/external URL classification for web navigation.
 
 enum WebViewNavigationDecision: Equatable {
+    /// 留在 WebView 里加载。
     case allow
+    /// 交给系统默认 handler 打开。
     case openExternally
+    /// 拒绝：协议不在外开白名单内（outD-5）。页面内容不得借
+    /// `NSWorkspace.open` 拉起 `file:` / 自定义 scheme 的 handler。
+    case block
 }
 
 /// Navigation failure classification for web navigation.
@@ -61,16 +66,29 @@ enum WebViewNavigationPolicy {
         inlineSchemes.contains(scheme?.lowercased() ?? "")
     }
 
+    /// 允许交给系统默认 handler 外开的协议（outD-5）。
+    ///
+    /// 只有这三种：Web 页面、邮件。`file:` 会让 LaunchServices 直接启动任何 .app
+    /// （`file:///System/Applications/Calculator.app`），自定义 scheme 会拉起任意
+    /// 已注册的第三方 handler——本地服务页（含被注入的页面内容）不应该拥有这个能力。
+    static let externalSchemes: Set<String> = ["http", "https", "mailto"]
+
+    /// 这条 URL 能否交给系统默认 handler 打开。
+    static func canOpenExternally(_ url: URL) -> Bool {
+        externalSchemes.contains(url.scheme?.lowercased() ?? "")
+    }
+
     /// Navigation decision: the configured service, loopback URLs and inline
-    /// URLs stay in the web view, everything else opens in the default browser.
+    /// URLs stay in the web view, http(s)/mailto open in the default handler,
+    /// everything else is blocked.
     static func decision(for url: URL, serviceURL: URL) -> WebViewNavigationDecision {
         if isAllowedURL(url, serviceURL: serviceURL) || isInlineScheme(url.scheme) {
             return .allow
         }
-        return .openExternally
+        return canOpenExternally(url) ? .openExternally : .block
     }
 
-    /// http(s) 是唯一允许留在 WebView 里的协议；`file:`、`mailto:` 等一律外开。
+    /// http(s) 是唯一允许留在 WebView 里的协议；`file:`、`mailto:` 等一律外开或拒绝。
     private static func isWebScheme(_ scheme: String?) -> Bool {
         ["http", "https"].contains(scheme?.lowercased() ?? "")
     }

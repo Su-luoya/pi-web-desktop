@@ -176,7 +176,7 @@ struct ProcessInspector {
     ///
     /// `pgid`, `lstart` and an executable identity are required; `commandLine`
     /// may be empty when `ps -o args=` yields nothing, and the verifier then
-    /// treats the record as a mismatch (an empty argv is not ownership proof).
+    /// treats the facts as unreadable (an empty argv is not ownership proof).
     func processFacts(of pid: pid_t) -> ServiceProcessFacts? {
         guard pid > 1,
               let processGroupID = processGroupID(of: pid),

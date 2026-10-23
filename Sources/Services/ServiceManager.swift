@@ -727,7 +727,7 @@ final class ServiceManager {
                 // A process without a verifiable ownership record can never be
                 // managed: kill the fresh group and report the startup failure
                 // instead of leaving an unmanageable service behind.
-                let recorded = writeOwnershipRecord(for: specification, process: process)
+                let recorded = writeOwnershipRecord(for: process)
                 guard recorded, verifiedOwnershipRecord() != nil else {
                     abandonUnhostedLaunch(process: process)
                     return
@@ -770,27 +770,25 @@ final class ServiceManager {
     /// A PID that is not a process group leader, unreadable `ps` facts, or a
     /// failed write all mean "unhosted": the caller terminates the fresh
     /// process group, because an unverifiable service must never survive as a
-    /// half-managed child. The digest is over the normalized command text:
-    /// the live `ps -o args=` text when it is readable, otherwise the canonical
-    /// `executablePath + arguments` text (which a later verification then
-    /// rejects, since an empty live command line is a mismatch).
-    private func writeOwnershipRecord(for specification: ServiceLaunchSpecification, process: ServiceProcessHandle) -> Bool {
+    /// half-managed child. The digest is over the normalized command text: the
+    /// live `ps -o args=` text when it is readable. When nothing readable was
+    /// observed at launch, the launch has no arguments provenance at all and
+    /// returns false here — recording the locally constructed
+    /// `executablePath + arguments` text would be an unverified digest that the
+    /// process can never re-produce (npm/shebang installs report the
+    /// interpreter), so the record would only be deleted later for nothing.
+    private func writeOwnershipRecord(for process: ServiceProcessHandle) -> Bool {
         guard process.processIdentifier > 1,
               let facts = processInspector.processFacts(of: process.processIdentifier),
-              facts.processGroupID == process.processIdentifier else { return false }
-        let commandText = facts.commandLine.isEmpty
-            ? ServiceOwnershipRecord.commandText(
-                executablePath: specification.executablePath,
-                arguments: specification.arguments
-            )
-            : facts.commandLine
+              facts.processGroupID == process.processIdentifier,
+              !facts.commandLine.isEmpty else { return false }
         let record = ServiceOwnershipRecord(
             pid: process.processIdentifier,
             processGroupID: facts.processGroupID,
             launchedAt: facts.launchedAt,
             resolvedExecutable: facts.resolvedExecutable,
             resolvedExecutableSource: facts.resolvedExecutableSource,
-            argumentsDigest: ServiceOwnershipRecord.commandDigest(ofCommandText: commandText),
+            argumentsDigest: ServiceOwnershipRecord.commandDigest(ofCommandText: facts.commandLine),
             port: configuration.port,
             instanceID: instanceID,
             recordedAt: ISO8601DateFormatter().string(from: Date())

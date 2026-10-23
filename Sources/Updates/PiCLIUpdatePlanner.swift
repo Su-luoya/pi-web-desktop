@@ -98,6 +98,14 @@ enum PiCLIUpdatePlanner {
         if let attempt = input.abandonedAttempt {
             return .deferred(plan: plan, reason: .abandonedAttemptPending(attempt))
         }
+        // 已有一轮更新在跑（outD-4）：手动入口不会置「自动更新进行中」标记，而编
+        // 排器一律拒绝第二次执行，所以这里必须自己判忙。不判的话上游会把决策记成
+        // `.automatic` 并**先**烧掉「本次运行只自动更新一次」的额度，命令却根本没
+        // 被执行（`PiCLIUpdateCoordinator` 的 `guard !isUpdateInProgress`）——用户的
+        // 自动更新设置就会在这一整次运行里静默失效。推迟不算消费额度。
+        if input.updateInProgress {
+            return .deferred(plan: plan, reason: .updateInProgress)
+        }
         // 进程保护：唯一允许自动执行的情况是“确认没有任何 Pi 进程”。
         switch input.processes {
         case .noProcesses:

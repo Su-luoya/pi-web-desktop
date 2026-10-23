@@ -98,8 +98,12 @@ extension AppDelegate {
     /// 用打开时的配置快照写回，出现“两个都能写配置的窗口、后写覆盖前写”。
     @objc func showPreferences(_ sender: Any?) {
         let controller = preferencesWindowStore.reuse { makePreferencesWindowController() }
+        // 不可见时整体重置（取消后的残留输入不保留）；可见时只刷新未被用户
+        // 改动的字段，把「打开后外部又变了配置」追上（outD-3）。
         if controller.window?.isVisible != true {
             controller.update(configuration: serviceManager.configuration)
+        } else {
+            controller.refreshIfUnedited(configuration: serviceManager.configuration)
         }
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
@@ -149,6 +153,10 @@ extension AppDelegate {
         let configurationGeneration = serviceManager.beginConfigurationChange()
         let previous = serviceManager.configuration
         appConfiguration.save(newConfiguration)
+        // outD-3：打开的设置窗口持有的是旧快照，用户接着点“保存”会把刚生效的
+        // 配置（菜单切监听地址/切工作目录）静默写回。这里立即追平：只刷新用户
+        // 没动过的字段，有未保存编辑时保留输入。
+        preferencesWindowStore.stored?.refreshIfUnedited(configuration: newConfiguration)
         // GitHub #157：监听地址可能刚从 loopback 切到（或切回）VPN 网段，这里用
         // 新配置的地址立即重算代理告警，不等异步重启完成。
         refreshSystemProxyWarning(serviceURL: newConfiguration.serviceURL)

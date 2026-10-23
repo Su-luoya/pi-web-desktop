@@ -1,6 +1,6 @@
 import Cocoa
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, NSMenuItemValidation {
     /// 多窗口登记表（GitHub #168）：窗口 ↔ WebView 控制器的唯一对应关系来源，
     /// 同时维护启动主窗口（primary）标识与最近使用顺序。
     /// 它只做登记/查找/最近使用排序，不触碰服务生命周期（开窗、关窗都不会启动、
@@ -84,6 +84,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     var updateSettingsWindowController: UpdateSettingsWindowController?
     /// 当前正在执行的桌面 App 安装器；必须由 AppDelegate 持有到下载/替换流程结束。
     var desktopAppUpdateInstaller: DesktopAppUpdateInstalling?
+    /// 桌面 App 自更新进行到哪个阶段、属于哪一轮（outD-2）：安装器对象只在下载
+    /// 与校验都完成后才创建，光靠它判断不到「下载窗口期」，于是重复点击会再下
+    /// 一遍整包。轮次标记还保证晚到的旧回调不会复位新一轮的阶段位。
+    var desktopAppUpdateRound = DesktopAppUpdateRound()
     /// 更新菜单里的「下载并安装桌面应用更新…」入口；只在检测到已核实的可用新版本时显示。
     var desktopAppUpdateMenuItem: NSMenuItem?
     /// 每类组件的“忽略版本”（只存版本字符串与时间戳，见 `UpdateIgnoredVersions`）。

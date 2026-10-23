@@ -37,7 +37,6 @@ private final class WrappingLabel: NSTextField {
 
 final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate {
     var onSave: ((ServiceConfiguration) -> Void)?
-    var onCancel: (() -> Void)?
     /// 密码在 Keychain 中被设置或删除后触发。
     ///
     /// 调用方负责持久化可能被改写的配置（删除密码会关闭远程模式并回到默认
@@ -288,16 +287,80 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         return row
     }
 
-    /// 用当前生效配置刷新控件（W4 M2）。
+    /// 用当前生效配置刷新控件（W4 M2 / outD-3）。
     ///
     /// 设置窗口是单例：重复打开复用同一个控制器/窗口，因此每次展示前都要把控件
     /// 重置为已保存的值——上一次被取消的输入、外部改动与刚输入的新密码都不会
     /// 残留（已保存的密码本来就只以“已设置/未设置”呈现）。
+    ///
+    /// 窗口**可见**时也可能被外部配置改动（菜单切监听地址、切工作目录）追上：
+    /// 那个场景走 `refreshIfUnedited(configuration:)`，只刷新用户没动过的字段。
+    /// 这里保持“整体重置”语义，供“打开前/关闭后”使用。
     func update(configuration: ServiceConfiguration) {
+        apply(configuration: configuration, reloadControls: true)
+    }
+
+    /// 窗口可见时收到外部配置变更（outD-3）。
+    ///
+    /// - Returns: 是否刷新了控件。`false` 表示用户已有未保存的编辑，控件保持
+    ///   原样，避免抹掉正在输入的内容。
+    @discardableResult
+    func refreshIfUnedited(configuration: ServiceConfiguration) -> Bool {
+        let shouldReload = PreferencesRefreshPolicy.shouldReload(
+            currentValues: controlValues(),
+            loadedValues: loadedControlValues
+        )
+        apply(configuration: configuration, reloadControls: shouldReload)
+        return shouldReload
+    }
+
+    /// 控件当前值的快照：只包含用户可编辑的字段。“已设置密码”这类状态由
+    /// Keychain 决定，不参与“是否被编辑过”的判定。
+    private func controlValues() -> [String] {
+        [
+            pathField.stringValue,
+            workspaceField.stringValue,
+            hostnameField.stringValue,
+            portField.stringValue,
+            allowedHostsField.stringValue,
+            httpProxyField.stringValue,
+            httpsProxyField.stringValue,
+            noProxyField.stringValue,
+            autoStartButton.state == .on ? "1" : "0",
+            String(quitBehaviorPopup.indexOfSelectedItem)
+        ]
+    }
+
+    /// 同步进控件的那一份快照：下一次判断“用户是否编辑过”的基线。
+    private var loadedControlValues: [String] {
+        [
+            configuration.piWebPath,
+            // 工作目录留空表示跟随默认目录；空串与窗口里的空值等价。
+            configuration.workspacePath,
+            configuration.hostname,
+            String(configuration.port),
+            configuration.allowedHosts,
+            configuration.httpProxy,
+            configuration.httpsProxy,
+            configuration.noProxy,
+            configuration.autoStart ? "1" : "0",
+            String(ServiceConfiguration.QuitBehavior.allCases.firstIndex(of: configuration.quitBehavior) ?? 0)
+        ]
+    }
+
+    /// 统一的配置落地：必须先写 `configuration` 再决定是否 `loadValues()`，
+    /// 这样快照与控件值始终来自同一个配置。
+    private func apply(configuration: ServiceConfiguration, reloadControls: Bool) {
         self.configuration = configuration
         newPasswordField.stringValue = ""
         errorLabel.isHidden = true
-        loadValues()
+        if reloadControls {
+            loadValues()
+        } else {
+            // 用户有未保存的编辑：只刷新那些不依赖控件值的状态提示。
+            refreshWorkspaceHint()
+            refreshRemoteAccessState()
+        }
     }
 
     private func loadValues() {
@@ -366,7 +429,8 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         if #available(macOS 12.0, *) {
             panel.allowedContentTypes = [.unixExecutable]
         }
-        panel.beginSheetModal(for: window!) { [weak self] response in
+        guard let host = sheetParentWindow() else { return }
+        panel.beginSheetModal(for: host) { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
             self?.pathField.stringValue = url.path
         }
@@ -382,7 +446,8 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         panel.canCreateDirectories = false
         panel.prompt = "选择"
         panel.message = "选择 pi-web 的工作目录（必须可写）"
-        panel.beginSheetModal(for: window!) { [weak self] response in
+        guard let host = sheetParentWindow() else { return }
+        panel.beginSheetModal(for: host) { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
             switch WorkspaceDirectory.validate(path: url.path, probe: self.workspaceProbe) {
             case .usable:
@@ -414,7 +479,6 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     }
 
     @objc private func cancel(_ sender: Any?) {
-        onCancel?()
         close()
     }
 
@@ -529,6 +593,20 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         } else if field === workspaceField {
             refreshWorkspaceHint()
         }
+    }
+
+    /// 弹出 panel 的宿主窗口。
+    ///
+    /// 两个打开面板（选 pi-web、选工作目录）只可能由窗口里的按钮触发，因此
+    /// `window` 一定存在；但用 `guard let` 代替 IUO 强解包：真出现“无窗口却
+    /// 发消息”这种异常调用时，宁可不弹面板，也不要让 App 崩掉。
+    private func sheetParentWindow() -> NSWindow? {
+        guard let window else {
+            errorLabel.stringValue = "窗口未就绪，无法打开文件选择器。"
+            errorLabel.isHidden = false
+            return nil
+        }
+        return window
     }
 
     private func showError(_ message: String) {

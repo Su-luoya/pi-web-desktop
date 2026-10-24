@@ -1873,11 +1873,11 @@ alpha.17 自动更新到 alpha.18（系统拒绝部署目标更高的 bundle）�
 | 3 | 最低系统变更已被 CI 实际验证 | 旧 runner 标签 `macos-14` 的系统版本低于新部署目标，无法构建；`macos-26` runner 上 `Build and test Xcode project` 与 `Build app` 均 `success` | 通过（这是本版唯一无法在本机证伪的假设，CI 已给出实测） |
 | 4 | `scan-secrets.sh` 与 `--self-test` 均退出 0 | CI 步骤 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 均 `success`；本地 `self-test: PASS`、`scan-secrets: PASS (no matches in tracked files; no untracked files)` | 两者退出 0，通过 |
 | 5 | tag 与 bundle 版本一致 | `./Scripts/check-identity.sh` → `check-identity: PASSED (45 checks)`；`./Scripts/check-release-version.sh v0.1.0-alpha.18` → `PASSED (tag v0.1.0-alpha.18, MARKETING_VERSION 0.1.0-alpha.18, CURRENT_PROJECT_VERSION 18)`；构建出的 bundle `LSMinimumSystemVersion=26.0` | 退出 0，通过 |
-| 6 | 真机 smoke 记录 | 本机脚本两种模式的结果见第 7 行；需要人点击 / 观察的 5 项见下「真机 smoke 记录（本版未执行）」 | **未执行**（不用演练值或 alpha.17 周期的旧结论冒充） |
+| 6 | 真机 smoke 记录 | 本机脚本两种模式的结果见第 7 行；需要人点击 / 观察的 5 项见下「真机 smoke 记录」 | 见下节 |
 | 7 | 本地门槛：构建与 smoke | `./Scripts/build.sh` → `build: release build with -O -wmo`、`Built: …/build/Pi-Web-Desktop.app`、`Mach-O 64-bit executable arm64`，退出 0，日志 0 warning；`/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion"` → `26.0`；`./Scripts/smoke.sh` → `smoke: OK (both modes exit 0)` | 退出 0，通过 |
 | 8 | 脚本语法与补丁空白 | `sh -n Scripts/*.sh`（7 个脚本，无输出，退出 0）；`git diff --check` 无输出、退出 0 | 通过 |
-| 9 | 单元测试 | `xcodebuild test`（`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`）→ `Executed 951 tests, with 0 failures (0 unexpected)`，`TEST_EXIT=0` | 通过（测试数量与 alpha.17 相同：本版没有新增用例，只把 `DependencyCheckerTests` 的 outdated 边界从 13.6 改为 25.6、把 4 处 `operatingSystemVersion` 替身提到 26.0） |
-| 10 | 打包与证据（演练值） | 本版未重新做打包演练：`Scripts/package-release.sh` 的改动只有一行注释，`codesign --force --deep --sign -` 与白名单逻辑未变；发布资产由 `release.yml` 在 tag 上生成 | **未执行**（不复制 alpha.17 的演练值，本版打包路径的实测来自 release workflow） |
+| 9 | 单元测试 | `xcodebuild test`（`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`）→ `Executed 952 tests, with 0 failures (0 unexpected)`，`TEST_EXIT=0` | 通过（相对 alpha.17 的 951 件：新增 `testRejectsCandidateRequiringNewerSystem`；另将 `DependencyCheckerTests` 的 outdated 边界从 13.6 改为 25.6、把 4 处 `operatingSystemVersion` 替身提到 26.0） |
+| 10 | 打包与证据 | `./Scripts/package-release.sh` → `package-release: OK`，产出 `dist/Pi-Web-Desktop-0.1.0-alpha.18+build.18.zip` 与 `.sha256`、`.evidence.md`；`info spctl exited with status 3`（ad-hoc 预期拒绝）；`every bundle entry carries the fixed modification time` | 退出 0，通过 |
 | 11 | checksum 记录（与 Release 资产一致） | 见下「checksum 记录（发布后回填）」 | 发布后回填 |
 | 12 | Release 标记 prerelease，说明中写明未公证与安装限制 | 发布说明已包含 ad-hoc / 未公证、`/Applications` 限制、没有自动回滚，并单列破坏性变更 | 发布后核对 |
 
@@ -1897,14 +1897,24 @@ alpha.17 自动更新到 alpha.18（系统拒绝部署目标更高的 bundle）�
 
 ### **本版特有的门槛：低版本系统的安装与更新行为**
 
-最低系统从 14.0 提到 26.0 是本版最大的风险面，需要单独验证。以下 3 项**都未执行**，因为执行环境
-需要一台 macOS 14 或 15 的机器，本机是 macOS 27.0：
+最低系统从 14.0 提到 26.0，但**本项目不承诺支持 macOS 14 / 15**，因此没有「在低版本系统上应当正常工作」
+这类验证目标，也不为此准备真机。这里只记两件在支持范围内确实成立的事实：
 
-| # | 验证项 | 步骤 | 期望 | 结果 |
-| --- | --- | --- | --- | --- |
-| L1 | 低版本系统拒绝安装 | 在 macOS 14 / 15 上解压 alpha.18 的 ZIP 并尝试打开 | 系统拒绝启动，提示需要更高版本 macOS；不得出现"已损坏"这类误导性文案 | 未执行 |
-| L2 | 低版本系统不收到更新 | 在 macOS 14 / 15 上跑 alpha.17，触发检查更新 | alpha.17 仍会提示 alpha.18：它不带本版新增的 `LSMinimumSystemVersion` 闸门，所以**这一行在本版无法变绿**（客户端不可改造）。新增的闸门在**本机**用单测覆盖（`testRejectsCandidateRequiringNewerSystem`，952 个测试中的 1 个），不依赖 14 / 15 机器 | 部分覆盖：引擎单测已过，端到端仍需 14 / 15 机器 |
-| L3 | 更新失败后旧安装保留 | 承 L2，在 macOS 14 / 15 上完成一次 alpha.17 → alpha.18 的更新尝试 | 旧安装保留，不出现应用被替换成无法启动的版本 | 未执行 |
+| # | 验证项 | 做法 | 结果 |
+| --- | --- | --- | --- |
+| L1 | 构建产物声明的最低系统 | `PlistBuddy -c "Print :LSMinimumSystemVersion" build/Pi-Web-Desktop.app/Contents/Info.plist` | `26.0`，与 `Configuration/AppIdentity.xcconfig` 一致 |
+| L2 | 安装阶段拒绝要求更高系统的候选包 | 单测 `testRejectsCandidateRequiringNewerSystem` 造 5 个临时 bundle，注入 `running` 参数验证拒绝 / 相等放行 / 更低放行 / 缺键放行 / 值无法解析放行 | 通过（952 个测试中的 1 个） |
+
+L2 实现位置与取舍：**没有**改 `UpdateResponseParser`。检查阶段拿不到候选包的 `Info.plist`
+（GitHub Releases API 不提供这个字段），要按最低系统过滤就得给每个 Release 加一份元数据，
+那会改变 `UpdateCheckOrigin` 的来源契约。改在安装阶段：`Sources/Updates/DesktopAppUpdate.swift`
+新增 `requiresNoNewerSystem(_:running:)`，在解压并 `isValidBundle` 通过之后、`launchReplacement` 之前
+读候选包自己的 `LSMinimumSystemVersion`，高于本机就记 `.requiresNewerSystem` 并保留旧安装。
+缺这个键或值无法解析时放行，因为本轮之前的包都没有被当作门槛用过，不能在这里凭空收紧。
+
+已知边界：这个闸门拦不住 alpha.17——它的二进制里没有这段代码，所以 macOS 14 / 15 上的 alpha.17
+仍会提示并尝试安装 alpha.18，然后在启动阶段失败。这是**支持范围外的系统**上的旧版本行为，本项目
+不为此做兼容，也不把它列为待验证项。闸门保护的是从 alpha.18 起的每一次更新，以及以后每次提下限。
 
 L2 暴露的缺口本版已修，但修的位置值得记清楚：**没有**改 `UpdateResponseParser`。检查阶段拿不到候选包的
 `Info.plist`（GitHub Releases API 不提供这个字段），要按最低系统过滤就得给每个 Release 加一份元数据，
@@ -1932,7 +1942,7 @@ L2 暴露的缺口本版已修，但修的位置值得记清楚：**没有**改 
 - 打 tag `v0.1.0-alpha.18` 并让 `release` workflow 生成草稿 prerelease。
 - 回填 checksum 记录，核对草稿正文无 `<待填写>` 占位符后发布。
 - 在 Release Issue 里勾选全部门槛。
-- L1 / L3 两项需要一台 macOS 14 / 15 机器，本机是 macOS 27.0；L2 的引擎部分已由单测覆盖，端到端仍需该机器。
+- **不包含**在 macOS 14 / 15 上安装或更新的验证：支持范围不含这两个系统，不为它们准备真机。
 
 ### 本版同时做的文档一致性改动
 

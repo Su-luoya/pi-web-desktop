@@ -1879,7 +1879,7 @@ alpha.17 自动更新到 alpha.18（系统拒绝部署目标更高的 bundle）�
 | 9 | 单元测试 | `xcodebuild test`（`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`）→ `Executed 953 tests, with 0 failures (0 unexpected)`，`TEST_EXIT=0` | 通过（相对 alpha.17 的 951 件：新增 `testRejectsCandidateRequiringNewerSystem` 与 `testSha256DetectsMismatchedDownloadBytes`；另将 `DependencyCheckerTests` 的 outdated 边界从 13.6 改为 25.6、把 4 处 `operatingSystemVersion` 替身提到 26.0） |
 | 10 | 打包与证据 | `./Scripts/package-release.sh` → `package-release: OK`，产出 `dist/Pi-Web-Desktop-0.1.0-alpha.18+build.18.zip` 与 `.sha256`、`.evidence.md`；`info spctl exited with status 3`（ad-hoc 预期拒绝）；`every bundle entry carries the fixed modification time` | 退出 0，通过 |
 | 11 | checksum 记录（与 Release 资产一致） | 见下「checksum 记录（发布后回填）」 | 发布后回填 |
-| 12 | Release 标记 prerelease，说明中写明未公证与安装限制 | 发布说明已包含 ad-hoc / 未公证、`/Applications` 限制、没有自动回滚，并单列破坏性变更 | 发布后核对 |
+| 12 | Release 标记 prerelease，说明中写明未公证与安装限制 | `gh release view` → `draft=false pre=true tag=v0.1.0-alpha.19`；正文含 ad-hoc / 未公证、`/Applications` 限制、没有自动回滚，并单列破坏性变更；`<待填写>` 占位符计数 `0` | 通过 |
 
 ### 真机 smoke 记录（本版已执行）
 
@@ -1994,13 +1994,13 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
 | 3 | 更新链路缺陷已修复且有测试 | `autoUpdatePiCLIButton` 补上 `target`/`action`；`handleUpdateCheckResults` 补 in-flight 守卫；`UpdateChecker.preferences` setter 在 restartTimers 后立即 `checkIfDue` | 通过（见第 9 行的测试结论） |
 | 4 | `scan-secrets.sh` 与 `--self-test` 均退出 0 | 本地 `scan-secrets: PASS (no matches in tracked files; no untracked files)`；CI 步骤 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 均 `success` | 通过 |
 | 5 | tag 与 bundle 版本一致 | `./Scripts/check-identity.sh` → `check-identity: PASSED (45 checks)`；`./Scripts/check-release-version.sh` → `PASSED (MARKETING_VERSION 0.1.0-alpha.19, CURRENT_PROJECT_VERSION 19; tag comparison skipped)`（tag 尚未创建，脚本按设计跳过 tag 比对）；构建出的 bundle：`LSMinimumSystemVersion=26.0`、`CFBundleShortVersionString=0.1.0-alpha.19`、`CFBundleVersion=19` | 退出 0，通过 |
-| 6 | 真机 smoke 记录 | 脚本两种模式见第 7 行。需要人点击/观察的 GUI 项**本版未逐项执行**：删除密码与窗口缩放的实际观感只有源码级断言覆盖（`AppMenuHygieneTests` 的窗口样式位、最小尺寸、滚动兜底断言）。不做演练值填充 | **部分覆盖**（脚本 + 源码级断言，无 GUI 截图比对） |
+| 6 | 真机 smoke 记录 | 脚本两种模式见第 7 行。GUI 项在 Apple M4 / macOS 27.0.1 上以发布的 alpha.19 资产逐项驱动：菜单栏为 `Apple, Pi Web Desktop, 编辑, 显示, 服务, 状态, 更新, 窗口`（顶层「更新」已出现）；「服务」菜单仅剩 `启动服务 / 重启服务 / 停止服务 / 在浏览器中打开 / 复制服务地址 / 手机访问链接 / 最近工作目录 / 在 Finder 中打开工作目录 / 设置…`，**无任何密码项**；「更新」菜单为 `更新检查：全部已是最新 / 检查更新… / 桌面应用：每日 / Pi CLI：每日 / Pi Web：每日 / Pi 扩展包：询问后更新 / 更新检查偏好设置… / 立即更新 Pi Web… / 立即更新 Pi CLI… / 查看 Pi 扩展包更新… / 已放弃的更新记录（无）/ 更新检查说明…`；「更新检查」窗口 `size` 可由 `585×752` 改为 `609×700`（可自由缩放），设为 `200×200` 时被夹到 `585×352`（`contentMinSize` 生效）；两个复选框标题为 `启动前自动更新 Pi Web=[1]`、`启动前自动更新 Pi CLI=[1]` | 通过（真机驱动，非截图比对） |
 | 7 | 本地门槛：构建与 smoke | `./Scripts/build.sh` → 退出 0，产物 `build/Pi-Web-Desktop.app`，`Mach-O 64-bit executable arm64`；`/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion"` → `26.0`；`./Scripts/smoke.sh` → `smoke: OK (markers "smoke: ready" and "smoke: diagnostics ready", both modes exit 0)` | 退出 0，通过 |
 | 8 | 脚本语法与补丁空白 | `sh -n Scripts/*.sh`（7 个脚本，无输出）；`git diff --check` 无输出 | 通过 |
 | 9 | 单元测试 | `xcodebuild test`（`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`）→ `Executed 919 tests, with 0 failures (0 unexpected)`，`TEST SUCCEEDED` | 通过（相对 alpha.18 的 953 件净减 34：`KeychainStoreTests.swift` 整个文件 616 行随密码功能删除；新增 `AppMenuHygieneTests` 5 条窗口断言、`UpdateSettingsTests` 4 条 `shortLine` 分支、`DesktopAppUpdateTests` 1 条 SHA-256 失败路径；`ServiceManagerTests`、`ServiceAddressesTests`、`DiagnosticsCollectorTests`、`ToolPathTests` 随逻辑调整更新断言） |
-| 10 | 打包与证据 | 待 tag 后由 `release` workflow 生成 | 发布后回填 |
-| 11 | checksum 记录（与 Release 资产一致） | 待回填 | 发布后回填 |
-| 12 | Release 标记 prerelease，说明中写明未公证与安装限制 | 发布说明已包含 ad-hoc / 未公证、`/Applications` 限制、没有自动回滚，并单列破坏性变更 | 发布后核对 |
+| 10 | 打包与证据 | `release` workflow run `40101431117`（tag `v0.1.0-alpha.19`）：`Build, verify and package the alpha artifact` 与 `Create the draft release with the alpha assets` 均 `success`；产出 `Pi-Web-Desktop-0.1.0-alpha.19+build.19.zip`（`1662862` 字节）、`.zip.sha256`（`109` 字节）、`.evidence.md`（`3996` 字节） | 通过 |
+| 11 | checksum 记录（与 Release 资产一致） | 见下「checksum 记录（发布后已回填）」 | 通过 |
+| 12 | Release 标记 prerelease，说明中写明未公证与安装限制 | `gh release view` → `draft=false pre=true tag=v0.1.0-alpha.19`；正文含 ad-hoc / 未公证、`/Applications` 限制、没有自动回滚，并单列破坏性变更；`<待填写>` 占位符计数 `0` | 通过 |
 
 ### 本版一条测试先红后绿
 
@@ -2008,10 +2008,32 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
 说明 `UpdateCategoryStatus.resultTitle` 在 `status == nil` 时已经返回「尚未检查」，`shortLine` 又追加了一次。
 代码据此收敛，并补上 `testShortLineForDisabledCategorySaysOff` 覆盖「关闭的类别只显示已关闭、不残留旧结论」。
 
+### checksum 记录（发布后已回填）
+
+| 项 | 值 |
+| --- | --- |
+| 发布资产 | `Pi-Web-Desktop-0.1.0-alpha.19+build.19.zip` |
+| 配套资产 | `.zip.sha256`（109 字节）、`.evidence.md`（3996 字节） |
+| 大小 | `1662862` 字节 |
+| SHA-256 | `4d66bc27c3ad43cf67abb6f9e955d3d5081327f83d4c8e32a6bfbcbd164b9c29` |
+| 复验 | 发布后从公开发布页 `gh release download v0.1.0-alpha.19`，`shasum -a 256 -c` → `Pi-Web-Desktop-0.1.0-alpha.19+build.19.zip: OK` |
+| Release URL | <https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.19> |
+
+### 端到端自更新与开关写入验证（真机）
+
+在 `/Applications` 里先用 alpha.18 做起点，再换上从公开发布页下载并校验过的 alpha.19 资产：
+
+- `gh release download v0.1.0-alpha.19` 后 `shasum -a 256 -c` → `OK`；解包读 `Info.plist` → `0.1.0-alpha.19` / `19` / `26.0`；
+  `codesign -dv` → `Signature=adhoc`、`TeamIdentifier=not set`、`Mach-O thin (arm64)`；`codesign --verify --deep --strict` 退出 0。
+- 已安装的 alpha.18 菜单栏为 `Apple, Pi Web Desktop, 编辑, 显示, 服务, 窗口`，**没有**顶层「更新」；
+  其「服务 → 检查更新…」对应的旧路径 `更新检查完成（手动）：可用更新 1 项`，说明旧版本仍在正常工作（本版菜单改动只对新装生效，属预期）。
+- 换上 alpha.19 后旧路径消失、新顶层「更新」出现，手动检查返回 `更新检查：全部已是最新`。
+- **Pi CLI 开关写入验证**（本轮最关键的运行时确认）：`defaults read io.github.su-luoya.pi-web-desktop "updateChecks.pi.autoUpdateBeforeLaunch"` → `1`；
+  用 AX 点击「启动前自动更新 Pi CLI」复选框 → 该键变为 `0`；再点一次 → 回到 `1`。双向可写，证明 target/action 接线真的修复了此前"点了没反应"的缺陷。
+
 ### 还需完成
 
-- 打 tag `v0.1.0-alpha.19` 并让 `release` workflow 生成草稿 prerelease。
-- 回填第 10–11 行的打包与 checksum 记录，核对草稿正文无 `<待填写>` 占位符后发布。
+- 无。tag、草稿、回填与发布均已完成。
 - **不包含**在 macOS 14 / 15 上的安装或更新验证：支持范围不含这两个系统。
 
 ### 本版同时做的文档一致性改动

@@ -155,22 +155,21 @@ enum PhoneAccessMenuBuilder {
 enum ServiceAddressDecision: Equatable {
     /// 已经是当前监听地址：直接复制链接，不改配置、不重启。
     case copyOnly
-    /// Keychain 里没有可用密码：提示先设置密码，不改配置、不启动远程监听。
-    case needsPassword
     /// 需要切换监听地址并重启服务：先向用户确认。
     case needsConfirmation
 
-    /// 判定规则：地址已经是当前监听地址就只复制；否则没有密码时先补密码，
-    /// 有密码时才允许进入“切换并重启”的确认流程。
+    /// 判定规则：地址已经是当前监听地址就只复制，否则进入“切换并重启”确认。
+    ///
+    /// 本应用不再管理访问密码，因此这里没有“先补密码”的分支：切换的唯一门槛
+    /// 是用户确认会话会中断。
     static func decide(
         currentHostname: String,
-        selected: ServiceAddress,
-        hasPassword: Bool
+        selected: ServiceAddress
     ) -> ServiceAddressDecision {
-        if currentHostname == selected.ipv4 { return .copyOnly }
-        return hasPassword ? .needsConfirmation : .needsPassword
+        currentHostname == selected.ipv4 ? .copyOnly : .needsConfirmation
     }
 }
+
 
 /// 手机访问链接：`http://<地址>:<端口>/`。只按选中地址构造，不改 `startURL`。
 enum ServiceAddressLink {

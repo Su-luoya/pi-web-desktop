@@ -502,7 +502,7 @@ enum UpdateAbandonedAttemptPresenter {
         result.append("")
         result.append(
             "这些记录不会阻止手动更新；自动更新在清除记录前不会执行。"
-                + "清除方式：菜单“服务 → 更新检查设置 → 已放弃的更新记录…”。"
+                + "清除方式：菜单“更新 → 已放弃的更新记录…”。"
         )
         return result.joined(separator: "\n")
     }

@@ -30,9 +30,6 @@ extension AppDelegate {
         serviceManager.onStartupFailure = { [weak self] message in
             self?.presentStartupError(message)
         }
-        serviceManager.onRemoteAccessClosed = { [weak self] closed in
-            self?.persistClosedRemoteAccessConfiguration(closed)
-        }
         // 启动入口在启动前发现工作目录不可用（GitHub #9 复审：健康监控运行期间
         // 自选目录被删除）：进入诊断状态并给出可读修复提示，而不是重建目录。
         serviceManager.onWorkspaceProblem = { [weak self] _, _ in
@@ -51,14 +48,6 @@ extension AppDelegate {
         refreshWorkspaceState()
         guard let report = dependencyReport else { return }
         applyDependencyReport(report, triggeredByUser: false)
-    }
-
-    /// 远程访问被 `ServiceManager` 收敛（密码被删除或读取失败、已停止托管进程）
-    /// 后只持久化回落后的 loopback 配置，不自动重启：用户先看到“已停止并回到
-    /// loopback”的可读提示，再由自己决定是否启动，敏感状态变化不做静默重启。
-    private func persistClosedRemoteAccessConfiguration(_ closed: ServiceConfiguration) {
-        appConfiguration.save(closed)
-        serviceManager.updateConfiguration(closed)
     }
 
     private func applyState(_ state: ServiceState) {
@@ -116,25 +105,16 @@ extension AppDelegate {
     private func makePreferencesWindowController() -> PreferencesWindowController {
         let controller = PreferencesWindowController(
             configuration: serviceManager.configuration,
-            keychain: keychain,
             defaultWorkspaceDirectory: appConfiguration.defaultWorkspaceDirectory.path,
             workspaceProbe: workspaceProbe
         )
         controller.onSave = { [weak self] newConfiguration in
-            self?.applyPreferencesConfiguration(newConfiguration, credentialsChanged: false)
-        }
-        controller.onRemoteAccessCredentialsChanged = { [weak self] newConfiguration in
-            self?.applyPreferencesConfiguration(newConfiguration, credentialsChanged: true)
+            self?.applyPreferencesConfiguration(newConfiguration)
         }
         return controller
     }
 
     /// 设置窗口保存后的统一入口。
-    ///
-    /// `credentialsChanged` 表示 Keychain 中的密码刚被设置或删除：远程模式下
-    /// 正在运行的托管服务必须重启，新的 `PI_WEB_PASSWORD`（或没有它）才会进入
-    /// 子进程环境。删除密码已经把 hostname 收回 loopback，因此会走普通的重启
-    /// 路径。
     ///
     /// `completion` 在配置生效（需要重启时，重启路径已经走完）后回到主线程调用；
     /// 默认 nil 让既有调用方不受影响。GitHub #150 的“切换监听地址后复制链接”
@@ -145,7 +125,6 @@ extension AppDelegate {
     /// 停止/清理（`stopService` 已经做完），不得把捕获的旧配置写回去。
     func applyPreferencesConfiguration(
         _ newConfiguration: ServiceConfiguration,
-        credentialsChanged: Bool,
         completion: (() -> Void)? = nil
     ) {
         // GitHub #135 F1：在改动任何状态之前领取本次请求的配置代次。之后任何更新的
@@ -162,8 +141,7 @@ extension AppDelegate {
         refreshSystemProxyWarning(serviceURL: newConfiguration.serviceURL)
         let changed = previous.runtimeSignature != newConfiguration.runtimeSignature
         let workspaceChanged = previous.workspacePath != newConfiguration.workspacePath
-        let needsRestartForCredentials = credentialsChanged && !RemoteAccessPolicy.isLoopbackHostname(newConfiguration.hostname)
-        let managed = (changed || needsRestartForCredentials) && serviceManager.managedServicePID() != nil
+        let managed = changed && serviceManager.managedServicePID() != nil
         // 工作目录门控与菜单可用性读最新配置，但配置要等旧服务停止后才交给
         // ServiceManager（否则停止校验会因端口/参数变化把旧进程误判为外部服务）。
         refreshWorkspaceState(configuration: newConfiguration)
@@ -189,7 +167,7 @@ extension AppDelegate {
             }
         } else {
             serviceManager.updateConfiguration(newConfiguration)
-            if changed || needsRestartForCredentials {
+            if changed {
                 serviceManager.reloadAfterConfigurationChange()
             } else {
                 // Re-emit the current state so the status menu title refreshes.

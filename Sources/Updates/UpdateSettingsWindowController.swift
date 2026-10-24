@@ -33,28 +33,23 @@ final class UpdateSettingsWindowController: NSWindowController {
         target: nil,
         action: nil
     )
-    private let autoUpdateHintLabel = NSTextField(labelWithString: UpdateAutomationBoundary.restrictedExplanation)
+    private let autoUpdateHintLabel = NSTextField(labelWithString:
+        "只在启动时更新已验证的 npm 全局安装，失败不影响启动。")
     private let autoUpdatePiCLIButton = NSButton(
-        checkboxWithTitle: "启动前自动更新 Pi CLI（有运行中的 Pi 进程时自动推迟）",
+        checkboxWithTitle: "启动前自动更新 Pi CLI（有运行中的 Pi 进程时推迟）",
         target: nil,
         action: nil
     )
     private let autoUpdatePiCLIHintLabel = NSTextField(labelWithString:
-        "只调用 Pi 官方命令 pi update --self（参数数组，不使用 shell、不调用 sudo）；"
-        + "检测到运行中的 Pi 进程或进程状态不确定时，自动更新会推迟到下一次判定，"
-        + "应用不会结束、暂停或接管任何 Pi 进程与会话。手动更新入口在菜单“服务 → 更新检查设置 → 立即更新 Pi CLI…”。")
+        "走官方命令 pi update --self；检测到运行中的 Pi 进程时推迟。")
     private let piCLIStatusLabel = NSTextField(labelWithString: "")
     private let piPackageHintLabel = NSTextField(labelWithString:
-        "Pi 扩展包只允许三种策略（关闭 / 检查并通知 / 询问后更新），不做无人值守更新："
-        + "“检查并通知”只提示版本；“询问后更新”只对来源为已验证的 npm 全局安装提供执行入口，"
-        + "并在菜单“服务 → 更新检查设置 → 查看 Pi 扩展包更新…”里显示包名、当前/目标版本、"
-        + "完整参数数组与风险说明，取消是默认按钮；只调用 Pi 官方命令 pi update npm:<包名>。"
-        + "检测到运行中的 Pi 进程或进程状态不确定时拒绝执行；应用不会结束或信号任何 Pi 进程。")
+        "不做无人值守更新，确认后只调用 pi update npm:<包名>。")
     /// internal：布局回归测试需要对照其他长文本 label 的约束（M11）。
-    let piPackageStatusLabel = NSTextField(labelWithString: "")
+    let piPackageStatusLabel = WrappingLabel(labelWithString: "")
     /// 「已放弃」记录（GitHub #62）：超时/放弃等待之后可能仍在运行的命令。
     /// internal：回归测试需要检查它的宽度约束（M11）。
-    let abandonedStatusLabel = NSTextField(labelWithString: "")
+    let abandonedStatusLabel = WrappingLabel(labelWithString: "")
 
     private static let timestampFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -115,21 +110,17 @@ final class UpdateSettingsWindowController: NSWindowController {
     // MARK: - 界面
 
     private func buildWindow() {
-        let content = NSView()
+        let content = FlippedDocumentView()
+        content.translatesAutoresizingMaskIntoConstraints = false
 
         let title = NSTextField(labelWithString: "更新检查偏好设置")
         title.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
 
-        let intro = NSTextField(labelWithString:
-            "更新检查只做只读的版本查询：不下载、不安装、不修改任何组件。关闭某一类后，"
-            + "应用不再为该类发起请求，也不安排复查；应用退出后不检查（不安装 LaunchAgent）。"
-            + "发现可用更新时使用应用内提示框（不使用系统通知中心），提示内容只含组件名与版本。"
-            + "扩展包更新不做无人值守更新：只有在菜单里显式确认后才会执行一次官方命令。")
-        intro.lineBreakMode = .byWordWrapping
-        intro.maximumNumberOfLines = 0
-        intro.textColor = .secondaryLabelColor
+        let intro = NSTextField(labelWithString: "只查版本，不下载也不安装；关闭某类后不再为它发请求。")
+        SettingsFormMetrics.configureHint(intro)
 
         var rows: [NSView] = [title, intro]
+        var categoryRows: [NSStackView] = []
         for (index, category) in UpdateCheckCategory.allCases.enumerated() {
             let header = NSTextField(labelWithString: category.displayName)
             header.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
@@ -166,37 +157,18 @@ final class UpdateSettingsWindowController: NSWindowController {
             row.alignment = .leading
             row.spacing = 4
             rows.append(row)
+            categoryRows.append(row)
         }
 
         autoUpdateButton.target = self
         autoUpdateButton.action = #selector(autoUpdateChanged(_:))
-        autoUpdateHintLabel.lineBreakMode = .byWordWrapping
-        autoUpdateHintLabel.maximumNumberOfLines = 0
-        autoUpdateHintLabel.textColor = .secondaryLabelColor
-        autoUpdateHintLabel.font = NSFont.systemFont(ofSize: 11)
-
-        autoUpdatePiCLIButton.target = self
-        autoUpdatePiCLIButton.action = #selector(autoUpdatePiCLIChanged(_:))
-        autoUpdatePiCLIHintLabel.lineBreakMode = .byWordWrapping
-        autoUpdatePiCLIHintLabel.maximumNumberOfLines = 0
-        autoUpdatePiCLIHintLabel.textColor = .secondaryLabelColor
-        autoUpdatePiCLIHintLabel.font = NSFont.systemFont(ofSize: 11)
-        piCLIStatusLabel.lineBreakMode = .byWordWrapping
-        piCLIStatusLabel.maximumNumberOfLines = 0
-        piCLIStatusLabel.textColor = .secondaryLabelColor
-        piCLIStatusLabel.font = NSFont.systemFont(ofSize: 11)
-        piPackageHintLabel.lineBreakMode = .byWordWrapping
-        piPackageHintLabel.maximumNumberOfLines = 0
-        piPackageHintLabel.textColor = .secondaryLabelColor
-        piPackageHintLabel.font = NSFont.systemFont(ofSize: 11)
-        piPackageStatusLabel.lineBreakMode = .byWordWrapping
-        piPackageStatusLabel.maximumNumberOfLines = 0
-        piPackageStatusLabel.textColor = .secondaryLabelColor
-        piPackageStatusLabel.font = NSFont.systemFont(ofSize: 11)
-        abandonedStatusLabel.lineBreakMode = .byWordWrapping
-        abandonedStatusLabel.maximumNumberOfLines = 0
-        abandonedStatusLabel.textColor = .secondaryLabelColor
-        abandonedStatusLabel.font = NSFont.systemFont(ofSize: 11)
+        for hint in [
+            autoUpdateHintLabel, autoUpdatePiCLIHintLabel, piCLIStatusLabel,
+            piPackageHintLabel, piPackageStatusLabel, abandonedStatusLabel
+        ] {
+            SettingsFormMetrics.configureHint(hint)
+            hint.font = NSFont.systemFont(ofSize: 11)
+        }
 
         let reservedHeader = NSTextField(labelWithString: "启动前自动更新（受限）")
         reservedHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
@@ -233,45 +205,69 @@ final class UpdateSettingsWindowController: NSWindowController {
         stack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(stack)
 
+        stack.widthAnchor.constraint(
+            greaterThanOrEqualToConstant: SettingsFormMetrics.minimumWidth
+        ).isActive = true
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
-            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
-            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -24),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: SettingsFormMetrics.inset),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -SettingsFormMetrics.inset),
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: SettingsFormMetrics.inset),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -SettingsFormMetrics.inset),
             title.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            intro.widthAnchor.constraint(equalToConstant: 620),
-            autoUpdateHintLabel.widthAnchor.constraint(equalToConstant: 620),
-            autoUpdatePiCLIHintLabel.widthAnchor.constraint(equalToConstant: 620),
-            piCLIStatusLabel.widthAnchor.constraint(equalToConstant: 620),
-            piPackageHintLabel.widthAnchor.constraint(equalToConstant: 620),
-            piPackageStatusLabel.widthAnchor.constraint(equalToConstant: 620),
-            // M11（更新事务审计）：abandonedStatusLabel 也是可换行长文本，缺宽度
-            // 约束时用 intrinsic width，与 stack.trailingAnchor 的 -24 固定边距冲突
-            // （长文本在 Pi 命令超时/被放弃后出现，症状是约束冲突+文本溢出窗口）。
-            abandonedStatusLabel.widthAnchor.constraint(equalToConstant: 620),
             buttons.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
-        for category in UpdateCheckCategory.allCases {
-            statusLabels[category]?.widthAnchor.constraint(equalToConstant: 620).isActive = true
+        // 说明与状态文本跟着窗口宽度重新折行：不再写死 620pt，窗口因此可以
+        // 自由缩放，变宽时文字也跟着变宽（旧的固定宽度会让右边永远留白，并把
+        // minSize 钉死在同一个数值上）。
+        for view in [
+            intro, autoUpdateHintLabel, autoUpdatePiCLIHintLabel, piCLIStatusLabel,
+            piPackageHintLabel, piPackageStatusLabel, abandonedStatusLabel
+        ] {
+            view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+        // 每个分类的整块（标题 + 策略 + 状态行）也撑满宽度，状态文本才能跟着折行。
+        for categoryStack in categoryRows {
+            categoryStack.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+        for (_, label) in statusLabels {
+            label.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
 
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.horizontalScrollElasticity = .none
+        scrollView.documentView = content
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        let container = NSView()
+        container.addSubview(scrollView)
+
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 668, height: 700),
+            contentRect: NSRect(x: 0, y: 0, width: 568, height: 720),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.title = "更新检查偏好设置"
-        window.contentView = content
+        window.title = "更新检查"
+        window.contentView = container
         window.isReleasedWhenClosed = false
-        // M12（更新事务审计）：minSize 不得小于内容固有高度——固定值 620 低于静态
-        // 内容需要的高度，拉到最小会触发不可满足约束并裁掉底部按钮。按 stack 的
-        // fittingSize 现算（可换行 label 宽度固定 620，文本高度即可确定），再外加上
-        // 下各 24 的边距；高度随文案调整自动跟踪，不再需要人工同步两个魔数。
-        let minimumWindowHeight = stack.fittingSize.height + 48
-        window.minSize = NSSize(width: 668, height: minimumWindowHeight)
+        // 与设置窗口同一套最小尺寸：表单列最小 520pt，窗口缩得再矮也只是滚动，
+        // 不会裁掉内容，也不需要按文案长度现算高度。
+        window.contentMinSize = SettingsFormMetrics.minimumContentSize
         window.center()
         self.window = window
+
+        NSLayoutConstraint.activate([
+            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: container.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            content.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            content.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            content.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor)
+        ])
     }
 
     // MARK: - 动作

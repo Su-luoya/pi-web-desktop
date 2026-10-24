@@ -149,49 +149,24 @@ final class ServiceAddressesTests: XCTestCase {
     func testDecisionCopiesOnlyWhenSelectedAddressIsAlreadyTheListeningAddress() {
         let selected = localNetwork("192.168.1.20")
         XCTAssertEqual(
-            ServiceAddressDecision.decide(currentHostname: "192.168.1.20", selected: selected, hasPassword: false),
-            .copyOnly
-        )
-        XCTAssertEqual(
-            ServiceAddressDecision.decide(currentHostname: "192.168.1.20", selected: selected, hasPassword: true),
+            ServiceAddressDecision.decide(currentHostname: "192.168.1.20", selected: selected),
             .copyOnly
         )
     }
 
-    func testDecisionRequiresPasswordBeforeSwitchingListeningAddress() {
+    /// 本应用不再持有访问密码，因此切换监听地址没有“先补密码”这一步：
+    /// 只要不是当前地址就要求确认（会重启并中断当前会话）。
+    func testDecisionRequiresConfirmationWhenSwitchingListeningAddress() {
         XCTAssertEqual(
-            ServiceAddressDecision.decide(
-                currentHostname: "127.0.0.1",
-                selected: localNetwork("192.168.1.20"),
-                hasPassword: false
-            ),
-            .needsPassword
-        )
-        XCTAssertEqual(
-            ServiceAddressDecision.decide(
-                currentHostname: "",
-                selected: tailnet(cgnat("64.0.2")),
-                hasPassword: false
-            ),
-            .needsPassword
-        )
-    }
-
-    func testDecisionRequiresConfirmationWhenSwitchingWithStoredPassword() {
-        XCTAssertEqual(
-            ServiceAddressDecision.decide(
-                currentHostname: "127.0.0.1",
-                selected: tailnet(cgnat("64.0.2")),
-                hasPassword: true
-            ),
+            ServiceAddressDecision.decide(currentHostname: "127.0.0.1", selected: localNetwork("192.168.1.20")),
             .needsConfirmation
         )
         XCTAssertEqual(
-            ServiceAddressDecision.decide(
-                currentHostname: "192.168.1.20",
-                selected: localNetwork("10.0.0.5"),
-                hasPassword: true
-            ),
+            ServiceAddressDecision.decide(currentHostname: "", selected: tailnet(cgnat("64.0.2"))),
+            .needsConfirmation
+        )
+        XCTAssertEqual(
+            ServiceAddressDecision.decide(currentHostname: "192.168.1.20", selected: localNetwork("10.0.0.5")),
             .needsConfirmation
         )
     }

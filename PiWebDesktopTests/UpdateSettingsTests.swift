@@ -691,52 +691,60 @@ final class UpdateSettingsTests: XCTestCase {
     // MARK: - M11/M12（更新事务审计）：设置窗口布局
 
     /// 唯一构造 AppKit 对象的用例：只创建窗口控制器（不 show、不进 runloop），
-    /// 断言 AutoLayout 约束本身的健全性。
-    func testSettingsWindowLayoutConstraintsAreSound() throws {
+    /// 断言窗口可以自由缩放这一组性质。
+    ///
+    /// 上一版这里断言的是"每条长文本恰有一条 620pt 宽度约束"。那个写法本身
+    /// 就是把窗口钉死的元凶：文本永远按 620 折行，窗口既缩不窄也放不宽。
+    /// 现在改为断言相反的性质 —— 没有任何写死的文本宽度，长文本是
+    /// `WrappingLabel` 并撑满表单列，最小尺寸来自共享度量而不是文案长度。
+    func testSettingsWindowCanResizeFreely() throws {
         let controller = UpdateSettingsWindowController()
         let window = try XCTUnwrap(controller.window)
         let content = try XCTUnwrap(window.contentView)
+        let scope = content.constraints
+            + content.subviews.flatMap(\.constraints)
+            + content.subviews.flatMap { $0.subviews.flatMap(\.constraints) }
 
-        // M11：abandonedStatusLabel 是可换行长文本（Pi 命令超时/被放弃后才有内容），
-        // 必须像其余长文本 label 一样有 620 宽度约束，否则出现长文本时用
-        // intrinsic width，与 stack 尾部 -24 固定边距冲突（约束冲突 + 文本溢出窗口）。
-        let label = controller.abandonedStatusLabel
-        // 宽度常量约束安装在最近公共祖先（自引用约束即 label 自身或其父视图）；
-        // 多层范围可能重复报出同一条约束，按身份去重。
-        let scope = content.constraints + content.subviews.flatMap { $0.constraints } + label.constraints
-        var seen = Set<ObjectIdentifier>()
-        let widthConstraints = scope.filter { constraint in
-            guard constraint.firstItem as? NSView === label, constraint.firstAttribute == .width else { return false }
-            if seen.contains(ObjectIdentifier(constraint)) { return false }
-            seen.insert(ObjectIdentifier(constraint))
-            return true
+        // 1. 不得再出现任何写死宽度的文本约束（620 是旧实现，其他常量同样是隐患）。
+        let wrappingLabels: [NSView] = [
+            controller.abandonedStatusLabel,
+            controller.piPackageStatusLabel
+        ]
+        for label in wrappingLabels {
+            let fixedWidths = scope.filter {
+                $0.firstItem as? NSView === label
+                    && $0.firstAttribute == .width
+                    && $0.relation == .equal
+                    && $0.secondItem == nil
+            }
+            XCTAssertTrue(
+                fixedWidths.isEmpty,
+                "长文本 label 不应有写死的宽度约束，实际 \(fixedWidths.map(\.constant))"
+            )
         }
-        // 对照组：既有长文本 label（piPackageStatusLabel）同样存在一条 620 宽度
-        // 约束（另有 AppKit 自加的 width==0 约束，与本修复无关，不作断言）。
-        let packageStatusLabel: NSView = controller.piPackageStatusLabel
-        let pkgScope = content.constraints + content.subviews.flatMap { $0.constraints } + packageStatusLabel.constraints
-        let packageSixTwenty = pkgScope.filter { constraint in
-            constraint.firstItem as? NSView === packageStatusLabel
-                && constraint.firstAttribute == .width && constraint.constant == 620
-        }
-        XCTAssertEqual(packageSixTwenty.count, 1, "对照组应恰有一条 620 宽度约束")
 
-        // M11 主断言：abandonedStatusLabel 与其他长文本 label 一致，恰有一条 620。
-        let sixTwenty = widthConstraints.filter { $0.constant == 620 && $0.relation == .equal }
-        XCTAssertEqual(sixTwenty.count, 1, "abandonedStatusLabel 必须恰有一条 620 宽度约束（M11）")
-        XCTAssertFalse(
-            widthConstraints.contains { $0.constant != 620 && $0.constant != 0 },
-            "不应有其他非预期宽度的显式约束（M11）"
+        // 2. 它们是 WrappingLabel：宽度由表单列决定，高度按当前宽度重新折行。
+        for label in wrappingLabels {
+            XCTAssertTrue(label is WrappingLabel, "\(type(of: label)) 必须可换行")
+        }
+
+        // 3. 可自由缩放：有 resizable 样式位，最小尺寸来自共享度量。
+        XCTAssertTrue(window.styleMask.contains(.resizable), "窗口必须可缩放")
+        XCTAssertEqual(window.contentMinSize, SettingsFormMetrics.minimumContentSize)
+        XCTAssertGreaterThan(window.contentMinSize.width, 0)
+        XCTAssertGreaterThan(window.contentMinSize.height, 0)
+
+        // 4. 滚动兜底：内容比视口高时靠滚动，而不是撑大最小高度。
+        let scrollView = try XCTUnwrap(
+            content.subviews.compactMap { $0 as? NSScrollView }.first
         )
+        XCTAssertTrue(scrollView.hasVerticalScroller)
 
-        // M12：minSize 高度必须覆盖内容固有高度，否则拉到最小会触发不可满足约束
-        // 并裁掉底部按钮（旧实现固定 620 < 静态内容需要的约 700）。
-        let fittingHeight = content.fittingSize.height
-        XCTAssertGreaterThan(fittingHeight, 0, "内容应有非零固有高度")
+        // 5. 最小宽度必须放得下表单列本身，不能比它还窄。
         XCTAssertGreaterThanOrEqual(
-            window.minSize.height,
-            fittingHeight,
-            "minSize \(window.minSize.height) 不得小于内容固有高度 \(fittingHeight)（M12）"
+            window.contentMinSize.width,
+            SettingsFormMetrics.minimumWidth
         )
     }
+
 }

@@ -230,10 +230,6 @@ extension AppDelegate {
         applyServiceControlAvailability()
         serviceManager.isDependencyGateOpen = report.canStartService
 
-        // 依赖检查（启动时或用户重新检测）是又一个收敛点：远程配置却取不到密码，
-        // 而本应用管理的远程进程仍在运行时，立即停止它并关闭远程模式。
-        serviceManager.closeRemoteAccessIfCredentialsAreUnavailable()
-
         // 只有本机真实检查的结论才写回缓存：快路径里的报告本身来自缓存，写回去
         // 只会不断刷新它的时间戳，让有效期形同虚设。
         if source != .cachedFastPath {

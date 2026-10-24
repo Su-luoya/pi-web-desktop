@@ -309,6 +309,13 @@ PLIST
 # attach com.apple.FinderInfo to the bundle after the files above were written, and
 # codesign --sign then refuses with "resource fork, Finder information, or similar
 # detritus not allowed" before the verify step below ever runs.
+#
+# `--deep` is kept deliberately. Upstream guidance discourages it for app bundles that
+# carry SPM/XCFramework dependencies (it signs nested code with the wrong entitlements),
+# but this bundle has no embedded frameworks or plugin code at all: the two Frameworks
+# build phases are empty and there are no package product dependencies, so `--deep`
+# signs exactly one Mach-O. Removing it would only change how a stale nested bundle left
+# in build/ is re-signed between retries, which the --force attempt loop already covers.
 sign_attempt=0
 sign_status=1
 while [ "$sign_attempt" -lt 3 ]; do

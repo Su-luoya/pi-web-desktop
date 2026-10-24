@@ -185,7 +185,7 @@ extension AppDelegate {
         target.makeKeyAndOrderFront(nil)
         fitOnCurrentScreen(target)
         if !NSApp.isActive {
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
         }
     }
 
@@ -348,7 +348,7 @@ extension AppDelegate {
             fitOnCurrentScreen(primary)
             primary.makeKeyAndOrderFront(nil)
             if !NSApp.isActive {
-                NSApp.activate(ignoringOtherApps: true)
+                NSApp.activate()
             }
             return
         }

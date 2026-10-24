@@ -191,12 +191,12 @@ final class SystemServiceLauncher: ServiceLaunching {
             guard status == 0 else { throw ServiceSpawnError.standardDescriptorsUnavailable(status) }
         }
 
-        // `posix_spawn` has no portable working-directory action. `addchdir`
-        // needs macOS 26 while the app targets macOS 14, so the `_np` variant
-        // is the only usable one here.
+        // `posix_spawn` 没有可移植的工作目录动作。`addchdir` 是 macOS 26 引入的
+        // 正式 API（`_np` 变体自 macOS 26 起已废弃），而应用的最低系统就是 macOS 26，
+        // 所以这里可以不带可用性判断地直接使用。
         let workingDirectory = specification.workingDirectory.path
         if !workingDirectory.isEmpty {
-            status = posix_spawn_file_actions_addchdir_np(&fileActions, workingDirectory)
+            status = posix_spawn_file_actions_addchdir(&fileActions, workingDirectory)
             guard status == 0 else { throw ServiceSpawnError.workingDirectoryUnavailable(status) }
         }
 

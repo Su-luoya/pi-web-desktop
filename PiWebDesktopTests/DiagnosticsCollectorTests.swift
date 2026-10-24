@@ -466,7 +466,7 @@ final class DiagnosticsCollectorTests: XCTestCase {
         XCTAssertEqual(creations, 1, "第二次请求不得再创建控制器")
         XCTAssertTrue(store.stored === first)
 
-        weak var released = first
+        weak let released = first
         var closed = false
         var discardedIdentity = false
         do {

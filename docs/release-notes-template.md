@@ -26,16 +26,16 @@ workflow strips it before building the release body.
 
 ## 摘要 / Summary
 
-Pi Web Desktop {{VERSION}} 是面向 Apple Silicon（arm64）、macOS 14 或更高版本的早期 alpha。ZIP 里的应用是 **ad-hoc 签名、未公证** 的：没有 Developer ID 证书，也没有 Apple 公证，因此 macOS Gatekeeper 默认会阻止直接双击打开，需要用户针对这一个应用手动放行。
+Pi Web Desktop {{VERSION}} 是面向 Apple Silicon（arm64）、macOS 26 或更高版本的早期 alpha。ZIP 里的应用是 **ad-hoc 签名、未公证** 的：没有 Developer ID 证书，也没有 Apple 公证，因此 macOS Gatekeeper 默认会阻止直接双击打开，需要用户针对这一个应用手动放行。
 
-Pi Web Desktop {{VERSION}} is an early alpha for Apple Silicon (arm64) Macs running macOS 14 or later. The app in the ZIP is **ad-hoc signed and not notarized**: there is no Developer ID certificate and no Apple notarization, so Gatekeeper blocks a plain double-click and the user has to approve this app explicitly.
+Pi Web Desktop {{VERSION}} is an early alpha for Apple Silicon (arm64) Macs running macOS 26 or later. The app in the ZIP is **ad-hoc signed and not notarized**: there is no Developer ID certificate and no Apple notarization, so Gatekeeper blocks a plain double-click and the user has to approve this app explicitly.
 
 ## 目标平台
 
 | 项目 | 值 |
 | --- | --- |
 | CPU 架构 | Apple Silicon（arm64）。**不支持 Intel（x86_64）**。 |
-| 最低系统 | macOS 14.0 |
+| 最低系统 | macOS 26.0 |
 | 应用包 | `Pi-Web-Desktop.app`，`CFBundleShortVersionString={{VERSION}}`，`CFBundleVersion={{BUILD}}` |
 | 签名 | ad-hoc（打包脚本执行 `codesign --sign -`），没有证书，`TeamIdentifier=not set` |
 | 公证 | 无。Gatekeeper 会拒绝，需要手动放行一个应用 |
@@ -110,7 +110,7 @@ Pi Web Desktop {{VERSION}} is an early alpha for Apple Silicon (arm64) Macs runn
 
 ## 支持边界
 
-- 只支持 Apple Silicon（arm64）与 macOS 14 或更高版本。
+- 只支持 Apple Silicon（arm64）与 macOS 26 或更高版本。
 - 没有 SLA：这是 alpha 预览，按“现状”提供，不承诺修复时间。
 - 没有无人值守的自动更新：自更新从 `v0.1.0-alpha.15` 起可用，但必须由用户在菜单里确认后才执行，且只在 `/Applications` 下可用。
 - 没有 Developer ID 签名、没有 Apple 公证，也没有 Apple 支持渠道。

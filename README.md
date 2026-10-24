@@ -24,7 +24,7 @@ shasum -a 256 -c Pi-Web-Desktop-*.zip.sha256
 
 双击应用，macOS 会提示「无法验证开发者」或「Apple 无法检查是否包含恶意软件」。应用只有 ad-hoc 签名、没有 Apple 公证，这个提示是预期行为，不是文件损坏。**不要关闭 Gatekeeper，也不要关闭 SIP。**
 
-- macOS 14：在 Finder 里按住 Control 点按（或右键点按）应用，选「打开」，确认框里再点一次「打开」。
+- macOS 26：在 Finder 里按住 Control 点按（或右键点按）应用，选「打开」，确认框里再点一次「打开」。
 - macOS 15 及更新版本：右键打开不再有效。打开「系统设置 → 隐私与安全性」，向下找到被拦下的这个应用，点「仍要打开」，再按提示用密码或 Touch ID 确认。
 
 放行只对这一个应用生效。重新下载 ZIP 后可能要再放行一次。
@@ -109,7 +109,7 @@ shasum -a 256 -c Pi-Web-Desktop-*.zip.sha256
 ## 已知限制
 
 - 未公证：只有 ad-hoc 签名，第一次打开需要手动放行。
-- 只有 Apple Silicon（arm64）产物，需要 macOS 14 或更高。Intel Mac 不在支持范围。
+- 只有 Apple Silicon（arm64）产物，需要 macOS 26 或更高。Intel Mac 不在支持范围。
 - 早期 alpha：可能有 bug 和行为变化，没有响应或修复时限。
 - 扩展包没有无人值守更新，只有「关闭 / 检查并通知 / 询问后更新」；确认一次只执行一次。
 - 远程访问默认关闭，应用不提供加密隧道或反向代理。
@@ -124,6 +124,7 @@ shasum -a 256 -c Pi-Web-Desktop-*.zip.sha256
 - 安全漏洞请按[安全政策](SECURITY.md)私密报告，不要在公开 Issue、PR 或日志里粘贴凭据或未脱敏内容
 - 其他文档：[架构说明](docs/architecture.md)、[安全设计](docs/security-ownership.md)、[设置、工作目录与退出行为](docs/settings-and-workspace.md)
 - 已发版修复的汇总：[`v0.1.0-alpha.17` 发布说明](docs/release-notes-v0.1.0-alpha.17.md)、[第二阶段审计修复汇总](docs/bugfix-round-2.md) 与[本轮安全评审](docs/security-review-alpha.17.md)（含 alpha.16 之后的全部修复）
+- 最新版本说明：[`v0.1.0-alpha.18`](docs/release-notes-v0.1.0-alpha.18.md)（最低系统提到 macOS 26、清理冗余可用性判断）
 
 Pi Web、Pi CLI、Pi packages 自身的问题请先到对应上游仓库确认；本仓库是社区维护的非官方项目，与上游维护者没有隶属、赞助或背书关系，也不分发上游代码。
 

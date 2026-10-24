@@ -127,7 +127,7 @@ extension AppDelegate {
         if window.isVisible {
             alert.beginSheetModal(for: window, completionHandler: decide)
         } else {
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
             decide(alert.runModal())
         }
     }

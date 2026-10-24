@@ -275,7 +275,7 @@ extension AppDelegate {
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         if !NSApp.isActive {
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
         }
     }
 

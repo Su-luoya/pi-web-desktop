@@ -141,12 +141,10 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKD
 
     private func performFind(backwards: Bool) {
         guard let text = findField?.stringValue, !text.isEmpty else { return }
-        if #available(macOS 11.0, *) {
-            let configuration = WKFindConfiguration()
-            configuration.backwards = backwards
-            configuration.wraps = true
-            webView.find(text, configuration: configuration) { _ in }
-        }
+        let configuration = WKFindConfiguration()
+        configuration.backwards = backwards
+        configuration.wraps = true
+        webView.find(text, configuration: configuration) { _ in }
     }
 
     @objc private func closeFindBar(_ sender: Any?) {
@@ -197,26 +195,21 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKD
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-        if !navigationResponse.canShowMIMEType {
-            if #available(macOS 11.3, *) { decisionHandler(.download) } else { decisionHandler(.cancel) }
-        } else { decisionHandler(.allow) }
+        decisionHandler(navigationResponse.canShowMIMEType ? .allow : .download)
     }
 
     // MARK: - WKDownloadDelegate
 
-    @available(macOS 11.3, *)
     func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
         download.delegate = self
         onDownloadStarted?()
     }
 
-    @available(macOS 11.3, *)
     func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
         download.delegate = self
         onDownloadStarted?()
     }
 
-    @available(macOS 11.3, *)
     func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
         guard let window = windowProvider() else {
             completionHandler(nil)

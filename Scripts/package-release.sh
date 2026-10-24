@@ -918,6 +918,9 @@ printf '\n== bundle identity ==\n'
 printf '\n== ad-hoc signature verification ==\n'
 # Finder/iCloud metadata is cleared first so a stale work tree cannot fail the
 # gate with "resource fork, Finder information, or similar detritus not allowed".
+# `--deep` here is verification-only: the bundle has no embedded frameworks or
+# plugin code (empty Frameworks phases, no package product dependencies), so it
+# walks exactly one Mach-O and cannot mask a nested signature problem.
 clear_extended_attributes "$APP"
 VERIFY_ATTEMPT=0
 while :; do

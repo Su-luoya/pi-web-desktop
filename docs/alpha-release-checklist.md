@@ -13,7 +13,7 @@
 ## 目标
 
 - 版本：v<MARKETING_VERSION>（build <CURRENT_PROJECT_VERSION>）
-- 类型：alpha 预览，Apple Silicon，macOS 14+，ad-hoc 签名，未公证
+- 类型：alpha 预览，Apple Silicon，macOS 26+，ad-hoc 签名，未公证
 - 发布 workflow run：<workflow 运行链接>
 - 草稿 Release：<draft Release 链接>
 
@@ -68,7 +68,7 @@
 
    三条命令都必须退出 0。`check-release-version.sh` 的 tag 必须写成完整的
    `v<MARKETING_VERSION>`；版本值只存在于 `Configuration/AppIdentity.xcconfig`，不要在别处复制。
-4. **真机 smoke 记录。** 在一台真实的 Apple Silicon Mac（macOS 14+）上运行：
+4. **真机 smoke 记录。** 在一台真实的 Apple Silicon Mac（macOS 26+）上运行：
 
    ```sh
    ./Scripts/smoke.sh
@@ -257,7 +257,7 @@ Provider 的重挂载时机；注入的 32 字节 FinderInfo 值取自同步目�
 
 | # | 门槛 | 覆盖位置 | 本机状态 |
 | --- | --- | --- | --- |
-| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-14` job 覆盖 |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖 |
 | C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds`（`check-identity.sh --test-bundle …`） | 本机只检查了脚本产物，由 CI 覆盖 |
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`；该步骤由 CI 覆盖（本地复现命令见[开发说明](development.md#personal-data-与-secret-扫描能力)） |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；Issue 中记录 run 链接 |
@@ -278,7 +278,7 @@ SHA-256 每次都不同，原因见上）。
 - **Release workflow**：run `35417813221`（macos-14，arm64）全绿，含 `xcodebuild build/test`、脚本构建、身份检查、smoke launch、ZIP/checksum/签名证据打包与 draft 生成。
 - **下载产物复核（Apple M4 / macOS 27.0 / arm64）**：`shasum -a 256 -c` 通过；`codesign --verify --deep --strict` 通过（`adhoc`，`TeamIdentifier=not set`）；`unzip -l` 9 项且无源码/测试/日志/个人路径；对下载产物运行 `PI_WEB_DESKTOP_SMOKE=1` 输出 `smoke: ready` 且退出 0。
 - **SHA-256**：`aa6c51851adb3cc457191fb96f7f08b6b34810ec335b07666cc91af4ebedd915`
-- **macOS 14 边界**：macOS 14 层面的验证由 CI 的 `macos-14` runner 承担；本机证据的系统版本为 macOS 27.0，两者在 Release 说明与 Issue #15 中分别标注，不混同。
+- **macOS 14 边界**：macOS 14 层面的验证由 CI 的 `macos-26` runner 承担；本机证据的系统版本为 macOS 27.0，两者在 Release 说明与 Issue #15 中分别标注，不混同。
 
 ### 发布过程中修复的两个真实缺陷
 
@@ -344,7 +344,7 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
 
 | # | 门槛 | 覆盖位置 | 本机状态 |
 | --- | --- | --- | --- |
-| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-14` job 覆盖 |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖 |
 | C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds` | 本机只检查了脚本产物，由 CI 覆盖 |
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`；该步骤由 CI 覆盖 |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；Issue 中记录 run 链接 |
@@ -439,7 +439,7 @@ alpha.3 的新增功能。
 
 | # | 门槛 | 覆盖位置 | 本机状态 |
 | --- | --- | --- | --- |
-| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-14` job 覆盖 |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖 |
 | C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds` | 本机只检查了脚本产物，由 CI 覆盖 |
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`；该步骤由 CI 覆盖 |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；Issue 中记录 run 链接 |
@@ -552,7 +552,7 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
 
 | # | 门槛 | 覆盖位置 | 本机状态 |
 | --- | --- | --- | --- |
-| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-14` job 覆盖。本版新增的 XCTest 文件：`PiWebDesktopTests/UpdateAbandonedAttemptTests.swift`，以及 `UpdateCheckerTests` / `UpdateTransactionTests` / `PiProcessInspectorTests` / `PiWebUpdateAdapterTests` / `PiPackageUpdateAdapterTests` / `PiCLIUpdateAdapterTests` / `UpdateSettingsTests` 的增量用例 |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖。本版新增的 XCTest 文件：`PiWebDesktopTests/UpdateAbandonedAttemptTests.swift`，以及 `UpdateCheckerTests` / `UpdateTransactionTests` / `PiProcessInspectorTests` / `PiWebUpdateAdapterTests` / `PiPackageUpdateAdapterTests` / `PiCLIUpdateAdapterTests` / `UpdateSettingsTests` 的增量用例 |
 | C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds` | 本机只检查了脚本产物，由 CI 覆盖 |
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`；该步骤由 CI 覆盖 |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；Issue 中记录 run 链接 |
@@ -729,7 +729,7 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
 
 | # | 门槛 | 覆盖位置 | 本机状态 |
 | --- | --- | --- | --- |
-| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-14` job 覆盖。本版新增的 XCTest 文件：`PiWebDesktopTests/QuitCoordinatorTests.swift`（#72）、`PiWebDesktopTests/ToolPathTests.swift`（#89）；`PiWebDesktopTests/` 下另外 16 个既有文件带增量用例（`git diff --name-only v0.1.0-alpha.4..6821ecd -- PiWebDesktopTests/` 共 18 个文件），其中 #94 改动 `PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`、`PiWebDesktopTests/UpdateTransactionTests.swift`，#95 改动 `PiWebDesktopTests/PiWebUpdateAdapterTests.swift`、`PiWebDesktopTests/PiCLIUpdateAdapterTests.swift`、`PiWebDesktopTests/UpdateAbandonedAttemptTests.swift`、`PiWebDesktopTests/UpdateTransactionTests.swift` |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖。本版新增的 XCTest 文件：`PiWebDesktopTests/QuitCoordinatorTests.swift`（#72）、`PiWebDesktopTests/ToolPathTests.swift`（#89）；`PiWebDesktopTests/` 下另外 16 个既有文件带增量用例（`git diff --name-only v0.1.0-alpha.4..6821ecd -- PiWebDesktopTests/` 共 18 个文件），其中 #94 改动 `PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`、`PiWebDesktopTests/UpdateTransactionTests.swift`，#95 改动 `PiWebDesktopTests/PiWebUpdateAdapterTests.swift`、`PiWebDesktopTests/PiCLIUpdateAdapterTests.swift`、`PiWebDesktopTests/UpdateAbandonedAttemptTests.swift`、`PiWebDesktopTests/UpdateTransactionTests.swift` |
 | C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds`（`check-identity.sh --test-bundle …`） | 本机只检查了脚本产物（`check-identity: PASSED (45 checks)`），Xcode 产物与 `.xctest` 由 CI 覆盖 |
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`（自检 + 仓库扫描）；该步骤由 CI 覆盖 |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；Issue 中记录 run 链接。合并前各提交的 CI 结果：#94 的 `b99e501` pass 4m23s、`87f124b` pass；#95 的 `6622b5d` pass 3m34s；合并后 main `6821ecd` pass 4m16s（run `35491357493`） |
@@ -862,7 +862,7 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
 
 | # | 门槛 | 覆盖位置 | 本机状态 |
 | --- | --- | --- | --- |
-| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-14` job 覆盖。本版新增/改动的测试只有 `PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`（+94 行）与 `PiWebDesktopTests/PiCLIUpdateAdapterTests.swift`（+59 行），共 5 个确定性用例（#102） |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖。本版新增/改动的测试只有 `PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`（+94 行）与 `PiWebDesktopTests/PiCLIUpdateAdapterTests.swift`（+59 行），共 5 个确定性用例（#102） |
 | C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds`（`check-identity.sh --test-bundle …`） | 本机只检查了脚本产物（`check-identity: PASSED (45 checks)`），Xcode 产物与 `.xctest` 由 CI 覆盖 |
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`（自检 + 仓库扫描）；该步骤由 CI 覆盖 |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；本版三个提交的 main run 均为 **success**：`3306398`（#100）run `35493841592`、`a47dd46`（#102）run `35494635211`、`8b591c9`（#104）run `35494836484` |
@@ -995,7 +995,7 @@ squash 合入 main → `fba1f12`（CI run `35499346342`，`build` success）；t
 
 | # | 门槛 | 覆盖位置 | 本机状态与回填结果 |
 | --- | --- | --- | --- |
-| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-14` job 覆盖。本版新增/改动的测试集中在 `PiWebDesktopTests/UpdateTransactionTests.swift`（#105 / #106）、`PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`（#107）、`PiWebDesktopTests/PiCLIUpdateAdapterTests.swift` 与 `PiWebDesktopTests/PiWebUpdateAdapterTests.swift`（#108） |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖。本版新增/改动的测试集中在 `PiWebDesktopTests/UpdateTransactionTests.swift`（#105 / #106）、`PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`（#107）、`PiWebDesktopTests/PiCLIUpdateAdapterTests.swift` 与 `PiWebDesktopTests/PiWebUpdateAdapterTests.swift`（#108） |
 | C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds`（`check-identity.sh --test-bundle …`） | 本机只检查了脚本产物（`check-identity: PASSED (45 checks)`），Xcode 产物与 `.xctest` 由 CI 覆盖 |
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`（自检 + 仓库扫描）；该步骤由 CI 覆盖 |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；本版六个提交的 main run 均为 **success**：`af47866`（#112）run `35496917660`、`9ede020`（#113）run `35497135814`、`be13c88`（#114）run `35497336171`、`0c1610c`（#115）run `35497649990`、`fbae499`（#117）run `35497954810`、`4e6e332`（#116）run `35498186531` |
@@ -1844,3 +1844,105 @@ alpha.14 / alpha.15 周期的旧结论冒充本版结果**。alpha.14 周期做�
   alpha.11 / alpha.15 记录的一个差别：本版不是纯文档发布。提交 / PR / tag / Release 由后续步骤完成
   （本节只记录本地门槛与演练，**没有** push、**没有** 建 PR、**没有** 打 tag、**没有** 碰 GitHub Release
   或 Issue 状态）。
+
+## Release v0.1.0-alpha.18 执行记录
+
+本版候选：`macos-app-skills-refactor` 分支（`v0.1.0-alpha.17` 之后的两个提交：`7fe2a0d` 死代码
+清理与废弃 API 替换、`021438a` 最低系统提到 macOS 26 + CI runner 换 `macos-26`），加上本版发布
+提交的版本 bump、发布说明与本节执行记录。
+
+本版是**纯清理发布**：没有新增功能，没有修用户可见缺陷。改动的来源是一轮以
+[macos-app-skills](https://github.com/fayazara/macos-app-skills) 为基准的代码审查；结论是绝大多数
+skill 条目本仓库早已满足（`AppDelegate+*` 已按职责拆 extension、`NSWindowController` 程序化建窗、
+`contentMinSize` + `setFrameAutosaveName`、剪贴板 `clearContents` 守卫、`AppIdentity.xcconfig` 单
+一版本来源），真正需要动的只有部署目标写错导致的死代码与一处废弃 API。
+
+### 破坏性变更（本版唯一影响已安装用户的变化）
+
+`APP_MINIMUM_SYSTEM_VERSION` 从 `14.0` 改为 `26.0`。macOS 14 / 15 上的用户无法安装本版，也无法从
+alpha.17 自动更新到 alpha.18（系统拒绝部署目标更高的 bundle），会停留在 alpha.17。alpha.17 资产
+仍可下载，回退路径不受影响。理由与回退方式写在
+[发布说明](release-notes-v0.1.0-alpha.18.md) 的「破坏性变更」一节。
+
+### 按门槛清单的实测值（本版）
+
+| # | 门槛 | 实测值 / 证据 | 判定 |
+| --- | --- | --- | --- |
+| 1 | main CI（build workflow）在 main 上为绿 | PR [#192](https://github.com/Su-luoya/pi-web-desktop/pull/192) 的 `build` check `pass`（run `40086161279`，job `120849422098`），runner 标签 `macos-26`，14 个步骤全部 `success` | 通过（受保护分支不接受直推：首次 `git push origin main` 返回 `GH006: Protected branch update failed`，改走 PR） |
+| 2 | 安全审查完成，无阻断项 | 本版只删除不可达分支、替换已废弃 API、对齐版本下限；没有新增输入路径、权限判定、外链白名单、Keychain 访问或更新事务链改动。`Sources/` 的 delta 为 `+13/-18`（不含版本与文档） | 通过（改动面不足以单独出一份 `security-review-alpha.18.md`，判断依据记在本行） |
+| 3 | 最低系统变更已被 CI 实际验证 | 旧 runner 标签 `macos-14` 的系统版本低于新部署目标，无法构建；`macos-26` runner 上 `Build and test Xcode project` 与 `Build app` 均 `success` | 通过（这是本版唯一无法在本机证伪的假设，CI 已给出实测） |
+| 4 | `scan-secrets.sh` 与 `--self-test` 均退出 0 | CI 步骤 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 均 `success`；本地 `self-test: PASS`、`scan-secrets: PASS (no matches in tracked files; no untracked files)` | 两者退出 0，通过 |
+| 5 | tag 与 bundle 版本一致 | `./Scripts/check-identity.sh` → `check-identity: PASSED (45 checks)`；`./Scripts/check-release-version.sh v0.1.0-alpha.18` → `PASSED (tag v0.1.0-alpha.18, MARKETING_VERSION 0.1.0-alpha.18, CURRENT_PROJECT_VERSION 18)`；构建出的 bundle `LSMinimumSystemVersion=26.0` | 退出 0，通过 |
+| 6 | 真机 smoke 记录 | 本机脚本两种模式的结果见第 7 行；需要人点击 / 观察的 5 项见下「真机 smoke 记录（本版未执行）」 | **未执行**（不用演练值或 alpha.17 周期的旧结论冒充） |
+| 7 | 本地门槛：构建与 smoke | `./Scripts/build.sh` → `build: release build with -O -wmo`、`Built: …/build/Pi-Web-Desktop.app`、`Mach-O 64-bit executable arm64`，退出 0，日志 0 warning；`/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion"` → `26.0`；`./Scripts/smoke.sh` → `smoke: OK (both modes exit 0)` | 退出 0，通过 |
+| 8 | 脚本语法与补丁空白 | `sh -n Scripts/*.sh`（7 个脚本，无输出，退出 0）；`git diff --check` 无输出、退出 0 | 通过 |
+| 9 | 单元测试 | `xcodebuild test`（`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`）→ `Executed 951 tests, with 0 failures (0 unexpected)`，`TEST_EXIT=0` | 通过（测试数量与 alpha.17 相同：本版没有新增用例，只把 `DependencyCheckerTests` 的 outdated 边界从 13.6 改为 25.6、把 4 处 `operatingSystemVersion` 替身提到 26.0） |
+| 10 | 打包与证据（演练值） | 本版未重新做打包演练：`Scripts/package-release.sh` 的改动只有一行注释，`codesign --force --deep --sign -` 与白名单逻辑未变；发布资产由 `release.yml` 在 tag 上生成 | **未执行**（不复制 alpha.17 的演练值，本版打包路径的实测来自 release workflow） |
+| 11 | checksum 记录（与 Release 资产一致） | 见下「checksum 记录（发布后回填）」 | 发布后回填 |
+| 12 | Release 标记 prerelease，说明中写明未公证与安装限制 | 发布说明已包含 ad-hoc / 未公证、`/Applications` 限制、没有自动回滚，并单列破坏性变更 | 发布后核对 |
+
+### 真机 smoke 记录（本版未执行）
+
+与 alpha.17 相同的 5 项都需要人在真实 `/Applications` 环境点击与观察，本版没有执行。第 4 项
+（校验失败后菜单入口恢复可用）在 alpha.17 修复、本版未改动，可用 alpha.17 的结论作为参考，但
+不构成本版资产的验证。
+
+| # | 验证项 | 步骤 | 期望 | 结果 |
+| --- | --- | --- | --- | --- |
+| 1 | 自更新入口出现 | 用低于本版的构建装进 `/Applications`，点「服务 → 更新检查设置 → 检查更新…」 | 菜单出现「下载并安装桌面应用更新…」 | 未执行 |
+| 2 | 确认与安装 | 点该菜单项 → 确认框写明目标版本 → 点「更新」 | 下载、校验、替换 `/Applications` 应用，应用退出并重启 | 未执行 |
+| 3 | 安装结果可核对 | 更新后核对 `/Applications/Pi-Web-Desktop.app` | `CFBundleShortVersionString=0.1.0-alpha.18`，可执行文件 SHA-256 与 Release 资产一致 | 未执行 |
+| 4 | 校验失败即中止，且入口恢复可用 | 把下载到的 `.sha256` 换成不匹配的值后再触发更新 | 报「更新包校验失败，已停止安装」，`/Applications` 应用不变；随后菜单入口仍可再次点击 | 未执行（alpha.17 已修并有测试守护，本版未改动该路径） |
+| 5 | 非 `/Applications` 拒绝 | 把同一个构建放到 `/tmp` 运行后点该菜单项 | 报「当前应用不是从 /Applications 安装，无法自动更新。」 | 未执行 |
+
+### **本版特有的门槛：低版本系统的安装与更新行为**
+
+最低系统从 14.0 提到 26.0 是本版最大的风险面，需要单独验证。以下 3 项**都未执行**，因为执行环境
+需要一台 macOS 14 或 15 的机器，本机是 macOS 27.0：
+
+| # | 验证项 | 步骤 | 期望 | 结果 |
+| --- | --- | --- | --- | --- |
+| L1 | 低版本系统拒绝安装 | 在 macOS 14 / 15 上解压 alpha.18 的 ZIP 并尝试打开 | 系统拒绝启动，提示需要更高版本 macOS；不得出现"已损坏"这类误导性文案 | 未执行 |
+| L2 | 低版本系统不收到更新 | 在 macOS 14 / 15 上跑 alpha.17，触发检查更新 | alpha.17 仍会提示 alpha.18：它不带本版新增的 `LSMinimumSystemVersion` 闸门，所以**这一行在本版无法变绿**（客户端不可改造）。新增的闸门在**本机**用单测覆盖（`testRejectsCandidateRequiringNewerSystem`，952 个测试中的 1 个），不依赖 14 / 15 机器 | 部分覆盖：引擎单测已过，端到端仍需 14 / 15 机器 |
+| L3 | 更新失败后旧安装保留 | 承 L2，在 macOS 14 / 15 上完成一次 alpha.17 → alpha.18 的更新尝试 | 旧安装保留，不出现应用被替换成无法启动的版本 | 未执行 |
+
+L2 暴露的缺口本版已修，但修的位置值得记清楚：**没有**改 `UpdateResponseParser`。检查阶段拿不到候选包的
+`Info.plist`（GitHub Releases API 不提供这个字段），要按最低系统过滤就得给每个 Release 加一份元数据，
+那会改变 `UpdateCheckOrigin` 的来源契约。改在安装阶段：
+`Sources/Updates/DesktopAppUpdate.swift` 新增 `requiresNoNewerSystem(_:running:)`，在解压并 `isValidBundle`
+通过之后、`launchReplacement` 之前读候选包自己的 `LSMinimumSystemVersion`，高于本机就记
+`.requiresNewerSystem` 并保留旧安装。缺这个键或值无法解析时放行，因为本轮之前的包都没有被当作门槛
+用过，不能在这里凭空收紧。
+
+这个闸门**救不了已经在用的旧版本**：alpha.17 的二进制里没有这段代码，所以 macOS 14 / 15 上的 alpha.17
+依然会提示并安装 alpha.18。它保护的是以后每一次提高下限（alpha.19、alpha.20……），以及从 alpha.18 起
+的每一次更新。要让 L2 真正变绿，只能靠在低版本系统上实测，或者从 alpha.18 开始观察。
+
+### checksum 记录（发布后回填）
+
+| 项 | 值 |
+| --- | --- |
+| 发布资产 | 待回填 |
+| 大小 | 待回填 |
+| SHA-256 | 待回填 |
+| 复验 | 待回填 |
+
+### 还需完成
+
+- 打 tag `v0.1.0-alpha.18` 并让 `release` workflow 生成草稿 prerelease。
+- 回填 checksum 记录，核对草稿正文无 `<待填写>` 占位符后发布。
+- 在 Release Issue 里勾选全部门槛。
+- L1 / L3 两项需要一台 macOS 14 / 15 机器，本机是 macOS 27.0；L2 的引擎部分已由单测覆盖，端到端仍需该机器。
+
+### 本版同时做的文档一致性改动
+
+- `Configuration/AppIdentity.xcconfig`（本版唯一版本来源）：`MARKETING_VERSION` → `0.1.0-alpha.18`、
+  `CURRENT_PROJECT_VERSION` → `18`、`APP_MINIMUM_SYSTEM_VERSION` → `26.0`。
+- `docs/release-notes-v0.1.0-alpha.18.md`（本版新增）：单列破坏性变更、逐条说明死代码清理与
+  `posix_spawn` 的换用理由、写明打包演练与真机验证未执行。
+- `README.md`：文档索引新增本版发布说明。
+- `docs/releasing.md`、`docs/development.md`、`docs/release-notes-template.md`：最低系统表述同步为
+  macOS 26。历史发布说明与 `docs/security-review-*.md` 是当时的实测记录，保持原样。
+- 本次发布准备**改动了 `Sources/`、`PiWebDesktopTests/`、两个 workflow 与两个打包脚本**，不是纯文档
+  发布；两个提交都已通过 CI。本节只记录本地门槛与 CI 结论，**没有** 打 tag、**没有** 碰 GitHub
+  Release 或 Issue 状态。

@@ -226,7 +226,7 @@ publish job 里复验与上传前一处）。所以脚本对写入该文件的�
   `tag` 输入为空且 ref 不是 tag 时，workflow 用
   `./Scripts/check-release-version.sh --print-tag` 从 xcconfig 推导 tag 再执行同一套比较。
 
-`build` job（`macos-14`，`permissions: contents: read`）：
+`build` job（`macos-26`，`permissions: contents: read`）：
 
 1. checkout（`actions/checkout` 固定到完整 commit SHA）；
 2. 解析 tag 并运行 `./Scripts/check-release-version.sh <tag>`；

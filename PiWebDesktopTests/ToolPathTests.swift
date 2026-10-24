@@ -159,7 +159,7 @@ final class ToolPathTests: XCTestCase {
             ),
             system: DependencySystemProbe(
                 architecture: { "arm64" },
-                operatingSystemVersion: { OperatingSystemVersion(majorVersion: 14, minorVersion: 0, patchVersion: 0) }
+                operatingSystemVersion: { OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0) }
             ),
             portProbe: ToolPathFakePortProbe(),
             environment: ["PATH": "/usr/bin:/bin", "HOME": fixture.homeURL.path],
@@ -204,7 +204,7 @@ final class ToolPathTests: XCTestCase {
             ),
             system: DependencySystemProbe(
                 architecture: { "arm64" },
-                operatingSystemVersion: { OperatingSystemVersion(majorVersion: 14, minorVersion: 0, patchVersion: 0) }
+                operatingSystemVersion: { OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0) }
             ),
             portProbe: ToolPathFakePortProbe(),
             environment: ["PATH": "/usr/bin:/bin", "HOME": fixture.homeURL.path],
@@ -838,7 +838,7 @@ private struct ToolPathHomebrewFixture {
             fileSystem: ToolPathFixtureFileSystemProbe(root: rootURL.path, home: homeURL.path),
             system: DependencySystemProbe(
                 architecture: { "arm64" },
-                operatingSystemVersion: { OperatingSystemVersion(majorVersion: 14, minorVersion: 0, patchVersion: 0) }
+                operatingSystemVersion: { OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0) }
             ),
             portProbe: ToolPathFakePortProbe(),
             environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": homeURL.path],

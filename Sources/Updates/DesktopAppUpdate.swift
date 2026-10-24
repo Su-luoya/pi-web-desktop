@@ -39,6 +39,8 @@ enum DesktopAppUpdateFailure: String, Error, Equatable {
     case unsupportedInstallation, missingAsset, invalidAssetURL, downloadFailed
     case invalidArchive, checksumUnavailable, checksumMismatch, invalidBundle
     case notWritable, replacementFailed, relaunchFailed
+    /// 更新包自述的最低系统高于本机：装进去只会得到一个打不开的应用。
+    case requiresNewerSystem
     /// 菜单入口拿到的结论不满足 `DesktopAppUpdateInstallPolicy` 的准入条件。
     case unconfirmedUpdate
     /// 已经有一轮更新在跑（含下载窗口期与等待确认）：拒绝重复开始。
@@ -58,6 +60,7 @@ enum DesktopAppUpdateFailure: String, Error, Equatable {
         case .checksumUnavailable: return "更新包缺少 SHA-256 校验值，已停止安装。"
         case .checksumMismatch: return "更新包校验失败，已停止安装。"
         case .invalidBundle: return "更新包中的应用无法验证，已停止安装。"
+        case .requiresNewerSystem: return "更新包要求更高的 macOS 版本，已停止安装；当前应用保留不变。"
         case .notWritable: return "当前应用目录不可写，无法自动更新。"
         case .replacementFailed: return "替换桌面应用失败，原应用未被删除。"
         case .relaunchFailed: return "应用已更新，但重新启动失败，请从 /Applications 手动打开。"
@@ -421,6 +424,12 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
                 guard Self.isValidBundle(staged, fileManager: self.fileManager, expectedBundleIdentifier: id, expectedVersion: asset.version) else {
                     try? self.fileManager.removeItem(at: staging); self.finish(.failed(.invalidBundle)); return
                 }
+                // 解压出来的包自带 `LSMinimumSystemVersion`：它比本机高就不能装。
+                // 这条检查是本机唯一能拦住「装完打不开」的地方；旧版本应用不会带它，
+                // 所以它保护的是以后每一次提高下限，而不是已经装好的旧版本。
+                guard Self.requiresNoNewerSystem(staged) else {
+                    try? self.fileManager.removeItem(at: staging); self.finish(.failed(.requiresNewerSystem)); return
+                }
                 try self.launchReplacement(stagedApp: staged, staging: staging)
                 self.finish(.updated(version: asset.version))
             } catch let failure as DesktopAppUpdateFailure {
@@ -528,6 +537,17 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
               fileManager.fileExists(atPath: bundle.appendingPathComponent("Contents/Info.plist").path) else { return false }
         return true
     }
+    /// 候选包声明的 `LSMinimumSystemVersion` 是否高于本机。缺这个键视为放行：
+    /// 本轮之前的所有包都没有被当作门槛使用过，不能在这里凭空收紧。
+    static func requiresNoNewerSystem(_ bundle: URL,
+                                      running: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion) -> Bool {
+        guard let object = Bundle(url: bundle),
+              let raw = object.infoDictionary?["LSMinimumSystemVersion"] as? String,
+              let required = SemanticVersion(raw) else { return true }
+        let current = SemanticVersion(major: running.majorVersion, minor: running.minorVersion, patch: running.patchVersion)
+        return current >= required
+    }
+
     private static func sha256(of url: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: url); defer { try? handle.close() }
         var hasher = SHA256()

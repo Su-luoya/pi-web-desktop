@@ -360,9 +360,7 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         panel.allowsMultipleSelection = false
         panel.prompt = "选择"
         panel.message = "选择已安装的 pi-web 可执行文件"
-        if #available(macOS 12.0, *) {
-            panel.allowedContentTypes = [.unixExecutable]
-        }
+        panel.allowedContentTypes = [.unixExecutable]
         let complete: (NSApplication.ModalResponse) -> Void = { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
             let error = self.onSelectPiWebPath?(url.path)

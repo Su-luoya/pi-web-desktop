@@ -4,7 +4,7 @@
 
 > 写文档或注释时的注意：personal-data 门禁是一条 `git grep` 字面量检查，所以**不要在文案里原样写出被检查的字面量**（例如用户主目录绝对路径前缀、代理端点、个人主机名）——用描述性的说法代替，否则文档本身会让门禁失败。
 
-首版目标是 Apple Silicon 和 macOS 14 或以上。构建需要 Xcode Command Line Tools、Swift 编译器和 Cocoa/WebKit SDK。`PiWebDesktop.xcodeproj` 的 6 个 build configuration 与 `Scripts/build.sh` 都只构建 arm64；应用只使用 Apple 系统框架（Cocoa/AppKit、WebKit、Security、CryptoKit、Foundation、Darwin），没有第三方运行时依赖。
+首版目标是 Apple Silicon 和 macOS 26 或以上。构建需要 Xcode Command Line Tools、Swift 编译器和 Cocoa/WebKit SDK。`PiWebDesktop.xcodeproj` 的 6 个 build configuration 与 `Scripts/build.sh` 都只构建 arm64；应用只使用 Apple 系统框架（Cocoa/AppKit、WebKit、Security、CryptoKit、Foundation、Darwin），没有第三方运行时依赖。
 
 运行服务还需要用户自行安装：
 
@@ -21,7 +21,7 @@
 | 维度 | 当前状态 |
 | --- | --- |
 | CPU | Apple Silicon（arm64）。Xcode 工程的 6 个 build configuration 与 `Scripts/build.sh` 都只构建 arm64 单一架构 |
-| 系统 | macOS 14.0 或更高（`APP_MINIMUM_SYSTEM_VERSION = 14.0`） |
+| 系统 | macOS 26.0 或更高（`APP_MINIMUM_SYSTEM_VERSION = 26.0`） |
 | Intel Mac | 不在支持范围，也没有支持承诺；没有 x86_64 产物，未做验证 |
 | 框架 | 只使用 Apple 系统框架（Cocoa/AppKit、WebKit、Security、CryptoKit、Foundation、Darwin）；没有第三方 Swift 包、CocoaPod 或 npm 运行时依赖 |
 | 构建工具 | 系统 Swift 编译器（`swiftc`）+ Xcode Command Line Tools；`xcodebuild build/test` 需要完整 Xcode |
@@ -42,7 +42,7 @@
 ./Scripts/build.sh
 ```
 
-当前脚本生成 `build/Pi-Web-Desktop.app`，使用 Apple Silicon、macOS 14 目标和 ad-hoc 签名。源码目录中的图标可能携带 macOS 扩展属性；构建脚本会避免把不适合签名的 Finder 元数据复制进 app bundle。
+当前脚本生成 `build/Pi-Web-Desktop.app`，使用 Apple Silicon、macOS 26 目标和 ad-hoc 签名。源码目录中的图标可能携带 macOS 扩展属性；构建脚本会避免把不适合签名的 Finder 元数据复制进 app bundle。
 
 ### Finder / iCloud 扩展属性与签名校验
 
@@ -84,7 +84,7 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 
 ## Xcode 工程构建与测试
 
-标准 Xcode 工程使用 Apple Silicon、macOS 14 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让测试在没有 host app 的情况下仍可编译，target 会把被测源码直接加入测试源（当前 `Sources/` 共 89 个 Swift 文件，其中 **74 个**直接进测试 target，15 个只进 app target）；因此测试文件直接使用该 target 内编译的这些类型，不通过 `@testable import PiWebDesktop` 引入 app target。
+标准 Xcode 工程使用 Apple Silicon、macOS 26 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让测试在没有 host app 的情况下仍可编译，target 会把被测源码直接加入测试源（当前 `Sources/` 共 89 个 Swift 文件，其中 **74 个**直接进测试 target，15 个只进 app target）；因此测试文件直接使用该 target 内编译的这些类型，不通过 `@testable import PiWebDesktop` 引入 app target。
 
 只进 app target 的 15 个文件全部依赖 AppKit/WebKit、需要真实窗口，或是 `AppDelegate` 的扩展与入口：
 
@@ -117,7 +117,7 @@ xcodebuild "${XCODEBUILD_ARGS[@]}" build
 xcodebuild "${XCODEBUILD_ARGS[@]}" test
 ```
 
-CI 在 `macos-14` 上使用同样的临时 `derivedDataPath` 和 ad-hoc `CODE_SIGN_IDENTITY=-`，不需要开发者账号或 provisioning profile。`xcodebuild` 的工程构建和测试验证需要完整 Xcode（命令行工具目录本身不提供完整的 Xcode 工程构建/测试环境）。当前环境若只有 Command Line Tools，则 `xcodebuild` 不可验证，会因 active developer directory 不是完整 Xcode 而失败；此时请使用下方 alpha 脚本验证构建路径。该临时目录不再在 `xcodebuild` 步骤结束时删除：步骤会把 `Build/Products/Debug/PiWebDesktop.app` 作为 `XCODE_APP_PATH` 导出，下一步在脚本产物和 Xcode 产物上同时运行 `./Scripts/check-identity.sh`，再清理临时目录，因此 DerivedData 不会被提交。
+CI 在 `macos-26` 上使用同样的临时 `derivedDataPath` 和 ad-hoc `CODE_SIGN_IDENTITY=-`，不需要开发者账号或 provisioning profile。`xcodebuild` 的工程构建和测试验证需要完整 Xcode（命令行工具目录本身不提供完整的 Xcode 工程构建/测试环境）。当前环境若只有 Command Line Tools，则 `xcodebuild` 不可验证，会因 active developer directory 不是完整 Xcode 而失败；此时请使用下方 alpha 脚本验证构建路径。该临时目录不再在 `xcodebuild` 步骤结束时删除：步骤会把 `Build/Products/Debug/PiWebDesktop.app` 作为 `XCODE_APP_PATH` 导出，下一步在脚本产物和 Xcode 产物上同时运行 `./Scripts/check-identity.sh`，再清理临时目录，因此 DerivedData 不会被提交。
 
 ### 测试分层
 
@@ -217,7 +217,7 @@ open "$HOME/Applications/Pi-Web-Desktop.app"
 
 ## 依赖诊断与首次启动
 
-启动时应用会先运行 `DependencyChecker`，检查 Apple Silicon / macOS 14+、Node.js `>=22.19.0`、Pi CLI、Pi Web（可执行文件、版本、真实路径、符号链接目标、pi-web 的 package.json）、默认服务端口（本机 `bind(2)`，不连接网络）和 Pi 配置目录（`~/.pi/agent`，只问“存在/可读”）。
+启动时应用会先运行 `DependencyChecker`，检查 Apple Silicon / macOS 26+、Node.js `>=22.19.0`、Pi CLI、Pi Web（可执行文件、版本、真实路径、符号链接目标、pi-web 的 package.json）、默认服务端口（本机 `bind(2)`，不连接网络）和 Pi 配置目录（`~/.pi/agent`，只问“存在/可读”）。
 
 首次启动路由由 `DiagnosticsRouting` 决定（纯函数，只有主窗口与诊断页两种结果，不存在退出应用的分支）：
 
@@ -280,7 +280,7 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 ./Scripts/smoke.sh
 ```
 
-`./Scripts/check-identity.sh` 退出 0 表示身份、版本与服务默认值一致，仓库文本扫描通过，且工作区没有落在扫描范围内的未跟踪文件。`./Scripts/scan-secrets.sh --self-test` 必须证明每条凭据规则都有一个会命中的样本、误报边界的样本（占位符与模板值、示例 URL、camelCase 标识符值）不会被报告、`scan-secrets: allow(reason=…)` 的理由门槛（裸标记、空理由和过短理由都不抑制、该行照常上报且计入 rejected、被抑制的行仍打印并计数），以及未跟踪文件门禁（默认退出 3、加 `--include-untracked` 能扫到未跟踪文件里的样例凭据、没有未跟踪文件时行为不变）；`./Scripts/scan-secrets.sh` 必须退出 0（没有已跟踪文件命中，且工作区没有未跟踪文件：有未跟踪文件时它如实退出 3，先 `git add` 或删除后再重跑）。`xcodebuild build` / `xcodebuild test` 需要完整 Xcode：`xcode-select -p` 指向 Command Line Tools 时这两条命令会失败，此时以上面的脚本链替代（脚本链不运行 XCTest），并在 PR 中说明 XCTest 由 CI 的 `macos-14` job 覆盖。
+`./Scripts/check-identity.sh` 退出 0 表示身份、版本与服务默认值一致，仓库文本扫描通过，且工作区没有落在扫描范围内的未跟踪文件。`./Scripts/scan-secrets.sh --self-test` 必须证明每条凭据规则都有一个会命中的样本、误报边界的样本（占位符与模板值、示例 URL、camelCase 标识符值）不会被报告、`scan-secrets: allow(reason=…)` 的理由门槛（裸标记、空理由和过短理由都不抑制、该行照常上报且计入 rejected、被抑制的行仍打印并计数），以及未跟踪文件门禁（默认退出 3、加 `--include-untracked` 能扫到未跟踪文件里的样例凭据、没有未跟踪文件时行为不变）；`./Scripts/scan-secrets.sh` 必须退出 0（没有已跟踪文件命中，且工作区没有未跟踪文件：有未跟踪文件时它如实退出 3，先 `git add` 或删除后再重跑）。`xcodebuild build` / `xcodebuild test` 需要完整 Xcode：`xcode-select -p` 指向 Command Line Tools 时这两条命令会失败，此时以上面的脚本链替代（脚本链不运行 XCTest），并在 PR 中说明 XCTest 由 CI 的 `macos-26` job 覆盖。
 
 ### personal-data 与 secret 扫描能力
 
@@ -335,6 +335,6 @@ sh -c "$SCAN" && echo "personal-data scan: PASS"
 - 修改前先确认 Issue 的 Target、Change、Constraints、Ownership 和 Observable acceptance。
 - worker 默认只提交本地 commit；coordinator 验证后 push、创建 PR 和映射 GitHub 状态。
 - 应用不引入第三方 Swift 包、CocoaPod 或 npm 运行时依赖；新增依赖前必须在 Issue 或 PR 里记录许可证、维护状态和供应链理由。
-- CI 只使用 GitHub 托管的 `macos-14` runner，工作流权限是只读的 `contents: read`，不使用 secrets；所有 GitHub Actions 按**提交 SHA 固定**（例如 `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`），不使用浮动 tag。`.github/dependabot.yml` 每周检查 GitHub Actions 固定版本的更新，并通过带 `dependencies`、`github_actions` 标签的 PR 提出升级，必须走正常评审和 CI。发布工作流同一条策略见 [发布说明的 CI 与依赖固定策略](releasing.md#ci-与依赖固定策略)。
+- CI 只使用 GitHub 托管的 `macos-26` runner，工作流权限是只读的 `contents: read`，不使用 secrets；所有 GitHub Actions 按**提交 SHA 固定**（例如 `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`），不使用浮动 tag。`.github/dependabot.yml` 每周检查 GitHub Actions 固定版本的更新，并通过带 `dependencies`、`github_actions` 标签的 PR 提出升级，必须走正常评审和 CI。发布工作流同一条策略见 [发布说明的 CI 与依赖固定策略](releasing.md#ci-与依赖固定策略)。
 - 文档里新增的命令必须实际执行过，并在 PR 中给出结果；无法在当前环境执行的命令要显式标注为未执行。
 - 不得写入未验证的兼容承诺。支持矩阵、签名与公证状态以 `Configuration/AppIdentity.xcconfig`、`Scripts/build.sh` 和实际产物检查为准。

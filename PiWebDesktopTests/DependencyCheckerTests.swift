@@ -83,7 +83,7 @@ private struct DependencyHarness {
     let runner = DependencyFakeRunner()
     let fileSystem = DependencyFakeFileSystem()
     var architecture = "arm64"
-    var osVersion = OperatingSystemVersion(majorVersion: 14, minorVersion: 5, patchVersion: 0)
+    var osVersion = OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0)
     var configuredPiWebPath = ""
     /// 默认端口探针结果；nil 表示无法判定。
     var portAvailability: Bool? = true
@@ -710,7 +710,7 @@ final class DependencyCheckerTests: XCTestCase {
 
     // MARK: - 系统检查
 
-    func testAppleSiliconAndMacOS14AreRequiredForOK() {
+    func testAppleSiliconAndMacOS26AreRequiredForOK() {
         let supported = DependencyHarness()
         supported.runner.handler = { _ in nil }
         XCTAssertEqual(supported.checker().run().finding(for: .system)?.status, .ok)
@@ -722,8 +722,9 @@ final class DependencyCheckerTests: XCTestCase {
         intel.runner.handler = { _ in nil }
         XCTAssertEqual(intel.checker().run().finding(for: .system)?.status, .missing)
 
+        // 25.x 是新的边界：macOS 26 之前的系统必须记 outdated。
         var oldSystem = DependencyHarness()
-        oldSystem.osVersion = OperatingSystemVersion(majorVersion: 13, minorVersion: 6, patchVersion: 0)
+        oldSystem.osVersion = OperatingSystemVersion(majorVersion: 25, minorVersion: 6, patchVersion: 0)
         oldSystem.runner.handler = { _ in nil }
         XCTAssertEqual(oldSystem.checker().run().finding(for: .system)?.status, .outdated)
     }

@@ -60,7 +60,9 @@ final class QuitPolicyTests: XCTestCase {
 
         for behavior in allBehaviors {
             let plan = QuitPlan.plan(for: behavior)
-            XCTAssertFalse(QuitPlan.stopsExternalService, "\(behavior) 不应停止外部服务")
+            // 每个行为只应停止托管服务；外部服务在任何行为下都不停。
+            XCTAssertEqual(plan.stopsManagedService, behavior == .stopService, "\(behavior) 的停止判定错误")
+            XCTAssertFalse(QuitPlan.stopsExternalService)
         }
         for confirmation in [QuitConfirmation.keepServiceRunning, QuitConfirmation.cancel] {
             let plan = QuitPlan.plan(for: confirmation)

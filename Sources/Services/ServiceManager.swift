@@ -502,7 +502,10 @@ final class ServiceManager {
                 }
             }
         }
-        startHealthMonitor()
+        // 幂等：`ensureServerIsRunning` 会进入 `startManagedService`，那里也会请求
+        // 一轮监控；两边都用幂等入口，保证任何启动路径下只存在一轮健康监控
+        // （叠加会让探测频率翻倍，且停止时漏掉一个计时器）。
+        startHealthMonitorIfNeeded()
     }
 
     func ensureServerIsRunning() {
@@ -561,6 +564,10 @@ final class ServiceManager {
     /// 依赖门控关闭时直接返回，不产生任何进程或页面副作用。
     func startManagedService() {
         guard isBaseStartPermitted else { return }
+        // 重试入口：启动失败时健康监控已被停掉（见 `reportStartupFailure`），
+        // 这里重新拉起，否则“重试”成功后不再有任何探测发现服务真的起来了。
+        // 已在运行时是空操作（`healthToken` 已存在则 return）。
+        startHealthMonitorIfNeeded()
         // 监听地址判定（GitHub #39 / R-3）：非法地址在凭证读取与工作目录探测之前
         // 就被拒绝，既不构造启动规格也不产生进程；诊断顺序（#8 收敛 → 地址诊断）
         // 由 `reportStartRequirementIfNeeded()` 统一给出。
@@ -1051,6 +1058,9 @@ final class ServiceManager {
         healthToken = scheduler.repeating(interval: Self.healthCheckInterval) { [weak self] in
             guard let self else { return }
             guard self.isStartPermitted else { return }
+            // 失败态（启动失败、停止中）不探测：`.failed` 下没有进程可救，
+            // 重复探测既改不了状态，也不会触发重启（判定只认 `.running`）。
+            if case .failed = self.currentState { return }
             let generation = self.lifecycleGeneration
             self.checkServer { ready in
                 self.scheduler.onMain {
@@ -1112,6 +1122,12 @@ final class ServiceManager {
     func stopHealthMonitor() {
         healthToken?.invalidate()
         healthToken = nil
+    }
+
+    /// 幂等的启动入口：已有一轮监控时什么都不做，避免重复计时器叠加探测频率。
+    private func startHealthMonitorIfNeeded() {
+        guard healthToken == nil else { return }
+        startHealthMonitor()
     }
 
     func checkServer(completion: @escaping (Bool) -> Void) {
@@ -1186,6 +1202,11 @@ final class ServiceManager {
         let redacted = redactor.redact(message)
         logWriter.record("启动失败：\(redacted)")
         setState(.failed(redacted))
+        // 启动已经失败，健康监控必须停：生产实证（2026-10-24 19:26:36）进程启动即
+        // 退出后，监控仍每 4 秒探测一个已死进程，17 分钟刷了 258 条“连续失败”，
+        // 而断开/重启判定永远不触发——它只对 `.running` 生效，`.failed` 下只能空转。
+        // 停掉之后由重试入口（`startManagedService`）重新拉起。
+        stopHealthMonitor()
         onPageMessage?("启动失败")
         onStartupFailure?(redacted)
     }

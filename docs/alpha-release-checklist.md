@@ -1876,24 +1876,31 @@ alpha.17 自动更新到 alpha.18（系统拒绝部署目标更高的 bundle）�
 | 6 | 真机 smoke 记录 | 本机脚本两种模式的结果见第 7 行；需要人点击 / 观察的 5 项见下「真机 smoke 记录」 | 见下节 |
 | 7 | 本地门槛：构建与 smoke | `./Scripts/build.sh` → `build: release build with -O -wmo`、`Built: …/build/Pi-Web-Desktop.app`、`Mach-O 64-bit executable arm64`，退出 0，日志 0 warning；`/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion"` → `26.0`；`./Scripts/smoke.sh` → `smoke: OK (both modes exit 0)` | 退出 0，通过 |
 | 8 | 脚本语法与补丁空白 | `sh -n Scripts/*.sh`（7 个脚本，无输出，退出 0）；`git diff --check` 无输出、退出 0 | 通过 |
-| 9 | 单元测试 | `xcodebuild test`（`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`）→ `Executed 952 tests, with 0 failures (0 unexpected)`，`TEST_EXIT=0` | 通过（相对 alpha.17 的 951 件：新增 `testRejectsCandidateRequiringNewerSystem`；另将 `DependencyCheckerTests` 的 outdated 边界从 13.6 改为 25.6、把 4 处 `operatingSystemVersion` 替身提到 26.0） |
+| 9 | 单元测试 | `xcodebuild test`（`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`）→ `Executed 953 tests, with 0 failures (0 unexpected)`，`TEST_EXIT=0` | 通过（相对 alpha.17 的 951 件：新增 `testRejectsCandidateRequiringNewerSystem` 与 `testSha256DetectsMismatchedDownloadBytes`；另将 `DependencyCheckerTests` 的 outdated 边界从 13.6 改为 25.6、把 4 处 `operatingSystemVersion` 替身提到 26.0） |
 | 10 | 打包与证据 | `./Scripts/package-release.sh` → `package-release: OK`，产出 `dist/Pi-Web-Desktop-0.1.0-alpha.18+build.18.zip` 与 `.sha256`、`.evidence.md`；`info spctl exited with status 3`（ad-hoc 预期拒绝）；`every bundle entry carries the fixed modification time` | 退出 0，通过 |
 | 11 | checksum 记录（与 Release 资产一致） | 见下「checksum 记录（发布后回填）」 | 发布后回填 |
 | 12 | Release 标记 prerelease，说明中写明未公证与安装限制 | 发布说明已包含 ad-hoc / 未公证、`/Applications` 限制、没有自动回滚，并单列破坏性变更 | 发布后核对 |
 
-### 真机 smoke 记录（本版未执行）
+### 真机 smoke 记录（本版已执行）
 
-与 alpha.17 相同的 5 项都需要人在真实 `/Applications` 环境点击与观察，本版没有执行。第 4 项
-（校验失败后菜单入口恢复可用）在 alpha.17 修复、本版未改动，可用 alpha.17 的结论作为参考，但
-不构成本版资产的验证。
+本机 Apple M4 / macOS 27.0.1 / arm64 / Node v24.22.1 / Pi 1.4.0 / @agegr/pi-web 0.12.2。
+全部在真实 `/Applications` 环境用 GUI 点击完成，不是脚本断言。
 
-| # | 验证项 | 步骤 | 期望 | 结果 |
-| --- | --- | --- | --- | --- |
-| 1 | 自更新入口出现 | 用低于本版的构建装进 `/Applications`，点「服务 → 更新检查设置 → 检查更新…」 | 菜单出现「下载并安装桌面应用更新…」 | 未执行 |
-| 2 | 确认与安装 | 点该菜单项 → 确认框写明目标版本 → 点「更新」 | 下载、校验、替换 `/Applications` 应用，应用退出并重启 | 未执行 |
-| 3 | 安装结果可核对 | 更新后核对 `/Applications/Pi-Web-Desktop.app` | `CFBundleShortVersionString=0.1.0-alpha.18`，可执行文件 SHA-256 与 Release 资产一致 | 未执行 |
-| 4 | 校验失败即中止，且入口恢复可用 | 把下载到的 `.sha256` 换成不匹配的值后再触发更新 | 报「更新包校验失败，已停止安装」，`/Applications` 应用不变；随后菜单入口仍可再次点击 | 未执行（alpha.17 已修并有测试守护，本版未改动该路径） |
-| 5 | 非 `/Applications` 拒绝 | 把同一个构建放到 `/tmp` 运行后点该菜单项 | 报「当前应用不是从 /Applications 安装，无法自动更新。」 | 未执行 |
+| # | 验证项 | 实测结果 | 判定 |
+| --- | --- | --- | --- |
+| 1 | 自更新入口出现 | `/Applications` 装 alpha.17，点「服务 → 检查更新…」→ 弹窗「发现 1 项可用更新 / 桌面应用：上游有新版本 0.1.0-alpha.18，本机 0.1.0-alpha.17」→ 菜单变为「更新检查：发现 1 项可用更新」，子菜单出现「下载并安装桌面应用更新…」 | 通过 |
+| 2 | 确认与安装 | 点该菜单项 → 确认框「更新桌面应用 / 检测到桌面应用新版本 0.1.0-alpha.18。下载并安装后应用会退出并重新启动。当前版本未经过 Apple Developer 签名与 notarization，请确认 GitHub 发布来源。」→ 点「更新」→ 5 秒内 `/Applications` 变为 alpha.18 | 通过 |
+| 3 | 安装结果可核对 | `/Applications/Pi-Web-Desktop.app`：`CFBundleShortVersionString=0.1.0-alpha.18`、`CFBundleVersion=18`、`LSMinimumSystemVersion=26.0`；`Contents/MacOS/PiWebDesktop` 的 SHA-256 为 `ed565e5b474e79305f56e9e960e62758ca3c79d5773e7524062ea557be3c9108`，与解压 Release ZIP 得到的同一文件逐字节一致；应用自动重启（新 PID 55713） | 通过 |
+| 4 | 校验失败即中止 | **真机未能构造出校验失败**：把 Release 的 `.sha256` 资产替换成全 0 值（`gh release upload --clobber`）后重跑更新，`/Applications` 仍从 alpha.17 升到了 alpha.18——客户端拿到的是 CDN 边缘缓存住的旧 `.sha256`，即正确值。改为在测试层覆盖：新增 `testSha256DetectsMismatchedDownloadBytes`（`PiWebDesktopTests/DesktopAppUpdateTests.swift`），对真实文件算摘要、断言与全 0 值不等、改一个字节摘要就变、并钉死 `.checksumMismatch` 的用户文案 `更新包校验失败，已停止安装。`；`sha256(of:)` 随之从 `private` 改为 internal 以便测试直接喂数据。953 个测试全过 | 通过（测试层覆盖，非真机） |
+| 5 | 非 `/Applications` 拒绝 | 把 alpha.17 解压到 `/tmp/a17-run.app` 运行，检测到同一项更新后点「下载并安装桌面应用更新…」→ 确认框 → 点「更新」，弹出「桌面应用更新未完成 / 当前应用不是从 /Applications 安装，无法自动更新。」，文案与预期逐字一致；`/tmp` 下的应用未被改动 | 通过 |
+
+第 4 项的副作用已经清理：`.sha256` 资产已用原值 `e9813301a9ab05bb2eda6d298c0dc6377e67187245a9e4e36b80807195a69ef9`
+重新上传并回读确认；测试中误传的 `BAD.sha256` 已删除；`/tmp` 下的临时副本已删除。
+
+**教训（写入发布纪律）**：用「改 Release 资产」的方式制造校验失败是不可靠的——GitHub 的
+`releases/download` 经过 CDN，刚上传的内容在不同边缘节点上可能仍返回旧字节，导致测试既没测到
+想测的失败，还可能把发布资产留在错误状态。要验证这条路径，应当改用本地代理拦截，或直接用
+`DesktopAppUpdateInstaller(asset:)` 的单测注入坏 checksum，不要动已发布的资产。
 
 ### **本版特有的门槛：低版本系统的安装与更新行为**
 

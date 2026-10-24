@@ -76,6 +76,37 @@ final class DesktopAppUpdateTests: XCTestCase {
         XCTAssertFalse(DesktopAppUpdateInstaller.canReplaceInstalledApp(symlinked.appendingPathComponent("Pi-Web-Desktop.app", isDirectory: true), applicationsRoot: symlinked))
     }
 
+    /// 更新包自带的最低系统高于本机时不得安装。
+    /// 版本值取与项目自身无关的数字，并显式注入 `running`：不依赖运行机的系统版本。
+    func testRejectsCandidateRequiringNewerSystem() {
+        let fileManager = FileManager.default
+        let temporary = fileManager.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? fileManager.removeItem(at: temporary) }
+
+        func bundle(named name: String, minimumSystem: String?) -> URL {
+            let app = temporary.appendingPathComponent("\(name).app", isDirectory: true)
+            let contents = app.appendingPathComponent("Contents", isDirectory: true)
+            try! fileManager.createDirectory(at: contents, withIntermediateDirectories: true)
+            var plist: [String: Any] = ["CFBundleIdentifier": "io.github.su-luoya.pi-web-desktop"]
+            if let minimumSystem { plist["LSMinimumSystemVersion"] = minimumSystem }
+            let data = try! PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+            try! data.write(to: contents.appendingPathComponent("Info.plist"))
+            return app
+        }
+
+        let older = OperatingSystemVersion(majorVersion: 2, minorVersion: 4, patchVersion: 0)
+        // 候选要求 2.5，本机是 2.4：拒绝。
+        XCTAssertFalse(DesktopAppUpdateInstaller.requiresNoNewerSystem(bundle(named: "TooNew", minimumSystem: "2.5.0"), running: older))
+        // 候选要求 2.4 / 2.3：放行。
+        XCTAssertTrue(DesktopAppUpdateInstaller.requiresNoNewerSystem(bundle(named: "Equal", minimumSystem: "2.4.0"), running: older))
+        XCTAssertTrue(DesktopAppUpdateInstaller.requiresNoNewerSystem(bundle(named: "Older", minimumSystem: "2.3.0"), running: older))
+        // 缺这个键视为放行：本轮之前的包都没有被当作门槛使用过。
+        XCTAssertTrue(DesktopAppUpdateInstaller.requiresNoNewerSystem(bundle(named: "Missing", minimumSystem: nil), running: older))
+        // 无法解析的声明按「缺键」处理（放行）：真正的闸门是 isValidBundle 与 sha256。
+        XCTAssertTrue(DesktopAppUpdateInstaller.requiresNoNewerSystem(bundle(named: "Garbage", minimumSystem: "not-a-version"), running: older))
+    }
+
     func testRejectsNonGitHubZipAndMalformedChecksum() {
         XCTAssertNil(DesktopAppReleaseAssetSelector.select(
             version: "2.5.0",

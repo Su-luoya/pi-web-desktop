@@ -1903,13 +1903,20 @@ alpha.17 自动更新到 alpha.18（系统拒绝部署目标更高的 bundle）�
 | # | 验证项 | 步骤 | 期望 | 结果 |
 | --- | --- | --- | --- | --- |
 | L1 | 低版本系统拒绝安装 | 在 macOS 14 / 15 上解压 alpha.18 的 ZIP 并尝试打开 | 系统拒绝启动，提示需要更高版本 macOS；不得出现"已损坏"这类误导性文案 | 未执行 |
-| L2 | 低版本系统不收到更新 | 在 macOS 14 / 15 上跑 alpha.17，触发检查更新 | `UpdateResponseParser` 只按 tag 与 `prerelease` 过滤，**不按 `LSMinimumSystemVersion` 过滤**；因此 alpha.17 会看到 alpha.18 并提示更新，下载安装后才会在启动阶段失败。这是已知缺陷，见下 | **未执行**（该缺陷由代码阅读确认，不是实测） |
+| L2 | 低版本系统不收到更新 | 在 macOS 14 / 15 上跑 alpha.17，触发检查更新 | alpha.17 仍会提示 alpha.18：它不带本版新增的 `LSMinimumSystemVersion` 闸门，所以**这一行在本版无法变绿**（客户端不可改造）。新增的闸门在**本机**用单测覆盖（`testRejectsCandidateRequiringNewerSystem`，952 个测试中的 1 个），不依赖 14 / 15 机器 | 部分覆盖：引擎单测已过，端到端仍需 14 / 15 机器 |
 | L3 | 更新失败后旧安装保留 | 承 L2，在 macOS 14 / 15 上完成一次 alpha.17 → alpha.18 的更新尝试 | 旧安装保留，不出现应用被替换成无法启动的版本 | 未执行 |
 
-L2 暴露一个真实问题：**更新链路没有按最低系统版本过滤候选版本**。alpha.18 是本项目第一次提最低
-系统，因此这个缺口此前不可见。建议在下一个版本里按 `LSMinimumSystemVersion` 过滤候选 Release，
-或在 Release 资产里附带最低系统元数据。本版不修，因为改动会触及 `UpdateResponseParser` 与
-`DesktopAppReleaseAssetSelector`（已有安全评审覆盖的信任边界），需要单独一轮评审。
+L2 暴露的缺口本版已修，但修的位置值得记清楚：**没有**改 `UpdateResponseParser`。检查阶段拿不到候选包的
+`Info.plist`（GitHub Releases API 不提供这个字段），要按最低系统过滤就得给每个 Release 加一份元数据，
+那会改变 `UpdateCheckOrigin` 的来源契约。改在安装阶段：
+`Sources/Updates/DesktopAppUpdate.swift` 新增 `requiresNoNewerSystem(_:running:)`，在解压并 `isValidBundle`
+通过之后、`launchReplacement` 之前读候选包自己的 `LSMinimumSystemVersion`，高于本机就记
+`.requiresNewerSystem` 并保留旧安装。缺这个键或值无法解析时放行，因为本轮之前的包都没有被当作门槛
+用过，不能在这里凭空收紧。
+
+这个闸门**救不了已经在用的旧版本**：alpha.17 的二进制里没有这段代码，所以 macOS 14 / 15 上的 alpha.17
+依然会提示并安装 alpha.18。它保护的是以后每一次提高下限（alpha.19、alpha.20……），以及从 alpha.18 起
+的每一次更新。要让 L2 真正变绿，只能靠在低版本系统上实测，或者从 alpha.18 开始观察。
 
 ### checksum 记录（发布后回填）
 
@@ -1925,7 +1932,7 @@ L2 暴露一个真实问题：**更新链路没有按最低系统版本过滤候
 - 打 tag `v0.1.0-alpha.18` 并让 `release` workflow 生成草稿 prerelease。
 - 回填 checksum 记录，核对草稿正文无 `<待填写>` 占位符后发布。
 - 在 Release Issue 里勾选全部门槛。
-- L1–L3 三项需要一台 macOS 14 / 15 机器；**L2 暴露的更新链路缺口建议单独开 Issue**。
+- L1 / L3 两项需要一台 macOS 14 / 15 机器，本机是 macOS 27.0；L2 的引擎部分已由单测覆盖，端到端仍需该机器。
 
 ### 本版同时做的文档一致性改动
 

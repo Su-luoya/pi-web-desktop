@@ -45,6 +45,24 @@ Pi Web Desktop `0.1.0-alpha.18` 面向 Apple Silicon（arm64）与 **macOS 26 �
 - `Scripts/build.sh`、`Scripts/package-release.sh`：补充注释说明为什么保留 `codesign --deep`。上游对这个参数的反对意见针对的是带 SPM / XCFramework 依赖的 bundle（会以错误 entitlements 重签嵌套代码），而本 bundle 的两个 Frameworks build phase 都为空、没有 package product dependency，`--deep` 实际只走一个 Mach-O。删除它只会改变重试之间对 `build/` 里陈旧嵌套 bundle 的重新签名方式，而这条路径已由 `--force` 尝试循环覆盖。
 - `README.md`、`Docs/development.md`、`Docs/releasing.md`、`Docs/release-notes-template.md`：最低系统表述同步为 macOS 26。历史发布说明与 `Docs/security-review-*.md` 是当时的实测记录，保持原样。
 
+**更新链路的版本闸门**
+
+- `Sources/Updates/DesktopAppUpdate.swift`：新增 `DesktopAppUpdateFailure.requiresNewerSystem` 与
+  `requiresNoNewerSystem(_:running:)`。安装流程在解压并校验候选包之后、调用替换脚本之前，读候选包
+  自己的 `LSMinimumSystemVersion`；高于本机就停止安装并保留旧安装。缺这个键或值无法解析视为放行。
+- 修在安装阶段而不是检查阶段，是因为检查阶段拿不到候选包的 `Info.plist`（GitHub Releases API 不
+  提供这个字段），而在检查阶段过滤就得引入一份 Release 元数据，改变 `UpdateCheckOrigin` 的
+  来源契约。安装阶段本来就要解压并验包，读一个已有键不增加新的信任输入。
+- 这个闸门**拦不住 alpha.17**：alpha.17 的二进制里没有这段代码，macOS 14 / 15 上的 alpha.17 依然会
+  提示并尝试安装 alpha.18。它保护的是从 alpha.18 起的每一次更新，以及以后每一次提高下限。
+
+**测试**
+
+- `PiWebDesktopTests/DesktopAppUpdateTests.swift`：新增 `testRejectsCandidateRequiringNewerSystem`，
+  造 5 个临时 bundle 分别验证「拒绝 / 相等放行 / 更低放行 / 缺键放行 / 值无法解析放行」。用注入的
+  `running` 参数，不依赖运行机的系统版本。
+- 测试总数 951 → **952**。
+
 ## 目标平台与安装
 
 | 项目 | 值 |
@@ -62,7 +80,7 @@ ZIP 下载后请先使用配套的 `.zip.sha256` 校验，再将应用放入 `~/
 
 ## 验证
 
-- 本地 `xcodebuild test`：951 个测试，0 失败；
+- 本地 `xcodebuild test`：952 个测试，0 失败；
 - `./Scripts/build.sh`：成功，`LSMinimumSystemVersion=26.0`；
 - `./Scripts/check-identity.sh`：`PASSED (45 checks)`；
 - `./Scripts/check-release-version.sh`：`PASSED (tag v0.1.0-alpha.18, MARKETING_VERSION 0.1.0-alpha.18, CURRENT_PROJECT_VERSION 18)`；
@@ -88,6 +106,7 @@ ZIP 下载后请先使用配套的 `.zip.sha256` 校验，再将应用放入 `~/
 - ad-hoc、未公证，首次手动安装需要用户放行；
 - 最低系统 macOS 26，macOS 14 / 15 上的用户停留在 alpha.17；
 - 桌面应用自更新仅支持 `/Applications`，需要用户确认；
+- 自更新会拒绝要求更高 macOS 的候选包，但 alpha.17 及更早的版本没有这个闸门，所以 macOS 14 / 15 上的旧版本仍会尝试安装本版并在启动时失败；
 - 自更新失败会保留旧安装，但新版本安装后启动失败不会自动回滚；
 - GUI 菜单与设置窗口的实际观感只有源码级断言覆盖，没有自动化真机验证；
 - `Sources/Diagnostics/` 尚未做过独立审计；

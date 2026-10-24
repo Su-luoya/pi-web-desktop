@@ -47,7 +47,7 @@ enum PiPackageUpdateStatusPresenter {
         if let warning {
             lines.append(warning.text)
         }
-        lines.append("手动入口：菜单“服务 → 更新检查设置 → 查看 Pi 扩展包更新…”（策略为“关闭”时不检查、不提示、不执行）")
+        lines.append("手动入口：菜单“更新 → 查看 Pi 扩展包更新…”（策略为“关闭”时不检查、不提示、不执行）")
         return lines
     }
 }

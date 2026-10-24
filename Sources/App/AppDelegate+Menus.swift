@@ -17,7 +17,7 @@ extension AppDelegate {
         recentWorkspacesMenu = nil
         // 更新检查：状态行、设置子菜单、四类快捷开关与各组件菜单项
         updateStatusMenuItem = nil
-        updateSettingsMenu = nil
+        updateMenu = nil
         updateCategoryMenuItems.removeAll()
         desktopAppUpdateMenuItem = nil
         piWebUpdateMenuItem = nil
@@ -49,14 +49,8 @@ extension AppDelegate {
         hideOthers.keyEquivalentModifierMask = [.command, .option]
         appMenu.addItem(withTitle: "显示全部", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
         appMenu.addItem(withTitle: "设置…", action: #selector(showPreferences(_:)), keyEquivalent: ",")
-        appMenu.addItem(makeServiceControlMenuItem(title: "启动服务", action: #selector(startServiceAction(_:))))
-        appMenu.addItem(makeServiceControlMenuItem(title: "重启服务", action: #selector(restartServiceAction(_:))))
-        appMenu.addItem(makeServiceControlMenuItem(title: "停止服务", action: #selector(stopServiceAction(_:))))
-        appMenu.addItem(withTitle: "在浏览器中打开", action: #selector(openInBrowser(_:)), keyEquivalent: "")
-        appMenu.addItem(withTitle: "复制本地地址", action: #selector(copyLocalAddress(_:)), keyEquivalent: "")
-        let appPhoneAccessItem = NSMenuItem(title: "复制手机访问链接", action: nil, keyEquivalent: "")
-        appPhoneAccessItem.submenu = makePhoneAccessMenu()
-        appMenu.addItem(appPhoneAccessItem)
+        // 应用菜单只留应用级动作：服务控件、浏览器与地址复制都归“服务”菜单，
+        // 在应用菜单里再放一遍只会让 ⌘ 菜单变长而不增加能力。
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "退出 Pi Web Desktop（保持服务运行）", action: #selector(quitKeepingService(_:)), keyEquivalent: "")
         appMenu.addItem(withTitle: "退出 Pi Web Desktop（停止服务）", action: #selector(quitAndStop(_:)), keyEquivalent: "")
@@ -100,7 +94,35 @@ extension AppDelegate {
         let serviceMenuItem = NSMenuItem()
         mainMenu.addItem(serviceMenuItem)
         let serviceMenu = NSMenu(title: "服务")
-        statusMenuItem = serviceMenu.addItem(withTitle: "状态：正在检查…", action: nil, keyEquivalent: "")
+        // 服务菜单只放"我要对服务做什么"。状态、地址、日志、代理告警这类信息
+        // 归“状态”菜单，更新归“更新”菜单：一屏能看完的选择项才是可用的菜单。
+        serviceMenu.addItem(makeServiceControlMenuItem(title: "启动服务", action: #selector(startServiceAction(_:))))
+        serviceMenu.addItem(makeServiceControlMenuItem(title: "重启服务", action: #selector(restartServiceAction(_:))))
+        serviceMenu.addItem(makeServiceControlMenuItem(title: "停止服务", action: #selector(stopServiceAction(_:))))
+        serviceMenu.addItem(.separator())
+        serviceMenu.addItem(withTitle: "在浏览器中打开", action: #selector(openInBrowser(_:)), keyEquivalent: "")
+        serviceMenu.addItem(withTitle: "复制服务地址", action: #selector(copyLocalAddress(_:)), keyEquivalent: "")
+        let servicePhoneAccessItem = NSMenuItem(title: "手机访问链接", action: nil, keyEquivalent: "")
+        servicePhoneAccessItem.submenu = makePhoneAccessMenu()
+        serviceMenu.addItem(servicePhoneAccessItem)
+        serviceMenu.addItem(.separator())
+        let recentWorkspacesItem = NSMenuItem(title: "最近工作目录", action: nil, keyEquivalent: "")
+        let recentWorkspacesMenu = NSMenu(title: "最近工作目录")
+        recentWorkspacesMenu.delegate = self
+        recentWorkspacesItem.submenu = recentWorkspacesMenu
+        self.recentWorkspacesMenu = recentWorkspacesMenu
+        serviceMenu.addItem(recentWorkspacesItem)
+        serviceMenu.addItem(withTitle: "在 Finder 中打开工作目录", action: #selector(openCurrentWorkspace(_:)), keyEquivalent: "")
+        serviceMenu.addItem(.separator())
+        serviceMenu.addItem(withTitle: "设置…", action: #selector(showPreferences(_:)), keyEquivalent: "")
+        serviceMenuItem.submenu = serviceMenu
+
+        // “状态”菜单：只读信息 + 诊断与日志入口。信息项带 `isEnabled = false`
+        // 的处理交给 AppKit 的自动启用逻辑（无 action 的项自动置灰）。
+        let statusMenuItemHolder = NSMenuItem()
+        mainMenu.addItem(statusMenuItemHolder)
+        let statusMenu = NSMenu(title: "状态")
+        statusMenuItem = statusMenu.addItem(withTitle: "状态：正在检查…", action: nil, keyEquivalent: "")
         statusMenuItem?.isEnabled = false
         // 系统代理告警项（GitHub #157）：条件成立时常显并可点开，不成立时隐藏。
         let proxyWarningItem = NSMenuItem(
@@ -111,32 +133,30 @@ extension AppDelegate {
         proxyWarningItem.target = self
         proxyWarningItem.isHidden = true
         systemProxyWarningMenuItem = proxyWarningItem
-        serviceMenu.addItem(proxyWarningItem)
-        serviceMenu.addItem(.separator())
-        serviceMenu.addItem(makeServiceControlMenuItem(title: "启动服务", action: #selector(startServiceAction(_:))))
-        serviceMenu.addItem(makeServiceControlMenuItem(title: "重启服务", action: #selector(restartServiceAction(_:))))
-        serviceMenu.addItem(makeServiceControlMenuItem(title: "停止服务", action: #selector(stopServiceAction(_:))))
-        serviceMenu.addItem(withTitle: "设置…", action: #selector(showPreferences(_:)), keyEquivalent: "")
-        let recentWorkspacesItem = NSMenuItem(title: "最近工作目录", action: nil, keyEquivalent: "")
-        let recentWorkspacesMenu = NSMenu(title: "最近工作目录")
-        recentWorkspacesMenu.delegate = self
-        recentWorkspacesItem.submenu = recentWorkspacesMenu
-        self.recentWorkspacesMenu = recentWorkspacesMenu
-        serviceMenu.addItem(recentWorkspacesItem)
-        serviceMenu.addItem(withTitle: "在 Finder 中打开当前工作目录", action: #selector(openCurrentWorkspace(_:)), keyEquivalent: "")
-        serviceMenu.addItem(withTitle: "在浏览器中打开", action: #selector(openInBrowser(_:)), keyEquivalent: "")
-        serviceMenu.addItem(withTitle: "复制本地地址", action: #selector(copyLocalAddress(_:)), keyEquivalent: "")
-        let servicePhoneAccessItem = NSMenuItem(title: "复制手机访问链接", action: nil, keyEquivalent: "")
-        servicePhoneAccessItem.submenu = makePhoneAccessMenu()
-        serviceMenu.addItem(servicePhoneAccessItem)
-        serviceMenu.addItem(withTitle: "打开日志", action: #selector(openLog(_:)), keyEquivalent: "")
-        serviceMenu.addItem(withTitle: "打开日志文件夹", action: #selector(openLogsFolder(_:)), keyEquivalent: "")
-        serviceMenu.addItem(withTitle: "复制诊断", action: #selector(copyDiagnostics(_:)), keyEquivalent: "")
-        serviceMenu.addItem(withTitle: "依赖与环境诊断…", action: #selector(showDiagnosticsAction(_:)), keyEquivalent: "")
-        serviceMenu.addItem(.separator())
-        serviceMenu.addItem(withTitle: "检查更新…", action: #selector(checkForUpdatesNow(_:)), keyEquivalent: "")
-        serviceMenu.addItem(makeUpdateSettingsMenuItem())
-        serviceMenuItem.submenu = serviceMenu
+        statusMenu.addItem(proxyWarningItem)
+        statusMenu.addItem(.separator())
+        statusMenu.addItem(withTitle: "打开日志", action: #selector(openLog(_:)), keyEquivalent: "")
+        statusMenu.addItem(withTitle: "打开日志文件夹", action: #selector(openLogsFolder(_:)), keyEquivalent: "")
+        statusMenu.addItem(withTitle: "复制诊断", action: #selector(copyDiagnostics(_:)), keyEquivalent: "")
+        statusMenu.addItem(withTitle: "依赖与环境诊断…", action: #selector(showDiagnosticsAction(_:)), keyEquivalent: "")
+        statusMenuItemHolder.submenu = statusMenu
+
+        // “更新”菜单：检查、立即更新、策略开关与偏好设置。原来的二级子菜单
+        // “更新检查设置”把 7 个可点项藏在两级之下，是最主要的一处“混乱”。
+        let updateMenuItemHolder = NSMenuItem()
+        mainMenu.addItem(updateMenuItemHolder)
+        let updateMenu = NSMenu(title: "更新")
+        updateMenu.autoenablesItems = false
+        updateMenu.delegate = self
+        self.updateMenu = updateMenu
+        let updateStatus = NSMenuItem(title: updateCheckStatusText(), action: nil, keyEquivalent: "")
+        updateStatus.isEnabled = false
+        updateStatusMenuItem = updateStatus
+        updateMenu.addItem(updateStatus)
+        updateMenu.addItem(.separator())
+        updateMenu.addItem(withTitle: "检查更新…", action: #selector(checkForUpdatesNow(_:)), keyEquivalent: "")
+        appendUpdateMenuItems(to: updateMenu)
+        updateMenuItemHolder.submenu = updateMenu
 
         let windowMenuItem = NSMenuItem()
         mainMenu.addItem(windowMenuItem)
@@ -157,14 +177,6 @@ extension AppDelegate {
 
         // 菜单装好后同步一次代理告警项（首次检测可能早于菜单创建）。
         refreshSystemProxyWarning()
-    }
-
-    func menuWillOpen(_ menu: NSMenu) {
-        if menu === recentWorkspacesMenu {
-            rebuildRecentWorkspacesMenu()
-        } else if phoneAccessMenus.contains(where: { $0 === menu }) {
-            rebuildPhoneAccessMenu(menu)
-        }
     }
 
     /// 依赖门控禁用的服务控件菜单项（启动/停止/重启）；菜单打开时由
@@ -237,7 +249,7 @@ extension AppDelegate {
     private func applyWorkspaceSwitch(path: String) {
         var configuration = serviceManager.configuration
         configuration.workspacePath = path
-        applyPreferencesConfiguration(configuration, credentialsChanged: false)
+        applyPreferencesConfiguration(configuration)
     }
 
     func recordCurrentWorkspace() {
@@ -401,23 +413,17 @@ extension AppDelegate {
     /// 候选动作：判定是纯函数（`ServiceAddressDecision`），交互层只做呈现。
     ///
     /// - 已经是当前监听地址：直接复制链接，不改配置；
-    /// - 没有可用密码：用共用文案引导到「设置… → 远程访问」，不静默改配置、
-    ///   不启动远程监听；
     /// - 其他情况：先确认（会切换监听地址并重启，当前会话中断），确认后按
     ///   设置窗口同一保存语义保存配置并重启，成功后才复制链接。
     @objc private func copyPhoneAccessLink(_ sender: NSMenuItem) {
         guard let address = (sender.representedObject as? ServiceAddressBox)?.address else { return }
         let configuration = serviceManager.configuration
-        let hasPassword = RemoteAccessPassword.load(from: keychain) != nil
         switch ServiceAddressDecision.decide(
             currentHostname: configuration.hostname,
-            selected: address,
-            hasPassword: hasPassword
+            selected: address
         ) {
         case .copyOnly:
             copyPhoneAccessLink(for: address, port: configuration.port)
-        case .needsPassword:
-            presentPhoneAccessPasswordRequired()
         case .needsConfirmation:
             confirmPhoneAccessSwitch(to: address)
         }
@@ -431,20 +437,6 @@ extension AppDelegate {
         }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(url.absoluteString, forType: .string)
-    }
-
-    /// 没有密码时的引导：只提示下一步，不写配置、不切监听地址。
-    private func presentPhoneAccessPasswordRequired() {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "需要先设置访问密码"
-        alert.informativeText = "\(RemoteAccessPolicy.missingPasswordMessage)\n\n监听地址保持不变。"
-        alert.addButton(withTitle: "打开设置…")
-        alert.addButton(withTitle: "取消")
-        presentPhoneAccessAlert(alert) { [weak self] response in
-            guard response == .alertFirstButtonReturn else { return }
-            self?.showPreferences(nil)
-        }
     }
 
     /// 切换监听地址前的确认：说明会重启服务、当前会话中断。
@@ -462,20 +454,18 @@ extension AppDelegate {
         }
     }
 
-    /// 确认后的切换：与设置窗口同一条保存路径（`RemoteAccessSetup.apply` 校验
-    /// hostname 并沿用 Keychain 里已有的密码）；配置未保存时不复制链接，也不启动
-    /// 远程监听。配置生效且重启路径结束（`applyPreferencesConfiguration` 的
-    /// completion）后才复制链接。
+    /// 确认后的切换：与设置窗口同一条保存路径（监听地址经统一判定）；配置未
+    /// 保存时不复制链接，也不启动远程监听。配置生效且重启路径结束
+    /// （`applyPreferencesConfiguration` 的 completion）后才复制链接。
     private func switchPhoneAccessListening(to address: ServiceAddress) {
         var requested = serviceManager.configuration
         requested.hostname = address.ipv4
-        let outcome = RemoteAccessSetup.apply(requested: requested, newPassword: nil, keychain: keychain)
-        guard let newConfiguration = outcome.configuration else {
-            presentPhoneAccessFailure(outcome.error ?? "设置未保存。")
+        if let message = RemoteAccessPolicy.hostnameValidationMessage(address.ipv4) {
+            presentPhoneAccessFailure(message)
             return
         }
-        applyPreferencesConfiguration(newConfiguration, credentialsChanged: false) { [weak self] in
-            self?.copyPhoneAccessLink(for: address, port: newConfiguration.port)
+        applyPreferencesConfiguration(requested) { [weak self] in
+            self?.copyPhoneAccessLink(for: address, port: requested.port)
         }
     }
 
@@ -541,23 +531,21 @@ extension AppDelegate {
         var launchEnvironment: String
         var logPath: String
         var logWriteStatus: String
-        var remoteAccessPasswordStatus: String
         var componentInstallations: [ComponentInstallation]
     }
 
     /// 在主线程捕获一次导出快照；不发起任何子进程，也不阻塞。
     private func diagnosticsExportSnapshot() -> DiagnosticsExportSnapshot {
         let piWebPath = serviceManager.resolvePiWebPath() ?? "未找到"
-        // 启动环境只展示应用显式设置的子进程变量；远程密码只以占位符进入展示路径，
-        // 真实值不经过诊断代码。脱敏器仍会再检查一遍。
-        let hasRemotePassword = RemoteAccessPassword.isSet(in: keychain)
+        // 启动环境只展示应用显式设置的子进程变量；真实凭证值不经过诊断代码，
+        // 脱敏器仍会再检查一遍。
+
         let launchEnvironment = ServiceLaunchSpecification.environmentDescription(
             ServiceLaunchSpecification.make(
                 configuration: serviceManager.configuration,
                 piWebPath: piWebPath,
                 appConfiguration: appConfiguration,
                 baseEnvironment: [:],
-                remoteAccessPassword: hasRemotePassword ? LogRedactor.marker : nil,
                 // 展示的启动环境与真实启动用同一个 PATH 构建器（GitHub #89）。
                 toolPathProvider: toolPathProvider
             ).environment
@@ -577,7 +565,6 @@ extension AppDelegate {
             launchEnvironment: launchEnvironment,
             logPath: appConfiguration.logURL.path,
             logWriteStatus: serviceManager.logWriter.writeStatusDescription,
-            remoteAccessPasswordStatus: RemoteAccessPassword.statusText(isSet: hasRemotePassword),
             // #16 的组件安装识别结果（已脱敏）直接进入导出文本。
             componentInstallations: dependencyReport?.components ?? []
         )
@@ -617,7 +604,6 @@ extension AppDelegate {
                 launchEnvironment: snapshot.launchEnvironment,
                 logPath: snapshot.logPath,
                 logWriteStatus: snapshot.logWriteStatus,
-                remoteAccessPasswordStatus: snapshot.remoteAccessPasswordStatus,
                 componentInstallations: snapshot.componentInstallations
             ),
             redactor: logRedactor

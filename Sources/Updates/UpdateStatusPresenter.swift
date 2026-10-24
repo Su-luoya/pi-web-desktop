@@ -281,7 +281,7 @@ enum UpdateNotificationText {
             if entry.policy == .askBeforeUpdate {
                 return "\(entry.target.displayName)：本机 \(installed)，上游 \(entry.latestVersion)。"
                     + "是否更新由你决定：应用不做无人值守扩展包更新，只在你确认后才用参数数组"
-                    + "执行一次 Pi 官方更新命令（菜单“服务 → 更新检查设置 → 查看 Pi 扩展包更新…”）。"
+                    + "执行一次 Pi 官方更新命令（菜单“更新 → 查看 Pi 扩展包更新…”）。"
             }
             return "\(entry.target.displayName)：本机 \(installed)，上游 \(entry.latestVersion)。"
         }

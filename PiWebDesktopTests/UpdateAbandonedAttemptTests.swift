@@ -679,7 +679,7 @@ final class UpdateAbandonedAttemptTests: XCTestCase {
         XCTAssertTrue(block.contains("超时上限：300 秒"))
         XCTAssertTrue(block.contains("放弃等待（例如应用退出）"))
         XCTAssertTrue(block.contains("只放弃等待：没有向任何进程发送任何信号"))
-        XCTAssertTrue(block.contains("清除方式：菜单“服务 → 更新检查设置 → 已放弃的更新记录…”"))
+        XCTAssertTrue(block.contains("清除方式：菜单“更新 → 已放弃的更新记录…”"))
         XCTAssertTrue(
             block.contains("自动更新在清除记录前不会执行"),
             "诊断文本必须说明自动路径被挡住、手动入口不受影响"

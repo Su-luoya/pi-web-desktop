@@ -145,7 +145,7 @@ struct UpdateCheckSummary: Equatable {
     var detailText: String {
         if allDisabled {
             return "四类更新检查都已关闭，应用不会向上游发起任何版本请求。"
-                + "可以在“服务 → 更新检查设置”里重新打开；应用只检查、不安装。"
+                + "可以在“更新”里重新打开；应用只检查、不安装。"
         }
         guard !results.isEmpty else {
             return "本次没有需要检查的对象（本机版本未知，或还没有到期）。"

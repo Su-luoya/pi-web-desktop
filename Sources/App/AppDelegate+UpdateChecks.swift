@@ -258,7 +258,7 @@ extension AppDelegate {
         syncUpdateSettingsWindow()
     }
 
-    /// “服务 → 更新检查偏好设置…”：策略、每类状态、忽略版本与 alpha.3 预留位。
+    /// “更新 → 更新检查偏好设置…”：策略、每类状态、忽略版本与 alpha.3 预留位。
     @objc private func showUpdatePreferences(_ sender: Any?) {
         let controller = updateSettingsWindowController ?? UpdateSettingsWindowController()
         controller.onPreferencesChanged = { [weak self] preferences in
@@ -360,17 +360,14 @@ extension AppDelegate {
         alert.beginSheetModal(for: window)
     }
 
-    /// “更新检查设置”子菜单：状态行 + 四类快捷开关 + 偏好设置与说明。菜单打开
-    /// 时由 `menuNeedsUpdate` 刷新。
-    func makeUpdateSettingsMenuItem() -> NSMenuItem {
-        let item = NSMenuItem(title: "更新检查设置", action: nil, keyEquivalent: "")
-        let menu = NSMenu(title: "更新检查设置")
-        menu.delegate = self
-        menu.autoenablesItems = false
-        let status = NSMenuItem(title: updateCheckStatusText(), action: nil, keyEquivalent: "")
-        status.isEnabled = false
-        updateStatusMenuItem = status
-        menu.addItem(status)
+    /// 把更新相关的可点项追加进顶层“更新”菜单。
+    ///
+    /// 这些项原来藏在“更新 → …”两级子菜单下：告警、四类开关、
+    /// 三个立即更新入口与两个对话框混在一屏，用户既找不到也读不完。现在按
+    /// “先看告警，再做动作，最后改策略”分三段，每段之间用分隔线断开。
+    ///
+    /// - Parameter menu: 顶层“更新”菜单，状态行已由调用方加好。
+    func appendUpdateMenuItems(to menu: NSMenu) {
         // 持久告警项：有告警时常显并可点开（无告警时隐藏）。
         let warningItem = NSMenuItem(
             title: "",
@@ -474,15 +471,18 @@ extension AppDelegate {
         abandonedItem.target = self
         abandonedAttemptsMenuItem = abandonedItem
         menu.addItem(abandonedItem)
+        menu.addItem(.separator())
         menu.addItem(withTitle: "更新检查说明…", action: #selector(showUpdateCheckExplanation(_:)), keyEquivalent: "")
-        item.submenu = menu
-        updateSettingsMenu = menu
-        return item
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        guard menu === updateSettingsMenu else { return }
-        refreshUpdateMenuState()
+        if menu === recentWorkspacesMenu {
+            rebuildRecentWorkspacesMenu()
+        } else if phoneAccessMenus.contains(where: { $0 === menu }) {
+            rebuildPhoneAccessMenu(menu)
+        } else if menu === updateMenu {
+            refreshUpdateMenuState()
+        }
     }
 
     func refreshUpdateMenuState() {
@@ -545,7 +545,7 @@ extension AppDelegate {
         }
     }
 
-    private func updateCheckStatusText() -> String {
+    func updateCheckStatusText() -> String {
         guard let updateChecker else { return "更新检查：不可用" }
         if updateCheckInProgress { return "更新检查：正在检查…" }
         return updateChecker.summary.statusLine

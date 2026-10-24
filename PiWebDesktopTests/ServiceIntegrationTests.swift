@@ -644,7 +644,6 @@ private final class IntegrationServiceHarness {
             fileManager: .default,
             ownershipStore: FileServiceOwnershipStore(),
             signaler: POSIXServiceSignaler(),
-            remoteAccessPassword: { nil },
             instanceID: instanceID
         )
         self.manager = manager

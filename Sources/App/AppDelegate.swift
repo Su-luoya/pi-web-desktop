@@ -79,7 +79,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     var updateChecker: UpdateChecker?
     var updateStatusMenuItem: NSMenuItem?
     var updateCategoryMenuItems: [UpdateCheckCategory: NSMenuItem] = [:]
-    var updateSettingsMenu: NSMenu?
+    /// 顶层“更新”菜单：`menuNeedsUpdate` 用它给状态行与告警项刷新文案。
+    var updateMenu: NSMenu?
     /// “更新检查偏好设置”窗口（GitHub #18）。
     var updateSettingsWindowController: UpdateSettingsWindowController?
     /// 当前正在执行的桌面 App 安装器；必须由 AppDelegate 持有到下载/替换流程结束。
@@ -188,9 +189,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     let logWriter: LogWriter
     /// 工作目录探针（存在/是目录/可写）；测试可注入假探针。
     let workspaceProbe: WorkspaceDirectoryProbe
-    /// 远程访问密码的唯一存储。AppDelegate 只把它注入 ServiceManager、设置界面
-    /// 和诊断文本的状态行，绝不把密码写进 UserDefaults、日志或诊断内容。
-    let keychain: KeychainStoring
 
     var startURL: URL { serviceManager.configuration.serviceURL }
 
@@ -199,12 +197,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     init(
         appConfiguration: AppConfiguration = AppConfiguration.forCurrentProcess(),
         commandRunner: CommandRunning = SystemCommandRunner(),
-        keychain: KeychainStoring = KeychainStore(),
         workspaceProbe: WorkspaceDirectoryProbe = .live(),
         logRedactor: LogRedactor = LogRedactor()
     ) {
         self.appConfiguration = appConfiguration
-        self.keychain = keychain
         self.workspaceProbe = workspaceProbe
         self.logRedactor = logRedactor
         // 先用「继承应用环境」的 runner 解析工具 PATH（登录 shell 查询、node、
@@ -230,8 +226,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             appConfiguration: appConfiguration,
             processInspector: processInspector,
             commandRunner: toolCommandRunner,
-            // 远程模式的门控与环境变量都读这一个闭包：读取失败即“无密码”。
-            remoteAccessPassword: { RemoteAccessPassword.load(from: keychain) },
             // ServiceManager 的日志与错误消息共用 AppDelegate 的脱敏器实例。
             logWriter: logWriter,
             // 服务启动环境与依赖探测共用同一个 PATH 构建器（GitHub #89）。

@@ -87,7 +87,6 @@ final class DiagnosticsCollectorTests: XCTestCase {
         launchEnvironment: "PI_WEB_NO_OPEN=1",
         logPath: "/tmp/PiWebDesktopTests/logs/Pi Web Desktop.log",
         logWriteStatus: "正常",
-        remoteAccessPasswordStatus: "已设置（仅存于 Keychain）",
         componentInstallations: [piWebComponentFixture]
     )
 
@@ -113,7 +112,6 @@ final class DiagnosticsCollectorTests: XCTestCase {
         "启动环境",
         "日志文件",
         "日志写入",
-        "远程访问密码",
         "组件安装"
     ]
 
@@ -177,7 +175,6 @@ final class DiagnosticsCollectorTests: XCTestCase {
         启动环境: PI_WEB_NO_OPEN=1
         日志文件: /tmp/PiWebDesktopTests/logs/Pi Web Desktop.log
         日志写入: 正常
-        远程访问密码: 已设置（仅存于 Keychain）
         组件安装: \(piWebComponentSummary)
         """
         XCTAssertEqual(DiagnosticsCollector.text(for: input), expected)
@@ -245,7 +242,6 @@ final class DiagnosticsCollectorTests: XCTestCase {
             """,
             logPath: "/Use" + "rs/\(name)/Library/Logs/Pi Web Desktop.log",
             logWriteStatus: "写入失败（2026-01-02 03:04:05 创建日志目录失败：~）",
-            remoteAccessPasswordStatus: "已设置（仅存于 Keychain）"
         )
 
         let text = DiagnosticsCollector.text(for: sensitive)
@@ -287,11 +283,11 @@ final class DiagnosticsCollectorTests: XCTestCase {
         XCTAssertEqual(DiagnosticsCollector.confidenceText("猜测"), "unknown（未知）")
     }
 
-    /// 诊断文本里只能出现“已设置/未设置”的结论：密码值、密码长度和 Keychain
-    /// 原始数据都不会进入收集器，也不会出现在输出里。
-    func testPasswordStateIsReportedWithoutTheSecret() {
+    /// 应用不再管理访问密码：诊断文本里既不该有密码字段，也不该出现任何秘密值。
+    func testPasswordFieldIsGoneAndNoSecretLeaks() {
         let text = DiagnosticsCollector.text(for: input)
-        XCTAssertTrue(text.contains("远程访问密码: 已设置（仅存于 Keychain）"))
+        XCTAssertFalse(text.contains("远程访问密码"))
+        XCTAssertFalse(text.contains("Keychain"))
         XCTAssertFalse(text.contains("hunter2"))
 
         let unset = DiagnosticsInput(
@@ -317,11 +313,9 @@ final class DiagnosticsCollectorTests: XCTestCase {
             launchCommand: "未找到",
             launchEnvironment: "",
             logPath: "",
-            logWriteStatus: "正常",
-            remoteAccessPasswordStatus: RemoteAccessPassword.statusText(isSet: false)
+            logWriteStatus: "正常"
         )
         let unsetText = DiagnosticsCollector.text(for: unset)
-        XCTAssertTrue(unsetText.contains("远程访问密码: 未设置"))
         XCTAssertTrue(unsetText.contains("托管关系: external（外部服务或未运行，无有效所有权记录）"))
     }
 
@@ -360,8 +354,7 @@ final class DiagnosticsCollectorTests: XCTestCase {
             launchCommand: "",
             launchEnvironment: "",
             logPath: "",
-            logWriteStatus: "正常",
-            remoteAccessPasswordStatus: "未设置"
+            logWriteStatus: "正常"
         )
         let text = DiagnosticsCollector.text(for: empty)
         XCTAssertTrue(text.contains("监听 PID: 无"))
@@ -395,7 +388,6 @@ final class DiagnosticsCollectorTests: XCTestCase {
         XCTAssertEqual(value("Pi CLI 版本", in: fields), "0.5.0（可信度 inferred（推断））")
         XCTAssertEqual(value("Node.js 版本", in: fields), "v22.19.0（可信度 verified（已验证））")
         XCTAssertEqual(value("托管关系", in: fields), DiagnosticsManagement.managed(pid: "4321").text)
-        XCTAssertEqual(value("远程访问密码", in: fields), "已设置（仅存于 Keychain）")
         XCTAssertEqual(value("组件安装", in: fields), piWebComponentSummary)
     }
 

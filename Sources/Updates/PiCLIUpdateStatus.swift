@@ -64,7 +64,7 @@ enum PiCLIUpdateStatusPresenter {
         if let warning {
             lines.append(warning.text)
         }
-        lines.append("手动更新入口：菜单“服务 → 更新检查设置 → 立即更新 Pi CLI…”（执行前显示进程信息并要求确认）")
+        lines.append("手动更新入口：菜单“更新 → 立即更新 Pi CLI…”（执行前显示进程信息并要求确认）")
         return lines
     }
 }

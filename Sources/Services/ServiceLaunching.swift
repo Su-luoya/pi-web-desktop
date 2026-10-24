@@ -10,29 +10,21 @@ struct ServiceLaunchSpecification: Equatable {
     var workingDirectory: URL
     var environment: [String: String]
 
-    /// 构造启动规格。`remoteAccessPassword` 必须是调用方在本次启动操作中已经用于
-    /// 校验的那一个值（一次读取、随决策传递）：本方法不再读 Keychain，因此不会
-    /// 出现“校验时有效、构造环境时失效却仍然启动”的 fail-open 窗口。
+    /// 构造启动规格。
+    ///
+    /// 不再向子进程注入访问密码：本应用已经不持有密码，远程访听也只需要地址合法。
+    /// 仍然主动清掉继承来的 `PI_WEB_PASSWORD`，让子进程环境只反映本应用的配置，
+    /// 而不是从启动它的 shell 里意外继承。
     static func make(
         configuration: ServiceConfiguration,
         piWebPath: String,
         appConfiguration: AppConfiguration,
         baseEnvironment: [String: String],
-        remoteAccessPassword: String? = nil,
         toolPathProvider: ToolPathProvider? = nil
     ) -> ServiceLaunchSpecification {
         var environment = baseEnvironment
         environment["PI_WEB_NO_OPEN"] = "1"
-        // 远程访问密码只通过子进程环境传递：不进入命令行、UserDefaults、日志、
-        // 诊断文本或错误消息。loopback 模式、缺少密码和读取失败都只会清掉继承
-        // 来的同名变量，绝不退化成无认证的远程监听。
-        if !RemoteAccessPolicy.isLoopbackHostname(configuration.hostname),
-           let remoteAccessPassword,
-           !remoteAccessPassword.isEmpty {
-            environment["PI_WEB_PASSWORD"] = remoteAccessPassword
-        } else {
-            environment.removeValue(forKey: "PI_WEB_PASSWORD")
-        }
+        environment.removeValue(forKey: "PI_WEB_PASSWORD")
         if !configuration.allowedHosts.isEmpty {
             environment["PI_WEB_ALLOWED_HOSTS"] = configuration.allowedHosts
         } else {
@@ -335,8 +327,6 @@ enum ServiceStartDecision: Equatable {
     case existingProcess
     /// No pi-web executable could be resolved.
     case missingExecutable
-    /// 远程 hostname 已配置，但 Keychain 中没有可用的非空密码。
-    case missingRemotePassword
     /// 监听地址不可用：通配地址、空值、前后空白或非法字符（GitHub #39 / R-3）。
     /// 关联值是包含非法值与允许范围的可读诊断。
     case invalidAddress(String)

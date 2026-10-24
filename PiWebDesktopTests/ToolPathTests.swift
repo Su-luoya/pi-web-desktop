@@ -582,7 +582,6 @@ final class ToolPathTests: XCTestCase {
             piWebPath: "/opt/homebrew/bin/pi-web",
             appConfiguration: appConfiguration,
             baseEnvironment: baseEnvironment,
-            remoteAccessPassword: nil,
             toolPathProvider: provider
         )
 
@@ -594,7 +593,7 @@ final class ToolPathTests: XCTestCase {
         XCTAssertEqual(specification.environment["PATH"], provider.path())
         XCTAssertEqual(specification.environment["BASE"], "1")
         XCTAssertEqual(specification.environment["PI_WEB_NO_OPEN"], "1")
-        XCTAssertNil(specification.environment["PI_WEB_PASSWORD"], "loopback 模式必须清掉继承的密码")
+        XCTAssertNil(specification.environment["PI_WEB_PASSWORD"], "继承来的密码变量必须被清掉：应用不再管理访问凭证")
         // 只增路径、不增变量：白名单语义没有被构建器扩大。
         XCTAssertFalse(specification.environment.keys.contains { ToolPath.isCredentialKey($0) })
     }
@@ -618,8 +617,7 @@ final class ToolPathTests: XCTestCase {
             configuration: .default,
             piWebPath: "/opt/homebrew/bin/pi-web",
             appConfiguration: appConfiguration,
-            baseEnvironment: baseEnvironment,
-            remoteAccessPassword: nil
+            baseEnvironment: baseEnvironment
         )
         XCTAssertEqual(
             specification.environment["PATH"],

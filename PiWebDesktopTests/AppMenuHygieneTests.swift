@@ -122,6 +122,109 @@ final class AppMenuHygieneTests: XCTestCase {
         XCTAssertTrue(source.contains("NSButton(title: \"取消\""))
     }
 
+    // MARK: - 菜单分组：服务只放动作，信息与更新各自成菜单
+
+    /// 顶层菜单的顺序是用户找东西的第一线索，也决定了 ⌘ 菜单的可读性。
+    func testTopLevelMenusKeepActionsAndInformationApart() throws {
+        let menus = SourceScan.codeText(of: try SourceScan.text(named: "AppDelegate+Menus.swift"))
+        for title in ["服务", "状态", "更新"] {
+            XCTAssertTrue(
+                menus.contains("NSMenu(title: \"\(title)\"")
+                    || menus.contains("NSMenu(title: \"\(title)\""),
+                "应当存在顶层“\(title)”菜单"
+            )
+        }
+
+        // “服务”菜单里不得再出现信息行/告警项：状态行归“状态”，更新归“更新”。
+        let serviceStart = try XCTUnwrap(menus.range(of: "let serviceMenu = NSMenu(title: \"服务\")"))
+        let serviceEnd = try XCTUnwrap(
+            menus.range(of: "serviceMenuItem.submenu = serviceMenu"),
+            "服务菜单应以赋值给菜单项结束"
+        )
+        let serviceMenuBody = String(menus[serviceStart.lowerBound..<serviceEnd.upperBound])
+        XCTAssertFalse(
+            serviceMenuBody.contains("状态："),
+            "服务菜单不该有状态行（它在“状态”菜单里）"
+        )
+        XCTAssertFalse(
+            serviceMenuBody.contains("systemProxyWarningMenuItem"),
+            "代理告警不该挤在服务菜单里"
+        )
+        XCTAssertFalse(
+            serviceMenuBody.contains("检查更新…"),
+            "更新入口不该挤在服务菜单里"
+        )
+        // 服务菜单必须仍有三个服务控件。
+        for action in ["startServiceAction", "restartServiceAction", "stopServiceAction"] {
+            XCTAssertTrue(serviceMenuBody.contains(action), "服务菜单缺 \(action)")
+        }
+    }
+
+    /// 更新相关可点项必须是顶层“更新”菜单的直接子项，不能再套一层子菜单。
+    func testUpdateItemsLiveDirectlyInTheUpdateMenu() throws {
+        let updates = SourceScan.codeText(of: try SourceScan.text(named: "AppDelegate+UpdateChecks.swift"))
+        let menus = SourceScan.codeText(of: try SourceScan.text(named: "AppDelegate+Menus.swift"))
+
+        // 追加函数接收顶层菜单，不能再返回/组装子菜单项。
+        XCTAssertTrue(updates.contains("func appendUpdateMenuItems(to menu: NSMenu)"))
+        XCTAssertFalse(
+            updates.contains("item.submenu = menu"),
+            "更新项不该再包一层子菜单"
+        )
+        XCTAssertTrue(menus.contains("appendUpdateMenuItems(to: updateMenu)"))
+        XCTAssertTrue(menus.contains("NSMenu(title: \"更新\")"))
+
+        // 关键入口都在这一个菜单里。
+        for action in [
+            "checkForUpdatesNow", "showUpdatePreferences", "updatePiWebNow",
+            "updatePiCLINow", "showPiPackageUpdates", "toggleUpdateCategory"
+        ] {
+            XCTAssertTrue(updates.contains(action), "更新菜单缺 \(action)")
+        }
+
+        // 人话路径：所有面向用户的提示都指向“更新 → …”，不再提两级旧路径。
+        for file in ["PiCLIUpdateStatus", "PiPackageUpdateStatus",
+                     "UpdateAbandonedAttempt", "UpdateStatusPresenter",
+                     "UpdateCheckResult", "UpdateCheckModel"] {
+            let text = try SourceScan.text(named: "\(file).swift")
+            XCTAssertFalse(
+                text.contains("更新检查设置 →"),
+                "\(file).swift 仍指向已删除的两级路径"
+            )
+        }
+    }
+
+    // MARK: - 服务设置窗口：与更新检查偏好设置同一套缩放行为
+
+    /// `PreferencesWindowController.swift` 刻意不编译进测试目标（要真实
+    /// `NSApplication` 与服务管理器），因此这里用源码断言固定缩放契约。
+    ///
+    /// 两个设置窗口曾经各自写死文案宽度，表现都是"缩不窄、放不宽"。现在
+    /// 共用 `SettingsFormViews`，这条断言保证它们不会再一次走岔。
+    func testServiceSettingsWindowSharesTheResizableFormLayout() throws {
+        let source = SourceScan.codeText(of: try SourceScan.text(named: "PreferencesWindowController.swift"))
+
+        // 1. 可缩放 + 最小尺寸来自共享度量，而不是文案长度。
+        XCTAssertTrue(source.contains(".resizable"), "服务设置窗口必须可缩放")
+        XCTAssertTrue(source.contains("contentMinSize = SettingsFormMetrics.minimumContentSize"))
+        XCTAssertFalse(source.contains("contentMinSize = NSSize(width: 620"), "不得再写死最小尺寸")
+
+        // 2. 滚动兜底：窗口缩矮时表单滚动，底部按钮始终可见。
+        XCTAssertTrue(source.contains("NSScrollView()"))
+        XCTAssertTrue(source.contains("hasVerticalScroller = true"))
+        XCTAssertTrue(source.contains("FlippedDocumentView()"))
+
+        // 3. 说明文字走共享的换行标签配置，而不是逐条手写 width 约束。
+        XCTAssertTrue(source.contains("SettingsFormMetrics.configureHint"))
+        XCTAssertFalse(
+            source.contains("widthAnchor.constraint(equalToConstant: 620)"),
+            "写死宽度的说明文字会反过来把窗口撑开"
+        )
+
+        // 4. 窗口尺寸与位置记住用户的选择。
+        XCTAssertTrue(source.contains("setFrameAutosaveName"), "调整过的尺寸应当记住")
+    }
+
     // MARK: - outD-次要-5：健康探测复用同一个 URLSession
 
     func testServiceProbeReusesASingleSession() throws {

@@ -422,19 +422,24 @@ final class LogWriter {
                     let source = Self.rotatedFileURL(for: logFileURL, index: index - 1)
                     guard fileManager.fileExists(atPath: source.path) else { continue }
                     let destination = Self.rotatedFileURL(for: logFileURL, index: index)
-                    if fileManager.fileExists(atPath: destination.path) {
-                        try fileManager.removeItem(at: destination)
+                    // rename 原子覆盖，避免「先删目标再搬源」中间失败时丢掉两份。
+                    guard rename(source.path, destination.path) == 0 else {
+                        throw WriterError.cannotOpenLogFile(
+                            "\(source.path) → \(destination.path)（rename 失败，errno=\(errno)）"
+                        )
                     }
-                    try fileManager.moveItem(at: source, to: destination)
                 }
             }
             let first = Self.rotatedFileURL(for: logFileURL, index: 1)
-            if fileManager.fileExists(atPath: first.path) {
-                try fileManager.removeItem(at: first)
-            }
             // 句柄即将跟着文件名走：先关上，下一次写入按新路径重新打开。
             closeWriterHandle()
-            try fileManager.moveItem(at: logFileURL, to: first)
+            // 同样用 rename 原子覆盖，而不是先 `removeItem(first)` 再 `moveItem`：
+            // 两步之间失败会让 `.1` 已删、当前日志还没搬过去，两份内容一起消失。
+            guard rename(logFileURL.path, first.path) == 0 else {
+                throw WriterError.cannotOpenLogFile(
+                    "\(logFileURL.path) → \(first.path)（rename 失败，errno=\(errno)）"
+                )
+            }
             if !fileManager.createFile(atPath: logFileURL.path, contents: nil, attributes: [.posixPermissions: 0o600]) {
                 throw WriterError.cannotCreateLogFile(logFileURL.path)
             }
@@ -539,18 +544,21 @@ final class LogWriter {
             // 没有需要替换的内容：不动原文件（mtime 不变）。
             return true
         }
-        do {
-            closeWriterHandle()
-            if fileManager.fileExists(atPath: path) {
-                try fileManager.removeItem(at: logFileURL)
-            }
-            try fileManager.moveItem(at: temporaryURL, to: logFileURL)
-            return true
-        } catch {
+        closeWriterHandle()
+        // 用同目录 rename 原子替换：`removeItem` + `moveItem` 两步之间如果失败
+        // （磁盘满、权限、进程被杀），原日志已经被删、新文件还没到位，整份日志
+        // 就没了。`rename(2)` 覆盖目标是一次原子操作，不存在这个中间态。
+        // 临时文件与主日志同目录（见上文），因此不会跨卷。
+        guard rename(temporaryURL.path, logFileURL.path) == 0 else {
+            let code = errno
             needsHistoricalScrub = true
-            recordFailure(operation: "脱敏历史日志失败", error: error)
+            recordFailure(
+                operation: "脱敏历史日志失败",
+                error: WriterError.cannotOpenLogFile("\(path)（rename 失败，errno=\(code)）")
+            )
             return false
         }
+        return true
     }
 
     // MARK: - 子进程输出管道

@@ -1096,6 +1096,60 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(harness.manager.currentState, .failed(expected))
     }
 
+    /// 启动失败后健康监控必须停下（生产实证 2026-10-24 19:26:36）：进程启动即退出、
+    /// 已报“启动失败”后，旧实现仍每 4 秒探测一个已死进程，17 分钟刷了 258 条
+    /// “连续失败”。断开/重启判定只对 `.running` 生效，`.failed` 下监控只能空转：
+    /// 既改不了状态，也永远不会触发重启。
+    func testStartupFailureStopsHealthMonitoring() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        let process = ManagerFakeProcess(processIdentifier: 5150)
+        harness.launcher.result = .success(process)
+        harness.probe.ready = false
+        harness.manager.startManagedService()
+
+        XCTAssertEqual(harness.scheduler.repeatingWork.count, 1, "启动后应有一轮健康监控")
+        let token = harness.scheduler.repeatTokens[0]
+        XCTAssertEqual(token.invalidateCount, 0)
+
+        // 真实序列：子进程启动即退出，终止回调先于任何就绪探测触发。
+        harness.launcher.terminationHandlers[0](process)
+        XCTAssertEqual(token.invalidateCount, 1, "启动失败必须停掉健康监控")
+
+        // 即使还有残留的计时器回调被触发，也不得再探测（不得刷“连续失败”）。
+        let probesBefore = harness.probe.probedURLs.count
+        harness.scheduler.runHealthCheck()
+        XCTAssertEqual(harness.probe.probedURLs.count, probesBefore, "失败态下不得继续探测")
+    }
+
+    /// 失败后的“重试”必须重新拉起监控：否则服务真的起来了也没有任何探测会把它
+    /// 从 `.starting` 推进到 `.running`。
+    func testRetryAfterStartupFailureRestartsHealthMonitoring() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured(try harness.makeExecutable()))
+        let first = ManagerFakeProcess(processIdentifier: 5150)
+        harness.launcher.result = .success(first)
+        harness.probe.ready = false
+        harness.manager.startManagedService()
+        harness.launcher.terminationHandlers[0](first)
+
+        XCTAssertEqual(harness.scheduler.repeatTokens.count, 1, "失败时只有一轮监控（已停）")
+        XCTAssertEqual(harness.scheduler.repeatTokens[0].invalidateCount, 1)
+
+        // 用户点“重试”：新的启动入口必须重新拉起监控，且不叠加计时器。
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.manager.restartManagedService()
+        harness.scheduler.runAllBackgroundWork()
+        XCTAssertEqual(harness.scheduler.repeatTokens.count, 2, "重试后应重新开始且仅一轮监控")
+        XCTAssertEqual(harness.scheduler.repeatTokens[1].invalidateCount, 0)
+
+        // 再调一次启动入口不得再叠加计时器（幂等）。
+        harness.manager.startManagedService()
+        XCTAssertEqual(harness.scheduler.repeatTokens.count, 2, "已在监控中不得叠加计时器")
+    }
+
     func testMissingExecutableReportsTheInstallHint() throws {
         let harness = try makeHarness(fileManager: ManagerFakeFileManager())
         defer { harness.cleanUp() }

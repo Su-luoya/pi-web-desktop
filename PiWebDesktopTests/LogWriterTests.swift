@@ -234,7 +234,40 @@ final class LogWriterTests: XCTestCase {
         let writer = makeWriter()
         XCTAssertTrue(writer.record("服务已启动：PID 4321"))
         let stamp = LogWriter.timestamp(for: fixedDate)
-        XCTAssertEqual(text(at: logURL), "[\(stamp)] 服务已启动：PID 4321")
+        XCTAssertEqual(text(at: logURL), "[\(stamp)] 服务已启动：PID 4321\n")
+    }
+
+    /// 每条记录必须自占一行（生产实证）：旧实现 `record` 不补行尾换行，
+    /// 258 条健康检查失败与后续启动记录粘成一行，`grep`/`tail` 与用户读日志全失效。
+    func testRecordTerminatesEveryLineSoEntriesDoNotRunTogether() {
+        let writer = makeWriter()
+        XCTAssertTrue(writer.record("第一条"))
+        XCTAssertTrue(writer.record("第二条"))
+        let log = text(at: logURL)
+        let lines = log.split(separator: "\n", omittingEmptySubsequences: false)
+        // 两条记录 + 末尾换行留下一个空段。
+        XCTAssertEqual(lines.count, 3, "两条记录必须各占一行：\(log)")
+        XCTAssertTrue(lines[0].hasSuffix("第一条"), log)
+        XCTAssertTrue(lines[1].hasSuffix("第二条"), log)
+    }
+
+    /// 上游已经自带换行的多行块（`logLine` 用 "\n" 拼决策详情）不得被重复终止，
+    /// 也不得在块内插入新内容。
+    func testAppendDoesNotDoubleTerminateOrSplitMultiLineBlocks() {
+        let writer = makeWriter()
+        XCTAssertTrue(writer.append("第一行\n第二行"))
+        XCTAssertEqual(text(at: logURL), "第一行\n第二行\n")
+
+        let logURL2 = logURL.deletingLastPathComponent().appendingPathComponent("second.log")
+        let second = LogWriter(
+            logFileURL: logURL2,
+            policy: .standard,
+            fileManager: .default,
+            redactor: LogRedactor(homeDirectory: fakeHome),
+            now: { self.fixedDate }
+        )
+        XCTAssertTrue(second.append("已经是完整的行\n"))
+        XCTAssertEqual(text(at: logURL2), "已经是完整的行\n")
     }
 
     func testEmptyInputIsIgnored() {

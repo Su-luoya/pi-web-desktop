@@ -198,8 +198,12 @@ final class LogWriter {
     @discardableResult
     func append(_ text: String) -> Bool {
         guard !text.isEmpty else { return true }
+        // 同样的理由：`append` 的上游既有单行事件，也有自带 "\n" 的多行块
+        // （`PiCLIUpdateModel.logLine` 等用 "\n" 拼接的决策详情）。只补齐末尾一个
+        // 换行，不改块内已有的分隔。
+        let terminated = text.hasSuffix("\n") ? text : text + "\n"
         // 脱敏在调用线程完成：写入队列只做文件 I/O，队列长度不会放大单次写入成本。
-        let payload = Data(redactor.redact(text).utf8)
+        let payload = Data(redactor.redact(terminated).utf8)
         submit(synchronousWhenIdle: true) { self.writeOnQueue(payload) }
         return true
     }
@@ -208,7 +212,11 @@ final class LogWriter {
     @discardableResult
     func record(_ event: String) -> Bool {
         guard !event.isEmpty else { return true }
-        return append("[\(Self.timestamp(for: now()))] \(event)")
+        // 行尾必须带换行：日志是逐行追加的文本文件，没有分隔符时相邻两条事件会
+        // 粘成一行（生产实证：258 条健康检查失败与后续启动记录挤在同一行，
+        // `grep`/`tail` 与用户读日志全都失效）。
+        let line = event.hasSuffix("\n") ? event : event + "\n"
+        return append("[\(Self.timestamp(for: now()))] \(line)")
     }
 
     /// 等写入队列排空。测试与需要落盘屏障的调用方使用；不能从写入队列内部调用。

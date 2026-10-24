@@ -25,7 +25,7 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 - `QuitPlan`（`Sources/App/QuitPolicy.swift`）与 `QuitCoordinator`（`Sources/App/QuitCoordinator.swift`）：退出行为的纯决策（询问 / 保持运行 / 停止服务）与退出状态机（GitHub #72，见下文“退出状态机”），都可 unhosted 测试；外部服务在任何退出行为下都不会被停止。
 - `ProcessInspector`（`Sources/Services/ProcessInspector.swift`）：`ps`/`lsof` 命令、监听端口 PID、进程存活判断、`pgid`/`lstart`/`comm`/`args` 事实读取和进程描述；命令执行通过 `CommandRunning` 注入，可执行标识读取（`proc_pidpath`）也可注入，解析规则是不访问进程的纯函数。它只报告事实，不做所有权判定。
 - `LogWriter`（`Sources/Diagnostics/LogWriter.swift`）与 `LogRedactor`（`Sources/Diagnostics/LogRedactor.swift`）：统一日志写入与统一脱敏（GitHub #10）。`LogWriter` 按大小轮转（`LogRotationPolicy`，默认 10 MB / 保留 5 份；阈值、份数、`FileManager`、时间源都可注入），打开子进程日志句柄前先就地脱敏历史日志，任何写入/轮转失败只记录在 `failureDescription`（诊断导出的“日志写入”一行）而不抛出也不崩溃。`LogRedactor` 的同一个实例用于日志行、诊断导出、错误消息、环境变量与命令行展示；规则覆盖 URL 查询串、`Authorization`/`Bearer`、敏感键值（含 `PI_WEB_PASSWORD`）、JWT、代理凭据、Home 路径、私钥块，多行输入逐行处理且幂等。
-- `DiagnosticsCollector`（`Sources/Diagnostics/DiagnosticsCollector.swift`）与 `DiagnosticsClipboard`（`Sources/Diagnostics/DiagnosticsClipboard.swift`）：把调用方已收集的版本/构建号、Node/pi/pi-web 版本与路径可信度、服务地址与端口、状态、托管关系、监听/托管 PID、有效工作目录、配置目录、启动命令与启动环境、日志位置与写入状态、密码状态组装为诊断文本，自身不执行命令、不读磁盘；整段文本在导出前交给注入的 `LogRedactor`。菜单“复制诊断”与诊断窗口的复制按钮共用同一导出文本与同一条提醒/写剪贴板路径。字段与规则见 [日志与诊断导出](logging-and-diagnostics.md)。
+- `DiagnosticsCollector`（`Sources/Diagnostics/DiagnosticsCollector.swift`）与 `DiagnosticsClipboard`（`Sources/Diagnostics/DiagnosticsClipboard.swift`）：把调用方已收集的版本/构建号、Node/pi/pi-web 版本与路径可信度、服务地址与端口、状态、托管关系、监听/托管 PID、有效工作目录、配置目录、启动命令与启动环境、日志位置与写入状态组装为诊断文本，自身不执行命令、不读磁盘；整段文本在导出前交给注入的 `LogRedactor`。菜单“复制诊断”与诊断窗口的复制按钮共用同一导出文本与同一条提醒/写剪贴板路径。字段与规则见 [日志与诊断导出](logging-and-diagnostics.md)。
 - `DependencyChecker`（`Sources/Services/DependencyChecker.swift`）：启动前的只读依赖诊断。检查系统（`uname` 架构与 macOS 版本）、Node.js（必须 `>= 22.19.0`，自实现语义化版本比较）、Pi CLI、Pi Web（可执行文件、版本、真实路径、符号链接目标，以及 pi-web 的 package.json `name`/`version`）、默认服务端口（本机 `bind(2)` 判定可用/被占用）和 Pi 配置目录（`~/.pi/agent`，只问“存在吗/可读吗”）。命令经 `CommandRunning` 注入，磁盘经 `DependencyFileSystemProbing` 注入，架构与系统版本经 `DependencySystemProbe` 注入，端口经 `DependencyPortProbing` 注入。它不安装、不升级、不联网、不调用 `sudo`，也不读取认证内容；路径在离开 checker 前已经完成 Home 脱敏（`~`）。除诊断项外，报告还带 `components`（GitHub #16 的组件安装模型，见下条），复用同一批探针结果（包括已知的 Node/pi/pi-web 版本），不重复执行 `--version`。
 - `ComponentInstallation`（`Sources/Updates/ComponentInstallationModel.swift`）：组件版本与安装来源模型（GitHub #16）——`ComponentKind`（`desktopApp`/`piCLI`/`piWeb`/`piPackage`）、`InstallSource`（`npmGlobal`/`pnpmGlobal`/`homebrew`/`nvm`/`mise`/`officialInstaller`/`gitCheckout`/`localPath`/`unknown`）、`DetectionConfidence`（`verified`/`inferred`/`unknown`）与 `ComponentInstallation`（包名、版本、可执行文件路径、真实路径、完整符号链接链、package.json 路径、来源、可信度、证据行、建议命令）。`ComponentSourceResolver` 是证据组合的纯函数；`ComponentInstallationDetector` 通过注入的 `CommandRunning` / `DependencyFileSystemProbing` / `environment` / `homeDirectory` 收集证据：可执行位、完整符号链接链（含悬空链）、最近一层 package.json（`name`/`version`/`bin`，最多向上 6 层）、包目录内 `.git`、`npm root -g`、`pnpm root -g` 和 `pi list`（失败或无法解析时降级为 unknown，不崩溃）。它只执行只读命令（`--version`、`npm root -g`、`pnpm root -g`、`pi list`、`command -v`；`DependencyChecker` 已经解析过可执行文件，会关掉重复的 `command -v`），不执行安装/升级、不联网、不调用 `sudo`、不读认证文件、不写任何文件；建议命令只来自静态清单 `InstallCommandManifest`，且只有 npm/pnpm 全局来源且 `verified` 时才给出，其它来源只给指引文字。
 - `UpdateChecker`（`Sources/Updates/UpdateChecker.swift`）：运行期只读版本检查（GitHub #17；策略、忽略版本与调度见 GitHub #18，详见“更新检查与缓存”）。四类检查（桌面应用 GitHub Releases、Pi CLI 与 Pi Web 的 npm registry、`pi list` 得到的扩展包逐个查询）各自按策略控制（关闭 / 每日 / 每周；扩展包为关闭 / 检查并通知 / 询问后更新），关闭后既不调度也不请求；只发 GET，端点由 `UpdateEndpoint` 白名单固定为 `api.github.com` 与 `registry.npmjs.org`，请求头只允许 `Accept` / `User-Agent` / `If-None-Match` / `If-Modified-Since`（`UpdateHTTPRequest.sanitized()` 丢弃其它头；生产客户端 `URLSessionUpdateHTTPClient` 用 ephemeral 配置且不跟随重定向）；`UpdateResponseParser` 是纯解析函数，`SemanticVersion` 负责含预发布标识符的语义化比较；只有“预期端点 + 结构可解析”才把上游版本标为 `verified`，解析失败、非预期主机或重定向一律 `unknown` 并保留上一次成功结果；失败只更新检查状态与提示文案，不抛出、不影响服务；没有任何安装/下载/执行路径。时钟（`UpdateClock`）、调度（`UpdateCheckScheduling`）、HTTP（`UpdateHTTPClient`）与缓存（`UpdateCacheStoring`）全部可注入，请求超时固定 15 秒。
@@ -35,15 +35,14 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 - `PiPackageUpdateCoordinator`（`Sources/Updates/PiPackageUpdateCoordinator.swift`）：Pi 扩展包的更新确认流与执行边界（GitHub #22）。输入是纯数据：GitHub #16 的 `pi list` 检测结果（包名、本机版本、`InstallSource`、`DetectionConfidence`）、GitHub #17 的检查结果（目标版本与可信度）与 `PiProcessInspection`；`PiPackageUpdatePlanner.decide(...)` 是纯决策，顺序是“策略 → 包名符合 npm 规范 → 包名必须出现在本次检测结果里 → 来源必须是已验证的 npm 全局安装 → 本机版本可读、目标版本经上游响应验证、可比较且更高 → 参数数组过安全校验 → 进程保护”，输出 `PiPackageUpdatePlanSet`（逐包 `notifyOnly` / `awaitingConfirmation` / `executeBlocked` / `manualOnly` / `unavailable` 与策略级拒绝）。`PiPackageUpdatePlan.executablePath` 必须是以 `pi` 结尾的官方可执行文件，参数数组恒为 `["update", "npm:<包名>"]`（上游 `pi update <source>` 的 npm 来源形式，来源规格由 Pi 自己解析；应用不调用 npm/pnpm、不拼 shell 字符串、不调用 `sudo`），`allowsUnattendedExecution` 与 `isAutomaticallyExecutable` 恒为 `false`——扩展包更新没有无人值守路径：`checkAndNotify` 只提示并给出官方命令文本，`askBeforeUpdate` 必须由用户在确认框里显式确认（取消是默认按钮），非“已验证的 npm 全局”来源不给执行入口、只展示 `pi update --extensions` 文本。`PiPackageUpdateCoordinator.runConfirmed(...)` 在执行前用 `PiProcessInspector` **再检查一次**进程状态，`runningProcesses` 与 `unknown` 都拒绝执行并给出可读原因（每个进程的 PID、父进程、启动时间、判定依据与脱敏命令摘要），整批按顺序执行、一旦出现进程立即停止后续计划并全部记为拒绝；`ProcessPiPackageUpdateCommand` 用 `Process` + 参数数组运行，环境只保留白名单键并把 `pi` 所在目录放到 `PATH` 最前，超时或应用退出只放弃等待，**不向任何进程发送信号**。退出码非零、超时、启动失败、放弃等待与“退出码 0 但版本没变化”都算失败，只写持久告警与日志、一次确认最多尝试一次、不重试、不声称回滚；所有拒绝（策略级、来源/版本不符、进程保护、用户取消）都带固定文案原因并写入日志与诊断。
 - `FirstLaunchDiagnostics`（`Sources/Diagnostics/FirstLaunchDiagnostics.swift`）：首次启动路由、门控控件映射、pi-web 路径选择和诊断 smoke 夹具的纯逻辑——`DiagnosticsGate`（`checking`/`ready`/`blocked`）、`ServiceControlState`（门控 → start/stop/restart 可用性）、`DiagnosticsRouting`（报告 + 首次设置状态 → `mainWindow`/`diagnostics(reasons)`）、`ServiceLaunchIntent`（首次设置刚完成 → 显式启动，否则尊重 `autoStart`）、`PiWebPathSelection` 与 `PiWebIdentityEvidence`（选中的路径 + 只读身份证据 → 新配置或可读错误）和 `DiagnosticsSmokeFixture`。不依赖 AppKit，可在 unhosted 测试目标里直接断言。
 - `DiagnosticsWindowController`（`Sources/Diagnostics/DiagnosticsWindowController.swift`）：首次启动诊断状态页（诊断项表格 + 可复制的安装命令 + 组件安装区块 + “选择 pi-web 路径…”“重新检测”“开始使用 Pi Web”）。它只渲染 `DependencyReport` 和收集用户选择：选择结果经 `onSelectPiWebPath` 交给 `AppDelegate` 校验并写入配置，重新检测经 `onRecheck` 回调；窗口不执行安装命令、不执行更新命令、不写配置。
-- `PreferencesWindowController`（`Sources/App/PreferencesWindowController.swift`）：用户设置界面；保存后由 `AppDelegate` 经 `AppConfiguration` 写回 UserDefaults。“远程访问”分区显示密码已设置/未设置，提供设置/生成/删除密码按钮，并说明密码认证不等于传输加密；删除密码会关闭远程模式并恢复默认 loopback。
-- `KeychainStore`（`Sources/Services/KeychainStore.swift`）：远程访问密码的存储与门控纯逻辑。`KeychainStoring` 协议只提供 save/load/delete/exists，生产实现是 macOS Security 的 `kSecClassGenericPassword`（service = bundle identifier，account = `remote-access-password`，`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`）；`RemoteAccessPassword` 给出读取与“已设置/未设置”状态文本，`RemoteAccessPolicy` 给出唯一的监听地址判定 `addressVerdict(hostname:)`（结果类型 `ServiceAddressVerdict`，保存/加载/启动共用）、loopback 判定、远程监听前置条件与“删除密码后回到 loopback”，`RemoteAccessSetup` 是设置界面的保存流程（密码只进 Keychain，配置只进 UserDefaults），`PasswordGenerator` 用 `SecRandomCopyBytes` 在本地生成不低于 24 位、含大小写字母数字符号的密码，`SecretScrubbing` 在展示前移除已知秘密。
+- `PreferencesWindowController`（`Sources/App/PreferencesWindowController.swift`）：用户设置界面；保存后由 `AppDelegate` 经 `AppConfiguration` 写回 UserDefaults。“网络”分区显示监听地址，并在地址不是 loopback 时用一行字说明远程访问没有认证层。
 
 ### 源码布局
 
 `Sources/` 按领域分为五个目录，一个组件族的实现文件放在同一个目录里：
 
 - `Sources/App/`：应用外壳。`AppDelegate.swift` 保留生命周期与装配，其余按功能拆成 `AppDelegate+Menus.swift`、`AppDelegate+Window.swift`、`AppDelegate+Service.swift`、`AppDelegate+Quit.swift`、`AppDelegate+Diagnostics.swift`、`AppDelegate+UpdateChecks.swift`、`AppDelegate+PreLaunchUpdates.swift`、`AppDelegate+CLIUpdate.swift`、`AppDelegate+PackageUpdates.swift`；另有 `ServiceConfiguration`、`WebViewController`、`WebViewNavigationPolicy`、`WorkspaceDirectory`、`RecentWorkspace`、`QuitPolicy` / `QuitCoordinator`、`AppConfiguration` / `AppPaths`、设置窗口控制器与 `main.swift`。单实例互斥在 `SingleInstanceLock`（`flock` 行为权威互斥，PID 记录只做快速路径与错误信息），设置窗口的追平判定在 `PreferencesRefreshPolicy`（纯值类型，可被 unhosted 测试覆盖）。
-- `Sources/Services/`：服务生命周期与系统事实读取。`ServiceManager`、`ServiceOwnership`、`ProcessInspector`、`PiProcessInspector`、`ToolPath`、`KeychainStore`、`DependencyChecker`（含依赖探针、模型与报告呈现）和 `InstallCommandManifest`。
+- `Sources/Services/`：服务生命周期与系统事实读取。`ServiceManager`、`ServiceOwnership`、`ProcessInspector`、`PiProcessInspector`、`ToolPath`、`ListeningAddressPolicy`、`DependencyChecker`（含依赖探针、模型与报告呈现）和 `InstallCommandManifest`。
 - `Sources/Diagnostics/`：日志、脱敏与诊断导出。`LogWriter`、`LogRedactor`、`DiagnosticsCollector`、`DiagnosticsClipboard`、`DiagnosticsWindowController`、`FirstLaunchDiagnostics`。
 - `Sources/Updates/`：更新检查、计划、执行与验证。`UpdateChecker` 族（`UpdateCheck*.swift`）、更新设置与偏好（`UpdateSettingsModel.swift`、`UpdateSettingsWindowController.swift`）、三条更新路径各自的 `*Model` / `*Planner` / `*Command` / `*Coordinator` / `*Status` 文件、事务与验证（`UpdateTransactionModel.swift`、`UpdateTransactionJournal.swift`、`UpdateVerifier.swift`、`UpdateArtifact*.swift`、`UpdateHistory.swift`、`UpdateRollback.swift`）、`UpdateAbandonedAttempt.swift` 与 `ComponentInstallation*.swift`。
 - `Sources/Support/`：跨领域的小工具值类型。`SemanticVersion.swift`（自实现的语义化版本比较）与 `NonEmptyString.swift`（`String` 的非空归一化）。
@@ -61,7 +60,7 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 - `ServiceSignaling`：只提供“向进程组发送信号”和“进程组是否存活”两个方法（`POSIXServiceSignaler` 用 `kill(-pgid, ...)`）；接口里没有单 PID 发送方法，测试用假实现记录收到的组信号。
 - `ServiceProbing`：启动轮询与健康检查用的 HTTP 探测（`URLSessionServiceProbe`，超时经参数注入）。
 - `ServiceScheduling`：主队列/后台队列、延时、重复定时器和 `sleep` 的调度；测试里即时执行，不等待真实时间。
-- `AppConfiguration`、`environment` 闭包与 `FileManager`：路径、子进程环境变量和文件操作；`ServiceManager` 另外注入 `remoteAccessPassword` 闭包（默认返回 nil，即“无密码”），因此测试永远不会读到真实 Keychain。
+- `AppConfiguration`、`environment` 闭包与 `FileManager`：路径、子进程环境变量和文件操作。
 - `DependencyFileSystemProbing` / `DependencySystemProbe` / `DependencyPortProbing`：依赖诊断的文件系统探针（可执行文件、符号链接、真实路径、文本读取、Home 目录、目录存在与可读性）、系统探针（`uname` 架构、macOS 版本）和端口探针（本机 `bind(2)`，只回“可用/占用/无法判定”）；测试注入假实现，因此不触碰真实 Home、npm 前缀、`~/.pi`、真实端口或网络。
 - `ComponentInstallationDetector`：组件安装识别的命令执行（`CommandRunning`）、磁盘访问（`DependencyFileSystemProbing`）、`environment` 与 `homeDirectory` 都可注入；测试用临时目录夹具 + 假命令回答覆盖多跳/悬空符号链接、nvm 与 npm 全局共存、Homebrew、git checkout 与降级路径，不执行真实 npm/pi/pi-web。
 - 更新检查（GitHub #17 / #18）：`UpdateHTTPClient`（生产 `URLSessionUpdateHTTPClient`；测试用记录请求并返回构造响应的替身）、`UpdateClock`（假时钟推进时间）、`UpdateCheckScheduling`（测试立即执行检查主体与回调，并记录/手动触发周期计时器，不使用真实 sleep）、`UpdateCacheStoring`（内存替身或临时目录文件存储）、`UpdateCheckPreferences`（策略 + 启动前自动更新布尔）与 `UpdateIgnoredVersions`（忽略版本）都可注入；因此测试不联网、不写真实 Application Support/UserDefaults。
@@ -80,7 +79,7 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
   GitHub #23 给三条路径加了阶段化事务、验证能力边界与有限降级，均见下文“更新检查、设置与缓存”；
   上述未实现的能力不在本版可用范围内，其它来源仍然只显示命令、绝不自动安装。
 
-`DiagnosticsCollector` 只负责文本组装（调用方仍然只传入可公开的字段，密码等秘密不会进入输入）；脱敏由注入的 `LogRedactor` 在导出时统一完成，见 [日志与诊断导出](logging-and-diagnostics.md)。
+`DiagnosticsCollector` 只负责文本组装（调用方仍然只传入可公开的字段）；脱敏由注入的 `LogRedactor` 在导出时统一完成，见 [日志与诊断导出](logging-and-diagnostics.md)。
 
 ## 依赖诊断与启动门控
 
@@ -220,28 +219,33 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 - **取消与重复触发**。取消回到 `idle` 且不停止任何服务；等待期间的重复请求不叠加第二个确认框，停止期间的重复请求不重复停服务；迟到的按钮回调或停止回调（已 `idle` 或已 `terminating`）一律忽略。AppKit 终止请求在已有流程进行中时只返回 `.terminateCancel`。
 - **外部服务**。只有当服务状态是 `managedRunning`（`ServiceManager.managedServicePID() != nil`，即通过 `ServiceOwnershipVerifier` 校验的记录）且处置为 `stopManagedService` 时，状态机才产生 `.stopManagedService`；外部服务或没有服务时“停止服务”等同于保持运行，只产生 `terminateApplication`。
 
-## 远程访问与密码
+## 监听边界与远程访问
 
-远程访问的唯一前置条件是 Keychain 中存在非空密码。密码的存储、读取和状态都在 `KeychainStore`（`Sources/Services/KeychainStore.swift`）中：
+本应用**不管理访问密码**：Keychain 里没有任何凭证，子进程环境不放 `PI_WEB_PASSWORD`，
+诊断文本、日志与 UserDefaults 里也没有密码相关字段。远程监听只要地址合法就能启动。
 
-- 存储：`kSecClassGenericPassword`，`kSecAttrService` 是应用的 bundle identifier，`kSecAttrAccount` 是 `remote-access-password`，可访问性固定为 `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`。密码只存在于这一个条目里，不进入 UserDefaults、命令行参数、日志文件、诊断文本或错误消息；`KeychainStoreError` 只携带 notFound / OSStatus，不携带秘密。
-- 读取：`RemoteAccessPassword.load(from:)` 在条目缺失、为空或读取失败时都返回 nil（fail closed：读取失败不会被当成“可以用无认证方式启动”）。
-- 门控：`RemoteAccessPolicy.allowsRemoteListening(hostname:password:)`——loopback 恒允许；hostname 不是 loopback 时必须存在非空密码。地址本身是否合法由同一处 `addressVerdict(hostname:)` 判定（见下文“监听边界”），`ServiceManager.isStartPermitted` 同时包含地址可用与凭证两个条件，所以启动、重启、配置变更重载、启动重试、启动轮询和健康检查都无法在地址非法或缺密码时启动服务、探测外部服务或加载服务页；`ServiceStartDecision.invalidAddress` 与 `.missingRemotePassword` 分别给出可读的失败提示。
-- 单次读取：`ServiceManager.startManagedService()` 在本次启动里只读一次凭证，并且把它同时传给门控和 `ServiceLaunchSpecification.make(..., remoteAccessPassword:)`（决策入口是 `startDecision(credentials:)`）。校验通过后不再读 Keychain，因此不存在“校验时有效、此后二次读取失效却仍然 `.launch`”的 fail-open 窗口（GitHub #8 复审）；读取失败或条目缺失一律按“无密码”拒绝启动。
-- 保存：`RemoteAccessSetup.apply(requested:newPassword:keychain:)` 是设置界面的保存流程。监听地址先经 `addressVerdict(hostname:)` 校验（通配地址、空值、空白与非法字符即使有密码也不能保存，这一步先于密码写入）；`newPassword` 为 nil 表示沿用已有密码，非空则再写入 Keychain；远程 hostname 没有可用密码时同样返回可读错误且不返回配置，调用方因此不会写 UserDefaults。密码写入失败时错误文本会先经过 `SecretScrubbing`，即使底层错误描述意外带上密码也不会展示。
-- 生成：界面上的“生成高强度密码”调用 `PasswordGenerator`（`SecRandomCopyBytes`，长度下限 24，保证大写字母/小写字母/数字/符号四类字符各至少一个，再用可注入随机源做 Fisher–Yates 洗牌），不联网、不引入依赖。
-- 删除：删除 Keychain 条目后 `RemoteAccessPolicy.disablingRemoteAccess(in:)` 把 hostname 收回 `127.0.0.1`，其余字段保持不变；`AppDelegate` 经 `AppConfiguration` 保存新配置，并且当远程服务正在运行时重启它，使新的（或已删除的）`PI_WEB_PASSWORD` 生效。
-- 运行中收敛：密码也可能在服务运行期间被外部删除或变成不可读，门控本身拦不住已经在跑的进程。`ServiceManager.closeRemoteAccessIfCredentialsAreUnavailable()` 是这类状态的收敛入口：配置是非 loopback 且取不到凭证时，若存在本应用启动、且仍能通过所有权验证的进程，则把 hostname 收回 `127.0.0.1`，走 `stopService()` 的既有验证路径停止该进程组（外部服务、无法验证的记录零信号），把状态改成带可读提示的 `.failed(RemoteAccessPolicy.revokedPasswordMessage)`，并通过 `onRemoteAccessClosed` 让 `AppDelegate` 持久化回落后的配置（不静默重启）。触发点是每 4 秒一次的健康轮询、所有启动入口的缺密码拒绝分支，以及依赖检查完成时（`AppDelegate.applyDependencyReport`）。没有可验证的托管进程时不改动用户配置，只给出“需要设置密码”的提示。
+代价必须说清：监听非 loopback 地址时，同一网络内的访问者不需要任何认证即可完全控制
+pi-web。设置窗口在用户把监听地址改成非 loopback 时用一行字提示这一点，启动前不做二次确认
+（确认框会让“我就是要远程访问”变成每次都要点）。需要认证/加密请自行在前面放 HTTPS 反向
+代理或受信任隧道。
 
-传输密码的路径只有一处：`ServiceLaunchSpecification.make(..., remoteAccessPassword:)`。只有当 hostname 不是 loopback 且密码非空时，子进程环境才包含 `PI_WEB_PASSWORD`；否则该变量会被从环境里删除（包括清除父进程继承来的同名变量）。命令行参数 `--hostname/--port/--no-open`、所有权记录（只有命令文本的 SHA-256 摘要）、日志文件（只有子进程的 stdout/stderr）和诊断文本（只有“已设置/未设置”）都不包含密码值或长度。
+地址校验只有一处实现：`RemoteAccessPolicy.addressVerdict(hostname:)`
+（`Sources/Services/ListeningAddressPolicy.swift`）返回 `ServiceAddressVerdict`，由偏好窗口
+保存路径（`hostnameValidationMessage`）、`ServiceConfiguration.load` 与 `ServiceManager` 的
+启动决策共用（GitHub #39 / 安全审查 R-3）。允许 loopback（`127.0.0.0/8`、`localhost`、
+`*.localhost`、`::1`）与用户显式配置的具体地址；拒绝空地址、前后空白、协议/路径/端口混写
+等非法字符，方括号只允许用于 IPv6 字面量，也不接受会被解析成通配地址的文本：`0.0.0.0`、
+`::`、`[::]`、`*` 之外，`0`、`0x0`、`000.000.000.000`、`0.0.0.0.`、`0:0:0:0:0:0:0:0`、
+`::ffff:0.0.0.0` 等 `getaddrinfo` 会按通配/其他规则解析的写法同样被拒绝（只接受规范点分四段、
+规范 IPv6 字面量与主机名）。
 
-监听边界：默认值仍是 `127.0.0.1`，地址校验只有一处实现：`RemoteAccessPolicy.addressVerdict(hostname:)` 返回 `ServiceAddressVerdict`，由偏好窗口保存路径（`hostnameValidationMessage` 与 `RemoteAccessSetup.apply`）、`ServiceConfiguration.load` 与 `ServiceManager.startDecision(credentials:)` 三处共用（GitHub #39 / 安全审查 R-3）。允许 loopback（`127.0.0.0/8`、`localhost`、`*.localhost`、`::1`）与用户显式配置的具体地址；拒绝空地址、前后空白、协议/路径/端口混写等非法字符，方括号只允许用于 IPv6 字面量，也不接受会被解析成通配地址的文本：`0.0.0.0`、`::`、`[::]`、`*` 之外，`0`、`0x0`、`000.000.000.000`、`0.0.0.0.`、`0:0:0:0:0:0:0:0`、`::ffff:0.0.0.0` 等 `getaddrinfo` 会按通配/其他规则解析的写法同样被拒绝（只接受规范点分四段、规范 IPv6 字面量与主机名）。
-
-`ServiceConfiguration.load` 读入时执行同一判定：`[::1]` 规范化为 `::1`（与 `--hostname` 参数和端口探测一致），非法值原样保留并由 `hostnameProblem` 标记为不可用，不静默替换成 loopback 或其他地址。`ServiceManager.isStartPermitted` 与 `startManagedService()` 都要求地址可用；非法地址返回 `ServiceStartDecision.invalidAddress`，不启动进程、不探测外部服务、不加载页面，并以 `.failed(非法值 + 允许范围)` 进入诊断状态。非 loopback 地址还必须已有非空密码（见上节），启动决策只使用调用方已读取的那一次凭证。拼 URL 时仍由 `RemoteAccessPolicy.urlHost(for:)` 给 IPv6 字面量加方括号：`http://[::1]:端口/`（`URLComponents` 对未加方括号的 IPv6 host 会返回 nil，旧实现会静默回落到 `127.0.0.1`）。密码认证只验证访问者，不是传输加密：设置界面和文档都明确要求远程访问自行配置受信任的加密隧道或 HTTPS 反向代理。
-
-## 网络边界
-
-默认监听 `127.0.0.1`，非 loopback 监听地址必须先在 Keychain 中设置非空密码（见上节）。通配地址（`0.0.0.0`、`::`、`[::]`、`*`）、空地址、前后空白与非法字符在保存、配置加载与启动决策三处都被同一个判定拒绝，直接改写 UserDefaults 不会绕过它。远程访问还需要用户显式配置受信任的加密隧道或 HTTPS 反向代理：密码认证不等于传输加密。桌面应用不把密码写入 UserDefaults、命令行、日志或诊断信息。
+`ServiceConfiguration.load` 读入时执行同一判定：`[::1]` 规范化为 `::1`（与 `--hostname` 参数和
+端口探测一致），非法值原样保留并由 `hostnameProblem` 标记为不可用，不静默替换成 loopback 或
+其他地址。`ServiceManager.isStartPermitted` 与 `startManagedService()` 都要求地址可用；非法地址
+返回 `ServiceStartDecision.invalidAddress`，不启动进程、不探测外部服务、不加载页面，并以
+`.failed(非法值 + 允许范围)` 进入诊断状态。拼 URL 时由 `RemoteAccessPolicy.urlHost(for:)` 给 IPv6
+字面量加方括号：`http://[::1]:端口/`（`URLComponents` 对未加方括号的 IPv6 host 会返回 nil，
+旧实现会静默回落到 `127.0.0.1`）。
 
 ## 更新检查、设置与缓存
 
@@ -277,7 +281,6 @@ GitHub #17 的版本检查在应用运行期间只做只读查询，不下载、
 ## 数据位置
 
 - 普通设置：UserDefaults（读写都经 `AppConfiguration`）。
-- 远程访问密码：macOS Keychain（service = bundle identifier，account = `remote-access-password`，仅本文一处存储）。
 - 运行状态和 PID：`~/Library/Application Support/Pi Web Desktop/`。
 - 日志：`~/Library/Logs/Pi Web Desktop/`（`Pi Web Desktop.log` 与 `.1.log` … `.5.log`），应用执行按大小轮转，详见 [日志与诊断导出](logging-and-diagnostics.md)。
 - 更新检查缓存（GitHub #17）：`~/Library/Application Support/Pi Web Desktop/update-check-cache.json`（只含版本、时间戳与条件请求字段，不含凭据、会话或诊断内容）；更新检查的策略、忽略版本、启动前自动更新开关、最近的更新失败警告、统一更新历史（GitHub #23，`updateChecks.updateHistory`，单键 JSON，只含固定枚举、已校验版本/包名与固定原因文案）与超时/放弃等待的「已放弃」记录（GitHub #62，`updateChecks.piWeb.abandonedAttempt` / `updateChecks.pi.abandonedAttempt` / `updateChecks.piPackages.abandonedAttempts`，只含固定枚举、已校验组件/包名、已脱敏命令摘要与时间）在 UserDefaults（`updateChecks.*`，见 [设置、工作目录与退出行为](settings-and-workspace.md)）。最近工作目录也在 UserDefaults（`workspace.recentPaths`，最多 10 条用户选过的绝对路径）。

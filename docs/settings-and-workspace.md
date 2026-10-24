@@ -7,7 +7,6 @@
 | 内容 | 位置 | 说明 |
 | --- | --- | --- |
 | 普通设置 | UserDefaults | 键与默认值沿用既有约定（`service.hostname`、`service.port`、`service.piWebPath`、`service.allowedHosts`、`service.httpProxy`、`service.httpsProxy`、`service.noProxy`、`service.autoStart`、`service.quitBehavior`，以及工作目录 `service.workspacePath`）。读写都经 `AppConfiguration`。 |
-| 远程访问密码 | macOS Keychain | service = bundle identifier，account = `remote-access-password`。密码不进入 UserDefaults、命令行、日志或诊断文本。 |
 | 运行状态 | `~/Library/Application Support/Pi Web Desktop/` | `app.pid`（单实例锁）、`instance.lock`、`service-owner.json`（所有权记录）、旧 `service.pid`（启动时删除）、默认工作目录 `Workspace/`。 |
 | 日志 | `~/Library/Logs/Pi Web Desktop/` | `Pi Web Desktop.log`，达到 10 MB 时轮转为 `Pi Web Desktop.1.log` … `.5.log`（保留 5 份）。菜单“打开日志”确保日志文件存在，“打开日志文件夹”只确保目录存在（目录不存在时创建，失败给出可读提示），因此从未启动过服务也能打开。轮转策略、脱敏规则与诊断导出见 [日志与诊断导出](logging-and-diagnostics.md)。 |
 
@@ -17,19 +16,19 @@
 
 ### 设置窗口（单例）
 
-菜单“设置…”/⌘, 是单例（W4 M2）：同一时刻只存在一个能写回配置的设置窗口。重复打开复用同一个控制器/窗口：窗口已经打开时只置前（不拿已保存值覆盖用户正在编辑的内容）；关闭/取消后再打开前，用当前生效配置刷新控件——上一次取消后留下的未保存输入、外部改动与刚输入的新密码都不会残留。旧实现每次新建控制器并覆盖引用，旧窗口（`isReleasedWhenClosed = false` 且不 close）会留在屏幕上、用打开时的配置快照写回，出现“两个窗口都能保存、后写覆盖前写”。需要显式丢弃时用 `ReusableControllerStore.discard`（先 close 再释放，旧实例不再被保留）。
+菜单“设置…”/⌘, 是单例（W4 M2）：同一时刻只存在一个能写回配置的设置窗口。重复打开复用同一个控制器/窗口：窗口已经打开时只置前（不拿已保存值覆盖用户正在编辑的内容）；关闭/取消后再打开前，用当前生效配置刷新控件——上一次取消后留下的未保存输入与外部改动都不会残留。旧实现每次新建控制器并覆盖引用，旧窗口（`isReleasedWhenClosed = false` 且不 close）会留在屏幕上、用打开时的配置快照写回，出现“两个窗口都能保存、后写覆盖前写”。需要显式丢弃时用 `ReusableControllerStore.discard`（先 close 再释放，旧实例不再被保留）。
 
 窗口可自由缩放并记住尺寸与位置（`setFrameAutosaveName`，只有第一次打开时才居中）：表单列最小 520pt，变宽时每一行、输入框与说明文字一起变宽，多行说明按新宽度重新折行（`WrappingLabel` 在每次布局后把 `preferredMaxLayoutWidth` 更新为实际宽度；窗口最小宽度由这一列宽加两侧 24pt 边距决定，与表单列同源，不再由某一行或单行文字的内在宽度决定）。表单放在 `NSScrollView` 里且文档只受宽度约束，窗口缩得比表单矮时从顶部开始滚动，不会裁掉说明文字或底部按钮；错误提示与「恢复默认/取消/保存」固定在窗口底部、不随表单滚动，因此窗口很矮时也能直接保存或取消。
 
 ### 监听地址校验
 
-监听地址（`service.hostname`）的校验只有一处实现：`RemoteAccessPolicy.addressVerdict(hostname:)`（`Sources/Services/KeychainStore.swift`，结果类型 `ServiceAddressVerdict`）。同一判定同时作用于三个入口（GitHub #39 / 安全审查 R-3）：
+监听地址（`service.hostname`）的校验只有一处实现：`RemoteAccessPolicy.addressVerdict(hostname:)`（`Sources/Services/ListeningAddressPolicy.swift`，结果类型 `ServiceAddressVerdict`）。同一判定同时作用于三个入口（GitHub #39 / 安全审查 R-3）：
 
-- 偏好窗口保存：`PreferencesWindowController` 保存前调用 `hostnameValidationMessage`，`RemoteAccessSetup.apply` 也先拒绝非法地址（先于密码写入），配置与 Keychain 都不会被写入。
+- 偏好窗口保存：`PreferencesWindowController` 保存前调用 `hostnameValidationMessage`，非法地址不会写入配置。
 - 配置加载：`ServiceConfiguration.load` 执行同一判定，`[::1]` 规范化为 `::1`；非法值原样保留并由 `ServiceConfiguration.hostnameProblem` 标记为不可用，不会静默回退到 loopback 或其他地址。
-- 启动决策：`ServiceManager.startDecision(credentials:)` 与 `isStartPermitted` 要求地址可用；非法地址返回 `.invalidAddress`，不启动进程、不探测外部服务、不加载服务页，失败提示给出非法值与允许范围。
+- 启动决策：`ServiceManager.startDecision()` 与 `isStartPermitted` 要求地址可用；非法地址返回 `.invalidAddress`，不启动进程、不探测外部服务、不加载服务页，失败提示给出非法值与允许范围。
 
-允许 loopback（`127.0.0.0/8`、`localhost`、`*.localhost`、`::1`）与用户显式配置的具体地址；拒绝 `0.0.0.0`、`::`、`[::]`、`*` 等通配地址、空地址、前后空白、协议/路径/端口混写等非法字符，方括号只允许用于 IPv6 字面量。`getaddrinfo` 会解析成 `0.0.0.0`/`::` 的写法（`0`、`0x0`、`000.000.000.000`、`0.0.0.0.`、`0:0:0:0:0:0:0:0`、`::ffff:0.0.0.0` 等）与歧义的数值写法同样被拒绝：只接受规范点分四段、规范 IPv6 字面量与主机名。非 loopback 地址还必须已有非空密码（见 [architecture.md](architecture.md) 的“远程访问与密码”一节）。因此直接改写 UserDefaults 绕过界面校验不再能进入启动流程。
+允许 loopback（`127.0.0.0/8`、`localhost`、`*.localhost`、`::1`）与用户显式配置的具体地址；拒绝 `0.0.0.0`、`::`、`[::]`、`*` 等通配地址、空地址、前后空白、协议/路径/端口混写等非法字符，方括号只允许用于 IPv6 字面量。`getaddrinfo` 会解析成 `0.0.0.0`/`::` 的写法（`0`、`0x0`、`000.000.000.000`、`0.0.0.0.`、`0:0:0:0:0:0:0:0`、`::ffff:0.0.0.0` 等）与歧义的数值写法同样被拒绝：只接受规范点分四段、规范 IPv6 字面量与主机名。应用不提供访问密码，非 loopback 监听只要地址合法即可启动，代价是对同网络无需认证即可完全控制 pi-web（见 [architecture.md](architecture.md) 的“监听边界与远程访问”一节）。因此直接改写 UserDefaults 绕过界面校验不再能进入启动流程。
 
 ## 更新检查设置
 
@@ -56,7 +55,7 @@
 - 兼容旧键：GitHub #17 的 `updateChecks.*.enabled` 仍会被读取（`true` → 该分类默认策略，`false` → 关闭）；保存新设置时删除旧键，不留下两套值。未知值、非法类型与非法分类组合回退默认，并写一条只含键名与结论的诊断日志（不回显原值）。
 - 界面：菜单“服务 → 更新检查设置”里是状态行 + 四类快捷开关（打开 = 默认策略，关闭 = 关闭）+ “立即更新 Pi Web…”与“立即更新 Pi CLI…” + 失败告警条目 + “已放弃的更新记录…” + “更新检查偏好设置…”；偏好设置窗口显示策略、每类最近检查时间、结果（最新 / 可更新 / 未知 / 失败）、被忽略版本与下次检查时间，并提供“忽略此版本”、两个启动前自动更新开关（标题写明生效范围）与一行 Pi CLI 进程保护/推迟原因状态（GitHub #21）；另有“查看 Pi 扩展包更新…”与一行 Pi 扩展包状态（策略、本次检测到的包数、可更新的包、需要先看「已放弃」记录再确认的包、拒绝原因与上次执行失败告警，GitHub #22 / #62）；设置窗口与诊断页还展示全部「已放弃」记录（GitHub #62）；菜单项本身在命令进行中或上一次更新退出未确认时置灰并加后缀说明（GitHub #107：“（正在更新）” / “（上一次更新未确认退出，重启应用可恢复）”）。诊断窗口显示同一份只读状态与手动更新入口。
 - 提示方式：发现可用更新时使用应用内提示框（`NSAlert`），不使用 `UNUserNotificationCenter`、不申请通知权限；提示内容只含组件名与版本，不含路径或凭据。取舍说明见 [隐私说明](privacy.md)。
-- 不写秘密：这一组键只有策略字符串、布尔与版本/时间戳；访问密码只在 Keychain，两者不交叉。
+- 不写秘密：这一组键只有策略字符串、布尔与版本/时间戳。
 
 ## 默认工作目录
 
@@ -99,8 +98,8 @@
 菜单「Pi Web Desktop → 复制手机访问链接」与「服务 → 复制手机访问链接」把服务换成手机可访问的地址并复制链接（GitHub #150）。候选地址只在菜单项里出现，不写日志或诊断导出。
 
 - 候选枚举：两个子菜单共用同一实现，打开时（`menuWillOpen(_:)`）按当前网络接口枚举 IPv4 地址并按用途分类——Tailscale 使用的 CGNAT 网段（`100.x.y.z`）记为「Tailscale」，私有网段 `10/8`、`172.16/12`、`192.168/16` 记为「局域网」；loopback（`127/8`）、link-local（`169.254/16`）与其他地址不进菜单，重复地址按文本去重，Tailscale 排在局域网之前。每项标题形如 `Tailscale · 100.x.y.z` 或 `局域网 · 192.168.x.y`；一个候选都没有时只显示一条禁用的「未检测到可用的 Tailscale 或局域网地址」。探测只读本机接口信息，不触发任何网络请求。
-- 前置条件：非 loopback 地址仍受「监听地址校验」的同一门控——必须已经有访问密码。没有密码时只提示并引导到「设置… → 远程访问」，不改配置、不切换监听地址、不启动远程监听。
-- 行为：选中地址已是当前监听地址（`service.hostname`）时直接复制 `http://<地址>:<端口>/`，不重启服务；否则先确认（文案写明会切换监听地址并重启服务、当前会话会中断），确认后经与设置窗口同一条保存路径（`RemoteAccessSetup.apply`，沿用 Keychain 里已有的密码）写入配置并重启服务，成功后才复制链接。链接按当前端口与新地址构造，不改窗口打开的地址。
+- 前置条件：非 loopback 地址仍受「监听地址校验」的同一门控——地址必须合法。应用不提供访问密码，因此这里只弹一次确认（文案写明切换后同网络无需认证即可访问），取消则不改配置、不切换监听地址、不启动远程监听。
+- 行为：选中地址已是当前监听地址（`service.hostname`）时直接复制 `http://<地址>:<端口>/`，不重启服务；否则先确认（文案写明会切换监听地址并重启服务、当前会话会中断），确认后经与设置窗口同一条保存路径写入配置并重启服务，成功后才复制链接。链接按当前端口与新地址构造，不改窗口打开的地址。
 - 说明：应用不会自动切回 loopback，也不做 `0.0.0.0`/`::` 通配监听；切走的地址只由「设置… → 监听地址」或再次使用本菜单改回。当前 WebView 策略只把 loopback 当作站内地址（见 [architecture.md](architecture.md)），因此在非 loopback 监听下应用内窗口可能无法加载服务页，手机仍可正常访问。
 
 ## 多窗口与窗口注册（GitHub #168）
@@ -177,12 +176,11 @@
 
 ## 测试覆盖
 
-unhosted 测试（注入临时目录、假探针、假 Keychain 与假网络地址提供者，不触碰真实用户目录、进程或网络）：
+unhosted 测试（注入临时目录、假探针与假网络地址提供者，不触碰真实用户目录、进程或网络）：
 
 - `PiWebDesktopTests/DiagnosticsCollectorTests.swift`（含 W4 M2/M3）：导出布局、脱敏上下文保留、可信度映射与组件安装区块之外，新增设置窗口控制器单例存储的复用与显式释放、探测收集器不阻塞调用方（阻塞替身 + 主线程计时）、超时终止子进程并降级、“没有监听者 ≠ 探测失败”、导出文本对外部 argv 复用更新路径遮罩（注入凭据不得出现）、失败项标注，以及 M2/M3/L5 的源码级接线断言。
 - `PiWebDesktopTests/AppConfigurationTests.swift`：三处存储位置、默认设置序列化后不含个人代理与远程 hostname、设置在重新读取后保留、smoke 使用临时目录、日志目录不存在时打开日志会先创建目录与文件（幂等、失败返回可读错误）。
 - `PiWebDesktopTests/ServiceConfigurationTests.swift`：默认退出行为与默认工作目录、既有键名、无法识别的退出行为回落为“询问”、工作目录进入运行时签名；直接写入 UserDefaults 的通配地址、空值、带空白/非法字符的值加载后被标记为不可用且不被静默替换，合法地址与 `[::1]` 规范化后仍可用。
-- `PiWebDesktopTests/KeychainStoreTests.swift`：地址判定与保存流程共用同一规则（通配地址即使有密码也被拒绝，且先于密码写入），加载与启动诊断包含非法值与允许范围，非 loopback 缺密码仍走 #8 的缺密码提示。
 - `PiWebDesktopTests/ServiceAddressesTests.swift`（GitHub #150）：地址分类边界（Tailscale 网段两端与网段外、私有网段的边界与网段外、loopback、link-local、非法输入）、探测结果的过滤/去重/排序（与输入顺序无关）与菜单标题生成（含无候选时的单条禁用说明项）、`ServiceAddressDecision.decide` 的三个分支、链接构造只按地址与端口拼装而不改窗口打开的地址；全部使用注入的假 provider。
 - `PiWebDesktopTests/SystemProxyWarningTests.swift`（GitHub #157）：loopback（`127.*`、`localhost`、`::1`）不提示；`100.x` 无启用代理不提示；`100.x` + 代理且无例外 → 提示（HTTP/HTTPS 各自 scheme、SOCKS、PAC 均覆盖）；例外命中（`100.x.*` 通配、精确地址、CGNAT 段 CIDR、逗号串起来的整串条目）→ 不提示；不命中与畸形条目（`/99`、非 IP、`<local>`、IPv6 条目）的取舍；网段边界（`100.63.x` / `100.128.x`）与局域网/主机名不提示；代理字典缺失、键类型畸形、空字典一律不提示；一次运行内只提示一次、切回 loopback 自动清除、手动「清除警告」只抑制本次运行、日志与文案不含用户真实地址。
 - `PiWebDesktopTests/AppWindowRegistryTests.swift`（GitHub #168）：多窗口登记表契约（新建后可查找、关闭后移除、主窗口随最近使用变化、多窗口并存互不影响、移除未知窗口是空操作）用泛型占位类型断言，不需要真实窗口或服务。
@@ -190,7 +188,7 @@ unhosted 测试（注入临时目录、假探针、假 Keychain 与假网络地�
 - `PiWebDesktopTests/RecentWorkspaceTests.swift`：去重与置顶、10 条上限与路径标准化、跨 store 实例的持久化与清除、注入 defaults 的配置读取、`WorkspaceSwitchDecision.decide` 的各分支（当前目录 `.unchanged`、相对路径与不存在的目录 `.reject(.missing)`、文件 `.reject(.notDirectory)`、可用目录 `.confirm`），以及任何分支都不创建目录。
 - `PiWebDesktopTests/QuitPolicyTests.swift`：三种退出行为与三种确认选择的决策表、取消不停止服务、只有显式“退出并停止服务”才请求停止托管服务、任何行为都不停止外部服务。
 - `PiWebDesktopTests/QuitCoordinatorTests.swift`（GitHub #72）：三条退出路径（询问后保持运行 / 询问后停服务 / 设置直接退出）、显式菜单项不受设置影响、取消后回到 idle 且可再次正常退出、等待与停止期间的重复触发不叠加、迟到的按钮/停止回调被忽略、超时前继续等待与超时后保持服务并退出（超时可注入，默认 5 分钟）、服务未运行与外部服务不产生停止副作用、AppKit 终止请求只得到 `terminateNow` / `cancelPendingDecision` 且 `terminateNow` 不带退出副作用。
-- `PiWebDesktopTests/ServiceManagerTests.swift`：工作目录不可用时所有启动入口零启动零加载并给出可读提示、恢复后门控重新打开、启动前重新校验（自选目录被删后不重建且阻止启动；存在且可写的自选目录不被创建；默认目录缺失时仍创建；健康监控期间自选目录消失时受托管重启被拒绝）、三种退出行为（保持运行零信号、停止只对已验证进程组、外部服务零信号且状态不变）、关闭期间无后台轮询、校验失败的记录不被认领也不被发信号；非法监听地址（通配、空值、空白、非法字符）在所有启动入口零进程零探测并给出可读诊断，loopback 与“具体地址 + 密码”仍可启动，`0.0.0.0` 写入 UserDefaults 后无法进入启动流程。
+- `PiWebDesktopTests/ServiceManagerTests.swift`：工作目录不可用时所有启动入口零启动零加载并给出可读提示、恢复后门控重新打开、启动前重新校验（自选目录被删后不重建且阻止启动；存在且可写的自选目录不被创建；默认目录缺失时仍创建；健康监控期间自选目录消失时受托管重启被拒绝）、三种退出行为（保持运行零信号、停止只对已验证进程组、外部服务零信号且状态不变）、关闭期间无后台轮询、校验失败的记录不被认领也不被发信号；非法监听地址（通配、空值、空白、非法字符）在所有启动入口零进程零探测并给出可读诊断，loopback 与具体地址仍可启动，`0.0.0.0` 写入 UserDefaults 后无法进入启动流程。
 - `PiWebDesktopTests/UpdateSettingsTests.swift`（GitHub #18）：四类策略的允许集合与默认值、菜单快捷开关映射、迁移（缺键 / 旧布尔键 / 未知与非法值 / 开关非布尔）、UserDefaults 往返只写策略、开关、警告与忽略版本且值里无路径或凭据、忽略版本只存版本与时间戳（非法版本丢弃、非法时间戳保留版本）、策略 → 间隔映射（`off` → nil）、每类状态快照与文案、通知判定（忽略 / 去重 / 关闭分类 / 非可更新状态）、提示文案与说明文本不含路径或凭据；以及 `AppConfiguration` 用注入 defaults 的设置往返。
 - `PiWebDesktopTests/UpdateCheckerTests.swift`（GitHub #17 / #18）：在上面列出的注入式检查器测试之外，新增逐类关闭后请求数为 0 且无该类计时器、每日 / 每周 / 扩展包 7 天用假时钟推进后的请求次数、迁移后的旧布尔键直接决定调度、`stop()` 后假时钟推进 30 天零请求、忽略当前版本后不再提示且上游更高版本重新提示、每类状态快照带下次检查时间、启动前自动更新开关打开与关闭时请求 / 结果 / 调度完全一致。
 - `PiWebDesktopTests/PiWebUpdateAdapterTests.swift`（GitHub #20）：插件式替身 + `$TMPDIR` 假安装器脚本覆盖设置关闭、来源/可信度不符、参数数组与命令策略、成功组合、安装器失败四态、版本未变、健康检查失败、服务运行中与脱敏断言；不联网、不执行真实 npm/pi-web、不写真实 Home 或 UserDefaults。

@@ -203,6 +203,31 @@ enum UpdateStatusPresenter {
             + line(for: status, policy: preferences.policy(for: status.category), format: format)
     }
 
+    /// 偏好窗口用的缩写：只保留用户实际要的两个结论——结果与最近检查时间。
+    ///
+    /// 策略已经由同一行的下拉框展示，忽略版本、下次检查时间、缓存来源与失败原因
+    /// 全部归诊断页。原来这里直接复用完整行，每类组件堆到 5 个分号，四行叠在一
+    /// 起就是一段读不完的说明文字。
+    static func shortLine(
+        for status: UpdateCategoryStatus,
+        policy: UpdateCheckPolicy,
+        format: (Date) -> String
+    ) -> String {
+        // 已关闭的类别不再展示旧结论：关了就关，残留的“可更新”只会让人以为
+        // 还有待处理的更新。
+        guard policy.isEnabled else { return "已关闭" }
+        var parts = [status.resultTitle]
+        if let lastAttemptAt = status.lastAttemptAt {
+            parts.append("上次检查 \(format(lastAttemptAt))")
+        }
+        // `resultTitle` 已把“.unknown + failure”收成“失败”，原因只在这里补一次
+        // 短语；具体错误分类与状态码只归诊断页。
+        if status.status == .unknown, let failure = status.failure {
+            parts.append(failure.text)
+        }
+        return parts.joined(separator: " · ")
+    }
+
     static func lines(
         statuses: [UpdateCategoryStatus],
         preferences: UpdateCheckPreferences,

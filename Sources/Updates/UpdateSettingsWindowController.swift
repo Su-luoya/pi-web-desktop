@@ -29,22 +29,22 @@ final class UpdateSettingsWindowController: NSWindowController {
     private var statusLabels: [UpdateCheckCategory: NSTextField] = [:]
     private var ignoreButtons: [UpdateCheckCategory: NSButton] = [:]
     private let autoUpdateButton = NSButton(
-        checkboxWithTitle: "启动前自动更新 Pi Web（仅限已验证的 npm 全局安装）",
+        checkboxWithTitle: "启动前自动更新 Pi Web",
         target: nil,
         action: nil
     )
     private let autoUpdateHintLabel = NSTextField(labelWithString:
-        "只在启动时更新已验证的 npm 全局安装，失败不影响启动。")
+        "仅对已验证的 npm 全局安装生效；其它来源只提示，不安装。")
     private let autoUpdatePiCLIButton = NSButton(
-        checkboxWithTitle: "启动前自动更新 Pi CLI（有运行中的 Pi 进程时推迟）",
+        checkboxWithTitle: "启动前自动更新 Pi CLI",
         target: nil,
         action: nil
     )
     private let autoUpdatePiCLIHintLabel = NSTextField(labelWithString:
-        "走官方命令 pi update --self；检测到运行中的 Pi 进程时推迟。")
+        "有运行中的 Pi 进程时推迟，并在下次检查时重试。")
     private let piCLIStatusLabel = NSTextField(labelWithString: "")
     private let piPackageHintLabel = NSTextField(labelWithString:
-        "不做无人值守更新，确认后只调用 pi update npm:<包名>。")
+        "确认后只执行官方更新命令一次，不做无人值守更新。")
     /// internal：布局回归测试需要对照其他长文本 label 的约束（M11）。
     let piPackageStatusLabel = WrappingLabel(labelWithString: "")
     /// 「已放弃」记录（GitHub #62）：超时/放弃等待之后可能仍在运行的命令。
@@ -87,7 +87,7 @@ final class UpdateSettingsWindowController: NSWindowController {
             let popup = policyPopups[category]
             let allowed = UpdateCheckPolicy.allowed(for: category)
             popup?.selectItem(at: allowed.firstIndex(of: policy) ?? 0)
-            statusLabels[category]?.stringValue = UpdateStatusPresenter.line(
+            statusLabels[category]?.stringValue = UpdateStatusPresenter.shortLine(
                 for: status(for: category),
                 policy: policy,
                 format: { Self.timestampFormatter.string(from: $0) }
@@ -116,7 +116,7 @@ final class UpdateSettingsWindowController: NSWindowController {
         let title = NSTextField(labelWithString: "更新检查偏好设置")
         title.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
 
-        let intro = NSTextField(labelWithString: "只查版本，不下载也不安装；关闭某类后不再为它发请求。")
+        let intro = NSTextField(labelWithString: "只查版本，不下载也不安装；关闭后不为该组件发请求。")
         SettingsFormMetrics.configureHint(intro)
 
         var rows: [NSView] = [title, intro]
@@ -145,6 +145,8 @@ final class UpdateSettingsWindowController: NSWindowController {
             controls.spacing = 8
             controls.alignment = .centerY
 
+            // 状态只留一句话：结论 + 最近检查。时间、忽略版本、缓存来源这些
+            // 细节归诊断页，设置窗口里堆满它们只会让每行都读不完。
             let statusLabel = NSTextField(labelWithString: "")
             statusLabel.lineBreakMode = .byWordWrapping
             statusLabel.maximumNumberOfLines = 0
@@ -162,6 +164,10 @@ final class UpdateSettingsWindowController: NSWindowController {
 
         autoUpdateButton.target = self
         autoUpdateButton.action = #selector(autoUpdateChanged(_:))
+        // 两个「启动前自动更新」开关必须各自接到自己的 action：漏接只会表现为
+        // 点不动，不会有编译错误。
+        autoUpdatePiCLIButton.target = self
+        autoUpdatePiCLIButton.action = #selector(autoUpdatePiCLIChanged(_:))
         for hint in [
             autoUpdateHintLabel, autoUpdatePiCLIHintLabel, piCLIStatusLabel,
             piPackageHintLabel, piPackageStatusLabel, abandonedStatusLabel
@@ -170,10 +176,10 @@ final class UpdateSettingsWindowController: NSWindowController {
             hint.font = NSFont.systemFont(ofSize: 11)
         }
 
-        let reservedHeader = NSTextField(labelWithString: "启动前自动更新（受限）")
+        let reservedHeader = NSTextField(labelWithString: "启动前自动更新")
         reservedHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
 
-        let piPackageHeader = NSTextField(labelWithString: "Pi 扩展包更新（不做无人值守更新）")
+        let piPackageHeader = NSTextField(labelWithString: "Pi 扩展包")
         piPackageHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
 
         let explanationButton = NSButton(title: "更新检查说明…", target: self, action: #selector(showExplanation(_:)))

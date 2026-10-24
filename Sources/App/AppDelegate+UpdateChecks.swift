@@ -594,6 +594,8 @@ extension AppDelegate {
         syncUpdateSettingsWindow()
         diagnosticsWindowController?.refreshUpdateStatus()
         // Pi CLI 的受限自动更新（GitHub #21）：只在拿到本次检查结果后判定一次。
+        // 推迟路径依赖这次判定再调一次检查，因此必须排在下面的
+        // `pendingManualUpdateCheck` 分支之前。
         attemptPiCLIAutomaticUpdateIfNeeded()
         guard pendingManualUpdateCheck else {
             notifyAboutAutomaticUpdates(summary)

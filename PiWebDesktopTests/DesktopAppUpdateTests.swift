@@ -107,6 +107,33 @@ final class DesktopAppUpdateTests: XCTestCase {
         XCTAssertTrue(DesktopAppUpdateInstaller.requiresNoNewerSystem(bundle(named: "Garbage", minimumSystem: "not-a-version"), running: older))
     }
 
+    /// 校验值比对的真实行为：下载到的字节与 GitHub 公布的 SHA-256 不一致时必须判不等，
+    /// 相等时必须判相等。alpha.18 的发布验证里试过用改 Release 资产的方式在真机上
+    /// 构造这个失败，结果被 CDN 缓存挡住（详见 Docs/alpha-release-checklist.md），
+    /// 所以这条路径的保证只能落在测试上。
+    func testSha256DetectsMismatchedDownloadBytes() throws {
+        let fileManager = FileManager.default
+        let file = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? fileManager.removeItem(at: file) }
+        try Data("hello pi web desktop".utf8).write(to: file)
+
+        let actual = try DesktopAppUpdateInstaller.sha256(of: file)
+        XCTAssertEqual(actual, "6f72aa83223c5151e74d92a27b61b4403017e5591e655937e7d3104f50f37d56")
+        XCTAssertEqual(actual.count, 64)
+
+        // 全 0 的“公布值”必须与真实摘要不符，且两者都能被 normalizedChecksum 接受。
+        let published = String(repeating: "0", count: 64)
+        XCTAssertEqual(DesktopAppReleaseAssetSelector.normalizedChecksum(published), published)
+        XCTAssertNotEqual(actual, DesktopAppReleaseAssetSelector.normalizedChecksum(published))
+
+        // 改一个字节就必须换一个摘要，否则比对本身失效。
+        try Data("hello pi web desktop!".utf8).write(to: file)
+        XCTAssertNotEqual(try DesktopAppUpdateInstaller.sha256(of: file), actual)
+
+        // 失败文案是用户唯一能看到的信号，不能改。
+        XCTAssertEqual(DesktopAppUpdateFailure.checksumMismatch.text, "更新包校验失败，已停止安装。")
+    }
+
     func testRejectsNonGitHubZipAndMalformedChecksum() {
         XCTAssertNil(DesktopAppReleaseAssetSelector.select(
             version: "2.5.0",

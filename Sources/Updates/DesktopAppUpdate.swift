@@ -548,7 +548,10 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
         return current >= required
     }
 
-    private static func sha256(of url: URL) throws -> String {
+    // internal 而非 private：校验值比对是「装错包」的最后一道地，
+    // 需要能被测试直接喂坏值（真机上无法可靠构造校验失败，见
+    // Docs/alpha-release-checklist.md 的 alpha.18 第 4 项）。
+    static func sha256(of url: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: url); defer { try? handle.close() }
         var hasher = SHA256()
         while true { let chunk = try handle.read(upToCount: 1024 * 1024) ?? Data(); if chunk.isEmpty { break }; hasher.update(data: chunk) }

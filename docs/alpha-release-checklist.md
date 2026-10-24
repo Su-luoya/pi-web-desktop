@@ -2049,3 +2049,61 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
 - 本次发布准备**改动了 `Sources/`、`PiWebDesktopTests/` 与 `PiWebDesktop.xcodeproj/project.pbxproj`**，
   不是纯文档发布；四个 PR 都已通过 CI。本节只记录本地门槛与 CI 结论，**没有** 打 tag、**没有** 碰
   GitHub Release 或 Issue 状态。
+
+## 本次发布执行记录（v0.1.0-alpha.20）
+
+稳定性修复发布，无新增功能、无破坏性变更。修复两个长期存在但只在日志里可见的缺陷。
+
+### 发布前门槛（本机 macOS 27.0.1，Apple M4）
+
+| # | 门槛 | 命令 | 实测输出摘要 | 判定 |
+| --- | --- | --- | --- | --- |
+| 1 | 脚本语法 | `sh -n Scripts/*.sh` | 无输出 | 退出 0，通过 |
+| 2 | 空白与补丁格式 | `git diff --check` | 无输出 | 退出 0，通过 |
+| 3 | 构建 | `./Scripts/build.sh` | `Built: build/Pi-Web-Desktop.app`；`Mach-O 64-bit executable arm64` | 退出 0，通过 |
+| 4 | 身份与版本一致性 | `./Scripts/check-identity.sh` | `PASSED (45 checks)`；`CFBundleShortVersionString=0.1.0-alpha.20`、`CFBundleVersion=20`、`LSMinimumSystemVersion=26.0` | 退出 0，通过 |
+| 5 | tag 与 bundle 版本一致 | `sh Scripts/check-release-version.sh v0.1.0-alpha.20` | `PASSED (tag v0.1.0-alpha.20, MARKETING_VERSION 0.1.0-alpha.20, CURRENT_PROJECT_VERSION 20)` | 退出 0，通过 |
+| 6 | 单元测试 | `xcodebuild test` → `Executed 923 tests, with 0 failures (0 unexpected)` | 通过（连续 3 轮：923 / 923 / 923，无 flaky） | 通过 |
+| 7 | 启动/退出循环 | 20 次 `PI_WEB_DESKTOP_SMOKE=1` | 20/20 通过 | 通过 |
+| 8 | 并发启动 | 6 个实例同时启动 | 6/6 通过（单实例锁正常） | 通过 |
+| 9 | smoke | `./Scripts/smoke.sh` | `OK`（`smoke: ready` / `smoke: diagnostics ready`，均 exit 0） | 通过 |
+| 10 | 密钥扫描 | `./Scripts/scan-secrets.sh` | `PASS` | 通过 |
+| 11 | 干净构建警告 | 排除 AppIntents 工具链提示 | 0 warning、0 error | 通过 |
+
+### 发布资产实测（从 GitHub 下载后核对）
+
+- `shasum -a 256 -c` → `Pi-Web-Desktop-0.1.0-alpha.20+build.20.zip: OK`；
+- 公布值 `5402ea507bda7e2ab5c718392b900f0dcb98effb7682f0981fcb7044ec3a8ca7` 与实际值一致；
+- `Info.plist`：`0.1.0-alpha.20` / `20` / `26.0` / `io.github.su-luoya.pi-web-desktop`；
+- `file` → `Mach-O 64-bit executable arm64`；
+- `codesign --verify --deep --strict` 退出 0；`Signature=adhoc`、`TeamIdentifier=not set`（预期）；
+- 两种 smoke 模式在解压后的发布包上各跑一次：均输出标记并 exit 0。
+
+### 真机 smoke 环境
+
+| 项目 | 值 |
+| --- | --- |
+| 机器与芯片 | Apple M4 |
+| macOS 版本 | 27.0.1 |
+| 架构 | arm64 |
+| Node.js | v24.22.1 |
+| Pi | 1.4.0 |
+| `@agegr/pi-web` | 0.12.2 |
+
+### 真实更新链路演练
+
+对 `v0.1.0-alpha.19` 的发布资产跑完整链路：下载 1662862 bytes → 公布 SHA-256 与实际一致 →
+解压 → `Info.plist` 为 `0.1.0-alpha.19` / `26.0` → `codesign --verify --deep --strict` 退出 0。
+
+### 发布结果
+
+- PR #202 squash 合并为 `7af756a`；
+- tag `v0.1.0-alpha.20` 已推送，release workflow `completed success`；
+- 草稿正文的 `<待填写>` 占位符已全部回填真机数据（复查计数 0）；
+- 已发布为 prerelease，`draft=false`，3 个资产；
+- 发布后核对：`/releases` 端点返回的最新条目为 `v0.1.0-alpha.20`，应用内更新检查会选中它。
+
+### 说明
+
+- 日志粘行修复只影响之后的写入，已有日志文件不会自动重排。
+- 本版不针对 macOS 14 / 15 做任何验证（支持范围外）。

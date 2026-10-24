@@ -1844,3 +1844,98 @@ alpha.14 / alpha.15 周期的旧结论冒充本版结果**。alpha.14 周期做�
   alpha.11 / alpha.15 记录的一个差别：本版不是纯文档发布。提交 / PR / tag / Release 由后续步骤完成
   （本节只记录本地门槛与演练，**没有** push、**没有** 建 PR、**没有** 打 tag、**没有** 碰 GitHub Release
   或 Issue 状态）。
+
+## Release v0.1.0-alpha.18 执行记录
+
+本版候选：`macos-app-skills-refactor` 分支（`v0.1.0-alpha.17` 之后的两个提交：`7fe2a0d` 死代码
+清理与废弃 API 替换、`021438a` 最低系统提到 macOS 26 + CI runner 换 `macos-26`），加上本版发布
+提交的版本 bump、发布说明与本节执行记录。
+
+本版是**纯清理发布**：没有新增功能，没有修用户可见缺陷。改动的来源是一轮以
+[macos-app-skills](https://github.com/fayazara/macos-app-skills) 为基准的代码审查；结论是绝大多数
+skill 条目本仓库早已满足（`AppDelegate+*` 已按职责拆 extension、`NSWindowController` 程序化建窗、
+`contentMinSize` + `setFrameAutosaveName`、剪贴板 `clearContents` 守卫、`AppIdentity.xcconfig` 单
+一版本来源），真正需要动的只有部署目标写错导致的死代码与一处废弃 API。
+
+### 破坏性变更（本版唯一影响已安装用户的变化）
+
+`APP_MINIMUM_SYSTEM_VERSION` 从 `14.0` 改为 `26.0`。macOS 14 / 15 上的用户无法安装本版，也无法从
+alpha.17 自动更新到 alpha.18（系统拒绝部署目标更高的 bundle），会停留在 alpha.17。alpha.17 资产
+仍可下载，回退路径不受影响。理由与回退方式写在
+[发布说明](release-notes-v0.1.0-alpha.18.md) 的「破坏性变更」一节。
+
+### 按门槛清单的实测值（本版）
+
+| # | 门槛 | 实测值 / 证据 | 判定 |
+| --- | --- | --- | --- |
+| 1 | main CI（build workflow）在 main 上为绿 | PR [#192](https://github.com/Su-luoya/pi-web-desktop/pull/192) 的 `build` check `pass`（run `40086161279`，job `120849422098`），runner 标签 `macos-26`，14 个步骤全部 `success` | 通过（受保护分支不接受直推：首次 `git push origin main` 返回 `GH006: Protected branch update failed`，改走 PR） |
+| 2 | 安全审查完成，无阻断项 | 本版只删除不可达分支、替换已废弃 API、对齐版本下限；没有新增输入路径、权限判定、外链白名单、Keychain 访问或更新事务链改动。`Sources/` 的 delta 为 `+13/-18`（不含版本与文档） | 通过（改动面不足以单独出一份 `security-review-alpha.18.md`，判断依据记在本行） |
+| 3 | 最低系统变更已被 CI 实际验证 | 旧 runner 标签 `macos-14` 的系统版本低于新部署目标，无法构建；`macos-26` runner 上 `Build and test Xcode project` 与 `Build app` 均 `success` | 通过（这是本版唯一无法在本机证伪的假设，CI 已给出实测） |
+| 4 | `scan-secrets.sh` 与 `--self-test` 均退出 0 | CI 步骤 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 均 `success`；本地 `self-test: PASS`、`scan-secrets: PASS (no matches in tracked files; no untracked files)` | 两者退出 0，通过 |
+| 5 | tag 与 bundle 版本一致 | `./Scripts/check-identity.sh` → `check-identity: PASSED (45 checks)`；`./Scripts/check-release-version.sh v0.1.0-alpha.18` → `PASSED (tag v0.1.0-alpha.18, MARKETING_VERSION 0.1.0-alpha.18, CURRENT_PROJECT_VERSION 18)`；构建出的 bundle `LSMinimumSystemVersion=26.0` | 退出 0，通过 |
+| 6 | 真机 smoke 记录 | 本机脚本两种模式的结果见第 7 行；需要人点击 / 观察的 5 项见下「真机 smoke 记录（本版未执行）」 | **未执行**（不用演练值或 alpha.17 周期的旧结论冒充） |
+| 7 | 本地门槛：构建与 smoke | `./Scripts/build.sh` → `build: release build with -O -wmo`、`Built: …/build/Pi-Web-Desktop.app`、`Mach-O 64-bit executable arm64`，退出 0，日志 0 warning；`/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion"` → `26.0`；`./Scripts/smoke.sh` → `smoke: OK (both modes exit 0)` | 退出 0，通过 |
+| 8 | 脚本语法与补丁空白 | `sh -n Scripts/*.sh`（7 个脚本，无输出，退出 0）；`git diff --check` 无输出、退出 0 | 通过 |
+| 9 | 单元测试 | `xcodebuild test`（`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`）→ `Executed 951 tests, with 0 failures (0 unexpected)`，`TEST_EXIT=0` | 通过（测试数量与 alpha.17 相同：本版没有新增用例，只把 `DependencyCheckerTests` 的 outdated 边界从 13.6 改为 25.6、把 4 处 `operatingSystemVersion` 替身提到 26.0） |
+| 10 | 打包与证据（演练值） | 本版未重新做打包演练：`Scripts/package-release.sh` 的改动只有一行注释，`codesign --force --deep --sign -` 与白名单逻辑未变；发布资产由 `release.yml` 在 tag 上生成 | **未执行**（不复制 alpha.17 的演练值，本版打包路径的实测来自 release workflow） |
+| 11 | checksum 记录（与 Release 资产一致） | 见下「checksum 记录（发布后回填）」 | 发布后回填 |
+| 12 | Release 标记 prerelease，说明中写明未公证与安装限制 | 发布说明已包含 ad-hoc / 未公证、`/Applications` 限制、没有自动回滚，并单列破坏性变更 | 发布后核对 |
+
+### 真机 smoke 记录（本版未执行）
+
+与 alpha.17 相同的 5 项都需要人在真实 `/Applications` 环境点击与观察，本版没有执行。第 4 项
+（校验失败后菜单入口恢复可用）在 alpha.17 修复、本版未改动，可用 alpha.17 的结论作为参考，但
+不构成本版资产的验证。
+
+| # | 验证项 | 步骤 | 期望 | 结果 |
+| --- | --- | --- | --- | --- |
+| 1 | 自更新入口出现 | 用低于本版的构建装进 `/Applications`，点「服务 → 更新检查设置 → 检查更新…」 | 菜单出现「下载并安装桌面应用更新…」 | 未执行 |
+| 2 | 确认与安装 | 点该菜单项 → 确认框写明目标版本 → 点「更新」 | 下载、校验、替换 `/Applications` 应用，应用退出并重启 | 未执行 |
+| 3 | 安装结果可核对 | 更新后核对 `/Applications/Pi-Web-Desktop.app` | `CFBundleShortVersionString=0.1.0-alpha.18`，可执行文件 SHA-256 与 Release 资产一致 | 未执行 |
+| 4 | 校验失败即中止，且入口恢复可用 | 把下载到的 `.sha256` 换成不匹配的值后再触发更新 | 报「更新包校验失败，已停止安装」，`/Applications` 应用不变；随后菜单入口仍可再次点击 | 未执行（alpha.17 已修并有测试守护，本版未改动该路径） |
+| 5 | 非 `/Applications` 拒绝 | 把同一个构建放到 `/tmp` 运行后点该菜单项 | 报「当前应用不是从 /Applications 安装，无法自动更新。」 | 未执行 |
+
+### **本版特有的门槛：低版本系统的安装与更新行为**
+
+最低系统从 14.0 提到 26.0 是本版最大的风险面，需要单独验证。以下 3 项**都未执行**，因为执行环境
+需要一台 macOS 14 或 15 的机器，本机是 macOS 27.0：
+
+| # | 验证项 | 步骤 | 期望 | 结果 |
+| --- | --- | --- | --- | --- |
+| L1 | 低版本系统拒绝安装 | 在 macOS 14 / 15 上解压 alpha.18 的 ZIP 并尝试打开 | 系统拒绝启动，提示需要更高版本 macOS；不得出现"已损坏"这类误导性文案 | 未执行 |
+| L2 | 低版本系统不收到更新 | 在 macOS 14 / 15 上跑 alpha.17，触发检查更新 | `UpdateResponseParser` 只按 tag 与 `prerelease` 过滤，**不按 `LSMinimumSystemVersion` 过滤**；因此 alpha.17 会看到 alpha.18 并提示更新，下载安装后才会在启动阶段失败。这是已知缺陷，见下 | **未执行**（该缺陷由代码阅读确认，不是实测） |
+| L3 | 更新失败后旧安装保留 | 承 L2，在 macOS 14 / 15 上完成一次 alpha.17 → alpha.18 的更新尝试 | 旧安装保留，不出现应用被替换成无法启动的版本 | 未执行 |
+
+L2 暴露一个真实问题：**更新链路没有按最低系统版本过滤候选版本**。alpha.18 是本项目第一次提最低
+系统，因此这个缺口此前不可见。建议在下一个版本里按 `LSMinimumSystemVersion` 过滤候选 Release，
+或在 Release 资产里附带最低系统元数据。本版不修，因为改动会触及 `UpdateResponseParser` 与
+`DesktopAppReleaseAssetSelector`（已有安全评审覆盖的信任边界），需要单独一轮评审。
+
+### checksum 记录（发布后回填）
+
+| 项 | 值 |
+| --- | --- |
+| 发布资产 | 待回填 |
+| 大小 | 待回填 |
+| SHA-256 | 待回填 |
+| 复验 | 待回填 |
+
+### 还需完成
+
+- 打 tag `v0.1.0-alpha.18` 并让 `release` workflow 生成草稿 prerelease。
+- 回填 checksum 记录，核对草稿正文无 `<待填写>` 占位符后发布。
+- 在 Release Issue 里勾选全部门槛。
+- L1–L3 三项需要一台 macOS 14 / 15 机器；**L2 暴露的更新链路缺口建议单独开 Issue**。
+
+### 本版同时做的文档一致性改动
+
+- `Configuration/AppIdentity.xcconfig`（本版唯一版本来源）：`MARKETING_VERSION` → `0.1.0-alpha.18`、
+  `CURRENT_PROJECT_VERSION` → `18`、`APP_MINIMUM_SYSTEM_VERSION` → `26.0`。
+- `docs/release-notes-v0.1.0-alpha.18.md`（本版新增）：单列破坏性变更、逐条说明死代码清理与
+  `posix_spawn` 的换用理由、写明打包演练与真机验证未执行。
+- `README.md`：文档索引新增本版发布说明。
+- `docs/releasing.md`、`docs/development.md`、`docs/release-notes-template.md`：最低系统表述同步为
+  macOS 26。历史发布说明与 `docs/security-review-*.md` 是当时的实测记录，保持原样。
+- 本次发布准备**改动了 `Sources/`、`PiWebDesktopTests/`、两个 workflow 与两个打包脚本**，不是纯文档
+  发布；两个提交都已通过 CI。本节只记录本地门槛与 CI 结论，**没有** 打 tag、**没有** 碰 GitHub
+  Release 或 Issue 状态。

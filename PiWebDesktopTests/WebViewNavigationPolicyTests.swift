@@ -254,7 +254,7 @@ final class WebViewNavigationPolicyTests: XCTestCase {
 
     /// AppDelegate 必须把拒绝事件接上日志（否则拒绝证据在诊断里不可见）。
     func testAppDelegateLogsBlockedExternalNavigation() throws {
-        let app = try SourceScan.codeText(of: try SourceScan.text(ofFamily: "AppDelegate"))
+        let app = SourceScan.codeText(of: try SourceScan.text(ofFamily: "AppDelegate"))
         XCTAssertTrue(app.contains("controller.onBlockedExternalNavigation = {"))
         XCTAssertTrue(app.contains("已拒绝打开非白名单协议的链接"))
     }

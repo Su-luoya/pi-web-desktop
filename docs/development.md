@@ -4,7 +4,7 @@
 
 > 写文档或注释时的注意：personal-data 门禁是一条 `git grep` 字面量检查，所以**不要在文案里原样写出被检查的字面量**（例如用户主目录绝对路径前缀、代理端点、个人主机名）——用描述性的说法代替，否则文档本身会让门禁失败。
 
-首版目标是 Apple Silicon 和 macOS 26 或以上。构建需要 Xcode Command Line Tools、Swift 编译器和 Cocoa/WebKit SDK。`PiWebDesktop.xcodeproj` 的 6 个 build configuration 与 `Scripts/build.sh` 都只构建 arm64；应用只使用 Apple 系统框架（Cocoa/AppKit、WebKit、Security、CryptoKit、Foundation、Darwin），没有第三方运行时依赖。
+首版目标是 Apple Silicon 和 macOS 26 或以上。构建需要 Xcode Command Line Tools、Swift 编译器和 Cocoa/WebKit SDK。`PiWebDesktop.xcodeproj` 的 6 个 build configuration 与 `Scripts/build.sh` 都只构建 arm64；应用只使用 Apple 系统框架（Cocoa/AppKit、WebKit、Security、CryptoKit、Foundation、Darwin），没有第三方运行时依赖。macOS 14 / 15 不在支持范围，也不是验证目标。
 
 运行服务还需要用户自行安装：
 

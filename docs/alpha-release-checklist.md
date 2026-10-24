@@ -158,11 +158,11 @@ git diff --check
    下面这条命令**输出必须为 0**，非 0 不要发布（`grep -c` 在计数为 0 时退出码是 1，看计数而不是退出码）：
 
    ```sh
-   gh release view v<MARKETING_VERSION> --json body --jq .body | grep -c '<待填写>'
+   gh release view v<MARKETING_VERSION> --json body --jq .body | grep -c '<待填写'
    ```
 
    要在计数非 0 时立即失败，用
-   `test "$(gh release view v<MARKETING_VERSION> --json body --jq .body | grep -c '<待填写>' || true)" -eq 0`。
+   `test "$(gh release view v<MARKETING_VERSION> --json body --jq .body | grep -c '<待填写' || true)" -eq 0`。
 4. 确认草稿资产与 Issue 中记录的 checksum 一致，然后发布（保持 prerelease 标记）。
    在这之前资产不会公开可见。
 5. 在 Release Issue 中记录最终 Release 链接与发布日期，勾选全部门槛。
@@ -1754,7 +1754,7 @@ iCloud 同步目录）的候选树上采集；打包演练（P1–P9）在**非�
 | 9 | 单元测试 | `xcodebuild test`（`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`）→ `Executed 951 tests, with 0 failures (0 unexpected)`，`** TEST SUCCEEDED **` | 通过（本版新增 8 个：`UpdateCheckTimerModeTests` 3 个、`DesktopAppUpdateFailurePathTests` 5 个） |
 | 10 | 打包与证据（演练值） | 见下「本版演练记录」：`package-release: OK`、`Pi-Web-Desktop-0.1.0-alpha.17+build.17.zip`（`1647154` 字节，SHA-256 `e74119ec…8d4751b`）、白名单条目集合一致（8 条，无 `__MACOSX/`）、`shasum -a 256 -c` → `OK`、解包后 `codesign --verify --deep --strict` 退出 0 | 通过（**演练值**；发布资产由 `release.yml` 在 tag 上生成） |
 | 11 | checksum 记录（与 Release 资产一致） | 见下「checksum 记录（发布后已回填）」；发布后从公开发布页重新下载，`shasum -a 256 -c` → `OK`；GitHub 资产 `digest` 与 `.sha256` 内容逐字符一致 | 通过 |
-| 12 | Release 标记 prerelease，说明中写明未公证与安装限制 | `draft=false`、`prerelease=true`、`publishedAt=2026-10-23T07:54:05Z`；正文含 ad-hoc / 未公证、`/Applications` 限制、信任边界与「没有自动回滚」；回落前 `grep -c '<待填写>'` 已为 `0` | 通过 |
+| 12 | Release 标记 prerelease，说明中写明未公证与安装限制 | `draft=false`、`prerelease=true`、`publishedAt=2026-10-23T07:54:05Z`；正文含 ad-hoc / 未公证、`/Applications` 限制、信任边界与「没有自动回滚」；回落前 `grep -c '<待填写'` 已为 `0` | 通过 |
 | 13 | 回退路径确认（上一版 `v0.1.0-alpha.16` 资产仍可下载） | alpha.16 ZIP 直链 `HEAD` 跟随重定向后 `HTTP/2 200`、`content-length: 1624132` | 通过 |
 
 ### 本版演练记录（`/tmp/piweb-alpha17`，非同步副本）

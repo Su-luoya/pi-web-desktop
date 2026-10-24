@@ -13,7 +13,7 @@
 ## 目标
 
 - 版本：v<MARKETING_VERSION>（build <CURRENT_PROJECT_VERSION>）
-- 类型：alpha 预览，Apple Silicon，macOS 14+，ad-hoc 签名，未公证
+- 类型：alpha 预览，Apple Silicon，macOS 26+，ad-hoc 签名，未公证
 - 发布 workflow run：<workflow 运行链接>
 - 草稿 Release：<draft Release 链接>
 
@@ -68,7 +68,7 @@
 
    三条命令都必须退出 0。`check-release-version.sh` 的 tag 必须写成完整的
    `v<MARKETING_VERSION>`；版本值只存在于 `Configuration/AppIdentity.xcconfig`，不要在别处复制。
-4. **真机 smoke 记录。** 在一台真实的 Apple Silicon Mac（macOS 14+）上运行：
+4. **真机 smoke 记录。** 在一台真实的 Apple Silicon Mac（macOS 26+）上运行：
 
    ```sh
    ./Scripts/smoke.sh
@@ -257,7 +257,7 @@ Provider 的重挂载时机；注入的 32 字节 FinderInfo 值取自同步目�
 
 | # | 门槛 | 覆盖位置 | 本机状态 |
 | --- | --- | --- | --- |
-| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-14` job 覆盖 |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖 |
 | C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds`（`check-identity.sh --test-bundle …`） | 本机只检查了脚本产物，由 CI 覆盖 |
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`；该步骤由 CI 覆盖（本地复现命令见[开发说明](development.md#personal-data-与-secret-扫描能力)） |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；Issue 中记录 run 链接 |
@@ -278,7 +278,7 @@ SHA-256 每次都不同，原因见上）。
 - **Release workflow**：run `35417813221`（macos-14，arm64）全绿，含 `xcodebuild build/test`、脚本构建、身份检查、smoke launch、ZIP/checksum/签名证据打包与 draft 生成。
 - **下载产物复核（Apple M4 / macOS 27.0 / arm64）**：`shasum -a 256 -c` 通过；`codesign --verify --deep --strict` 通过（`adhoc`，`TeamIdentifier=not set`）；`unzip -l` 9 项且无源码/测试/日志/个人路径；对下载产物运行 `PI_WEB_DESKTOP_SMOKE=1` 输出 `smoke: ready` 且退出 0。
 - **SHA-256**：`aa6c51851adb3cc457191fb96f7f08b6b34810ec335b07666cc91af4ebedd915`
-- **macOS 14 边界**：macOS 14 层面的验证由 CI 的 `macos-14` runner 承担；本机证据的系统版本为 macOS 27.0，两者在 Release 说明与 Issue #15 中分别标注，不混同。
+- **macOS 14 边界**：macOS 14 层面的验证由 CI 的 `macos-26` runner 承担；本机证据的系统版本为 macOS 27.0，两者在 Release 说明与 Issue #15 中分别标注，不混同。
 
 ### 发布过程中修复的两个真实缺陷
 
@@ -344,7 +344,7 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
 
 | # | 门槛 | 覆盖位置 | 本机状态 |
 | --- | --- | --- | --- |
-| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-14` job 覆盖 |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖 |
 | C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds` | 本机只检查了脚本产物，由 CI 覆盖 |
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`；该步骤由 CI 覆盖 |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；Issue 中记录 run 链接 |
@@ -439,7 +439,7 @@ alpha.3 的新增功能。
 
 | # | 门槛 | 覆盖位置 | 本机状态 |
 | --- | --- | --- | --- |
-| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-14` job 覆盖 |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖 |
 | C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds` | 本机只检查了脚本产物，由 CI 覆盖 |
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`；该步骤由 CI 覆盖 |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；Issue 中记录 run 链接 |
@@ -552,7 +552,7 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
 
 | # | 门槛 | 覆盖位置 | 本机状态 |
 | --- | --- | --- | --- |
-| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-14` job 覆盖。本版新增的 XCTest 文件：`PiWebDesktopTests/UpdateAbandonedAttemptTests.swift`，以及 `UpdateCheckerTests` / `UpdateTransactionTests` / `PiProcessInspectorTests` / `PiWebUpdateAdapterTests` / `PiPackageUpdateAdapterTests` / `PiCLIUpdateAdapterTests` / `UpdateSettingsTests` 的增量用例 |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖。本版新增的 XCTest 文件：`PiWebDesktopTests/UpdateAbandonedAttemptTests.swift`，以及 `UpdateCheckerTests` / `UpdateTransactionTests` / `PiProcessInspectorTests` / `PiWebUpdateAdapterTests` / `PiPackageUpdateAdapterTests` / `PiCLIUpdateAdapterTests` / `UpdateSettingsTests` 的增量用例 |
 | C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds` | 本机只检查了脚本产物，由 CI 覆盖 |
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`；该步骤由 CI 覆盖 |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；Issue 中记录 run 链接 |
@@ -729,7 +729,7 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
 
 | # | 门槛 | 覆盖位置 | 本机状态 |
 | --- | --- | --- | --- |
-| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-14` job 覆盖。本版新增的 XCTest 文件：`PiWebDesktopTests/QuitCoordinatorTests.swift`（#72）、`PiWebDesktopTests/ToolPathTests.swift`（#89）；`PiWebDesktopTests/` 下另外 16 个既有文件带增量用例（`git diff --name-only v0.1.0-alpha.4..6821ecd -- PiWebDesktopTests/` 共 18 个文件），其中 #94 改动 `PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`、`PiWebDesktopTests/UpdateTransactionTests.swift`，#95 改动 `PiWebDesktopTests/PiWebUpdateAdapterTests.swift`、`PiWebDesktopTests/PiCLIUpdateAdapterTests.swift`、`PiWebDesktopTests/UpdateAbandonedAttemptTests.swift`、`PiWebDesktopTests/UpdateTransactionTests.swift` |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖。本版新增的 XCTest 文件：`PiWebDesktopTests/QuitCoordinatorTests.swift`（#72）、`PiWebDesktopTests/ToolPathTests.swift`（#89）；`PiWebDesktopTests/` 下另外 16 个既有文件带增量用例（`git diff --name-only v0.1.0-alpha.4..6821ecd -- PiWebDesktopTests/` 共 18 个文件），其中 #94 改动 `PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`、`PiWebDesktopTests/UpdateTransactionTests.swift`，#95 改动 `PiWebDesktopTests/PiWebUpdateAdapterTests.swift`、`PiWebDesktopTests/PiCLIUpdateAdapterTests.swift`、`PiWebDesktopTests/UpdateAbandonedAttemptTests.swift`、`PiWebDesktopTests/UpdateTransactionTests.swift` |
 | C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds`（`check-identity.sh --test-bundle …`） | 本机只检查了脚本产物（`check-identity: PASSED (45 checks)`），Xcode 产物与 `.xctest` 由 CI 覆盖 |
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`（自检 + 仓库扫描）；该步骤由 CI 覆盖 |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；Issue 中记录 run 链接。合并前各提交的 CI 结果：#94 的 `b99e501` pass 4m23s、`87f124b` pass；#95 的 `6622b5d` pass 3m34s；合并后 main `6821ecd` pass 4m16s（run `35491357493`） |
@@ -862,7 +862,7 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
 
 | # | 门槛 | 覆盖位置 | 本机状态 |
 | --- | --- | --- | --- |
-| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-14` job 覆盖。本版新增/改动的测试只有 `PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`（+94 行）与 `PiWebDesktopTests/PiCLIUpdateAdapterTests.swift`（+59 行），共 5 个确定性用例（#102） |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖。本版新增/改动的测试只有 `PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`（+94 行）与 `PiWebDesktopTests/PiCLIUpdateAdapterTests.swift`（+59 行），共 5 个确定性用例（#102） |
 | C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds`（`check-identity.sh --test-bundle …`） | 本机只检查了脚本产物（`check-identity: PASSED (45 checks)`），Xcode 产物与 `.xctest` 由 CI 覆盖 |
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`（自检 + 仓库扫描）；该步骤由 CI 覆盖 |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；本版三个提交的 main run 均为 **success**：`3306398`（#100）run `35493841592`、`a47dd46`（#102）run `35494635211`、`8b591c9`（#104）run `35494836484` |
@@ -995,7 +995,7 @@ squash 合入 main → `fba1f12`（CI run `35499346342`，`build` success）；t
 
 | # | 门槛 | 覆盖位置 | 本机状态与回填结果 |
 | --- | --- | --- | --- |
-| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-14` job 覆盖。本版新增/改动的测试集中在 `PiWebDesktopTests/UpdateTransactionTests.swift`（#105 / #106）、`PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`（#107）、`PiWebDesktopTests/PiCLIUpdateAdapterTests.swift` 与 `PiWebDesktopTests/PiWebUpdateAdapterTests.swift`（#108） |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖。本版新增/改动的测试集中在 `PiWebDesktopTests/UpdateTransactionTests.swift`（#105 / #106）、`PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`（#107）、`PiWebDesktopTests/PiCLIUpdateAdapterTests.swift` 与 `PiWebDesktopTests/PiWebUpdateAdapterTests.swift`（#108） |
 | C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds`（`check-identity.sh --test-bundle …`） | 本机只检查了脚本产物（`check-identity: PASSED (45 checks)`），Xcode 产物与 `.xctest` 由 CI 覆盖 |
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`（自检 + 仓库扫描）；该步骤由 CI 覆盖 |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；本版六个提交的 main run 均为 **success**：`af47866`（#112）run `35496917660`、`9ede020`（#113）run `35497135814`、`be13c88`（#114）run `35497336171`、`0c1610c`（#115）run `35497649990`、`fbae499`（#117）run `35497954810`、`4e6e332`（#116）run `35498186531` |

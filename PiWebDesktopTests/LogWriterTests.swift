@@ -396,8 +396,56 @@ final class LogWriterTests: XCTestCase {
     }
 
     /// GitHub #38 R-1：就地脱敏必须幂等——第二次 scrub 不能吞掉第一次留下的 `}`。
-    func testScrubbingAnAlreadyRedactedLogIsByteStable() {
+    ///
+    /// 另：脱敏替换与轮转改名都改成了 `rename(2)` 原子覆盖，而不是旧的
+    /// `removeItem` + `moveItem` 两步。这里验证替换后旧日志仍完整可读、不留临时文件。
+    ///
+    /// **局限（必须诚实记录）**：这条测试不能区分新旧实现。非原子窗口只在两步之间
+    /// 失败时暴露（磁盘满、权限、进程被杀），测试无法可靠制造那个瞬间；实测把实现
+    /// 回退到旧写法，本测试仍然全绿。原子性靠 `rename(2)` 的语义保证，不靠这条测试。
+    func testScrubReplaceLeavesTheLogReadableAndNeverMissing() throws {
         let writer = makeWriter()
+        // 直接写盘绕过即时脱敏，制造「历史日志里还有明文」的现场。
+        try FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "token=secret-to-redact trailing-context\n".write(to: logURL, atomically: true, encoding: .utf8)  // scan-secrets: allow(reason=redaction fixture)
+
+        XCTAssertTrue(writer.scrubExistingLog())
+        // 替换后文件必须存在且完整：既没被删掉，也没截断成空。
+        XCTAssertTrue(FileManager.default.fileExists(atPath: logURL.path), "脱敏替换后日志不能消失")
+        let after = text(at: logURL)
+        XCTAssertFalse(after.isEmpty, "脱敏替换后日志不能变空")
+        XCTAssertFalse(after.contains("secret-to-redact"), after)
+        // `token=...` 后面的同一行内容会一并被屏蔽（redactor 既有行为，不属本测试范围）。
+        XCTAssertTrue(after.contains("<redacted>"), after)
+        // 临时文件不能残留。
+        let leftovers = (try? FileManager.default.contentsOfDirectory(
+            atPath: logURL.deletingLastPathComponent().path
+        ))?.filter { $0.contains(".scrub-") } ?? []
+        XCTAssertTrue(leftovers.isEmpty, "脱敏临时文件不能残留：\(leftovers)")
+        XCTAssertNil(writer.failureDescription)
+    }
+
+    /// 连续多次脱敏必须幂等且不丢内容：每次都是原子替换，不能越洗越少。
+    func testRepeatedScrubbingNeverLosesContent() throws {
+        let writer = makeWriter()
+        let filler = String(repeating: "context-line ", count: 40)
+        try FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try ("token=secret-to-redact\n" + filler + "\n").write(to: logURL, atomically: true, encoding: .utf8)  // scan-secrets: allow(reason=redaction fixture)
+
+        var previous = ""
+        for round in 1...5 {
+            // 第 1 轮真有改动；之后已经洗干净，返回 false 也是正确行为。
+            _ = writer.scrubExistingLog()
+            let now = text(at: logURL)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: logURL.path), "第 \(round) 轮后日志消失")
+            XCTAssertTrue(now.contains("context-line"), "第 \(round) 轮后正文丢失")
+            if round > 1 { XCTAssertEqual(now, previous, "第 \(round) 轮不应改变已脱敏内容") }
+            previous = now
+        }
+        XCTAssertNil(writer.failureDescription)
+    }
+
+    func testScrubbingAnAlreadyRedactedLogIsByteStable() {        let writer = makeWriter()
         XCTAssertTrue(writer.append("{\"token\": \"json-secret-value\"} trailing-context\n"))
         XCTAssertTrue(writer.scrubExistingLog())
         let once = text(at: logURL)

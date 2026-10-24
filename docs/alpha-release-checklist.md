@@ -1963,3 +1963,67 @@ L2 暴露的缺口本版已修，但修的位置值得记清楚：**没有**改 
 - 本次发布准备**改动了 `Sources/`、`PiWebDesktopTests/`、两个 workflow 与两个打包脚本**，不是纯文档
   发布；两个提交都已通过 CI。本节只记录本地门槛与 CI 结论，**没有** 打 tag、**没有** 碰 GitHub
   Release 或 Issue 状态。
+
+## Release v0.1.0-alpha.19 执行记录
+
+本版候选：`v0.1.0-alpha.18` 之后合并的 4 个 PR（[#194](https://github.com/Su-luoya/pi-web-desktop/pull/194)
+SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-desktop/pull/195) 删除访问密码 +
+两个设置窗口支持缩放 + 精简服务菜单、[#196](https://github.com/Su-luoya/pi-web-desktop/pull/196)
+文档同步、[#197](https://github.com/Su-luoya/pi-web-desktop/pull/197) 修复 Pi CLI 自动更新开关失效 +
+精简更新偏好窗口文案），加上本版发布提交的版本 bump、发布说明与本节执行记录。
+
+本版是**界面与更新链路的整理发布**：一处用户可见的功能删除、一个真实功能缺陷修复、若干减少说明文字的
+界面调整。`git diff --stat v0.1.0-alpha.18..HEAD` 为 40 files, +1017 / -2322（净 -1305，主要来自删除
+`KeychainStore.swift` 611 行与 `KeychainStoreTests.swift` 616 行）。
+
+### 破坏性变更：访问密码功能整体删除
+
+`Sources/Services/KeychainStore.swift` 与 `PiWebDesktopTests/KeychainStoreTests.swift` 整体删除；
+设置窗口的密码输入/生成/保存/删除、启动 `pi-web` 时注入的 `PI_WEB_PASSWORD`、`ServiceManager`
+中的密码状态接口与提示一并移除。
+
+**方向是放松**：非 loopback 监听不再有应用层凭证门控，明文 HTTP 上没有认证。理由与替代方案（应用外
+套 HTTPS 反向代理或加密隧道）写在[发布说明](release-notes-v0.1.0-alpha.19.md) 的「破坏性变更」一节。
+
+### 按门槛清单的实测值（本版）
+
+| # | 门槛 | 实测值 / 证据 | 判定 |
+| --- | --- | --- | --- |
+| 1 | main CI（build workflow）在 main 上为绿 | PR [#197](https://github.com/Su-luoya/pi-web-desktop/pull/197) 的 `build` check `pass`（run `40099492188`，job `120888515956`），耗时 5m31s，runner 标签 `macos-26`；合并后 `main` 上 run `40099950274` 同样 `success` | 通过（受保护分支不接受直推，四个改动全部走 PR 合并） |
+| 2 | 安全审查完成，无阻断项 | 本版信任边界有一处变化，方向是**放松**：删除 Keychain 访问与 `PI_WEB_PASSWORD` 注入。没有新增输入路径、外链白名单或权限判定；`ListeningAddressPolicy` 的地址判定规则未改，`ServiceAddressVerdict` 仍对通配地址、空值、非法字符逐条拒绝。`Sources/` 的净 delta 以删除为主 | 通过（删除凭证功能的改动面不足以单独出 `security-review-alpha.19.md`，判断依据记在本行；已知代价是明文 HTTP 上的远程访问无认证，已在发布说明与界面文案中写明） |
+| 3 | 更新链路缺陷已修复且有测试 | `autoUpdatePiCLIButton` 补上 `target`/`action`；`handleUpdateCheckResults` 补 in-flight 守卫；`UpdateChecker.preferences` setter 在 restartTimers 后立即 `checkIfDue` | 通过（见第 9 行的测试结论） |
+| 4 | `scan-secrets.sh` 与 `--self-test` 均退出 0 | 本地 `scan-secrets: PASS (no matches in tracked files; no untracked files)`；CI 步骤 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 均 `success` | 通过 |
+| 5 | tag 与 bundle 版本一致 | `./Scripts/check-identity.sh` → `check-identity: PASSED (45 checks)`；`./Scripts/check-release-version.sh` → `PASSED (MARKETING_VERSION 0.1.0-alpha.19, CURRENT_PROJECT_VERSION 19; tag comparison skipped)`（tag 尚未创建，脚本按设计跳过 tag 比对）；构建出的 bundle：`LSMinimumSystemVersion=26.0`、`CFBundleShortVersionString=0.1.0-alpha.19`、`CFBundleVersion=19` | 退出 0，通过 |
+| 6 | 真机 smoke 记录 | 脚本两种模式见第 7 行。需要人点击/观察的 GUI 项**本版未逐项执行**：删除密码与窗口缩放的实际观感只有源码级断言覆盖（`AppMenuHygieneTests` 的窗口样式位、最小尺寸、滚动兜底断言）。不做演练值填充 | **部分覆盖**（脚本 + 源码级断言，无 GUI 截图比对） |
+| 7 | 本地门槛：构建与 smoke | `./Scripts/build.sh` → 退出 0，产物 `build/Pi-Web-Desktop.app`，`Mach-O 64-bit executable arm64`；`/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion"` → `26.0`；`./Scripts/smoke.sh` → `smoke: OK (markers "smoke: ready" and "smoke: diagnostics ready", both modes exit 0)` | 退出 0，通过 |
+| 8 | 脚本语法与补丁空白 | `sh -n Scripts/*.sh`（7 个脚本，无输出）；`git diff --check` 无输出 | 通过 |
+| 9 | 单元测试 | `xcodebuild test`（`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`）→ `Executed 919 tests, with 0 failures (0 unexpected)`，`TEST SUCCEEDED` | 通过（相对 alpha.18 的 953 件净减 34：`KeychainStoreTests.swift` 整个文件 616 行随密码功能删除；新增 `AppMenuHygieneTests` 5 条窗口断言、`UpdateSettingsTests` 4 条 `shortLine` 分支、`DesktopAppUpdateTests` 1 条 SHA-256 失败路径；`ServiceManagerTests`、`ServiceAddressesTests`、`DiagnosticsCollectorTests`、`ToolPathTests` 随逻辑调整更新断言） |
+| 10 | 打包与证据 | 待 tag 后由 `release` workflow 生成 | 发布后回填 |
+| 11 | checksum 记录（与 Release 资产一致） | 待回填 | 发布后回填 |
+| 12 | Release 标记 prerelease，说明中写明未公证与安装限制 | 发布说明已包含 ad-hoc / 未公证、`/Applications` 限制、没有自动回滚，并单列破坏性变更 | 发布后核对 |
+
+### 本版一条测试先红后绿
+
+`testShortLineWithoutAttemptSaysNotCheckedYet` 初版失败：`("尚未检查 · 尚未检查") is not equal to ("尚未检查")`。
+说明 `UpdateCategoryStatus.resultTitle` 在 `status == nil` 时已经返回「尚未检查」，`shortLine` 又追加了一次。
+代码据此收敛，并补上 `testShortLineForDisabledCategorySaysOff` 覆盖「关闭的类别只显示已关闭、不残留旧结论」。
+
+### 还需完成
+
+- 打 tag `v0.1.0-alpha.19` 并让 `release` workflow 生成草稿 prerelease。
+- 回填第 10–11 行的打包与 checksum 记录，核对草稿正文无 `<待填写>` 占位符后发布。
+- **不包含**在 macOS 14 / 15 上的安装或更新验证：支持范围不含这两个系统。
+
+### 本版同时做的文档一致性改动
+
+- `Configuration/AppIdentity.xcconfig`（本版唯一版本来源）：`MARKETING_VERSION` → `0.1.0-alpha.19`、
+  `CURRENT_PROJECT_VERSION` → `19`。
+- `docs/release-notes-v0.1.0-alpha.19.md`（本版新增）。
+- `README.md`：文档索引更新为本版发布说明。
+- `docs/architecture.md`、`docs/privacy.md`、`docs/settings-and-workspace.md`、`docs/logging-and-diagnostics.md`、
+  `docs/development.md`：同步删除密码后的真实状态（架构一节改为「监听边界与远程访问」、隐私文档写明
+  应用不保存任何访问密码）、更新菜单已提到顶层、偏好窗口不再展示被忽略版本与下次检查时间。
+- 历史发布说明与 `docs/security-review-*.md` 是当时的实测记录，保持原样。
+- 本次发布准备**改动了 `Sources/`、`PiWebDesktopTests/` 与 `PiWebDesktop.xcodeproj/project.pbxproj`**，
+  不是纯文档发布；四个 PR 都已通过 CI。本节只记录本地门槛与 CI 结论，**没有** 打 tag、**没有** 碰
+  GitHub Release 或 Issue 状态。

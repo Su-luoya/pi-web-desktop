@@ -73,7 +73,7 @@ final class TimedProbeCommandRunner: CommandRunning {
 /// 不升级、不联网、不调用 `sudo`，也不读取任何认证内容。修复建议只来自
 /// `InstallCommandManifest` 的静态常量，由用户自己复制执行。
 struct DependencyChecker {
-    static let minimumMacOSVersion = OperatingSystemVersion(majorVersion: 14, minorVersion: 0, patchVersion: 0)
+    static let minimumMacOSVersion = OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0)
     static var minimumNodeVersion: SemanticVersion { InstallCommandManifest.minimumNodeVersion }
 
     static let shellPath = "/bin/zsh"
@@ -393,7 +393,7 @@ struct DependencyChecker {
 
     // MARK: - 检查项
 
-    /// 系统只做提示：不是 Apple Silicon 记 missing，macOS 低于 14 记 outdated。
+    /// 系统只做提示：不是 Apple Silicon 记 missing，macOS 低于 26 记 outdated。
     private func makeSystemFinding() -> DependencyFinding {
         let architecture = trimmed(system.architecture()) ?? "unknown"
         let osVersion = system.operatingSystemVersion()

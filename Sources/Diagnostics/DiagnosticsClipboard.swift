@@ -38,7 +38,7 @@ enum DiagnosticsClipboard {
             alert.beginSheetModal(for: window, completionHandler: complete)
         } else {
             // 不可见窗口上不挂 sheet；应用级模态不改变任何窗口的可见性。
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
             complete(alert.runModal())
         }
     }

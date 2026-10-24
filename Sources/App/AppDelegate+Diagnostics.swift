@@ -401,7 +401,7 @@ extension AppDelegate {
             diagnosticsWindowController?.refreshUpdateStatus()
         }
         if !NSApp.isActive {
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
         }
     }
 

@@ -426,9 +426,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        if #available(macOS 12.0, *) {
-            panel.allowedContentTypes = [.unixExecutable]
-        }
+        panel.allowedContentTypes = [.unixExecutable]
         guard let host = sheetParentWindow() else { return }
         panel.beginSheetModal(for: host) { [weak self] response in
             guard response == .OK, let url = panel.url else { return }

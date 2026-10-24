@@ -63,6 +63,11 @@ final class UpdateChecker {
             settingsLock.unlock()
             guard started, !stopped else { return }
             restartTimers()
+            // 刚把某一类从“关闭”打开时，上一次检查可能已经是很久以前：新的周期
+            // 计时器从现在开始计时，会让“打开后立刻能看到当前版本”变成“最多再等
+            // 一整个周期”。这里顺手跑一次到期判定：没有到期对象时它什么都不做，
+            // 有到期对象时立即补上一次检查。
+            checkIfDue(triggeredBy: .scheduled)
         }
     }
     private var preferencesValue: UpdateCheckPreferences

@@ -661,6 +661,76 @@ final class UpdateSettingsTests: XCTestCase {
         XCTAssertTrue(text.contains(UpdateCheckUpstream.npmRegistryHost))
     }
 
+    // MARK: - 偏好窗口的一行状态
+
+    /// 偏好窗口每类只留一行：结果 + 最近检查。策略已由同一行的下拉框展示，
+    /// 忽略版本、下次检查时间、缓存来源与失败分类都归诊断页。
+    func testShortLineKeepsOnlyResultAndTimestamp() {
+        let withAttempt = UpdateCategoryStatus(
+            category: .desktopApp,
+            lastAttemptAt: referenceDate,
+            status: .upToDate,
+            installedVersion: "2.4.1",
+            latestVersion: "2.4.1",
+            ignoredVersion: "2.4.0",
+            nextCheckAt: referenceDate.addingTimeInterval(3600),
+            origin: .cachedFallback,
+            cacheWrittenAt: referenceDate
+        )
+        let line = UpdateStatusPresenter.shortLine(
+            for: withAttempt,
+            policy: .daily,
+            format: fixedFormat
+        )
+        XCTAssertTrue(line.hasPrefix("最新"), "首段必须是结论，实际：\(line)")
+        XCTAssertTrue(line.contains("上次检查"), "必须带上最近检查时间，实际：\(line)")
+        for dropped in ["策略", "被忽略版本", "下次检查", "缓存", "来源"] {
+            XCTAssertFalse(line.contains(dropped), "偏好窗口不该出现「\(dropped)」：\(line)")
+        }
+        // 四类组件四行叠起来必须仍然读得完。
+        XCTAssertLessThan(line.count, 60, "单行过长就不再是概括：\(line)")
+    }
+
+    /// 从未检查过时不能说“上次检查”，只能明说尚未检查。
+    func testShortLineWithoutAttemptSaysNotCheckedYet() {
+        let never = UpdateCategoryStatus(category: .piCLI)
+        XCTAssertEqual(
+            UpdateStatusPresenter.shortLine(for: never, policy: .daily, format: fixedFormat),
+            "尚未检查"
+        )
+    }
+
+    /// 关掉的类别只显示“已关闭”，不展示旧结论。
+    func testShortLineForDisabledCategorySaysOff() {
+        let stale = UpdateCategoryStatus(
+            category: .piWeb,
+            lastAttemptAt: referenceDate,
+            status: .updateAvailable,
+            installedVersion: "0.1.0",
+            latestVersion: "0.2.0"
+        )
+        XCTAssertEqual(
+            UpdateStatusPresenter.shortLine(for: stale, policy: .off, format: fixedFormat),
+            "已关闭"
+        )
+    }
+
+    /// 失败时结论仍是“失败”，并补一次可读原因（不带 HTTP 状态码）。
+    func testShortLineAppendsReadableReasonOnFailure() {
+        var failed = UpdateCategoryStatus(category: .piWeb)
+        failed.status = .unknown
+        failed.failure = .offline
+        failed.lastAttemptAt = referenceDate
+        let line = UpdateStatusPresenter.shortLine(
+            for: failed,
+            policy: .daily,
+            format: fixedFormat
+        )
+        XCTAssertTrue(line.hasPrefix("失败"), "实际：\(line)")
+        XCTAssertTrue(line.contains("网络不可用"), "必须给出可读原因，实际：\(line)")
+        XCTAssertFalse(line.contains("500"), "状态码只归诊断页：\(line)")
+    }
+
     // MARK: - AppConfiguration 接线
 
     func testAppConfigurationRoundTripsUpdateSettingsThroughInjectedDefaults() {

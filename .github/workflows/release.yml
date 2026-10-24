@@ -148,7 +148,9 @@ jobs:
             echo "::error::the rendered release notes do not contain the ZIP checksum"
             exit 1
           fi
-          unfilled="$(grep -c '<待填写>' dist/release-body.md || true)"
+          # 匹配前缀而不是完整标签：模板里出现过 `<待填写：说明>` 变体，
+          # 只匹配 `<待填写>` 会把它漏数（发布后回填时才发现）。
+          unfilled="$(grep -c '<待填写' dist/release-body.md || true)"
           # Warning, not error: the draft must still be created so a maintainer can
           # fill these fields from the Release Issue. The hard gate is the manual
           # pre-publish check documented in docs/releasing.md and

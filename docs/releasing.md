@@ -276,13 +276,13 @@ Release 说明由 `docs/release-notes-template.md` 渲染；每个版本还会�
 **输出必须为 0**；非 0 就先补填，不要发布：
 
 ```sh
-gh release view v<MARKETING_VERSION> --json body --jq .body | grep -c '<待填写>'
+gh release view v<MARKETING_VERSION> --json body --jq .body | grep -c '<待填写'
 ```
 
 `grep -c` 在计数为 0 时退出码是 1，不要只看管道退出码；要在计数非 0 时立即失败，用：
 
 ```sh
-test "$(gh release view v<MARKETING_VERSION> --json body --jq .body | grep -c '<待填写>' || true)" -eq 0
+test "$(gh release view v<MARKETING_VERSION> --json body --jq .body | grep -c '<待填写' || true)" -eq 0
 ```
 
 ## 可复现性与诚实的边界

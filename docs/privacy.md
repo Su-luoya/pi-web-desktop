@@ -42,16 +42,14 @@ Pi Web Desktop 在应用运行期间做只读的版本查询，只提示、不�
 ## 本地数据
 
 - 普通设置写入 UserDefaults，其中包含超时/放弃等待的「已放弃」记录（`updateChecks.piWeb.abandonedAttempt` / `updateChecks.pi.abandonedAttempt` / `updateChecks.piPackages.abandonedAttempts`，见下文）：只含固定文案、已校验的组件/包名、脱敏后的命令摘要、时间与来源，不含绝对路径、环境变量值或凭据。
-- 远程访问密码只写入 macOS Keychain：`kSecClassGenericPassword`，service 为应用 bundle identifier，account 为 `remote-access-password`，可访问性为 `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`（设备解锁一次后可读，且不随备份迁移到其他设备）。密码不进入 UserDefaults、命令行参数、日志文件、诊断文本或错误消息；设置界面只显示“已设置/未设置”，已保存的密码不会被读回显示。
-- 只有远程模式（监听地址不是 loopback）启动托管服务时，密码才经子进程环境变量 `PI_WEB_PASSWORD` 传给 pi-web；loopback 模式不注入，并会清除继承来的同名变量。
-- 删除 Keychain 密码条目会立即关闭远程模式：监听地址回到 `127.0.0.1` 并更新配置；若密码是在服务运行期间被删除或变成不可读，应用会先停止本应用启动且仍可验证所有权的远程进程组（外部服务不发信号），再把配置收回到 `127.0.0.1` 并显示可读提示。
+- 应用不保存任何访问密码：Keychain 里没有本应用的条目，子进程环境也不注入 `PI_WEB_PASSWORD`（继承来的同名变量会被移除）。
 - 运行状态写入 `~/Library/Application Support/Pi Web Desktop/`。
 - 日志写入 `~/Library/Logs/Pi Web Desktop/Pi Web Desktop.log`（见 `Sources/App/AppPaths.swift`），超过 10 MB 轮转为 `.1.log` … `.5.log`。写入日志的每一行、错误消息、环境变量与命令行展示、诊断导出都经过同一个 `LogRedactor` 实例；托管 pi-web 的 stdout/stderr 也一样：子进程接在应用侧持有的管道上，输出先逐行脱敏再写入日志（GitHub #73），子进程不再直接写日志文件。启动前自动更新的决策、参数数组、退出码与前后版本也走同一实例，环境变量只记键名、不记值，子进程输出只保留截断尾部（Pi CLI 更新的进程记录同样先完成凭据与 Home 脱敏再写入日志）。规则与边界见 [日志与诊断导出](logging-and-diagnostics.md)。
 - `WKWebView` 使用系统默认的持久化网站数据存储：`Sources/App/WebViewController.swift:40` 设置 `configuration.websiteDataStore = .default()`，`Sources/` 里没有任何 `WKWebsiteDataStore` 的删除调用。WebKit 因此会以 bundle identifier 为键，在应用自己的 UserDefaults/Application Support 之外持久化网站数据：`~/Library/WebKit/io.github.su-luoya.pi-web-desktop/WebsiteData/`（本机观察到 `Default/`、`IndexedDB/`、`LocalStorage/`、`SearchHistory/`、`ResourceLoadStatistics/`、`EnhancedSecurity/` 等子目录）和 `~/Library/Caches/io.github.su-luoya.pi-web-desktop/WebKit/`（观察到 `NetworkCache/`、`CacheStorage/`、`ServiceWorkers/`、`HSTS/`、`AlternativeServices/`）。这些文件（WebKit 保存的 cookies、缓存、local storage、IndexedDB、Service Worker 记录等，具体取决于服务页面和 WebKit 版本；本机未在 `~/Library/Cookies/` 或 `~/Library/HTTPStorages/` 下观察到属于本 bundle id 的独立文件）由 WebKit 管理，应用自身不读取也不解析它们。当前构建未启用 App Sandbox，所以路径就在用户的 `~/Library` 下，而不是沙盒容器里。
 - 应用不读取、复制或迁移 `~/.pi/agent/auth.json` 等 Pi 认证内容。
 - 首次启动诊断只检查 `~/.pi/agent` 是否存在与可读（不列目录、不读取任何文件），报告里只出现脱敏后的路径 `~/.pi/agent`。
 - 用户在诊断窗口选择 pi-web 路径时，只对该文件做两件本地只读的事：执行 `--version`、向上查找并读取 package.json 的 `name`（不安装、不联网、不读取其他文件）。
-- 组件安装识别（GitHub #16）同样只读：它只执行只读命令（`--version`、`npm root -g`、`pnpm root -g`、`pi list`、登录 shell 的 `command -v`）、只读可执行位/符号链接/真实路径、最多向上 6 层读 `package.json` 与检查 `.git` 是否存在（目录只看存在性；`.git` 是文件时只读它一次，不解析内容）。它不执行安装/升级/卸载命令、不调用 `sudo`、不联网、不读 Keychain、不读 `~/.pi` 认证内容；除了写日志/诊断（仍经同一个 `LogRedactor`）以外不写任何文件，也不修改用户全局目录（`~/.npm-global`、npm prefix、Homebrew 前缀都只读）。临时目录夹具的隔离断言见 [开发说明](development.md) 的测试分层一节。
+- 组件安装识别（GitHub #16）同样只读：它只执行只读命令（`--version`、`npm root -g`、`pnpm root -g`、`pi list`、登录 shell 的 `command -v`）、只读可执行位/符号链接/真实路径、最多向上 6 层读 `package.json` 与检查 `.git` 是否存在（目录只看存在性；`.git` 是文件时只读它一次，不解析内容）。它不执行安装/升级/卸载命令、不调用 `sudo`、不联网、不读 `~/.pi` 认证内容；除了写日志/诊断（仍经同一个 `LogRedactor`）以外不写任何文件，也不修改用户全局目录（`~/.npm-global`、npm prefix、Homebrew 前缀都只读）。临时目录夹具的隔离断言见 [开发说明](development.md) 的测试分层一节。
 
 ## 本地数据一览与删除
 
@@ -61,10 +59,9 @@ Pi Web Desktop 在应用运行期间做只读的版本查询，只提示、不�
 | 运行状态与所有权记录 | `~/Library/Application Support/Pi Web Desktop/` | 退出应用后删除该目录 |
 | 日志（含轮转文件） | `~/Library/Logs/Pi Web Desktop/`（`Pi Web Desktop.log` 与 `.1.log` … `.5.log`） | 退出应用后删除该目录 |
 | 更新检查缓存 | `~/Library/Application Support/Pi Web Desktop/update-check-cache.json` | 退出应用后删除该文件；在“服务 → 更新检查设置”里关闭四类可停止后续请求（已存缓存不会自动删除），忽略版本记录在 UserDefaults 里、不影响缓存。缓存不是可信输入（可被同一用户改写），读取时校验结构与上限、不合法即整份丢弃，且不参与自动安装判定（GitHub #59） |
-| 远程访问密码 | 登录 Keychain；service 为 bundle identifier，account 为 `remote-access-password` | 在应用里点“删除密码”，或 `security delete-generic-password -s io.github.su-luoya.pi-web-desktop -a remote-access-password` |
 | WebKit 持久化网站数据 | `~/Library/WebKit/io.github.su-luoya.pi-web-desktop/`、`~/Library/Caches/io.github.su-luoya.pi-web-desktop/` | 应用当前没有“清空网站数据”入口，只能退出应用后手动删除：`rm -rf "$HOME/Library/WebKit/io.github.su-luoya.pi-web-desktop" "$HOME/Library/Caches/io.github.su-luoya.pi-web-desktop"` |
 
-删除以上任何一项都不会影响 Pi Web、Pi CLI 或 Node.js 自身的数据。除上表位置外，应用自身不写其他位置；WebKit 的持久化网站数据由系统框架按 bundle id 写入，不在应用自己的 Application Support 目录或 UserDefaults 里，删除 Keychain 密码或删除应用本身都不会自动清除它。`Scripts/smoke.sh` 只把应用自己的 support 目录和日志放进临时目录，不写 UserDefaults、Application Support 和 Logs，但仍会创建默认的 `WKWebView`，所以不隔离上面那两处 WebKit 数据（实测 smoke 会更新其文件 mtime/size，见 [开发说明](development.md)）。
+删除以上任何一项都不会影响 Pi Web、Pi CLI 或 Node.js 自身的数据。除上表位置外，应用自身不写其他位置；WebKit 的持久化网站数据由系统框架按 bundle id 写入，不在应用自己的 Application Support 目录或 UserDefaults 里，删除应用本身不会自动清除它。`Scripts/smoke.sh` 只把应用自己的 support 目录和日志放进临时目录，不写 UserDefaults、Application Support 和 Logs，但仍会创建默认的 `WKWebView`，所以不隔离上面那两处 WebKit 数据（实测 smoke 会更新其文件 mtime/size，见 [开发说明](development.md)）。
 
 ## 诊断脱敏
 
@@ -96,6 +93,4 @@ Pi Web Desktop 在应用运行期间做只读的版本查询，只提示、不�
 
 ## 远程访问
 
-默认服务只监听 loopback（`127.0.0.1`）。非 loopback 监听地址必须在 Keychain 中存在非空密码：缺少密码时配置无法保存、服务也无法启动，运行中的远程托管服务在密码被删除后会立即停止并回到 loopback。监听地址在保存、配置加载与启动决策三处都经同一条规则校验：`0.0.0.0`、`::`、`*` 等“所有网络接口”地址、空地址、前后空白与非法字符一律被拒绝，直接改写 UserDefaults 也不能让服务以这些地址启动（见 [架构说明](architecture.md) 的“监听边界”）。密码认证不等于传输加密；远程访问需要用户配置受信任的加密隧道或 HTTPS 反向代理。项目文档不会把个人主机名或其他私人网络地址写入默认配置。
-
-“生成高强度密码”完全在本地完成（`SecRandomCopyBytes`），长度不低于 24，字符集包含大小写字母、数字和符号，不联网、不引入依赖、不做密码同步。诊断文本里只出现密码状态（已设置/未设置），不出现密码值、密码长度或 Keychain 原始数据。
+默认服务只监听 loopback（`127.0.0.1`）。应用不提供访问密码，非 loopback 监听地址只由同一条地址规则校验：`0.0.0.0`、`::`、`*` 等“所有网络接口”地址、空地址、前后空白与非法字符一律被拒绝，直接改写 UserDefaults 也不能让服务以这些地址启动（见 [架构说明](architecture.md) 的“监听边界与远程访问”）。改成非 loopback 地址等于对同网络完全开放，需要用户自备受信任的加密隧道或 HTTPS 反向代理。项目文档不会把个人主机名或其他私人网络地址写入默认配置。

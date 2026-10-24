@@ -514,8 +514,8 @@ extension AppDelegate {
         alert.beginSheetModal(for: window) { _ in }
     }
 
-    /// 导出用的主线程快照：只读取已经在内存里的状态（配置、依赖报告、Keychain
-    /// 结论、进程记录），**不执行任何子进程**。子进程探测交给
+    /// 导出用的主线程快照：只读取已经在内存里的状态（配置、依赖报告、服务
+    /// 状态、进程记录），**不执行任何子进程**。子进程探测交给
     /// `diagnosticsProbeCollector` 在后台串行队列上做（W4 M3）。
     private struct DiagnosticsExportSnapshot {
         var piWebPath: String

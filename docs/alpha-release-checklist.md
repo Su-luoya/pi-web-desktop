@@ -92,9 +92,9 @@
 | # | 安全门槛 | alpha.1 验收标准（可观察） | 证据形式 |
 | --- | --- | --- | --- |
 | S1 | 服务所有权与外部服务只读 | 只有通过所有权验证的进程组会收到信号；验证失败零信号；无命令行子串匹配的停止路径 | 审查报告的 §1 结论 + `git grep -n "kill(" -- Sources` 与 `sendGroupSignal` 调用点输出 |
-| S2 | 凭据边界 | 密码只在 Keychain 与子进程环境；UserDefaults / 命令行 / 日志 / 诊断 / 错误消息中无密码值或长度 | 审查报告的 §2 结论 + `git grep` 反证输出 |
+| S2 | 凭据边界 | 应用不持有访问密码：无 Keychain 条目、不注入 `PI_WEB_PASSWORD`、继承值被移除；UserDefaults / 命令行 / 日志 / 诊断 / 错误消息中无凭据 | `git grep -n "KeychainStore\|remoteAccessPassword\|PI_WEB_PASSWORD" -- Sources`：前两者零命中，后者只剩 `ServiceLaunching` 的清除逻辑与 `LogRedactor` 的脱敏规则 |
 | S3 | 日志与诊断脱敏 | 统一 `LogRedactor` 实例覆盖四处路径；已记录已知不覆盖形态与幂等例外 | 审查报告的 §3 结论与实测矩阵 |
-| S4 | 网络边界 | 默认 loopback；非 loopback 强制非空密码；`0.0.0.0`/`::` 在界面不可保存；文档明写“密码认证不等于传输加密” | 审查报告 §4 表 + `./Scripts/check-identity.sh` 的服务默认值检查 |
+| S4 | 网络边界 | 默认 loopback；`0.0.0.0`/`::` 在界面不可保存；文档明写“非 loopback 监听没有认证层” | 审查报告 §4 表 + `./Scripts/check-identity.sh` 的服务默认值检查 |
 | S5 | 构建与发布 | CI 权限最小、Actions 固定完整 SHA、ZIP 只含应用包与 AppleDouble 元数据、checksum 可复验 | 审查报告 §5 + `unzip -l` 清单 |
 | S6 | 签名与 Gatekeeper 表述 | `codesign` 报告 `Signature=adhoc` / `TeamIdentifier=not set`，`spctl` 预期拒绝；文档只写 ad-hoc/未公证 | 审查报告 §6 + 本机 `codesign` / `spctl` 输出 |
 | S7 | 依赖与供应链 | 无第三方 Swift / npm 运行时依赖，无 `Package.swift`；Actions 依赖清单固定 | 审查报告 §7 输出 |
@@ -647,7 +647,7 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
 `grep -c 'scan-secrets: allow'` 在 `v0.1.0-alpha.4` 与本工作区上对逐个文件核对，计数为：
 `PiWebDesktopTests/ToolPathTests.swift` alpha.4 不存在 / 本版 6（#89 新增文件）、
 `PiWebDesktopTests/PiWebUpdateAdapterTests.swift` 0 / 2（#95）、
-`PiWebDesktopTests/KeychainStoreTests.swift` 0 / 1、`PiWebDesktopTests/ServiceManagerTests.swift`
+`PiWebDesktopTests/ServiceManagerTests.swift`
 0 / 1、`PiWebDesktopTests/UpdateTransactionTests.swift` 0 / 1、`PiWebDesktopTests/LogWriterTests.swift`
 3 / 6；同时 #78 收紧了抑制标记格式（旧的无 `reason` 标记按违规处理，见本版自检项）。15 行全部是
 `PiWebDesktopTests/` 里的脱敏与环境夹具（`// scan-secrets: allow(reason=…)`），没有在 `Sources/`
@@ -1869,7 +1869,7 @@ alpha.17 自动更新到 alpha.18（系统拒绝部署目标更高的 bundle）�
 | # | 门槛 | 实测值 / 证据 | 判定 |
 | --- | --- | --- | --- |
 | 1 | main CI（build workflow）在 main 上为绿 | PR [#192](https://github.com/Su-luoya/pi-web-desktop/pull/192) 的 `build` check `pass`（run `40086161279`，job `120849422098`），runner 标签 `macos-26`，14 个步骤全部 `success` | 通过（受保护分支不接受直推：首次 `git push origin main` 返回 `GH006: Protected branch update failed`，改走 PR） |
-| 2 | 安全审查完成，无阻断项 | 本版只删除不可达分支、替换已废弃 API、对齐版本下限；没有新增输入路径、权限判定、外链白名单、Keychain 访问或更新事务链改动。`Sources/` 的 delta 为 `+13/-18`（不含版本与文档） | 通过（改动面不足以单独出一份 `security-review-alpha.18.md`，判断依据记在本行） |
+| 2 | 安全审查完成，无阻断项 | 本版只删除不可达分支、替换已废弃 API、对齐版本下限、给桌面更新加最低系统闸门；没有新增输入路径、权限判定、外链白名单或 Keychain 访问改动。`Sources/` 的 delta 为 `+13/-18`（不含版本与文档） | 通过（改动面不足以单独出一份 `security-review-alpha.18.md`，判断依据记在本行） |
 | 3 | 最低系统变更已被 CI 实际验证 | 旧 runner 标签 `macos-14` 的系统版本低于新部署目标，无法构建；`macos-26` runner 上 `Build and test Xcode project` 与 `Build app` 均 `success` | 通过（这是本版唯一无法在本机证伪的假设，CI 已给出实测） |
 | 4 | `scan-secrets.sh` 与 `--self-test` 均退出 0 | CI 步骤 `Self-test the secret scanner` 与 `Scan tracked files for committed secrets` 均 `success`；本地 `self-test: PASS`、`scan-secrets: PASS (no matches in tracked files; no untracked files)` | 两者退出 0，通过 |
 | 5 | tag 与 bundle 版本一致 | `./Scripts/check-identity.sh` → `check-identity: PASSED (45 checks)`；`./Scripts/check-release-version.sh v0.1.0-alpha.18` → `PASSED (tag v0.1.0-alpha.18, MARKETING_VERSION 0.1.0-alpha.18, CURRENT_PROJECT_VERSION 18)`；构建出的 bundle `LSMinimumSystemVersion=26.0` | 退出 0，通过 |

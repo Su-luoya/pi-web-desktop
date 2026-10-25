@@ -2107,3 +2107,53 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
 
 - 日志粘行修复只影响之后的写入，已有日志文件不会自动重排。
 - 本版不针对 macOS 14 / 15 做任何验证（支持范围外）。
+
+## 本次发布执行记录（v0.1.0-alpha.21）
+
+### 门槛实测
+
+| # | 门槛 | 命令 | 实测输出摘要 | 判定 |
+| --- | --- | --- | --- | --- |
+| 1 | 脚本语法 | `sh -n Scripts/*.sh` | 无输出 | 退出 0，通过 |
+| 2 | 空白与补丁格式 | `git diff --check` | 无输出 | 退出 0，通过 |
+| 3 | 构建 | `./Scripts/build.sh` | `Built: build/Pi-Web-Desktop.app`；`Mach-O 64-bit executable arm64` | 退出 0，通过 |
+| 4 | 身份与版本一致性 | `./Scripts/check-identity.sh` | `check-identity: PASSED (45 checks)`；`CFBundleShortVersionString=0.1.0-alpha.21`、`CFBundleVersion=21`、`LSMinimumSystemVersion=26.0` | 退出 0，通过 |
+| 5 | tag 与 bundle 版本一致 | `sh Scripts/check-release-version.sh v0.1.0-alpha.21` | `PASSED (tag v0.1.0-alpha.21, MARKETING_VERSION 0.1.0-alpha.21, CURRENT_PROJECT_VERSION 21)` | 退出 0，通过 |
+| 6 | 单元测试 | `xcodebuild test` | `Executed 925 tests, with 0 failures (0 unexpected)` | 退出 0，通过（alpha.20 为 923，本版新增 2 条 LogWriter 测试） |
+| 7 | smoke | `./Scripts/smoke.sh` | `smoke: OK`，两种模式均 exit 0 | 退出 0，通过 |
+| 8 | 密钥扫描 | `./Scripts/scan-secrets.sh` | `PASS (no matches in tracked files; no untracked files)` | 退出 0，通过 |
+| 9 | 编译警告 | 干净构建后统计 `warning:` | 0 条（排除 Xcode 工具链的 AppIntents 提示） | 通过 |
+
+### 发布资产实测（下载后核对，不复述 CI 输出）
+
+- `gh release download v0.1.0-alpha.21` → 3 个资产；
+- `shasum -a 256 -c` → `Pi-Web-Desktop-0.1.0-alpha.21+build.21.zip: OK`；
+- SHA-256：`01a4a4005ba7235e529011faf6627a7f870d27e189c4ccd7741b65eb58c69c34`（与发布说明中的自动生成值一致）；
+- `Info.plist`：`0.1.0-alpha.21` / `21` / `26.0`；
+- `codesign --verify --deep --strict` → `valid`；`Signature=adhoc`、`Format=app bundle with Mach-O thin (arm64)`（ad-hoc 为预期）；
+- 解压后的发布包上跑两种 smoke 模式：分别输出 `smoke: ready` 与 `smoke: diagnostics ready`，均 exit 0。
+
+### 真机 smoke 环境
+
+| 项目 | 值 |
+| --- | --- |
+| 机器与芯片 | Apple M4 |
+| macOS 版本 | 27.0.1 |
+| 架构 | arm64 |
+| Node.js | v24.22.1 |
+| Pi | 1.4.0 |
+| `@agegr/pi-web` | 0.12.2 |
+
+### 发布结果
+
+- PR #204 squash 合并为 `825255b`（修复本体）；PR #205 squash 合并为 `2a1e281`（版本号与发布说明）；
+- tag `v0.1.0-alpha.21` 已推送，release workflow `completed success`；
+- 草稿正文的 `<待填写>` 占位符已全部回填真机数据（复查计数 0）；
+- 已发布为 prerelease，`draft=false`，3 个资产。
+
+### 说明
+
+- 本版唯一改动是 `LogWriter` 的三处替换改为 `rename(2)` 原子覆盖；
+- 新增的 2 条测试**不能区分新旧实现**（回退到旧写法仍全绿）。非原子窗口只在失败瞬间暴露，
+  测试造不出那个瞬间。原子性由 `rename(2)` 语义保证，不由测试保证；这一点写进了测试注释与发布说明；
+- 本版不针对 macOS 14 / 15 做任何验证（支持范围外）。

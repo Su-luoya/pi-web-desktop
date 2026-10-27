@@ -120,6 +120,18 @@ struct SystemDependencyPortProbe: DependencyPortProbing {
         let descriptor = socket(family, SOCK_STREAM, 0)
         guard descriptor >= 0 else { return nil }
         defer { close(descriptor) }
+        // 必须开 SO_REUSEADDR：否则刚从上一个实例退下来的端口处于 TIME_WAIT，
+        // `bind(2)` 会返回 EADDRINUSE，而这个端口实际上可以立刻复用。
+        // 不开会让启动前的探测把「自己的上一轮连接」误判成「被其它程序占用」，
+        // 触发一次没必要的端口回落。
+        var reuse: Int32 = 1
+        guard setsockopt(
+            descriptor,
+            SOL_SOCKET,
+            SO_REUSEADDR,
+            &reuse,
+            socklen_t(MemoryLayout<Int32>.size)
+        ) == 0 else { return nil }
         let result = withUnsafePointer(to: &address) { pointer in
             pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(descriptor, $0, length) }
         }

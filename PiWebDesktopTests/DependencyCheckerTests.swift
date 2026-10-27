@@ -102,6 +102,102 @@ private struct DependencyHarness {
     }
 }
 
+/// 真实端口探针：`TIME_WAIT` 回归。
+///
+/// 生产实证：应用重启时，上一个实例的监听套接字处于 `TIME_WAIT`，而探测用的
+/// `bind(2)` 没开 `SO_REUSEADDR` 就会返回 `EADDRINUSE`，于是「端口其实空闲」
+/// 被误判成「被其它程序占用」，触发一次没必要的端口回落。
+final class SystemDependencyPortProbeTests: XCTestCase {
+    /// 真绑定一个监听套接字，然后连一次并关掉，制造 `TIME_WAIT`。
+    private func makeTimeWaitPort() throws -> (port: Int, cleanup: () -> Void) {
+        let listener = socket(AF_INET, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(listener, 0)
+        var reuse: Int32 = 1
+        setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = 0
+        inet_pton(AF_INET, "127.0.0.1", &address.sin_addr)
+        let bound = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(listener, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        XCTAssertEqual(bound, 0)
+        XCTAssertEqual(listen(listener, 4), 0)
+        var actual = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &actual) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(listener, $0, &length)
+            }
+        }
+        let port = Int(UInt16(bigEndian: actual.sin_port))
+
+        // 建立并关闭一条连接：客户端侧进入 TIME_WAIT。
+        let client = socket(AF_INET, SOCK_STREAM, 0)
+        var target = sockaddr_in()
+        target.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        target.sin_family = sa_family_t(AF_INET)
+        target.sin_port = in_port_t(UInt16(port).bigEndian)
+        inet_pton(AF_INET, "127.0.0.1", &target.sin_addr)
+        _ = withUnsafePointer(to: &target) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(client, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        close(client)
+        close(listener)
+        return (port, {})
+    }
+
+    /// 关键回归：端口上只有 `TIME_WAIT` 残留时，探针必须报「可用」。
+    func testPortInTimeWaitIsReportedAvailable() throws {
+        let (port, _) = try makeTimeWaitPort()
+        XCTAssertEqual(
+            SystemDependencyPortProbe().isPortAvailable(host: "127.0.0.1", port: port),
+            true,
+            "TIME_WAIT 残留不得被当成“端口被占用”"
+        )
+    }
+
+    /// 真被其它进程监听时必须报「不可用」——`SO_REUSEADDR` 不能把这种也放过。
+    func testPortWithLiveListenerIsReportedTaken() throws {
+        let listener = socket(AF_INET, SOCK_STREAM, 0)
+        var reuse: Int32 = 1
+        setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = 0
+        inet_pton(AF_INET, "127.0.0.1", &address.sin_addr)
+        let bound = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(listener, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        XCTAssertEqual(bound, 0)
+        XCTAssertEqual(listen(listener, 4), 0)
+        defer { close(listener) }
+        var actual = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &actual) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(listener, $0, &length)
+            }
+        }
+        let port = Int(UInt16(bigEndian: actual.sin_port))
+
+        XCTAssertEqual(SystemDependencyPortProbe().isPortAvailable(host: "127.0.0.1", port: port), false)
+    }
+
+    /// 主机名不解析：无法判定时返回 nil，而不是猜成“可用”。
+    func testHostnameIsNotResolved() {
+        XCTAssertNil(SystemDependencyPortProbe().isPortAvailable(host: "example.invalid", port: 30141))
+    }
+}
+
 /// 固定结果的假端口探针：不绑定真实端口。
 private struct DependencyFakePortProbe: DependencyPortProbing {
     var availability: () -> Bool?

@@ -69,3 +69,24 @@ pi-web 进程已退出。请查看日志：~/Library/Logs/Pi Web Desktop/Pi Web 
 - 「打开设置」只打开设置页，不预填建议端口；是否写回设置由你决定。
 
 上一版 `v0.1.0-alpha.22` 的资产仍然保留，回退会带回本版修掉的端口冲突问题。
+
+## 发布资产
+
+| 资产 | 值 |
+| --- | --- |
+| ZIP | `Pi-Web-Desktop-0.1.0-alpha.23+build.23.zip` |
+| SHA-256 | `af8d741a97e44d0aa6cb9aa9901ff2c95371d32fd006cf43c26797397a55e44e` |
+| 体积 | 见 Release 资产列表 |
+| 签名 | ad-hoc（`TeamIdentifier=not set`），未公证 |
+| 最低系统 | macOS 26.0 |
+| 架构 | arm64（Apple Silicon） |
+
+校验方式：
+
+```sh
+shasum -a 256 -c Pi-Web-Desktop-0.1.0-alpha.23+build.23.zip.sha256
+```
+
+`package-release.sh --tag v0.1.0-alpha.23` 输出 `OK`：ZIP 内容与白名单一致（8 个条目，无 `__MACOSX/`），ad-hoc 签名验证通过，`spctl` 证据已记录在 `Pi-Web-Desktop-0.1.0-alpha.23+build.23.evidence.md`。
+
+`./Scripts/smoke.sh`：两种模式均 exit 0（`smoke: ready` / `smoke: diagnostics ready`）。

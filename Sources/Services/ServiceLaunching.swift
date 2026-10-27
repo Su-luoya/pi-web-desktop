@@ -20,7 +20,8 @@ struct ServiceLaunchSpecification: Equatable {
         piWebPath: String,
         appConfiguration: AppConfiguration,
         baseEnvironment: [String: String],
-        toolPathProvider: ToolPathProvider? = nil
+        toolPathProvider: ToolPathProvider? = nil,
+        hostname: String? = nil
     ) -> ServiceLaunchSpecification {
         var environment = baseEnvironment
         environment["PI_WEB_NO_OPEN"] = "1"
@@ -48,7 +49,7 @@ struct ServiceLaunchSpecification: Equatable {
         }
         return ServiceLaunchSpecification(
             executablePath: piWebPath,
-            arguments: arguments(configuration: configuration),
+            arguments: arguments(configuration: configuration, hostname: hostname),
             workingDirectory: appConfiguration.workspaceDirectory(for: configuration),
             environment: environment
         )
@@ -72,8 +73,8 @@ struct ServiceLaunchSpecification: Equatable {
     /// Canonical argument list for a configuration. The launcher and the
     /// ownership record share it, so `argumentsDigest` always describes what
     /// the app would actually launch.
-    static func arguments(configuration: ServiceConfiguration) -> [String] {
-        ["--hostname", configuration.hostname, "--port", String(configuration.port), "--no-open"]
+    static func arguments(configuration: ServiceConfiguration, hostname: String? = nil) -> [String] {
+        ["--hostname", hostname ?? configuration.hostname, "--port", String(configuration.port), "--no-open"]
     }
 
     /// 诊断展示用：把子进程环境整理成按键排序的 `KEY=value` 行。值原样给出，

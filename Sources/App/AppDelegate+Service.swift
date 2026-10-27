@@ -13,10 +13,11 @@ extension AppDelegate {
             guard let self else { return }
             // 多窗口（GitHub #168）：同一个服务地址更新到**所有已登记窗口**（最近使用
             // 优先），再一起重新加载服务页。窗口只是展示层：这里不会因为多窗口而新增
-            // 任何服务启动/停止/重启路径。
+            // 任何服务启动/停止/重启路径。地址用生效地址：监听地址回落后子进程
+            // 实际听的是回环地址，窗口不能再去连那个不在本机的地址。
             let configuration = self.serviceManager.configuration
             for controller in self.windowRegistry.controllers {
-                controller.updateService(url: configuration.serviceURL, port: configuration.port)
+                controller.updateService(url: self.serviceManager.effectiveServiceURL, port: configuration.port)
                 controller.loadServicePage()
             }
         }
@@ -29,6 +30,12 @@ extension AppDelegate {
         }
         serviceManager.onStartupFailure = { [weak self] message in
             self?.presentStartupError(message)
+        }
+        // 监听地址不在本机、本次启动改用回环地址：只告知，不改配置。
+        serviceManager.onListeningAddressFallback = { [weak self] fallback in
+            guard let self else { return }
+            // 从启动入口里回来，延到下一个主线程周期再弹窗，避开重入。
+            DispatchQueue.main.async { self.presentListeningAddressFallback(fallback) }
         }
         // 启动入口在启动前发现工作目录不可用（GitHub #9 复审：健康监控运行期间
         // 自选目录被删除）：进入诊断状态并给出可读修复提示，而不是重建目录。
@@ -55,6 +62,24 @@ extension AppDelegate {
         // The status menu keeps the pre-split base text; the ownership suffix is
         // reserved for the diagnostics copy.
         statusMenuItem?.title = "状态：\(state.displayText)"
+    }
+
+    /// 监听地址在本机不存在、本次启动改用回环地址时的告知。
+    ///
+    /// 配置不改，只说明“为什么现在连的是回环地址”；否则用户会以为设置没生效。
+    /// 日志里已经有一行同样内容（`ServiceManager` 写入），这里只负责界面提示。
+    func presentListeningAddressFallback(_ fallback: ListeningAddressFallback) {
+        guard let notice = fallback.notice, !serviceManager.isQuitting else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "监听地址不在本机"
+        alert.informativeText = notice
+        alert.addButton(withTitle: "好")
+        alert.addButton(withTitle: "打开设置")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertSecondButtonReturn else { return }
+            self?.showPreferences(nil)
+        }
     }
 
     /// Alert shown when the managed service could not start. ServiceManager owns
@@ -137,8 +162,9 @@ extension AppDelegate {
         // 没动过的字段，有未保存编辑时保留输入。
         preferencesWindowStore.stored?.refreshIfUnedited(configuration: newConfiguration)
         // GitHub #157：监听地址可能刚从 loopback 切到（或切回）VPN 网段，这里用
-        // 新配置的地址立即重算代理告警，不等异步重启完成。
-        refreshSystemProxyWarning(serviceURL: newConfiguration.serviceURL)
+        // 新配置的地址立即重算代理告警，不等异步重启完成。回落生效时以生效地址为准，
+        // 否则告警会针对一个子进程根本不会监听的地址。
+        refreshSystemProxyWarning(serviceURL: serviceManager.effectiveServiceURL(for: newConfiguration))
         let changed = previous.runtimeSignature != newConfiguration.runtimeSignature
         let workspaceChanged = previous.workspacePath != newConfiguration.workspacePath
         let managed = changed && serviceManager.managedServicePID() != nil
@@ -184,7 +210,8 @@ extension AppDelegate {
     /// 调用点：菜单创建（启动）、设置保存、应用回到前台（用户可能刚在系统设置
     /// 里加了例外）。读系统代理是只读操作；读不到或配置畸形一律降级为不提示。
     func refreshSystemProxyWarning(serviceURL: URL? = nil) {
-        let url = serviceURL ?? serviceManager.configuration.serviceURL
+        // 用生效地址：监听地址回落后实际监听的是回环地址，代理告警必须针对真正要连的地址。
+        let url = serviceURL ?? serviceManager.effectiveServiceURL
         guard systemProxyWarningMonitor.refresh(serviceURL: url) else { return }
         systemProxyWarning = systemProxyWarningMonitor.warning
         systemProxyWarningMenuItem?.title = systemProxyWarning?.shortText ?? ""

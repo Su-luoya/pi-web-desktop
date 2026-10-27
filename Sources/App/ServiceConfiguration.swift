@@ -117,7 +117,13 @@ struct ServiceConfiguration: Equatable {
         defaults.set(workspacePath, forKey: Key.workspacePath)
     }
 
-    var serviceURL: URL {
+    var serviceURL: URL { serviceURL(forHostname: hostname) }
+
+    /// 以指定监听地址构造服务 URL。
+    ///
+    /// 与 `serviceURL` 是同一段拼接逻辑：`ServiceManager` 在回环回落时用生效地址
+    /// 调用它，界面加载、健康探测与错误提示因此不会各算一套。
+    func serviceURL(forHostname hostname: String) -> URL {
         var components = URLComponents()
         components.scheme = "http"
         // IPv6 字面量必须加方括号：URLComponents 对 host = "::1" 会返回 nil，

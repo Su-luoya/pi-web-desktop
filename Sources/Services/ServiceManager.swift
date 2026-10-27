@@ -27,6 +27,10 @@ final class ServiceManager {
     /// 密码，但“谁都能连上这个 agent”这件事必须在界面上说出来。
     var onRemoteAccessWarning: ((String) -> Void)?
 
+    /// 配置的监听地址在本机不存在、本次启动临时改用回环地址时的通知。
+    /// 只在真正发生回落时回调一次；配置本身不变，下次启动重新检测。
+    var onListeningAddressFallback: ((ListeningAddressFallback) -> Void)?
+
     // MARK: - Timing (unchanged from the pre-split implementation)
 
     static let maxStartupAttempts = 150
@@ -154,6 +158,20 @@ final class ServiceManager {
     /// `fileManager`，测试可以注入假探针。
     let workspaceProbe: WorkspaceDirectoryProbe
 
+    /// 本机接口地址快照（含 loopback）。只用于监听地址回落判定：配置的地址
+    /// （例如 Tailscale 掉线后的覆盖网络地址）不在本机时，启动前就能判定出来，
+    /// 而不是等 pi-web `EADDRNOTAVAIL` 秒退。测试注入固定快照。
+    private let localAddresses: () -> LocalAddresses
+    /// 主机名是否解析到本机；与 `localAddresses` 成对注入。
+    private let resolvesToLocalHost: (String) -> Bool
+
+    /// 本次启动实际生效的监听地址（回落时为回环地址，否则等于配置地址）。
+    /// 界面加载、健康探测与错误提示都以它为准，避免“进程用了 A、界面连 B”。
+    private(set) var effectiveListeningAddress: String
+
+    /// 配置的监听地址在本机不存在时的回落在生效中（配置本身未被修改）。
+    private(set) var listeningAddressFallback: ListeningAddressFallback
+
     private var serviceProcess: ServiceProcessHandle?
 
     // MARK: - 生命周期代次与启动会话（W3 M1/M2/M3/L1）
@@ -210,7 +228,9 @@ final class ServiceManager {
         workspaceProbe: WorkspaceDirectoryProbe? = nil,
         instanceID: String = UUID().uuidString,
         logWriter: LogWriter? = nil,
-        toolPathProvider: ToolPathProvider? = nil
+        toolPathProvider: ToolPathProvider? = nil,
+        localAddresses: (() -> LocalAddresses)? = nil,
+        resolvesToLocalHost: ((String) -> Bool)? = nil
     ) {
         self.configuration = configuration
         self.appConfiguration = appConfiguration
@@ -227,6 +247,15 @@ final class ServiceManager {
         self.workspaceProbe = workspaceProbe ?? .live(fileManager: fileManager)
         self.instanceID = instanceID
         self.logWriter = logWriter ?? LogWriter(logFileURL: appConfiguration.logURL, fileManager: fileManager)
+        // 监听地址回落依赖：默认读真实接口表与系统解析器，测试注入固定快照。
+        // 两个闭包必须成对：`resolvesToLocalHost` 的默认值转调同一个快照来源，
+        // 否则注入的快照与主机名判定会看到不同的本机地址。
+        let addressSnapshot = localAddresses ?? LocalAddresses.current
+        self.localAddresses = addressSnapshot
+        self.resolvesToLocalHost = resolvesToLocalHost
+            ?? { HostnameResolver.resolvesToLocalHost($0, localAddresses: addressSnapshot) }
+        self.effectiveListeningAddress = configuration.hostname
+        self.listeningAddressFallback = .none(configuration.hostname)
     }
 
     // MARK: - Configuration
@@ -257,6 +286,9 @@ final class ServiceManager {
     func updateConfiguration(_ configuration: ServiceConfiguration) {
         configurationGeneration &+= 1
         self.configuration = configuration
+        // 配置变了就要重新判定回落：用户刚把地址改回本机地址/回环地址时，
+        // 旧的回落结论不能继续生效（否则界面还去连 127.0.0.1）。
+        recomputeEffectiveListeningAddress()
     }
 
     /// 只有仍是最新一次配置请求时才写入，返回是否写入。过期请求返回 false，
@@ -265,7 +297,54 @@ final class ServiceManager {
     func updateConfiguration(_ configuration: ServiceConfiguration, ifGenerationMatches generation: Int) -> Bool {
         guard generation == configurationGeneration else { return false }
         self.configuration = configuration
+        recomputeEffectiveListeningAddress()
         return true
+    }
+
+    // MARK: - 监听地址回环回落
+
+    /// 重算本次启动的生效监听地址。
+    ///
+    /// 配置的地址在本机不存在（典型的 Tailscale 掉线：本机已经没有那个 CGNAT
+    /// 地址）时，用它启动只会得到 `EADDRNOTAVAIL` 秒退和一条通用“进程已退出”。
+    /// 这里在启动前就把结论算出来：回落只用回环地址启动，**不写回配置**，因此
+    /// 下次启动时地址恢复就仍然用原地址。
+    private func recomputeEffectiveListeningAddress() {
+        let resolution = ListeningAddressFallbackPolicy.resolve(
+            hostname: configuration.hostname,
+            localAddresses: localAddresses,
+            resolvesToLocalHost: resolvesToLocalHost
+        )
+        let previous = listeningAddressFallback
+        listeningAddressFallback = resolution.fallback
+        effectiveListeningAddress = resolution.fallback.effective
+        // 只在结论发生变化时记录与告知：每次启动都重算，但同一次回落只提示一次。
+        guard resolution.fallback != previous, let notice = resolution.fallback.notice else { return }
+        // 地址本身非法（.unknown）时这里不会回落：诊断仍由地址校验路径给出，
+        // 这里只记录“配置地址不在本机”这一种事实。
+        logWriter.record("监听地址回落：\(notice)")
+        onListeningAddressFallback?(resolution.fallback)
+    }
+
+    /// 本次启动实际生效的服务 URL（回落后是回环地址）。
+    ///
+    /// 读缓存结论，不在这里重新解析（`getaddrinfo` 可能阻塞）；缓存只在启动决策点
+    /// 与配置变更时重算。
+    var effectiveServiceURL: URL {
+        configuration.serviceURL(forHostname: effectiveListeningAddress)
+    }
+
+    /// 指定配置的生效服务 URL。
+    ///
+    /// 设置保存路径在 `updateConfiguration` 之前就要重算代理告警，那时
+    /// `effectiveServiceURL` 还是旧配置的结论，所以需要显式传入新配置。
+    func effectiveServiceURL(for configuration: ServiceConfiguration) -> URL {
+        let resolution = ListeningAddressFallbackPolicy.resolve(
+            hostname: configuration.hostname,
+            localAddresses: localAddresses,
+            resolvesToLocalHost: resolvesToLocalHost
+        )
+        return configuration.serviceURL(forHostname: resolution.fallback.effective)
     }
 
     /// 更新工作目录门控（GitHub #9）。`problem` 为 nil 表示目录可用；路径与
@@ -440,6 +519,9 @@ final class ServiceManager {
     /// 凭证：本应用不持有访问密码，只要地址合法就可以启动。
     func startDecision() -> ServiceStartDecision {
         guard !isStoppingService else { return .ignored }
+        // 回落在启动决策里重算：首次启动（`startAtLaunch` 直走 `ensureServerIsRunning`）
+        // 之前只走过初始化，`updateConfiguration` 没被调用，这里才是真正的决策点。
+        recomputeEffectiveListeningAddress()
         // 与保存路径、`ServiceConfiguration.load` 共用同一个判定函数。
         if let message = RemoteAccessPolicy.addressVerdict(hostname: configuration.hostname).diagnosisMessage {
             return .invalidAddress(message)
@@ -453,12 +535,14 @@ final class ServiceManager {
             return .missingExecutable
         }
         // PATH 来自注入的工具 PATH 构建器（未注入时 `make` 用纯静态兜底）。
+        // 监听地址用生效地址：回落后启动的是回环地址，子进程参数必须一致。
         return .launch(ServiceLaunchSpecification.make(
             configuration: configuration,
             piWebPath: piWebPath,
             appConfiguration: appConfiguration,
             baseEnvironment: environment(),
-            toolPathProvider: toolPathProvider
+            toolPathProvider: toolPathProvider,
+            hostname: effectiveListeningAddress
         ))
     }
 
@@ -472,6 +556,8 @@ final class ServiceManager {
     /// “Pi Web 服务未运行。” right after a successful setup). A normal launch keeps
     /// the stored `autoStart` setting.
     func startAtLaunch(forceStart: Bool = false) {
+        // 首次启动也走这里：先按本机接口快照判定监听地址是否需要回落。
+        recomputeEffectiveListeningAddress()
         // Records from earlier runs are evaluated (and cleaned) before any new
         // launch decision, so a leftover file can never be adopted.
         reconcileOwnershipRecord()
@@ -1131,7 +1217,7 @@ final class ServiceManager {
     }
 
     func checkServer(completion: @escaping (Bool) -> Void) {
-        probe.probe(url: configuration.serviceURL, timeout: Self.probeTimeout, completion: completion)
+        probe.probe(url: effectiveServiceURL, timeout: Self.probeTimeout, completion: completion)
     }
 
     /// Re-checks the (possibly changed) configuration after preferences were

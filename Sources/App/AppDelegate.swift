@@ -190,7 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 工作目录探针（存在/是目录/可写）；测试可注入假探针。
     let workspaceProbe: WorkspaceDirectoryProbe
 
-    var startURL: URL { serviceManager.configuration.serviceURL }
+    var startURL: URL { serviceManager.effectiveServiceURL }
 
     var instanceLockHandle: FileHandle?
 

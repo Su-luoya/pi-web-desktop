@@ -560,7 +560,11 @@ extension AppDelegate {
             serviceAddress: startURL.absoluteString,
             status: statusDescription(),
             workspaceDirectory: appConfiguration.workspaceDirectory(for: serviceManager.configuration).path,
-            launchCommand: ([piWebPath] + ServiceLaunchSpecification.arguments(configuration: serviceManager.configuration))
+            // 诊断导出要说“实际会执行的命令”：回落生效时地址是回环地址。
+            launchCommand: ([piWebPath] + ServiceLaunchSpecification.arguments(
+                configuration: serviceManager.configuration,
+                hostname: serviceManager.effectiveListeningAddress
+            ))
                 .joined(separator: " "),
             launchEnvironment: launchEnvironment,
             logPath: appConfiguration.logURL.path,

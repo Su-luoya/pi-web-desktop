@@ -60,6 +60,22 @@ pi-web 进程已退出。请查看日志：~/Library/Logs/Pi Web Desktop/Pi Web 
   3. 地址与端口同时失效：日志依次出现地址回落与端口回落两行，实际参数 `pi-web --hostname 127.0.0.1 --port 30143`；
   4. 测试结束后配置与日志文件均已还原。
 
+## 发布后补的修复：TIME_WAIT 误判为端口占用
+
+打包 alpha.23 后做真机验证时发现：`30142` 上没有任何进程监听，应用仍判定「被占用」并回落到 `30143`。
+
+根因是启动前探测用的 `bind(2)` 没有开 `SO_REUSEADDR`。上一个实例退出后留下的连接处于 `TIME_WAIT`，此时 `bind` 返回 `EADDRINUSE`，但端口其实可以立刻复用 —— 于是每次重启都可能触发一次没必要的端口回落和一条「端口被占用」弹窗。
+
+修复（`Sources/Services/DependencyProbing.swift`）：探测 socket 加 `SO_REUSEADDR`。补 3 条真绑定用例，其中「端口只有 `TIME_WAIT` 残留时探针必须报可用」在改前会失败。
+
+重新验证（全量 957 tests / 0 failures）：
+
+- 连续三次退出并重启应用，均直接使用 `30142`，日志无回落行；
+- 在配置地址的 `:30142` 上真占一个监听套接字后启动，正确回落到 `30143`；
+- 在 `127.0.0.1:30142` 上占用、配置地址是覆盖网络地址时**不**回落 —— 两个地址互不冲突，探测结论正确。
+
+本版 Release 资产已在上述修复后重新打包，上面的 SHA-256 对应最终产物。
+
 ## 已知限制
 
 - ad-hoc 签名、未公证：首次手动安装需要按 macOS 提示放行；
@@ -75,8 +91,8 @@ pi-web 进程已退出。请查看日志：~/Library/Logs/Pi Web Desktop/Pi Web 
 | 资产 | 值 |
 | --- | --- |
 | ZIP | `Pi-Web-Desktop-0.1.0-alpha.23+build.23.zip` |
-| SHA-256 | `af8d741a97e44d0aa6cb9aa9901ff2c95371d32fd006cf43c26797397a55e44e` |
-| 体积 | 见 Release 资产列表 |
+| SHA-256 | `7dbab2c0df4a22b4f2708d54dfcf4691adc5913f656de1da01ead10225dd9357` |
+| 体积 | 1638923 字节 |
 | 签名 | ad-hoc（`TeamIdentifier=not set`），未公证 |
 | 最低系统 | macOS 26.0 |
 | 架构 | arm64（Apple Silicon） |

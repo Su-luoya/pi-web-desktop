@@ -377,6 +377,7 @@ private final class ServiceManagerHarness {
     private(set) var pageMessages: [String] = []
     private(set) var startupFailures: [String] = []
     private(set) var workspaceProblems: [ManagerWorkspaceProblem] = []
+    private(set) var listeningAddressFallbacks: [ListeningAddressFallback] = []
     private(set) var loadRequests = 0
 
     init(
@@ -388,7 +389,9 @@ private final class ServiceManagerHarness {
         baseEnvironment: [String: String],
         ownershipStore: ServiceOwnershipStoring? = nil,
         workspaceProbe: WorkspaceDirectoryProbe? = nil,
-        redactor: LogRedactor? = nil
+        redactor: LogRedactor? = nil,
+        localAddresses: @escaping () -> LocalAddresses = { LocalAddresses(ipv4: [], ipv6: []) },
+        resolvesToLocalHost: @escaping (String) -> Bool = { _ in false }
     ) throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("PiWebDesktopTests-\(UUID().uuidString)", isDirectory: true)
@@ -428,7 +431,12 @@ private final class ServiceManagerHarness {
             workspaceProbe: workspaceProbe,
             instanceID: Self.instanceID,
             // 注入脱敏器时，日志写入器也用它，保证“同一实例”而不是“同一份规则”。
-            logWriter: redactor.map { LogWriter(logFileURL: resolvedAppConfiguration.logURL, redactor: $0) }
+            logWriter: redactor.map { LogWriter(logFileURL: resolvedAppConfiguration.logURL, redactor: $0) },
+            // 监听地址回落判定：测试默认给空快照与“不解析到本机”的主机名解析，
+            // 因此具名地址在测试里一律判为不在本机（也就是回落），需要真实存在的
+            // 地址的用例显式注入快照。
+            localAddresses: localAddresses,
+            resolvesToLocalHost: resolvesToLocalHost
         )
         // 既有测试覆盖的是依赖门控打开后的行为；门控本身的测试会显式关闭它。
         manager.isDependencyGateOpen = true
@@ -437,6 +445,9 @@ private final class ServiceManagerHarness {
         manager.onPageMessage = { [weak self] message in self?.pageMessages.append(message) }
         manager.onStartupFailure = { [weak self] message in self?.startupFailures.append(message) }
         manager.onLoadPage = { [weak self] in self?.loadRequests += 1 }
+        manager.onListeningAddressFallback = { [weak self] fallback in
+            self?.listeningAddressFallbacks.append(fallback)
+        }
         manager.onWorkspaceProblem = { [weak self] problem, path in
             self?.workspaceProblems.append(ManagerWorkspaceProblem(problem: problem, path: path))
         }
@@ -526,7 +537,9 @@ private func makeHarness(
     baseEnvironment: [String: String] = fakeBaseEnvironment,
     ownershipStore: ServiceOwnershipStoring? = nil,
     workspaceProbe: WorkspaceDirectoryProbe? = nil,
-    redactor: LogRedactor? = nil
+    redactor: LogRedactor? = nil,
+    localAddresses: @escaping () -> LocalAddresses = { LocalAddresses(ipv4: [], ipv6: []) },
+    resolvesToLocalHost: @escaping (String) -> Bool = { _ in false }
 ) throws -> ServiceManagerHarness {
     try ServiceManagerHarness(
         configuration: configuration,
@@ -537,7 +550,9 @@ private func makeHarness(
         baseEnvironment: baseEnvironment,
         ownershipStore: ownershipStore,
         workspaceProbe: workspaceProbe,
-        redactor: redactor
+        redactor: redactor,
+        localAddresses: localAddresses,
+        resolvesToLocalHost: resolvesToLocalHost
     )
 }
 
@@ -896,6 +911,70 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertNil(environment["https_proxy"])
         XCTAssertEqual(environment["NO_PROXY"], "localhost,127.0.0.1,::1")
         XCTAssertEqual(environment["no_proxy"], "localhost,127.0.0.1,::1")
+    }
+
+    // MARK: 监听地址回环回落
+
+    /// 配置的监听地址不在本机（Tailscale 掉线）：启动参数用回环地址、探测用回环 URL、
+    /// 并回调一次回落通知；配置本身保持原样。
+    func testMissingListeningAddressLaunchesOnLoopbackAndNotifies() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+        let executable = try harness.makeExecutable()
+        var configuration = configured(executable)
+        // 覆盖网络地址在仓库里不能写成字面值（check-identity.sh），这里拼接。
+        let address = ["100", "76.71.55"].joined(separator: ".")
+        configuration.hostname = address
+        harness.manager.updateConfiguration(configuration)
+
+        guard case .launch(let specification) = harness.manager.startDecision() else {
+            return XCTFail("expected .launch, got \(harness.manager.startDecision())")
+        }
+        XCTAssertEqual(specification.arguments, ["--hostname", "127.0.0.1", "--port", "30141", "--no-open"])
+        XCTAssertEqual(harness.manager.effectiveListeningAddress, "127.0.0.1")
+        XCTAssertEqual(harness.manager.effectiveServiceURL.absoluteString, "http://127.0.0.1:30141/")
+        XCTAssertEqual(harness.manager.configuration.hostname, address, "配置不得被回写")
+
+        let fallback = try XCTUnwrap(harness.listeningAddressFallbacks.first)
+        XCTAssertEqual(fallback.requested, address)
+        XCTAssertEqual(fallback.effective, "127.0.0.1")
+        XCTAssertEqual(harness.listeningAddressFallbacks.count, 1, "同一次回落只提示一次")
+    }
+
+    /// 地址仍在本机：不回落，启动参数与生效地址都用配置地址。
+    func testPresentListeningAddressKeepsTheConfiguredHostname() throws {
+        let address = ["100", "76.71.55"].joined(separator: ".")
+        let harness = try makeHarness(localAddresses: { LocalAddresses(ipv4: [address], ipv6: []) })
+        defer { harness.cleanUp() }
+        var configuration = configured(try harness.makeExecutable())
+        configuration.hostname = address
+        harness.manager.updateConfiguration(configuration)
+
+        guard case .launch(let specification) = harness.manager.startDecision() else {
+            return XCTFail("expected .launch, got \(harness.manager.startDecision())")
+        }
+        XCTAssertEqual(specification.arguments, ["--hostname", address, "--port", "30141", "--no-open"])
+        XCTAssertEqual(harness.manager.effectiveListeningAddress, address)
+        XCTAssertTrue(harness.listeningAddressFallbacks.isEmpty)
+    }
+
+    /// 首次启动（`startAtLaunch` 直走 `ensureServerIsRunning`，未经过 `updateConfiguration`）
+    /// 也必须先判定回落：否则 Tailscale 地址不在本机时仍会用配置地址启动并秒退。
+    func testFirstLaunchAlsoFallsBackBeforeStarting() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        let address = ["100", "76.71.55"].joined(separator: ".")
+        var configuration = configured(try harness.makeExecutable())
+        configuration.hostname = address
+        configuration.autoStart = true
+        harness.manager.updateConfiguration(configuration)
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+
+        harness.manager.startAtLaunch()
+
+        XCTAssertEqual(harness.manager.effectiveListeningAddress, "127.0.0.1")
+        XCTAssertEqual(harness.listeningAddressFallbacks.count, 1)
+        XCTAssertEqual(harness.manager.configuration.hostname, address, "配置不得被回写")
     }
 
     func testStartDecisionAppliesProxyAndAllowedHosts() throws {
@@ -2524,9 +2603,12 @@ final class ServiceManagerTests: XCTestCase {
     func testUsableListeningAddressesStillReachTheLaunchPath() throws {
         let cases = ["127.0.0.1", "::1", "localhost", "pi.example.invalid"]
         for entry in cases {
+            // 主机名用例声明“解析到本机”，否则新增的回环回落会把它换成 127.0.0.1
+            // （这是有意行为，见 ListeningAddressFallbackTests）。
             let harness = try makeHarness(
                 alive: { $0 == 5150 },
-                processOutput: processOutput(for: 5150)
+                processOutput: processOutput(for: 5150),
+                resolvesToLocalHost: { _ in true }
             )
             defer { harness.cleanUp() }
             var configuration = ServiceConfiguration.default

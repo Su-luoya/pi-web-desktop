@@ -77,7 +77,7 @@ extension AppDelegate {
     }
 
     /// 「新建窗口」/ ⌘N 的入口：新窗口 + **新的** `WebViewController` 实例，加载
-    /// `serviceManager.configuration.serviceURL`（GitHub #149 的放行面由
+    /// `serviceManager.effectiveServiceURL`（GitHub #149 的放行面由
     /// `WebViewController` 自身的 `serviceURL` 决定，不受窗口数量影响）。
     ///
     /// 窗口共享同一个 `ServiceManager`：开窗只创建展示层，不启动、不停止、不重启
@@ -213,7 +213,7 @@ extension AppDelegate {
             return
         }
         controller.updateService(
-            url: serviceManager.configuration.serviceURL,
+            url: serviceManager.effectiveServiceURL,
             port: serviceManager.configuration.port
         )
         controller.loadServicePage()

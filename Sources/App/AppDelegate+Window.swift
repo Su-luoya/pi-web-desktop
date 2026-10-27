@@ -106,7 +106,7 @@ extension AppDelegate {
     ) -> (window: NSWindow, controller: WebViewController) {
         let controller = WebViewController(
             serviceURL: startURL,
-            servicePort: serviceManager.configuration.port,
+            servicePort: serviceManager.effectiveListeningPort,
             windowProvider: { nil }
         )
         controller.onNavigationFailure = { [weak self, weak controller] failure in
@@ -214,7 +214,7 @@ extension AppDelegate {
         }
         controller.updateService(
             url: serviceManager.effectiveServiceURL,
-            port: serviceManager.configuration.port
+            port: serviceManager.effectiveListeningPort
         )
         controller.loadServicePage()
     }

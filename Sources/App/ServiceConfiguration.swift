@@ -124,6 +124,14 @@ struct ServiceConfiguration: Equatable {
     /// 与 `serviceURL` 是同一段拼接逻辑：`ServiceManager` 在回环回落时用生效地址
     /// 调用它，界面加载、健康探测与错误提示因此不会各算一套。
     func serviceURL(forHostname hostname: String) -> URL {
+        serviceURL(forHostname: hostname, port: port)
+    }
+
+    /// 以指定监听地址与端口构造服务 URL。
+    ///
+    /// `ServiceManager` 在地址/端口回落时用生效值调用它，界面加载、健康探测、
+    /// 导航白名单与错误提示因此不会各算一套。
+    func serviceURL(forHostname hostname: String, port: Int) -> URL {
         var components = URLComponents()
         components.scheme = "http"
         // IPv6 字面量必须加方括号：URLComponents 对 host = "::1" 会返回 nil，

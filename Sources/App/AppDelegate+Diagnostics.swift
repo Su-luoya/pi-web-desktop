@@ -158,8 +158,9 @@ extension AppDelegate {
         let checker = DependencyChecker(
             commandRunner: commandRunner,
             configuredPiWebPath: configuration.piWebPath,
-            serviceHostname: configuration.hostname,
-            servicePort: configuration.port,
+            serviceHostname: serviceManager.effectiveListeningAddress,
+            // 端口用生效值：回落后的端口才是本次启动真正会用的。
+            servicePort: serviceManager.effectiveListeningPort,
             // 组件安装识别（GitHub #16）：只读运行中的应用包信息；unhosted 测试
             // 与 smoke 用默认 `.none`，因此不会读到真实 bundle 路径。
             applicationInstallation: .current,

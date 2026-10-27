@@ -2157,3 +2157,57 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
 - 新增的 2 条测试**不能区分新旧实现**（回退到旧写法仍全绿）。非原子窗口只在失败瞬间暴露，
   测试造不出那个瞬间。原子性由 `rename(2)` 语义保证，不由测试保证；这一点写进了测试注释与发布说明；
 - 本版不针对 macOS 14 / 15 做任何验证（支持范围外）。
+
+## 本次发布执行记录（v0.1.0-alpha.22）
+
+### 门槛实测
+
+| # | 门槛 | 命令 | 实测输出摘要 | 判定 |
+| --- | --- | --- | --- | --- |
+| 1 | 脚本语法 | `sh -n Scripts/*.sh` | 无输出 | 退出 0，通过 |
+| 2 | 空白与补丁格式 | `git diff --check` | 无输出 | 退出 0，通过 |
+| 3 | 构建 | `./Scripts/build.sh` | `Built: build/Pi-Web-Desktop.app`；`Mach-O 64-bit executable arm64` | 退出 0，通过 |
+| 4 | 身份与版本一致性 | `./Scripts/check-identity.sh` | `check-identity: PASSED (45 checks)`；`CFBundleShortVersionString=0.1.0-alpha.22`、`CFBundleVersion=22`、`LSMinimumSystemVersion=26.0` | 退出 0，通过 |
+| 5 | tag 与 bundle 版本一致 | `sh Scripts/check-release-version.sh v0.1.0-alpha.22` | `PASSED (tag v0.1.0-alpha.22, MARKETING_VERSION 0.1.0-alpha.22, CURRENT_PROJECT_VERSION 22)` | 退出 0，通过 |
+| 6 | 单元测试 | `xcodebuild test` | `Executed 937 tests, with 0 failures (0 unexpected)` | 退出 0，通过（alpha.21 为 925，本版新增 12 条监听地址回落的测试） |
+| 7 | 打包自检 | `./Scripts/package-release.sh --self-test` | `self-test: PASS` | 退出 0，通过 |
+| 8 | 打包 | `./Scripts/package-release.sh --tag v0.1.0-alpha.22` | `package-release: OK`；`Pi-Web-Desktop-0.1.0-alpha.22+build.22.zip`，8 个白名单条目，`signature: adhoc (TeamIdentifier=not set), not notarized` | 退出 0，通过 |
+| 9 | smoke | `./Scripts/smoke.sh` | `smoke: OK`，两种模式均 exit 0 | 退出 0，通过 |
+| 10 | 密钥扫描 | `./Scripts/scan-secrets.sh` | `PASS (no matches in tracked files; no untracked files)` | 退出 0，通过 |
+
+`check-identity.sh` 在未 `git add` 新文件时会以 `1 untracked file(s) … were not scanned` 失败，这是预期行为；
+先把新文件加入索引再跑，得到 `PASSED (45 checks)`。
+
+### 发布资产实测（下载后核对，不复述 CI 输出）
+
+- `gh release download v0.1.0-alpha.22` → 3 个资产；
+- `shasum -a 256 -c` → `Pi-Web-Desktop-0.1.0-alpha.22+build.22.zip: OK`；
+- SHA-256：`863a795071e850a1e80916540ebcdcc5b6c29dd60d6b759df5bcb42d387a7fe0`（与发布说明中的自动生成值一致）；
+- `Info.plist`：`0.1.0-alpha.22` / `22` / `26.0`；
+- `codesign --verify --deep --strict` → `valid`；`Signature=adhoc`、`TeamIdentifier=not set`（ad-hoc 为预期）；
+- 解压后的发布包上跑两种 smoke 模式：分别输出 `smoke: ready` 与 `smoke: diagnostics items=6 blockers=3` / `smoke: diagnostics ready`，均 exit 0。
+
+### 真机环境
+
+| 项目 | 值 |
+| --- | --- |
+| 机器与芯片 | Apple M4 |
+| macOS 版本 | 27.2 |
+| 架构 | arm64 |
+| Node.js | v24.22.1 |
+| Pi | 1.4.0 |
+| `@agegr/pi-web` | 0.12.2 |
+
+### 发布结果
+
+- PR #207 squash 合并为 `ab3a2ac`（修复本体）；PR #208 squash 合并为 `8844360`（版本号与发布说明）；
+- tag `v0.1.0-alpha.22` 已推送，release workflow run 40443720589 `completed success`；
+- 草稿正文的 `<待填写>` 占位符已全部回填真机数据（复查计数 0）；
+- 已发布为 prerelease，`draft=false`，3 个资产；Release Issue #209。
+
+### 说明
+
+- 本版唯一改动是启动前判断监听地址是否仍在本机，不存在时用 `127.0.0.1` 启动并告知，不写回配置；
+- 回落只在启动时判断一次：运行中地址消失（覆盖网络掉线）需要重启应用才重新绑定；
+- 本版只覆盖「地址不在本机」这一种启动失败，端口占用等其它原因仍显示通用提示，具体原因需看日志；
+- 本版不针对 macOS 14 / 15 做任何验证（支持范围外）。

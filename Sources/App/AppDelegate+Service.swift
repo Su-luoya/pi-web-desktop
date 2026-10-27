@@ -13,11 +13,10 @@ extension AppDelegate {
             guard let self else { return }
             // 多窗口（GitHub #168）：同一个服务地址更新到**所有已登记窗口**（最近使用
             // 优先），再一起重新加载服务页。窗口只是展示层：这里不会因为多窗口而新增
-            // 任何服务启动/停止/重启路径。地址用生效地址：监听地址回落后子进程
-            // 实际听的是回环地址，窗口不能再去连那个不在本机的地址。
-            let configuration = self.serviceManager.configuration
+            // 任何服务启动/停止/重启路径。地址与端口用生效值：回落发生后子进程
+            // 实际听的是回环地址/空闲端口，窗口不能再去连配置值。
             for controller in self.windowRegistry.controllers {
-                controller.updateService(url: self.serviceManager.effectiveServiceURL, port: configuration.port)
+                controller.updateService(url: self.serviceManager.effectiveServiceURL, port: self.serviceManager.effectiveListeningPort)
                 controller.loadServicePage()
             }
         }
@@ -36,6 +35,11 @@ extension AppDelegate {
             guard let self else { return }
             // 从启动入口里回来，延到下一个主线程周期再弹窗，避开重入。
             DispatchQueue.main.async { self.presentListeningAddressFallback(fallback) }
+        }
+        // 端口被其它程序占用、本次启动临时换端口：同一套告知方式，配置同样不改。
+        serviceManager.onListeningPortFallback = { [weak self] fallback in
+            guard let self else { return }
+            DispatchQueue.main.async { self.presentListeningPortFallback(fallback) }
         }
         // 启动入口在启动前发现工作目录不可用（GitHub #9 复审：健康监控运行期间
         // 自选目录被删除）：进入诊断状态并给出可读修复提示，而不是重建目录。
@@ -82,8 +86,25 @@ extension AppDelegate {
         }
     }
 
-    /// Alert shown when the managed service could not start. ServiceManager owns
-    /// the state change and the "启动失败" page; the buttons are UI wiring here.
+    /// 端口被占用、本次启动改用其它端口时的告知。
+    ///
+    /// 与地址回落同一套：配置不改，只说明“为什么现在连的是另一个端口”；
+    /// 否则用户会以为设置里的端口没生效。日志里已有一行同样内容。
+    func presentListeningPortFallback(_ fallback: ListeningPortFallback) {
+        guard let notice = fallback.notice, !serviceManager.isQuitting else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = fallback.requested.map { "端口 \($0) 已被占用" } ?? "端口已被占用"
+        alert.informativeText = notice
+        alert.addButton(withTitle: "好")
+        alert.addButton(withTitle: "打开设置")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertSecondButtonReturn else { return }
+            self?.showPreferences(nil)
+        }
+    }
+
+    /// Alert shown when the managed service could not start. ServiceManager owns    /// the state change and the "启动失败" page; the buttons are UI wiring here.
     private func presentStartupError(_ message: String) {
         let alert = NSAlert()
         alert.alertStyle = .critical

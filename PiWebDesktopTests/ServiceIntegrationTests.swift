@@ -644,7 +644,11 @@ private final class IntegrationServiceHarness {
             fileManager: .default,
             ownershipStore: FileServiceOwnershipStore(),
             signaler: POSIXServiceSignaler(),
-            instanceID: instanceID
+            instanceID: instanceID,
+            // 集成测试用本地 HTTP 服务器**自己占着**这个端口来当服务端，端口探测在这里
+            // 没有意义：真实探测会把它判成“外部占用”并触发端口回落，测试就不再验证
+            // “端口可用时按配置端口启动”这条路径。注入“无法判定”= 不回落。
+            isPortAvailable: { _, _ in nil }
         )
         self.manager = manager
 

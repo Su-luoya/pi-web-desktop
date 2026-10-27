@@ -31,6 +31,10 @@ final class ServiceManager {
     /// 只在真正发生回落时回调一次；配置本身不变，下次启动重新检测。
     var onListeningAddressFallback: ((ListeningAddressFallback) -> Void)?
 
+    /// 配置端口被占用、本次启动临时改用其它端口时的通知。
+    /// 只在真正发生回落时回调一次；配置本身不变，下次启动重新检测。
+    var onListeningPortFallback: ((ListeningPortFallback) -> Void)?
+
     // MARK: - Timing (unchanged from the pre-split implementation)
 
     static let maxStartupAttempts = 150
@@ -165,12 +169,28 @@ final class ServiceManager {
     /// 主机名是否解析到本机；与 `localAddresses` 成对注入。
     private let resolvesToLocalHost: (String) -> Bool
 
+    /// 端口可用性探测（`bind(2)`）。配置端口被占用时用来找空闲端口；
+    /// 测试注入固定结论，不碰真实 socket。
+    private let isPortAvailable: (String, Int) -> Bool?
+
+    /// 测试注入的端口探测覆盖（`setPortAvailability`）。
+    private var portAvailabilityOverride: ((String, Int) -> Bool?)?
+
+    /// 测试注入的“已管理 PID”覆盖（`setManagedServicePIDForTesting`）。
+    private var managedPIDForTesting: pid_t?
+
     /// 本次启动实际生效的监听地址（回落时为回环地址，否则等于配置地址）。
     /// 界面加载、健康探测与错误提示都以它为准，避免“进程用了 A、界面连 B”。
     private(set) var effectiveListeningAddress: String
 
+    /// 本次启动实际生效的监听端口（回落时为扫到的空闲端口，否则等于配置端口）。
+    private(set) var effectiveListeningPort: Int
+
     /// 配置的监听地址在本机不存在时的回落在生效中（配置本身未被修改）。
     private(set) var listeningAddressFallback: ListeningAddressFallback
+
+    /// 配置端口被占用时的端口回落在生效中（配置本身未被修改）。
+    private(set) var listeningPortFallback: ListeningPortFallback
 
     private var serviceProcess: ServiceProcessHandle?
 
@@ -230,7 +250,8 @@ final class ServiceManager {
         logWriter: LogWriter? = nil,
         toolPathProvider: ToolPathProvider? = nil,
         localAddresses: (() -> LocalAddresses)? = nil,
-        resolvesToLocalHost: ((String) -> Bool)? = nil
+        resolvesToLocalHost: ((String) -> Bool)? = nil,
+        isPortAvailable: ((String, Int) -> Bool?)? = nil
     ) {
         self.configuration = configuration
         self.appConfiguration = appConfiguration
@@ -254,11 +275,26 @@ final class ServiceManager {
         self.localAddresses = addressSnapshot
         self.resolvesToLocalHost = resolvesToLocalHost
             ?? { HostnameResolver.resolvesToLocalHost($0, localAddresses: addressSnapshot) }
+        // 端口回落依赖：默认读真实 `bind(2)` 结论，测试注入固定结果。
+        self.isPortAvailable = isPortAvailable
+            ?? { SystemDependencyPortProbe().isPortAvailable(host: $0, port: $1) }
         self.effectiveListeningAddress = configuration.hostname
+        self.effectiveListeningPort = configuration.port
         self.listeningAddressFallback = .none(configuration.hostname)
+        self.listeningPortFallback = .none(configuration.port)
     }
 
     // MARK: - Configuration
+
+    /// 测试用：替换端口可用性探测。生产路径通过初始化参数注入。
+    func setPortAvailability(_ probe: @escaping (String, Int) -> Bool?) {
+        portAvailabilityOverride = probe
+    }
+
+    /// 测试用：伪造一个“本应用管理的 PID”，使 `startDecision` 走 `.existingProcess`。
+    func setManagedServicePIDForTesting(_ pid: pid_t) {
+        managedPIDForTesting = pid
+    }
 
     /// 配置请求代次（GitHub #135 F1）。
     ///
@@ -301,7 +337,7 @@ final class ServiceManager {
         return true
     }
 
-    // MARK: - 监听地址回环回落
+    // MARK: - 监听地址/端口回落
 
     /// 重算本次启动的生效监听地址。
     ///
@@ -315,29 +351,57 @@ final class ServiceManager {
             localAddresses: localAddresses,
             resolvesToLocalHost: resolvesToLocalHost
         )
-        let previous = listeningAddressFallback
+        let previousAddress = listeningAddressFallback
         listeningAddressFallback = resolution.fallback
         effectiveListeningAddress = resolution.fallback.effective
+
+        // 地址变了，上一次的端口结论就作废（它是在旧地址上探测的）。这里只重置不
+        // 探测：保存配置的主线程路径不该做 `bind(2)`，真正的探测在启动决策点。
+        if listeningPortFallback.requested != configuration.port {
+            listeningPortFallback = .none(configuration.port)
+        }
+        effectiveListeningPort = listeningPortFallback.effective
+
         // 只在结论发生变化时记录与告知：每次启动都重算，但同一次回落只提示一次。
-        guard resolution.fallback != previous, let notice = resolution.fallback.notice else { return }
-        // 地址本身非法（.unknown）时这里不会回落：诊断仍由地址校验路径给出，
-        // 这里只记录“配置地址不在本机”这一种事实。
+        // 地址本身非法（.unknown）时这里不会回落：诊断仍由地址校验路径给出。
+        guard resolution.fallback != previousAddress, let notice = resolution.fallback.notice else { return }
         logWriter.record("监听地址回落：\(notice)")
         onListeningAddressFallback?(resolution.fallback)
     }
 
-    /// 本次启动实际生效的服务 URL（回落后是回环地址）。
+    /// 重算本次启动的生效监听端口。
+    ///
+    /// 只在**确定要启动新子进程时**调用：已经在跑的本应用实例占着端口不是冲突，
+    /// 把那种情况当成占用会让 `effectiveServiceURL` 指向一个没人监听的端口。
+    /// 探测绑在生效地址上 —— 地址回落到回环后，原地址上的端口占用与本次启动无关。
+    private func recomputeEffectiveListeningPort() {
+        let resolution = ListeningPortFallbackPolicy.resolve(
+            hostname: effectiveListeningAddress,
+            port: configuration.port,
+            isAvailable: portAvailabilityOverride ?? isPortAvailable
+        )
+        let previousPort = listeningPortFallback
+        listeningPortFallback = resolution
+        effectiveListeningPort = resolution.effective
+        guard resolution != previousPort, let notice = resolution.notice else { return }
+        logWriter.record("监听端口回落：\(notice)")
+        onListeningPortFallback?(resolution)
+    }
+
+    /// 本次启动实际生效的服务 URL（回落后是回环地址与扫到的空闲端口）。
     ///
     /// 读缓存结论，不在这里重新解析（`getaddrinfo` 可能阻塞）；缓存只在启动决策点
     /// 与配置变更时重算。
     var effectiveServiceURL: URL {
-        configuration.serviceURL(forHostname: effectiveListeningAddress)
+        configuration.serviceURL(forHostname: effectiveListeningAddress, port: effectiveListeningPort)
     }
 
     /// 指定配置的生效服务 URL。
     ///
     /// 设置保存路径在 `updateConfiguration` 之前就要重算代理告警，那时
     /// `effectiveServiceURL` 还是旧配置的结论，所以需要显式传入新配置。
+    /// 地址回落在保存路径上是确定可算的；端口回落需要 `bind(2)` 探测，不能放在
+    /// 主线程的保存路径上，所以这里只算地址回落，端口用配置端口。
     func effectiveServiceURL(for configuration: ServiceConfiguration) -> URL {
         let resolution = ListeningAddressFallbackPolicy.resolve(
             hostname: configuration.hostname,
@@ -435,13 +499,13 @@ final class ServiceManager {
     /// may run in that case. The record itself is the only authority: a child
     /// handle without a record is unhosted as well.
     func managedServicePID() -> pid_t? {
-        verifiedOwnershipRecord()?.pid
+        managedPIDForTesting ?? verifiedOwnershipRecord()?.pid
     }
 
     /// Expectation a stored record must satisfy for the current configuration.
     func ownershipExpectation() -> ServiceOwnershipExpectation {
         ServiceOwnershipExpectation(
-            port: configuration.port,
+            port: effectiveListeningPort,
             instanceID: instanceID
         )
     }
@@ -535,14 +599,18 @@ final class ServiceManager {
             return .missingExecutable
         }
         // PATH 来自注入的工具 PATH 构建器（未注入时 `make` 用纯静态兜底）。
-        // 监听地址用生效地址：回落后启动的是回环地址，子进程参数必须一致。
+        // 端口回落在“确认要起新进程”之后才算：本应用自己的实例占着端口不是冲突。
+        recomputeEffectiveListeningPort()
+        // 监听地址与端口用生效值：回落后启动的是回环地址/空闲端口，子进程
+        // 参数必须一致。
         return .launch(ServiceLaunchSpecification.make(
             configuration: configuration,
             piWebPath: piWebPath,
             appConfiguration: appConfiguration,
             baseEnvironment: environment(),
             toolPathProvider: toolPathProvider,
-            hostname: effectiveListeningAddress
+            hostname: effectiveListeningAddress,
+            port: effectiveListeningPort
         ))
     }
 
@@ -712,7 +780,7 @@ final class ServiceManager {
                            self.activeStartupSessionGeneration == self.lifecycleGeneration {
                             self.endStartupSession()
                             self.reportStartupFailureOnce(
-                                "pi-web 进程已退出。请查看日志：\(self.appConfiguration.logURL.path)",
+                                StartupFailureDiagnosis.message(logURL: self.appConfiguration.logURL),
                                 session: session
                             )
                             return
@@ -788,7 +856,7 @@ final class ServiceManager {
             resolvedExecutable: facts.resolvedExecutable,
             resolvedExecutableSource: facts.resolvedExecutableSource,
             argumentsDigest: ServiceOwnershipRecord.commandDigest(ofCommandText: facts.commandLine),
-            port: configuration.port,
+            port: effectiveListeningPort,
             instanceID: instanceID,
             recordedAt: ISO8601DateFormatter().string(from: Date())
         )
@@ -947,7 +1015,7 @@ final class ServiceManager {
                     } else if let process = self.serviceProcess, !process.isRunning {
                         self.endStartupSession()
                         self.reportStartupFailureOnce(
-                            "pi-web 进程已退出。请查看日志：\(self.appConfiguration.logURL.path)",
+                            StartupFailureDiagnosis.message(logURL: self.appConfiguration.logURL),
                             session: session
                         )
                     } else {

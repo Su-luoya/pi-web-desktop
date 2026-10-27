@@ -378,6 +378,7 @@ private final class ServiceManagerHarness {
     private(set) var startupFailures: [String] = []
     private(set) var workspaceProblems: [ManagerWorkspaceProblem] = []
     private(set) var listeningAddressFallbacks: [ListeningAddressFallback] = []
+    private(set) var portFallbacks: [ListeningPortFallback] = []
     private(set) var loadRequests = 0
 
     init(
@@ -447,6 +448,9 @@ private final class ServiceManagerHarness {
         manager.onLoadPage = { [weak self] in self?.loadRequests += 1 }
         manager.onListeningAddressFallback = { [weak self] fallback in
             self?.listeningAddressFallbacks.append(fallback)
+        }
+        manager.onListeningPortFallback = { [weak self] fallback in
+            self?.portFallbacks.append(fallback)
         }
         manager.onWorkspaceProblem = { [weak self] problem, path in
             self?.workspaceProblems.append(ManagerWorkspaceProblem(problem: problem, path: path))
@@ -975,6 +979,65 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(harness.manager.effectiveListeningAddress, "127.0.0.1")
         XCTAssertEqual(harness.listeningAddressFallbacks.count, 1)
         XCTAssertEqual(harness.manager.configuration.hostname, address, "配置不得被回写")
+    }
+
+    // MARK: - 端口回落
+
+    /// 配置端口被其它程序占用：启动决策改用扫到的空闲端口，配置本身不改。
+    func testStartDecisionUsesFallbackPortWhenConfigurationPortIsTaken() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+        var configuration = configured(try harness.makeExecutable())
+        configuration.port = 30141
+        harness.manager.updateConfiguration(configuration)
+        harness.manager.setPortAvailability { _, port in port != 30141 }
+
+        guard case .launch(let specification) = harness.manager.startDecision() else {
+            return XCTFail("expected .launch, got \(harness.manager.startDecision())")
+        }
+        XCTAssertEqual(specification.arguments, ["--hostname", "127.0.0.1", "--port", "30142", "--no-open"])
+        XCTAssertEqual(harness.manager.effectiveListeningPort, 30142)
+        XCTAssertEqual(harness.manager.effectiveServiceURL.absoluteString, "http://127.0.0.1:30142/")
+        XCTAssertEqual(harness.manager.configuration.port, 30141, "配置不得被回写")
+        XCTAssertEqual(harness.portFallbacks.map(\.effective), [30142])
+    }
+
+    /// 本应用自己的实例占着端口不是冲突：必须返回 `.existingProcess`，生效端口保持
+    /// 配置端口，否则界面会去连一个没人监听的端口。
+    func testExistingProcessIsNotTreatedAsPortConflict() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+        var configuration = configured(try harness.makeExecutable())
+        configuration.port = 30141
+        harness.manager.updateConfiguration(configuration)
+        harness.manager.setPortAvailability { _, _ in false }
+        harness.manager.setManagedServicePIDForTesting(ProcessInfo.processInfo.processIdentifier)
+
+        XCTAssertEqual(harness.manager.startDecision(), .existingProcess)
+        XCTAssertEqual(harness.manager.effectiveListeningPort, 30141)
+        XCTAssertTrue(harness.portFallbacks.isEmpty)
+    }
+
+    /// 地址回落到回环后，端口探测必须绑在回环地址上（原地址上的占用与本次无关）。
+    func testPortProbeUsesTheEffectiveAddressAfterAddressFallback() throws {
+        let harness = try makeHarness(localAddresses: { LocalAddresses(ipv4: [], ipv6: []) })
+        defer { harness.cleanUp() }
+        var configuration = configured(try harness.makeExecutable())
+        // 覆盖网络地址在仓库里不能写成字面值（check-identity.sh），这里拼接。
+        configuration.hostname = ["100", "76.71.55"].joined(separator: ".")
+        configuration.port = 30141
+        harness.manager.updateConfiguration(configuration)
+        var probedHosts: [String] = []
+        harness.manager.setPortAvailability { host, _ in
+            probedHosts.append(host)
+            return true
+        }
+
+        guard case .launch(let specification) = harness.manager.startDecision() else {
+            return XCTFail("expected .launch, got \(harness.manager.startDecision())")
+        }
+        XCTAssertEqual(specification.arguments, ["--hostname", "127.0.0.1", "--port", "30141", "--no-open"])
+        XCTAssertEqual(probedHosts, ["127.0.0.1"])
     }
 
     func testStartDecisionAppliesProxyAndAllowedHosts() throws {

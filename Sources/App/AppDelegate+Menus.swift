@@ -423,7 +423,7 @@ extension AppDelegate {
             selected: address
         ) {
         case .copyOnly:
-            copyPhoneAccessLink(for: address, port: configuration.port)
+            copyPhoneAccessLink(for: address, port: serviceManager.effectiveListeningPort)
         case .needsConfirmation:
             confirmPhoneAccessSwitch(to: address)
         }
@@ -556,14 +556,15 @@ extension AppDelegate {
             piCLIFinding: dependencyReport?.finding(for: .piCLI),
             nodeFinding: dependencyReport?.finding(for: .node),
             managedPID: serviceManager.managedServicePID(),
-            port: serviceManager.configuration.port,
+            port: serviceManager.effectiveListeningPort,
             serviceAddress: startURL.absoluteString,
             status: statusDescription(),
             workspaceDirectory: appConfiguration.workspaceDirectory(for: serviceManager.configuration).path,
-            // 诊断导出要说“实际会执行的命令”：回落生效时地址是回环地址。
+            // 诊断导出要说“实际会执行的命令”：回落生效时地址/端口都是生效值。
             launchCommand: ([piWebPath] + ServiceLaunchSpecification.arguments(
                 configuration: serviceManager.configuration,
-                hostname: serviceManager.effectiveListeningAddress
+                hostname: serviceManager.effectiveListeningAddress,
+                port: serviceManager.effectiveListeningPort
             ))
                 .joined(separator: " "),
             launchEnvironment: launchEnvironment,

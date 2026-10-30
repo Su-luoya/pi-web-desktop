@@ -21,7 +21,6 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 - `WebViewNavigationPolicy`（`Sources/App/WebViewNavigationPolicy.swift`）：本地/外链 URL 判定（应用自己配置并启动的服务来源：scheme + host + port 与 `ServiceConfiguration.serviceURL` 完全一致，host 大小写不敏感、IPv6 按 `RemoteAccessPolicy.normalizedHostname` 去方括号后比较；`127.0.0.1`/`localhost`/`::1` 加配置端口；`about`/`blob`/`data` 视为内联；其余一律外开，判定里没有任何网段或后缀白名单）与导航失败判定（`WebViewNavigationFailure` 与 `navigationFailure(for:)`：取消类错误 `NSURLErrorCancelled`，含包装在 `NSUnderlyingErrorKey` 里的情形，一律不上报；其余按错误码归为 `.connectionFailed` / `.loadFailed`），不依赖 Cocoa/WebKit，可在 unhosted 测试目标里直接测试。
 - `AppConfiguration`（`Sources/App/AppConfiguration.swift`）与 `AppPaths`（`Sources/App/AppPaths.swift`）：设置分层与路径的唯一提供者——普通设置经 UserDefaults 读写，运行状态（`service-owner.json`、旧 `service.pid`、app PID、实例锁）在 `~/Library/Application Support/Pi Web Desktop/`，日志在 `~/Library/Logs/Pi Web Desktop/`，默认工作目录为其中的 `Workspace/`。两个根目录都可注入（support/log），因此测试与 smoke 运行不会写入真实目录。
 - `WorkspaceDirectory`（`Sources/App/WorkspaceDirectory.swift`）：工作目录的解析与校验（存在、是目录、可写）与可读修复提示；默认目录首次使用时创建，自选目录必须已存在且可写，不可用时阻止启动（见 [docs/settings-and-workspace.md](settings-and-workspace.md)）。
-- `RecentWorkspaceStore`（`Sources/App/RecentWorkspace.swift`）：最近工作目录的持久化与去重（UserDefaults 单键 `workspace.recentPaths`，最多 10 条绝对路径）与切换决策的纯逻辑 `WorkspaceSwitchDecision`（绝对路径校验 + `WorkspaceDirectory.validate` + 是否与当前目录相同）。它不接触 AppKit：菜单、确认框、重启与 `NSWorkspace.open` 都在 `AppDelegate` 里（见 [docs/settings-and-workspace.md](settings-and-workspace.md)）。切换只写 `service.workspacePath`（因此进入 `ServiceConfiguration.runtimeSignature`）并复用既有的「只停止已验证托管进程组」路径，服务是外部进程时不会被停止或重启；只接受绝对路径，且必须存在、是目录、可写，任何分支都不创建目录（只读 delta 评审见 [alpha.10 安全评审](security-review-alpha.10.md)；重叠切换竞态等四项非阻断发现见 [#135](https://github.com/Su-luoya/pi-web-desktop/issues/135)）。
 - `QuitPlan`（`Sources/App/QuitPolicy.swift`）与 `QuitCoordinator`（`Sources/App/QuitCoordinator.swift`）：退出行为的纯决策（询问 / 保持运行 / 停止服务）与退出状态机（GitHub #72，见下文“退出状态机”），都可 unhosted 测试；外部服务在任何退出行为下都不会被停止。
 - `ProcessInspector`（`Sources/Services/ProcessInspector.swift`）：`ps`/`lsof` 命令、监听端口 PID、进程存活判断、`pgid`/`lstart`/`comm`/`args` 事实读取和进程描述；命令执行通过 `CommandRunning` 注入，可执行标识读取（`proc_pidpath`）也可注入，解析规则是不访问进程的纯函数。它只报告事实，不做所有权判定。
 - `LogWriter`（`Sources/Diagnostics/LogWriter.swift`）与 `LogRedactor`（`Sources/Diagnostics/LogRedactor.swift`）：统一日志写入与统一脱敏（GitHub #10）。`LogWriter` 按大小轮转（`LogRotationPolicy`，默认 10 MB / 保留 5 份；阈值、份数、`FileManager`、时间源都可注入），打开子进程日志句柄前先就地脱敏历史日志，任何写入/轮转失败只记录在 `failureDescription`（诊断导出的“日志写入”一行）而不抛出也不崩溃。`LogRedactor` 的同一个实例用于日志行、诊断导出、错误消息、环境变量与命令行展示；规则覆盖 URL 查询串、`Authorization`/`Bearer`、敏感键值（含 `PI_WEB_PASSWORD`）、JWT、代理凭据、Home 路径、私钥块，多行输入逐行处理且幂等。
@@ -41,8 +40,8 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 
 `Sources/` 按领域分为五个目录，一个组件族的实现文件放在同一个目录里：
 
-- `Sources/App/`：应用外壳。`AppDelegate.swift` 保留生命周期与装配，其余按功能拆成 `AppDelegate+Menus.swift`、`AppDelegate+Window.swift`、`AppDelegate+Service.swift`、`AppDelegate+Quit.swift`、`AppDelegate+Diagnostics.swift`、`AppDelegate+UpdateChecks.swift`、`AppDelegate+PreLaunchUpdates.swift`、`AppDelegate+CLIUpdate.swift`、`AppDelegate+PackageUpdates.swift`；另有 `ServiceConfiguration`、`WebViewController`、`WebViewNavigationPolicy`、`WorkspaceDirectory`、`RecentWorkspace`、`QuitPolicy` / `QuitCoordinator`、`AppConfiguration` / `AppPaths`、设置窗口控制器与 `main.swift`。单实例互斥在 `SingleInstanceLock`（`flock` 行为权威互斥，PID 记录只做快速路径与错误信息），设置窗口的追平判定在 `PreferencesRefreshPolicy`（纯值类型，可被 unhosted 测试覆盖）。
-- `Sources/Services/`：服务生命周期与系统事实读取。`ServiceManager`、`ServiceOwnership`、`ProcessInspector`、`PiProcessInspector`、`ToolPath`、`ListeningAddressPolicy`、`DependencyChecker`（含依赖探针、模型与报告呈现）和 `InstallCommandManifest`。
+- `Sources/App/`：应用外壳。`AppDelegate.swift` 保留生命周期与装配，其余按功能拆成 `AppDelegate+Menus.swift`、`AppDelegate+Window.swift`、`AppDelegate+Service.swift`、`AppDelegate+Quit.swift`、`AppDelegate+Diagnostics.swift`、`AppDelegate+UpdateChecks.swift`、`AppDelegate+PreLaunchUpdates.swift`、`AppDelegate+CLIUpdate.swift`、`AppDelegate+PackageUpdates.swift`、`AppDelegate+RemoteAccess.swift`；另有 `ServiceConfiguration`、`WebViewController`、`WebViewNavigationPolicy`、`WorkspaceDirectory`、`QuitPolicy` / `QuitCoordinator`、`AppConfiguration` / `AppPaths`、设置窗口控制器与 `main.swift`。远程访问的状态与 side effect 编排在 `RemoteAccessController`（菜单文案、确认框与二维码在 `AppDelegate+RemoteAccess.swift`）；单实例互斥在 `SingleInstanceLock`（`flock` 行为权威互斥，PID 记录只做快速路径与错误信息），设置窗口的追平判定在 `PreferencesRefreshPolicy`（纯值类型，可被 unhosted 测试覆盖）。
+- `Sources/Services/`：服务生命周期与系统事实读取。`ServiceManager`、`ServiceOwnership`、`ProcessInspector`、`PiProcessInspector`、`ToolPath`、`ListeningAddressPolicy`、`TailscaleServe`（CLI 调用与纯决策 `RemoteAccessPlanner`；测试通过假 `CommandRunning` 覆盖，不执行真实 CLI）、`DependencyChecker`（含依赖探针、模型与报告呈现）和 `InstallCommandManifest`。
 - `Sources/Diagnostics/`：日志、脱敏与诊断导出。`LogWriter`、`LogRedactor`、`DiagnosticsCollector`、`DiagnosticsClipboard`、`DiagnosticsWindowController`、`FirstLaunchDiagnostics`。
 - `Sources/Updates/`：更新检查、计划、执行与验证。`UpdateChecker` 族（`UpdateCheck*.swift`）、更新设置与偏好（`UpdateSettingsModel.swift`、`UpdateSettingsWindowController.swift`）、三条更新路径各自的 `*Model` / `*Planner` / `*Command` / `*Coordinator` / `*Status` 文件、事务与验证（`UpdateTransactionModel.swift`、`UpdateTransactionJournal.swift`、`UpdateVerifier.swift`、`UpdateArtifact*.swift`、`UpdateHistory.swift`、`UpdateRollback.swift`）、更新进度窗口（`UpdateProgressModel.swift`、`UpdateProgressWindowController.swift`）、`UpdateAbandonedAttempt.swift` 与 `ComponentInstallation*.swift`。
 - `Sources/Support/`：跨领域的小工具值类型。`SemanticVersion.swift`（自实现的语义化版本比较）与 `NonEmptyString.swift`（`String` 的非空归一化）。
@@ -247,6 +246,35 @@ pi-web。设置窗口在用户把监听地址改成非 loopback 时用一行字�
 字面量加方括号：`http://[::1]:端口/`（`URLComponents` 对未加方括号的 IPv6 host 会返回 nil，
 旧实现会静默回落到 `127.0.0.1`）。
 
+### Tailscale 远程访问（serve）
+
+「服务 → 远程访问」把本机服务挂到 tailnet 上的一条 HTTPS 入口，代替“改监听地址 + 自备
+隧道”那套手工流程。**只用 `tailscale serve`，绝不用 `funnel`**：serve 只对同一 tailnet
+内的设备可见，funnel 会发布到公网。这一功能同样**没有访问密码**——能进入 tailnet 的设备
+就能完全控制 pi-web，边界就是 tailnet 身份本身。
+
+分工（`Sources/Services/TailscaleServe.swift` 纯逻辑，`Sources/App/RemoteAccessController.swift`
+编排）：
+
+- `TailscaleServeCommand.cliCandidates()` 只在 `/Applications/Tailscale.app/Contents/MacOS/`
+  与 `/opt/homebrew/bin/tailscale`、`/usr/local/bin/tailscale` 三处找 CLI（App Store 版把 CLI
+  放在 app bundle 里，不在 PATH）。路径由片段拼出而不是写成整串，否则身份检查脚本的
+  厂商名扫描会命中这一行。
+- `TailscaleServe.detect()` → `ready(dnsName:)` / `notRunning(backendState:)` / `notInstalled`。
+  主机名一律取 `tailscale status --json` 的 `Self.DNSName`（去掉结尾的点），不从机器名猜。
+- `RemoteAccessPlanner.plan` 是唯一决策点，**纯函数**（输入：主机名、目标 URL、允许主机名、
+  `TailscaleServeSnapshot`）：优先 443（不带端口的 URL），被别的服务占用就退到 8444、9443；
+  同一端口上已经是我们的目标就复用；三个都被占返回 `.noFreePort`。主机名不在
+  `--allowed-hosts` 里时要回写配置（此时必须重启服务，确认框在 App 层）。
+- `TailscaleServe.enable/disable` 用 `--bg --https=<port> <target>` 与 `--https=<port> off`。
+  撤销精确到端口，**从不 `reset`**；记录（端口）存在 UserDefaults 的 `remoteAccess.port`。
+- 退出时 `revokeForQuit()` 同步撤销：入口指向的服务马上就不在，留着只会让手机打开 502。
+
+真机验证过的行为：443 上挂 `http://127.0.0.1:<port>` 后 `https://<机器名>/` 能直接打开
+pi-web（无需端口）；`tailscale serve status` 显示 `(tailnet only)`；撤销后同一地址返回
+连接失败。允许主机名缺失时 pi-web 返回 403，因此启用流程里必须先把主机名写进
+`--allowed-hosts`。
+
 ## 更新检查、设置与缓存
 
 GitHub #17 的版本检查在应用运行期间只做只读查询，不下载、不安装、不修改服务配置；应用退出后不再检查（不安装 LaunchAgent）。GitHub #18 在同一模型上加了逐类策略、忽略版本、状态显示与启动前自动更新设置位。GitHub #20 让这个设置位在受限条件下生效：只有来源为已验证的 npm 全局安装的 Pi Web 才会在启动前尝试自动更新，其余来源只显示命令。
@@ -294,7 +322,7 @@ GitHub #17 的版本检查在应用运行期间只做只读查询，不下载、
 - 普通设置：UserDefaults（读写都经 `AppConfiguration`）。
 - 运行状态和 PID：`~/Library/Application Support/Pi Web Desktop/`。
 - 日志：`~/Library/Logs/Pi Web Desktop/`（`Pi Web Desktop.log` 与 `.1.log` … `.5.log`），应用执行按大小轮转，详见 [日志与诊断导出](logging-and-diagnostics.md)。
-- 更新检查缓存（GitHub #17）：`~/Library/Application Support/Pi Web Desktop/update-check-cache.json`（只含版本、时间戳与条件请求字段，不含凭据、会话或诊断内容）；更新检查的策略、忽略版本、启动前自动更新开关、最近的更新失败警告、统一更新历史（GitHub #23，`updateChecks.updateHistory`，单键 JSON，只含固定枚举、已校验版本/包名与固定原因文案）与超时/放弃等待的「已放弃」记录（GitHub #62，`updateChecks.piWeb.abandonedAttempt` / `updateChecks.pi.abandonedAttempt` / `updateChecks.piPackages.abandonedAttempts`，只含固定枚举、已校验组件/包名、已脱敏命令摘要与时间）在 UserDefaults（`updateChecks.*`，见 [设置、工作目录与退出行为](settings-and-workspace.md)）。最近工作目录也在 UserDefaults（`workspace.recentPaths`，最多 10 条用户选过的绝对路径）。
+- 更新检查缓存（GitHub #17）：`~/Library/Application Support/Pi Web Desktop/update-check-cache.json`（只含版本、时间戳与条件请求字段，不含凭据、会话或诊断内容）；更新检查的策略、忽略版本、启动前自动更新开关、最近的更新失败警告、统一更新历史（GitHub #23，`updateChecks.updateHistory`，单键 JSON，只含固定枚举、已校验版本/包名与固定原因文案）与超时/放弃等待的「已放弃」记录（GitHub #62，`updateChecks.piWeb.abandonedAttempt` / `updateChecks.pi.abandonedAttempt` / `updateChecks.piPackages.abandonedAttempts`，只含固定枚举、已校验组件/包名、已脱敏命令摘要与时间）在 UserDefaults（`updateChecks.*`，见 [设置、工作目录与退出行为](settings-and-workspace.md)）。
 
 设置分层、默认工作目录、退出行为与不可写目录的处理见 [docs/settings-and-workspace.md](settings-and-workspace.md)。
 

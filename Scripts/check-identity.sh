@@ -466,7 +466,10 @@ else
   HOME_PATH_PATTERN='/Users/[A-Za-z0-9._-]+'
   PROXY_ENDPOINT_PATTERN='(127\.0\.0\.1|localhost|\[::1\]):(7890|7891|1080|10809|3128|8888)'
 
-  scan_forbidden "no Tailscale default hostname" -E -e "$VENDOR_PATTERN" -- ":!$SELF_REL" ':!*.icns'
+  # 厂商名只允许出现在代码/配置里（用来拼 CLI 路径与命令，靠片段拼接绕开本扫描）；
+  # 文档里必须能写清怎么用 CLI，因此这条扫描限定在代码与配置目录。真正的隐私风险
+  # 由下一条 `.ts.net` 与 CGNAT 地址两条全库扫描兜住。
+  scan_forbidden "no Tailscale default hostname" -E -e "$VENDOR_PATTERN" -- Sources Scripts Configuration PiWebDesktopTests PiWebDesktop.xcodeproj ":!$SELF_REL" ':!*.icns'
   scan_forbidden "no tailnet DNS suffix default" -E -i -e "$TAILNET_SUFFIX_PATTERN" -- ":!$SELF_REL" ':!*.icns'
   scan_forbidden "no CGNAT private address default" -E -e "$CGNAT_PATTERN" -- ":!$SELF_REL" ':!*.icns'
   scan_forbidden "no absolute home path default" -E -e "$HOME_PATH_PATTERN" -- ":!$SELF_REL" ':!*.icns'

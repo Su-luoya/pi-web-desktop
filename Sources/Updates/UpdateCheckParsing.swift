@@ -114,6 +114,32 @@ enum UpdateResponseParser {
         ))
     }
 
+    /// 解析自建 appcast：与 GitHub 列表同一套语义化版本比较规则，只是字段名
+    /// 是 `tag`。zip 字段缺失不影响版本比较（安装路径会单独校验）。
+    static func latestAppcastRelease(from data: Data) -> Result<UpdateUpstreamVersion, UpdateParseFailure> {
+        guard let tags = AppcastFeed.tags(from: data) else {
+            return .failure(.unexpectedStructure)
+        }
+        var best: (tag: String, version: SemanticVersion)?
+        for tag in tags {
+            guard let version = SemanticVersion(tag) else { continue }
+            if let current = best {
+                if current.version < version { best = (tag, version) }
+            } else {
+                best = (tag, version)
+            }
+        }
+        guard let best else {
+            return .failure(tags.isEmpty ? .emptyReleaseList : .missingVersion)
+        }
+        return .success(UpdateUpstreamVersion(
+            version: best.version.description,
+            semanticVersion: best.version,
+            isPrerelease: best.version.prerelease != nil,
+            tag: best.tag
+        ))
+    }
+
     /// 解析 npm registry `/latest` 文档：只读顶层 `version` 字段。
     static func latestNpmVersion(from data: Data) -> Result<UpdateUpstreamVersion, UpdateParseFailure> {
         guard let object = try? JSONSerialization.jsonObject(with: data) else {

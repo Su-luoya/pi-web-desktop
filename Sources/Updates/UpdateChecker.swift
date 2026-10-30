@@ -520,7 +520,9 @@ final class UpdateChecker {
     private func endpoint(for category: UpdateCheckCategory, packageName: String?) -> UpdateEndpoint? {
         switch category {
         case .desktopApp:
-            return UpdateEndpoint.githubReleases(repository: UpdateCheckUpstream.desktopRepository)
+            // 优先更新通道（不占 GitHub API 配额），通道不可用时回落 API。
+            return UpdateEndpoint.appcast()
+                ?? UpdateEndpoint.githubReleases(repository: UpdateCheckUpstream.desktopRepository)
         case .piCLI:
             return UpdateEndpoint.npmLatest(packageName: UpdateCheckUpstream.piCLIPackageName)
         case .piWeb:
@@ -568,10 +570,56 @@ final class UpdateChecker {
                     self.finishStoppedCheck()
                     return
                 }
+                // 更新通道（appcast）不可达时回落 GitHub API：一次 CDN 抖动不该
+                // 让检查直接失败。回落后用 API 的解析器重新判定。
+                if let fallback = self.fallbackEndpoint(for: item, endpoint: endpoint, response: response) {
+                    let fallbackRequest = self.makeRequest(endpoint: fallback, cached: item.cached)
+                    self.httpClient.perform(fallbackRequest) { [weak self] fallbackResponse in
+                        guard let self else { return }
+                        self.scheduler.perform { [weak self] in
+                            guard let self else { return }
+                            guard !self.stopped else {
+                                self.finishStoppedCheck()
+                                return
+                            }
+                            let (entry, result) = self.evaluate(
+                                item: item, endpoint: fallback, response: fallbackResponse, at: now
+                            )
+                            self.cache.upsert(entry)
+                            self.runItems(
+                                items, at: index + 1, collected: collected + [result],
+                                now: now, completion: completion
+                            )
+                        }
+                    }
+                    return
+                }
                 let (entry, result) = self.evaluate(item: item, endpoint: endpoint, response: response, at: now)
                 self.cache.upsert(entry)
                 self.runItems(items, at: index + 1, collected: collected + [result], now: now, completion: completion)
             }
+        }
+    }
+
+    /// 桌面应用的回落端点：只在主端点就是更新通道、且这次请求没拿到 2xx/304
+    /// 时才用。拿到响应后即使内容不合规也不回落（那是我们自己的 feed 格式问题，
+    /// 应该在发布演练里被发现，而不是用两次请求掩盖）。
+    ///
+    /// 唯一例外是 `.offline`：根本连不上网络时再打第二个请求只是白花一个超时。
+    private func fallbackEndpoint(
+        for item: PlanItem,
+        endpoint: UpdateEndpoint,
+        response: Result<UpdateHTTPResponse, UpdateHTTPFailure>
+    ) -> UpdateEndpoint? {
+        guard item.target.category == .desktopApp,
+              endpoint.allowedHosts.contains(AppcastFeed.host) else { return nil }
+        switch response {
+        case .success(let http) where (200..<300).contains(http.statusCode):
+            return nil
+        case .failure(.offline), .failure(.cancelled):
+            return nil
+        case .success, .failure:
+            return UpdateEndpoint.githubReleases(repository: UpdateCheckUpstream.desktopRepository)
         }
     }
 
@@ -870,6 +918,9 @@ final class UpdateChecker {
     }
 
     private func parse(endpoint: UpdateEndpoint, body: Data) -> Result<UpdateUpstreamVersion, UpdateParseFailure> {
+        if endpoint.allowedHosts.contains(AppcastFeed.host) {
+            return UpdateResponseParser.latestAppcastRelease(from: body)
+        }
         if endpoint.allowedHosts.contains(UpdateCheckUpstream.githubHost) {
             return UpdateResponseParser.latestGitHubRelease(from: body)
         }

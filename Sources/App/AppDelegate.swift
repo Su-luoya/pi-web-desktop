@@ -91,6 +91,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     var updateProgressMenuItem: NSMenuItem?
     /// 当前正在执行的桌面 App 安装器；必须由 AppDelegate 持有到下载/替换流程结束。
     var desktopAppUpdateInstaller: DesktopAppUpdateInstalling?
+    /// 预下载用的安装器实例（只下载、不安装）。与 `desktopAppUpdateInstaller`
+    /// 分开：后者一旦非空，菜单入口就按“安装中”置灰，预下载期间不该置灰。
+    var desktopAppPrefetcher: DesktopAppUpdateInstaller?
+    /// 已经成功预下载的版本：同一个版本不重复下载，换版本才重新下。
+    var prefetchedDesktopUpdateVersion: String?
     /// 桌面 App 自更新进行到哪个阶段、属于哪一轮（outD-2）：安装器对象只在下载
     /// 与校验都完成后才创建，光靠它判断不到「下载窗口期」，于是重复点击会再下
     /// 一遍整包。轮次标记还保证晚到的旧回调不会复位新一轮的阶段位。

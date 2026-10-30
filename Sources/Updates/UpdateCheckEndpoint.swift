@@ -27,6 +27,16 @@ struct UpdateEndpoint: Equatable {
         return UpdateEndpoint(url: url, allowedHosts: [UpdateCheckUpstream.githubHost])
     }
 
+    /// 更新通道（appcast）：发布 workflow 在 Release 正式发布后写入的静态 JSON。
+    ///
+    /// 走 CDN，不消耗 GitHub API 配额（未认证每小时 60 次、按出口 IP 共享，
+    /// GitHub #225），一个请求就带齐全部 tag。拿不到时由调用方回落
+    /// `githubReleases`。
+    static func appcast() -> UpdateEndpoint? {
+        guard let url = AppcastFeed.url else { return nil }
+        return UpdateEndpoint(url: url, allowedHosts: [AppcastFeed.host])
+    }
+
     /// npm registry 的 `/latest` 文档端点。作用域包名里的 `/` 编码为 `%2F`。
     static func npmLatest(packageName: String) -> UpdateEndpoint? {
         guard let encoded = encodedPackageName(packageName) else { return nil }

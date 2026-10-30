@@ -60,6 +60,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 网络地址探测：默认枚举本机接口；测试注入替身，不访问真实网络。
     let networkAddressProvider: NetworkAddressProviding = SystemNetworkAddressProvider()
 
+    /// 「远程访问」子菜单（服务菜单下）：菜单打开时按控制器缓存的状态重建，
+    /// 不在打开菜单时跑 CLI。
+    var remoteAccessMenus: [NSMenu] = []
+    /// 远程访问（Tailscale serve）的状态与「本应用占的那一条入口」的记录。
+    lazy var remoteAccessController = RemoteAccessController(runner: commandRunner)
+
     // MARK: - 更新检查（GitHub #17）
 
     /// 版本检查器：只检查、不安装。失败只改变检查结果状态，不影响服务状态。
@@ -474,6 +480,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func applicationWillTerminate(_ notification: Notification) {
         desktopAppUpdateInstaller = nil
+        // 退出时撤销远程访问：那条入口指向的服务马上就不在了，留着只会让手机
+        // 打开一个 502。同步做完，不让撤销悬在后台线程上。
+        remoteAccessController.revokeForQuit()
         // 退出已开始：兜底计时器不再需要。
         quitDecisionTimer?.invalidate()
         quitDecisionTimer = nil

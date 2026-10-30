@@ -12,6 +12,7 @@ extension AppDelegate {
         // 服务控件与手机访问子菜单
         serviceControlMenuItems.removeAll()
         phoneAccessMenus.removeAll()
+        remoteAccessMenus.removeAll()
         statusMenuItem = nil
         // 更新检查：状态行、设置子菜单、四类快捷开关与各组件菜单项
         updateStatusMenuItem = nil
@@ -105,6 +106,11 @@ extension AppDelegate {
         let servicePhoneAccessItem = NSMenuItem(title: "手机访问链接", action: nil, keyEquivalent: "")
         servicePhoneAccessItem.submenu = makePhoneAccessMenu()
         serviceMenu.addItem(servicePhoneAccessItem)
+        // 与「手机访问链接」同一个问题（手机怎么连上来）的完整答案：不靠局域网
+        // 地址，而是挂一条 tailnet 的 HTTPS 入口。
+        let serviceRemoteAccessItem = NSMenuItem(title: "远程访问", action: nil, keyEquivalent: "")
+        serviceRemoteAccessItem.submenu = makeRemoteAccessMenu()
+        serviceMenu.addItem(serviceRemoteAccessItem)
         serviceMenu.addItem(.separator())
         serviceMenu.addItem(withTitle: "在 Finder 中打开工作目录", action: #selector(openCurrentWorkspace(_:)), keyEquivalent: "")
         serviceMenu.addItem(.separator())

@@ -28,6 +28,9 @@
   确认 xcconfig、Xcode 工程、已构建 bundle 的 `Info.plist` 与本地服务默认值一致。
 - `Scripts/check-identity.sh` 会拒绝 `Sources/`、`Scripts/`、`PiWebDesktop.xcodeproj/`、
   `PiWebDesktopTests/` 里出现 `MARKETING_VERSION` 的字面值；不要在代码、脚本或模板中复制版本号。
+- 同一条检查还会扫描 `Sources/`、`Scripts/`、`Configuration/`、`PiWebDesktopTests/`、
+  `PiWebDesktop.xcodeproj/` 里是否出现远程访问厂商名的裸串（防止把默认主机名或默认入口写进代码）。
+  文档可以直接写厂商名与 CLI 用法，但全库仍禁止出现 tailnet 域名后缀与 CGNAT 私有地址。
 - Release 说明里同时写明 `CFBundleShortVersionString`（即 `MARKETING_VERSION`）与
   `CFBundleVersion`（即 `CURRENT_PROJECT_VERSION`），便于用户核对下载的 ZIP。
 

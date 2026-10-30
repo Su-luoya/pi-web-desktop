@@ -614,6 +614,8 @@ extension AppDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         if phoneAccessMenus.contains(where: { $0 === menu }) {
             rebuildPhoneAccessMenu(menu)
+        } else if remoteAccessMenus.contains(where: { $0 === menu }) {
+            rebuildRemoteAccessMenu(menu)
         } else if menu === updateMenu {
             refreshUpdateMenuState()
         }

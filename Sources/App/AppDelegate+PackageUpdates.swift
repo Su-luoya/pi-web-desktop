@@ -32,6 +32,9 @@ extension AppDelegate {
         installMainMenu()
         createWindow()
         installServiceManagerCallbacks()
+        // 远程访问对账：上次异常退出留下的记录在这里收尾（serve 里那条已经不在
+        // 就丢弃记录，否则恢复成「已开启」）。不阻塞启动，结果只影响菜单文案。
+        remoteAccessController.refresh(configuration: serviceManager.configuration)
         serviceManager.setState(.checking)
         webViewController.showLoadingPage(message: "正在检查运行环境…")
         refreshWorkspaceState()

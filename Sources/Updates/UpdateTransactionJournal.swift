@@ -23,10 +23,18 @@ struct UpdateTransactionJournal {
     private(set) var verifiedVersion: String?
 
     private let now: () -> Date
+    /// 阶段记录回调（GitHub #219）：每个阶段的结果一记录就通知进度窗口。
+    /// 默认 nil：既有调用点与测试行为完全不变。
+    private let onPhase: ((UpdateTransactionPhaseResult) -> Void)?
 
-    init(configuration: Configuration, now: @escaping () -> Date = Date.init) {
+    init(
+        configuration: Configuration,
+        now: @escaping () -> Date = Date.init,
+        onPhase: ((UpdateTransactionPhaseResult) -> Void)? = nil
+    ) {
         self.configuration = configuration
         self.now = now
+        self.onPhase = onPhase
     }
 
     /// 准备阶段：记录更新前指纹。返回指纹供后续验证使用。
@@ -80,6 +88,7 @@ struct UpdateTransactionJournal {
         } else {
             phases.append(result)
         }
+        onPhase?(result)
         return passed
     }
 
@@ -185,6 +194,7 @@ struct UpdateTransactionJournal {
             reason: reason,
             recordedAt: now()
         ))
+        onPhase?(phases[phases.count - 1])
     }
 
 }

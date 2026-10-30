@@ -161,7 +161,9 @@ final class PiWebUpdateCoordinator {
                     probe: environment.transaction.probe
                 )
             ),
-            now: environment.transaction.now
+            now: environment.transaction.now,
+            // 进度窗口（GitHub #219）：阶段一记录就上报；未接入时是空实现。
+            onPhase: { [weak self] result in self?.environment.transaction.reportPhase(component, result) }
         )
         journal.recordPreflight()
         environment.installer.install(plan, timeout: environment.timeout) { [weak self] result in

@@ -24,6 +24,8 @@ extension AppDelegate {
         piCLIUpdateMenuItem = nil
         piPackageUpdateMenuItem = nil
         abandonedAttemptsMenuItem = nil
+        // 进度窗口（GitHub #219）菜单入口
+        updateProgressMenuItem = nil
         // 持久告警项
         piWebUpdateWarningMenuItem = nil
         piCLIUpdateWarningMenuItem = nil

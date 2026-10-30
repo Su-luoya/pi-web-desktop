@@ -83,6 +83,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     var updateMenu: NSMenu?
     /// “更新检查偏好设置”窗口（GitHub #18）。
     var updateSettingsWindowController: UpdateSettingsWindowController?
+    /// “更新进度”窗口与会话汇总（GitHub #219）。中心是主线程独占的纯状态；
+    /// 窗口只渲染它推过来的快照。
+    var updateProgressCenter = UpdateProgressCenter()
+    var updateProgressWindowController: UpdateProgressWindowController?
+    /// “更新 → 显示更新进度”菜单项。
+    var updateProgressMenuItem: NSMenuItem?
     /// 当前正在执行的桌面 App 安装器；必须由 AppDelegate 持有到下载/替换流程结束。
     var desktopAppUpdateInstaller: DesktopAppUpdateInstalling?
     /// 桌面 App 自更新进行到哪个阶段、属于哪一轮（outD-2）：安装器对象只在下载
@@ -95,6 +101,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     var ignoredVersions: UpdateIgnoredVersions = .empty
     /// 本次运行已经提示过哪些版本，避免同一个版本反复打扰；退出即丢弃。
     var notifiedVersions: [UpdateCheckTarget: String] = [:]
+    /// 进度窗口（GitHub #219）已经自动弹过的那一次会话的起始时间：只在会话第一次
+    /// 变化时抢焦点，后续日志行不重复弹窗。
+    var lastAutoPresentedUpdateProgressStart: Date?
     /// 主线程状态：是否有一次检查正在进行（用于菜单文案与重复点击防护）。
     var updateCheckInProgress = false
     /// 手动检查完成后是否弹提示；自动检查是否提示由策略与忽略版本决定。
@@ -238,7 +247,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         )
         // 更新检查设置（GitHub #18）：策略与忽略版本都存在同一个注入的
         // UserDefaults domain 里；旧版布尔键经迁移函数回退，诊断行进日志。
-        let updateLog: (String) -> Void = { [logWriter] message in _ = logWriter.append(message) }
+        // 更新过程的统一日志入口（GitHub #219）：先写诊断日志，再把同一行
+        // （已由调用方用 `logRedactor` 脱敏）推给进度窗口。窗口是主线程独占的，
+        // 所以这里显式回主线程。用局部常量而不是 `self`：`super.init()` 之前
+        // 不能引用 self，而这三个编排器必须在 init 里就拿到日志入口。
+        let progressCenter = UpdateProgressCenter()
+        self.updateProgressCenter = progressCenter
+        let updateLog: (String) -> Void = { [logWriter, progressCenter] message in
+            _ = logWriter.append(message)
+            DispatchQueue.main.async { progressCenter.appendLog(message) }
+        }
         let updatePreferences = appConfiguration.updateCheckPreferences(diagnostics: updateLog)
         self.ignoredVersions = appConfiguration.updateCheckIgnoredVersions(diagnostics: updateLog)
         let updateChecker = UpdateChecker(
@@ -277,6 +295,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         updateChecker.onResultsChanged = { [weak self] summary in
             self?.handleUpdateCheckResults(summary)
         }
+        // 进度窗口（GitHub #219）：中心在主线程发快照，窗口只在主线程渲染。
+        updateProgressCenter.onChange = { [weak self] session in
+            self?.handleUpdateProgressChange(session)
+        }
         // 受限自动更新（GitHub #20）：日志与其它写入共用同一个 LogWriter/LogRedactor；
         // 版本重检测复用 #16 识别器；服务启动与健康检查复用 ServiceManager 路径。
         self.piWebUpdateWarning = appConfiguration.piWebUpdateWarning()
@@ -293,14 +315,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self?.startServiceAndCheckHealthForUpdate(completion: completion)
             },
             redactor: logRedactor,
-            log: { [logWriter] message in _ = logWriter.append(message) },
+            log: updateLog,
             deliver: { work in DispatchQueue.main.async(execute: work) },
             timeout: PiWebUpdateCoordinator.defaultTimeout,
             transaction: UpdateTransactionEnvironment(
                 probe: .live,
-                recordHistory: { [weak self] entry in self?.appConfiguration.recordUpdateHistory(entry) },
+                recordHistory: { [weak self] entry in
+                    guard let self else { return }
+                    self.appConfiguration.recordUpdateHistory(entry)
+                    // 历史写入是唯一权威的结束信号（GitHub #219）。
+                    DispatchQueue.main.async { self.updateProgressCenter.finish(history: entry) }
+                },
                 applyDegradation: { [weak self] plan in self?.applyPiWebUpdateDegradation(plan) },
-                now: Date.init
+                now: Date.init,
+                reportPhase: { [weak self] component, result in
+                    DispatchQueue.main.async {
+                        self?.updateProgressCenter.apply(phase: result, component: component)
+                    }
+                }
             ),
             clearAbandonedAttempt: { [weak self] component in self?.clearAbandonedAttempt(component) }
         ))
@@ -321,14 +353,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 )
             },
             redactor: logRedactor,
-            log: { [logWriter] message in _ = logWriter.append(message) },
+            log: updateLog,
             deliver: { work in DispatchQueue.main.async(execute: work) },
             timeout: PiCLIUpdateCoordinator.defaultTimeout,
             transaction: UpdateTransactionEnvironment(
                 probe: .live,
-                recordHistory: { [weak self] entry in self?.appConfiguration.recordUpdateHistory(entry) },
+                recordHistory: { [weak self] entry in
+                    guard let self else { return }
+                    self.appConfiguration.recordUpdateHistory(entry)
+                    DispatchQueue.main.async { self.updateProgressCenter.finish(history: entry) }
+                },
                 applyDegradation: { [weak self] plan in self?.applyPiCLIUpdateDegradation(plan) },
-                now: Date.init
+                now: Date.init,
+                reportPhase: { [weak self] component, result in
+                    DispatchQueue.main.async {
+                        self?.updateProgressCenter.apply(phase: result, component: component)
+                    }
+                }
             ),
             clearAbandonedAttempt: { [weak self] component in self?.clearAbandonedAttempt(component) }
         ))
@@ -349,17 +390,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 )(packageName)
             },
             redactor: logRedactor,
-            log: { [logWriter] message in _ = logWriter.append(message) },
+            log: updateLog,
             deliver: { work in DispatchQueue.main.async(execute: work) },
             timeout: PiPackageUpdateCoordinator.defaultTimeout,
             transaction: UpdateTransactionEnvironment(
                 probe: .live,
-                recordHistory: { [weak self] entry in self?.appConfiguration.recordUpdateHistory(entry) },
+                recordHistory: { [weak self] entry in
+                    guard let self else { return }
+                    self.appConfiguration.recordUpdateHistory(entry)
+                    DispatchQueue.main.async { self.updateProgressCenter.finish(history: entry) }
+                },
                 applyDegradation: { plan in
                     // 扩展包没有可重新指向的可执行文件：只把降级结果写进日志与历史。
                     _ = plan
                 },
-                now: Date.init
+                now: Date.init,
+                reportPhase: { [weak self] component, result in
+                    DispatchQueue.main.async {
+                        self?.updateProgressCenter.apply(phase: result, component: component)
+                    }
+                }
             ),
             clearAbandonedAttempt: { [weak self] component in self?.clearAbandonedAttempt(component) }
         ))

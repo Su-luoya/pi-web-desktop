@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "releases": [
+    {
+      "tag": "v0.1.0-alpha.26",
+      "version": "0.1.0-alpha.26",
+      "publishedAt": "2026-10-30T09:00:35Z",
+      "zip": {
+        "name": "Pi-Web-Desktop-0.1.0-alpha.26+build.26.zip",
+        "url": "https://github.com/Su-luoya/pi-web-desktop/releases/download/v0.1.0-alpha.26/Pi-Web-Desktop-0.1.0-alpha.26+build.26.zip",
+        "sha256": "095f795ccaffff6d3c20c85ec8bc2b4aabb69df32411d2dfd0273cfd2d9c5069"
+      },
+      "notes": "https://github.com/Su-luoya/pi-web-desktop/blob/main/docs/release-notes-v0.1.0-alpha.26.md"
+    }
+  ]
+}

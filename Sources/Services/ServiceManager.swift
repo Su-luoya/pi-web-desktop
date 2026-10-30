@@ -357,7 +357,7 @@ final class ServiceManager {
 
         // 地址变了，上一次的端口结论就作废（它是在旧地址上探测的）。这里只重置不
         // 探测：保存配置的主线程路径不该做 `bind(2)`，真正的探测在启动决策点。
-        if listeningPortFallback.requested != configuration.port {
+        if effectiveListeningAddress != previousAddress.effective || listeningPortFallback.requested != configuration.port {
             listeningPortFallback = .none(configuration.port)
         }
         effectiveListeningPort = listeningPortFallback.effective
@@ -595,7 +595,7 @@ final class ServiceManager {
         // an unrecorded child that survived cleanup). Starting another one
         // would leave two services competing for the same port.
         if let process = serviceProcess, process.isRunning { return .existingProcess }
-        guard let piWebPath = configuration.piWebPath.nilIfEmpty ?? resolvePiWebPath() else {
+        guard let piWebPath = resolvePiWebPath() else {
             return .missingExecutable
         }
         // PATH 来自注入的工具 PATH 构建器（未注入时 `make` 用纯静态兜底）。
@@ -667,6 +667,7 @@ final class ServiceManager {
             reportStartRequirementIfNeeded()
             return
         }
+        startHealthMonitorIfNeeded()
         let generation = lifecycleGeneration
         checkServer { [weak self] ready in
             guard let self else { return }
@@ -695,6 +696,7 @@ final class ServiceManager {
             reportStartRequirementIfNeeded()
             return
         }
+        startHealthMonitorIfNeeded()
         let generation = lifecycleGeneration
         checkServer { [weak self] ready in
             guard let self else { return }
@@ -1296,6 +1298,7 @@ final class ServiceManager {
             reportStartRequirementIfNeeded()
             return
         }
+        startHealthMonitorIfNeeded()
         let generation = lifecycleGeneration
         checkServer { [weak self] ready in
             guard let self else { return }

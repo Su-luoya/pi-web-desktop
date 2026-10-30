@@ -2250,7 +2250,8 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
   `check-identity.sh` `PASSED (45 checks)`；`check-release-version.sh` `PASSED`；
   `scan-secrets.sh` `PASS`。
 - 发布前硬门禁 `<待填写` 计数 0；发布后 `gh release download` + `shasum -a 256 -c` 复验 `OK`。
-- checksum `686964951cd5122e79369619e8bb0ba61f0183c1d0522ad5ac2625590f068017`，体积 1687180 字节。
+- 发布资产的 checksum `095f795ccaffff6d3c20c85ec8bc2b4aabb69df32411d2dfd0273cfd2d9c5069`，
+  体积 1727671 字节（CI 重新构建，与本地 `package-release.sh` 的结果不同；本地那份只用于发版前自检）。
 - 发布记录：Release Issue #229。
 - 真机环境：Mac16,10 / Apple M4，macOS 27.2（26B123），Node v26.13.0，Pi 1.4.0，
   `@agegr/pi-web` 0.13.0（Homebrew 全局安装）。
@@ -2259,3 +2260,7 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
     （`Scripts/make-appcast.sh` 的用法示例、新测试里的夹具版本），分别改为 `alpha.N` 占位与
     与真实版本无关的 `1.2.x` 夹具；这类检查的价值正在于此，不要为了过检查而放宽它。
   - 真机完整替换流程（装进 `/Applications` 并真的替换一次）仍无自动化覆盖，本版只验证到打包与冒烟。
+  - appcast workflow 首跑踩坑：`git diff --quiet -- appcast.json` 看不到未跟踪文件，分支还不存在时
+    它判定“无变化”并 exit 0，run 显示 success 但 `appcast` 分支从未建立（桌面更新静默走 API 回落）。
+    PR #231 改成先 `git add` 再比 `git diff --cached`，并用 `workflow_dispatch` 补登本版。
+    教训：发布链路上“跳过”和“成功”必须在日志里可区分，否则 CI 绿着也会漏掉一半功能。

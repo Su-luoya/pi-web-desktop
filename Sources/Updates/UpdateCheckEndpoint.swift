@@ -4,13 +4,27 @@ import Foundation
 
 /// 一个只读端点：固定 URL + 允许的最终主机。
 ///
-/// 检查器只接受由本类型的工厂方法构造的端点，因此端点主机是编译期常量，
-/// 不会因为包名、配置或环境变量而指向其它主机。响应最终落到别的主机
+/// 检查器只接受由本类型的工厂方法构造的端点，因此端点主机不会因为包名或环境
+/// 变量而指向其它主机：上游端点的域名是编译期常量，唯一例外是本机回环地址上的
+/// pi-web 服务（`piWebAppUpdate`，非回环一律拒绝）。响应最终落到别的主机
 /// （重定向）时，检查结果记为 unknown，不采信其内容。
 struct UpdateEndpoint: Equatable {
+    /// 端点类型：决定用哪个解析器，以及能不能回落到别的端点。
+    ///
+    /// 早先靠“白名单里的主机是哪个”反推解析器；加上本机服务端点后主机不再是
+    /// 唯一线索（回环地址不属于任何上游域名），因此显式带类型。
+    enum Kind: String {
+        case appcast
+        case githubReleases
+        case npmLatest
+        /// 本机 pi-web 服务的 `/api/app-update`。
+        case piWebAppUpdate
+    }
+
     let url: URL
     /// 允许的最终主机（小写）。重定向后必须仍然命中，否则结果记为 unknown。
     let allowedHosts: Set<String>
+    let kind: Kind
 
     /// GitHub Releases 列表：取最近若干条发布，按语义化版本挑最高者（含预发布，
     /// 因为应用自身处于 alpha 阶段）。
@@ -24,7 +38,7 @@ struct UpdateEndpoint: Equatable {
         components.path = "/repos/\(repository)/releases"
         components.queryItems = [URLQueryItem(name: "per_page", value: String(githubReleasePageSize))]
         guard let url = components.url else { return nil }
-        return UpdateEndpoint(url: url, allowedHosts: [UpdateCheckUpstream.githubHost])
+        return UpdateEndpoint(url: url, allowedHosts: [UpdateCheckUpstream.githubHost], kind: .githubReleases)
     }
 
     /// 更新通道（appcast）：发布 workflow 在 Release 正式发布后写入的静态 JSON。
@@ -34,7 +48,7 @@ struct UpdateEndpoint: Equatable {
     /// `githubReleases`。
     static func appcast() -> UpdateEndpoint? {
         guard let url = AppcastFeed.url else { return nil }
-        return UpdateEndpoint(url: url, allowedHosts: [AppcastFeed.host])
+        return UpdateEndpoint(url: url, allowedHosts: [AppcastFeed.host], kind: .appcast)
     }
 
     /// npm registry 的 `/latest` 文档端点。作用域包名里的 `/` 编码为 `%2F`。
@@ -43,7 +57,34 @@ struct UpdateEndpoint: Equatable {
         guard let url = URL(string: "https://\(UpdateCheckUpstream.npmRegistryHost)/\(encoded)/latest") else {
             return nil
         }
-        return UpdateEndpoint(url: url, allowedHosts: [UpdateCheckUpstream.npmRegistryHost])
+        return UpdateEndpoint(url: url, allowedHosts: [UpdateCheckUpstream.npmRegistryHost], kind: .npmLatest)
+    }
+
+    /// 本机 pi-web 服务的 `/api/app-update`：由服务自己比对上游版本（它自带
+    /// 12 小时缓存与 5 秒超时），桌面端因此不再为了 Pi Web 直接访问 npm，
+    /// 拿到的是同一份判断。
+    ///
+    /// 这是唯一一个主机不来自编译期常量的端点。它必须是本机回环地址，且只能
+    /// 由 `ServiceManager` 的生效服务 URL 构造：用户把服务绑到局域网地址时，
+    /// 版本查询不该跟着发到别的机器上去。`currentVersion` 字段不采信——本机
+    /// 版本以依赖检测为准，服务端版本可能比实际安装的新或旧。
+    static func piWebAppUpdate(serviceURL: URL) -> UpdateEndpoint? {
+        guard let host = serviceURL.host, isLoopbackHost(host) else { return nil }
+        guard var components = URLComponents(url: serviceURL, resolvingAgainstBaseURL: false) else { return nil }
+        components.scheme = "http"
+        components.path = "/api/app-update"
+        components.query = nil
+        components.fragment = nil
+        guard let url = components.url else { return nil }
+        return UpdateEndpoint(url: url, allowedHosts: [host.lowercased()], kind: .piWebAppUpdate)
+    }
+
+    /// 回环地址判定（`localhost`、`127.0.0.1`、`::1`）。
+    static func isLoopbackHost(_ host: String) -> Bool {
+        let normalized = host
+            .lowercased()
+            .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        return normalized == "localhost" || normalized == "127.0.0.1" || normalized == "::1"
     }
 
     /// `owner/repo` 形态校验：两段都非空，且只含 ASCII 字母、数字与 `-._`。

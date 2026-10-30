@@ -228,7 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         self.logWriter = logWriter
         let processInspector = ProcessInspector(runner: toolCommandRunner)
         self.processInspector = processInspector
-        self.serviceManager = ServiceManager(
+        let serviceManager = ServiceManager(
             configuration: appConfiguration.serviceConfiguration,
             appConfiguration: appConfiguration,
             processInspector: processInspector,
@@ -238,6 +238,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // 服务启动环境与依赖探测共用同一个 PATH 构建器（GitHub #89）。
             toolPathProvider: toolPathProvider
         )
+        self.serviceManager = serviceManager
         // 更新检查设置（GitHub #18）：策略与忽略版本都存在同一个注入的
         // UserDefaults domain 里；旧版布尔键经迁移函数回退，诊断行进日志。
         // 更新过程的统一日志入口（GitHub #219）：先写诊断日志，再把同一行
@@ -259,6 +260,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             identity: .current,
             preferences: updatePreferences,
             ignoredVersions: ignoredVersions,
+            // Pi Web 的版本查询发给本机服务（`/api/app-update`），因此需要服务的
+            // 生效地址；服务不在运行就没有答案，检查器会跳过这一项。
+            piWebServiceURL: { [weak serviceManager] in
+                guard let serviceManager, case .running = serviceManager.currentState else { return nil }
+                return serviceManager.effectiveServiceURL
+            },
             log: { [logWriter] message in _ = logWriter.append(message) }
         )
         self.updateChecker = updateChecker

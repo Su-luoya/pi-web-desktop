@@ -238,9 +238,10 @@ publish job 里复验与上传前一处）。所以脚本对写入该文件的�
 7. `./Scripts/smoke.sh`（两种模式）；
 8. `./Scripts/package-release.sh`：`codesign --verify --deep --strict`、
    `codesign -dv --verbose=4`、`spctl -a -vv`、ZIP、SHA-256、证据与元数据；
-9. 用 `docs/release-notes-template.md` 渲染 Release 说明：替换 `{{VERSION}}`、`{{BUILD}}`、
-   `{{ZIP_NAME}}`、`{{SHA256}}`，并在固定位置插入证据段落；渲染后若仍有 `{{...}}` 占位符
-   或缺少 checksum 则直接失败；模板里的 `<待填写>` 只打 `::warning::`（计数必须为 0，但不阻断草稿创建）；
+9. 渲染 Release 说明：`docs/release-notes-template.md` 提供骨架，`docs/release-notes-<tag>.md`
+   的 `## 摘要` 填入「本版改动」；替换 `{{VERSION}}`、`{{BUILD}}`、`{{ZIP_NAME}}`、`{{SHA256}}`、
+   `{{EVIDENCE_NAME}}`、`{{NOTES_URL}}`。残留 `{{...}}`、缺少 checksum、出现 `<待填写`、
+   notes 文件缺失，任一情况都直接失败（正文按原样发布，没有人工回填环节）；
 10. 把 `dist/` 上传为 artifact。
 
 `publish` job（`ubuntu-latest`，只有这里授予 `contents: write`）：
@@ -255,10 +256,16 @@ publish job 里复验与上传前一处）。所以脚本对写入该文件的�
 
 ## Release 说明与证据段落
 
-Release 说明由 `docs/release-notes-template.md` 渲染；每个版本还会留一份现成的正文（例如
-[v0.1.0-alpha.2 Release 说明](release-notes-v0.1.0-alpha.2.md)），可以在草稿编辑页粘贴并把
-`校验值` 换成草稿资产的实际 SHA-256；workflow 渲染的始终是模板。
-`Scripts/package-release.sh` 生成的“签名与公证证据”段落会写入固定位置，内容包括：
+Release 页面只回答四件事：本版改了什么、怎么装、怎么校验、什么不能用。正文由两部分拼成：
+`docs/release-notes-template.md` 提供骨架与固定段落，`docs/release-notes-<tag>.md` 的
+`## 摘要` 段落填入「本版改动」（缺这一段时退化为一句指向完整记录的链接）。长内容——S1–S8
+门禁、真机环境、可复现性说明——只留在仓库里的 notes 文件，不再灌进 Release 正文。
+
+正文里的 `{{VERSION}}`、`{{BUILD}}`、`{{ZIP_NAME}}`、`{{SHA256}}`、`{{EVIDENCE_NAME}}`、
+`{{NOTES_URL}}` 由 workflow 替换；渲染后仍有 `{{...}}`、缺 checksum、或出现 `<待填写` 都会
+**直接失败**，因为正文按原样发布，占位符会到达用户；notes 文件缺失同样是硬错误。
+
+`Scripts/package-release.sh` 生成的“签名与公证证据”作为独立资产上传，内容包括：
 
 - `codesign --verify --deep --strict` 的退出码（必须为 0）；
 - `codesign -dv --verbose=4` 原始输出，其中必须出现 `Signature=adhoc` 与 `TeamIdentifier=not set`；
@@ -267,22 +274,14 @@ Release 说明由 `docs/release-notes-template.md` 渲染；每个版本还会�
 
 如果 bundle 的签名不是 `adhoc`，`package-release.sh` 会拒绝打包，因为现有的说明与安装步骤
 只描述未公证的 alpha。真机实测版本（机器、macOS、Node.js、Pi、Pi Web）来自 Release Issue，
-由维护者在发布草稿前填入；workflow 不会用 CI runner 的版本冒充真机记录，未填写的字段会以
-`<待填写>` 保留在说明里。
+必须写进 `docs/release-notes-<tag>.md` 并在打 tag **之前**提交：workflow 不会用 CI runner 的
+版本冒充真机记录，也不会事后编辑已渲染的正文。
 
-发布流程：workflow 结束 → 打开草稿 Release → 从 Release Issue 填入真机记录与已知问题 →
-确认没有 `<待填写>`、checksum 与 Issue 记录一致 → 发布（保持 prerelease）。workflow 渲染阶段对
-`<待填写>` 只打 `::warning::`（草稿必须仍能创建），因此发布前**必须**人工执行下面的命令，
-**输出必须为 0**；非 0 就先补填，不要发布：
+发布流程：workflow 结束 → 打开草稿 Release，确认资产名称与 checksum 和 Release Issue 记录一致
+（正文无需编辑）→ 发布（保持 prerelease）。资产在发布前不会公开可见。发布后复核：
 
 ```sh
-gh release view v<MARKETING_VERSION> --json body --jq .body | grep -c '<待填写'
-```
-
-`grep -c` 在计数为 0 时退出码是 1，不要只看管道退出码；要在计数非 0 时立即失败，用：
-
-```sh
-test "$(gh release view v<MARKETING_VERSION> --json body --jq .body | grep -c '<待填写' || true)" -eq 0
+gh release view v<MARKETING_VERSION> --json body --jq .body | grep -c '<待填写' || true   # 预期 0
 ```
 
 ## 可复现性与诚实的边界

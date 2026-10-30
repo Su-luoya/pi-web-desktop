@@ -153,16 +153,10 @@ git diff --check
 
    推送后 `release` workflow 会按 tag 重新构建、校验、打包，并创建一个**草稿** prerelease，
    资产为 ZIP、`.sha256` 与证据 Markdown。
-3. 打开草稿 Release，把 Release Issue 里的真机实测版本、已知问题和回退路径填进说明。
-   workflow 阶段对 `<待填写>` 只打 `::warning::`（草稿仍会建出来），所以这里就是发布前的硬门禁：
-   下面这条命令**输出必须为 0**，非 0 不要发布（`grep -c` 在计数为 0 时退出码是 1，看计数而不是退出码）：
-
-   ```sh
-   gh release view v<MARKETING_VERSION> --json body --jq .body | grep -c '<待填写'
-   ```
-
-   要在计数非 0 时立即失败，用
-   `test "$(gh release view v<MARKETING_VERSION> --json body --jq .body | grep -c '<待填写' || true)" -eq 0`。
+3. 草稿 Release 的正文由 workflow 渲染好，不需要编辑：真机实测版本、已知问题与回退路径必须
+   已经写在 `docs/release-notes-v<MARKETING_VERSION>.md` 里（打 tag 前提交）。渲染后正文里
+   出现 `<待填写`、残留 `{{...}}` 或缺 checksum 时 workflow 会直接失败，所以草稿能建出来就
+   说明这三项都过了。
 4. 确认草稿资产与 Issue 中记录的 checksum 一致，然后发布（保持 prerelease 标记）。
    在这之前资产不会公开可见。
 5. 在 Release Issue 中记录最终 Release 链接与发布日期，勾选全部门槛。

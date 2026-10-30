@@ -107,11 +107,13 @@ jobs:
             git checkout -B appcast origin/main
           fi
           cp .build/appcast.json appcast.json
-          if git diff --quiet -- appcast.json; then
+          # 先入索引再比：`git diff` 看不到未跟踪文件，首次跑（分支刚从 main 分出、
+          # 还没有 appcast.json）会被当成“无变化”直接退出，分支永远建不出来。
+          git add appcast.json
+          if git diff --cached --quiet -- appcast.json; then
             echo "Feed already lists ${TAG}; nothing to commit."
             exit 0
           fi
-          git add appcast.json
           git commit -m "chore(appcast): ${TAG}"
           git push origin appcast
           {

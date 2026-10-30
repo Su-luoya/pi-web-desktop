@@ -45,10 +45,12 @@ extension AppDelegate {
             guard response == .alertFirstButtonReturn else {
                 // 用户取消：阶段位必须复位（否则入口永久置灰、菜单永久显示「等待确认」）。
                 self.finishDesktopAppUpdateRound(releaseTag: target.releaseTag)
+                self.finishDesktopAppUpdateProgress(.skipped(reason: "用户取消了更新"))
                 return
             }
-            self.downloadAndInstallDesktopApp(version: target.version, releaseTag: target.releaseTag)
-        }
+            // 进度窗口（GitHub #219）：从这里开始才有真正要等的工作。
+            self.beginDesktopAppUpdateProgress(version: target.version)
+            self.downloadAndInstallDesktopApp(version: target.version, releaseTag: target.releaseTag)        }
     }
 
     /// 从「等待确认」推进到「重新核对发布页」：只允许推进自己那一轮（同一 tag），
@@ -77,6 +79,8 @@ extension AppDelegate {
     /// 调用方负责确保已在主线程（`desktopAppUpdateRound` 是主线程独占的状态）。
     private func failDesktopAppUpdateRound(_ failure: DesktopAppUpdateFailure, releaseTag: String?) {
         finishDesktopAppUpdateRound(releaseTag: releaseTag)
+        // 进度窗口（GitHub #219）：失败必须停在这一步可见，所以用同一句原因收尾。
+        finishDesktopAppUpdateProgress(.failed(reason: failure.text))
         presentDesktopUpdateFailure(failure)
     }
 
@@ -137,6 +141,11 @@ extension AppDelegate {
             }
 
             var checksumRequest = URLRequest(url: checksumAsset.url)
+            // 进度窗口（GitHub #219）：发布页与资产列表都核对完了，进入下载阶段。
+            DispatchQueue.main.async { [weak self] in
+                self?.setDesktopAppUpdateProgressStep(0, .succeeded, detail: "已核对发布页与资产列表")
+                self?.setDesktopAppUpdateProgressStep(1, .running, detail: "正在下载更新包与校验和…")
+            }
             checksumRequest.httpMethod = "GET"
             checksumRequest.timeoutInterval = UpdateChecker.requestTimeout
             checksumRequest.setValue("text/plain", forHTTPHeaderField: "Accept")
@@ -185,6 +194,9 @@ extension AppDelegate {
                     }
                     let installer = DesktopAppUpdateInstaller()
                     self.desktopAppUpdateInstaller = installer
+                    // 进度窗口（GitHub #219）：校验和已匹配，安装器接手下载与替换。
+                    self.setDesktopAppUpdateProgressStep(1, .succeeded, detail: "已取得更新包与校验和")
+                    self.setDesktopAppUpdateProgressStep(2, .running, detail: "正在校验安装包（SHA-256）…")
                     self.refreshUpdateMenuState()
                     installer.install(asset: verifiedAsset) { [weak self, weak installer] result in
                         if self?.desktopAppUpdateInstaller === installer {
@@ -194,8 +206,13 @@ extension AppDelegate {
                         // 必须重新可用（否则菜单永久置灰）。
                         switch result {
                         case .updated:
+                            self?.setDesktopAppUpdateProgressStep(2, .succeeded, detail: "校验和匹配")
+                            self?.setDesktopAppUpdateProgressStep(3, .succeeded, detail: "已替换应用，即将重新启动")
                             self?.finishDesktopAppUpdateRound(releaseTag: releaseTag)
+                            self?.finishDesktopAppUpdateProgress(.succeeded(version: version))
                         case .failed(let failure):
+                            // 失败停在真正失败的那一步，而不是笼统地“跳过”。
+                            self?.failRunningDesktopAppUpdateStep(detail: failure.text)
                             self?.failDesktopAppUpdateRound(failure, releaseTag: releaseTag)
                         }
                     }
@@ -431,6 +448,16 @@ extension AppDelegate {
         )
         preferencesItem.target = self
         menu.addItem(preferencesItem)
+        // 进度窗口（GitHub #219）：重新打开当前（或最近一次）更新的实时进度；
+        // 窗口也只在更新开始/失败时自动出现，这里给用户一个手动入口。
+        let progressItem = NSMenuItem(
+            title: "显示更新进度…",
+            action: #selector(showUpdateProgress(_:)),
+            keyEquivalent: ""
+        )
+        progressItem.target = self
+        updateProgressMenuItem = progressItem
+        menu.addItem(progressItem)
         // 手动“立即更新”：运行期间发现的更新不会自动安装，只能在这里显式确认后执行。
         let manualUpdateItem = NSMenuItem(
             title: "立即更新 Pi Web…",

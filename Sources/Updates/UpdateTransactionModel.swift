@@ -130,11 +130,31 @@ struct UpdateTransactionEnvironment {
     var applyDegradation: (UpdateDegradationPlan) -> Void
     /// 时钟（测试注入固定时间）。
     var now: () -> Date
+    /// 阶段进度回调（GitHub #219）：每个事务阶段一记录就上报给进度窗口。
+    /// 默认什么都不做：未接入进度窗口的调用点（含全部现有测试）行为不变。
+    var reportPhase: (UpdateTransactionComponent, UpdateTransactionPhaseResult) -> Void
+
+    /// 显式初始化：`reportPhase` 默认什么都不做，因此未接入进度窗口的调用点
+    /// （含全部现有测试）不需要改动。
+    init(
+        probe: UpdateArtifactProbe,
+        recordHistory: @escaping (UpdateHistoryEntry) -> Void,
+        applyDegradation: @escaping (UpdateDegradationPlan) -> Void,
+        now: @escaping () -> Date = Date.init,
+        reportPhase: @escaping (UpdateTransactionComponent, UpdateTransactionPhaseResult) -> Void = { _, _ in }
+    ) {
+        self.probe = probe
+        self.recordHistory = recordHistory
+        self.applyDegradation = applyDegradation
+        self.now = now
+        self.reportPhase = reportPhase
+    }
 
     static let disabled = UpdateTransactionEnvironment(
         probe: .disabled,
         recordHistory: { _ in },
         applyDegradation: { _ in },
-        now: Date.init
+        now: Date.init,
+        reportPhase: { _, _ in }
     )
 }

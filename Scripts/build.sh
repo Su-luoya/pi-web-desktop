@@ -264,17 +264,6 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>zh_CN</string>
     <key>CFBundleDisplayName</key>
     <string>$APP_DISPLAY_NAME</string>
-    <key>CFBundleDocumentTypes</key>
-    <array>
-        <dict>
-            <key>CFBundleTypeName</key>
-            <string>Folder</string>
-            <key>CFBundleTypeRole</key>
-            <string>Editor</string>
-            <key>LSItemContentTypes</key>
-            <array><string>public.folder</string></array>
-        </dict>
-    </array>
     <key>CFBundleExecutable</key>
     <string>$APP_EXECUTABLE_NAME</string>
     <key>CFBundleIconFile</key>

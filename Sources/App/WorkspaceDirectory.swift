@@ -108,8 +108,7 @@ enum WorkspaceDirectory {
     /// **原值**混用（`isEmpty` 判定用 trimmed，返回值用原值），且不展开 `~`。
     /// 结果是手工改过 defaults、或历史版本写入的 `" /home/me/work"`、`"~/work"`
     /// 会拿到一个不存在的路径，`prepare` 报“工作目录不存在”，而目录实际可用。
-    /// 这里只做 trim + `~` 展开（不解析符号链接：那是 `RecentWorkspace` 存储
-    /// 路径的职责，改变它会影响“当前目录”的比较语义）。
+    /// 这里只做 trim + `~` 展开（不解析符号链接：改变它会影响“当前目录”的比较语义）。
     static func resolvedPath(configured: String, defaultPath: String) -> String {
         let trimmed = configured.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return defaultPath }

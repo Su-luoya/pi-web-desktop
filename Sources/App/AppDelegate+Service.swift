@@ -182,19 +182,11 @@ extension AppDelegate {
         // 配置（菜单切监听地址/切工作目录）静默写回。这里立即追平：只刷新用户
         // 没动过的字段，有未保存编辑时保留输入。
         preferencesWindowStore.stored?.refreshIfUnedited(configuration: newConfiguration)
-        // GitHub #157：监听地址可能刚从 loopback 切到（或切回）VPN 网段，这里用
-        // 新配置的地址立即重算代理告警，不等异步重启完成。回落生效时以生效地址为准，
-        // 否则告警会针对一个子进程根本不会监听的地址。
-        refreshSystemProxyWarning(serviceURL: serviceManager.effectiveServiceURL(for: newConfiguration))
         let changed = previous.runtimeSignature != newConfiguration.runtimeSignature
-        let workspaceChanged = previous.workspacePath != newConfiguration.workspacePath
         let managed = changed && serviceManager.managedServicePID() != nil
         // 工作目录门控与菜单可用性读最新配置，但配置要等旧服务停止后才交给
         // ServiceManager（否则停止校验会因端口/参数变化把旧进程误判为外部服务）。
         refreshWorkspaceState(configuration: newConfiguration)
-        if workspaceChanged {
-            recordWorkspace(path: appConfiguration.workspaceDirectory(for: newConfiguration).path)
-        }
         applyServiceControlAvailability()
 
         if managed {
@@ -222,48 +214,5 @@ extension AppDelegate {
             }
             completion?()
         }
-    }
-
-    // MARK: - 系统代理告警（GitHub #157）
-
-    /// 重新评估「系统代理未排除 VPN 网段」并同步“服务”菜单里的告警项。
-    ///
-    /// 调用点：菜单创建（启动）、设置保存、应用回到前台（用户可能刚在系统设置
-    /// 里加了例外）。读系统代理是只读操作；读不到或配置畸形一律降级为不提示。
-    func refreshSystemProxyWarning(serviceURL: URL? = nil) {
-        // 用生效地址：监听地址回落后实际监听的是回环地址，代理告警必须针对真正要连的地址。
-        let url = serviceURL ?? serviceManager.effectiveServiceURL
-        guard systemProxyWarningMonitor.refresh(serviceURL: url) else { return }
-        systemProxyWarning = systemProxyWarningMonitor.warning
-        systemProxyWarningMenuItem?.title = systemProxyWarning?.shortText ?? ""
-        systemProxyWarningMenuItem?.isHidden = systemProxyWarning == nil
-    }
-
-    /// 菜单里的告警项：展开完整告警文本，并提供“清除警告”。
-    @objc func showSystemProxyWarning(_ sender: Any?) {
-        guard let warning = systemProxyWarning else { return }
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = warning.shortText
-        alert.informativeText = warning.text
-        alert.addButton(withTitle: "好")
-        alert.addButton(withTitle: "清除警告")
-        presentAlert(alert) { [weak self] response in
-            guard response == .alertSecondButtonReturn else { return }
-            self?.clearSystemProxyWarning()
-        }
-    }
-
-    /// 用户清除告警：本次运行内条件仍成立也不再提示；条件消失后重新评估。
-    func clearSystemProxyWarning() {
-        guard systemProxyWarningMonitor.dismiss() else { return }
-        systemProxyWarning = nil
-        systemProxyWarningMenuItem?.title = ""
-        systemProxyWarningMenuItem?.isHidden = true
-    }
-
-    /// 回到前台时重读一次系统代理：用户常常是去「系统设置」加完例外再切回来。
-    func applicationDidBecomeActive(_ notification: Notification) {
-        refreshSystemProxyWarning()
     }
 }

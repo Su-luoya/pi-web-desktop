@@ -57,7 +57,7 @@ Pi Web Desktop `0.1.0-alpha.25` 面向 Apple Silicon（arm64）与 **macOS 26 �
 - `./Scripts/check-identity.sh`：`PASSED (45 checks)`；`./Scripts/scan-secrets.sh --self-test` 与 `./Scripts/scan-secrets.sh`：`PASS`（`suppressed 17 lines`，无 `rejected` 行）；`sh -n Scripts/*.sh` 与 `git diff --check` 干净。
 - `./Scripts/build.sh`：成功；`./Scripts/package-release.sh --tag v0.1.0-alpha.25`：`OK`（8 个白名单条目、无 `__MACOSX/`、ad-hoc 签名验证通过）；`./Scripts/smoke.sh`：两种模式均 exit 0。
 - 真机 smoke：Node.js v26.13.0、Pi 1.4.0、`@agegr/pi-web` 0.13.0（Homebrew 全局安装）；`smoke: ready` 与 `smoke: diagnostics ready` 均出现，退出码 0。
-- 发布 workflow（tag `v0.1.0-alpha.25`）：build 与 publish 两个 job 均通过；发布前 `<待填写` 计数为 0；发布后 `gh release download` + `shasum -a 256 -c` 复验 `OK`。
+- 发布 workflow（tag `v0.1.0-alpha.25`）：build 与 publish 两个 job 均通过；发布前占位符计数为 0；发布后 `gh release download` + `shasum -a 256 -c` 复验 `OK`。
 
 ## 已知限制
 

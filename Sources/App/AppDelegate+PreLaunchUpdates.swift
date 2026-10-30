@@ -172,7 +172,7 @@ extension AppDelegate {
         if !attempts.isEmpty {
             alert.addButton(withTitle: "清除全部记录")
         }
-        alert.beginSheetModal(for: window) { [weak self] response in
+        presentAlert(alert) { [weak self] response in
             guard response == .alertSecondButtonReturn else { return }
             self?.clearAllAbandonedAttempts()
         }
@@ -207,7 +207,7 @@ extension AppDelegate {
         alert.messageText = "本次启动没有自动更新 Pi Web"
         alert.informativeText = "原因：\(reason.text)。\n\n服务会照常启动；需要更新时可以用菜单「立即更新 Pi Web…」。"
         alert.addButton(withTitle: "好")
-        alert.beginSheetModal(for: window)
+        presentAlert(alert)
     }
 
     /// 失败路径：记录持久告警、进入诊断状态、保留可用 UI；不启动服务、不声称回滚。
@@ -253,7 +253,7 @@ extension AppDelegate {
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
         alert.addButton(withTitle: "好")
-        alert.beginSheetModal(for: window)
+        presentAlert(alert)
     }
 
     private func presentPiWebUpdateWarningBanner(_ warning: PiWebUpdateWarning) {
@@ -263,7 +263,7 @@ extension AppDelegate {
         alert.informativeText = warning.text
         alert.addButton(withTitle: "好")
         alert.addButton(withTitle: "清除警告")
-        alert.beginSheetModal(for: window) { [weak self] response in
+        presentAlert(alert) { [weak self] response in
             // 只清除这条持久警告；不会改变 Pi Web 的版本，也不会重试安装。
             guard response == .alertSecondButtonReturn else { return }
             self?.clearPiWebUpdateWarning()
@@ -280,7 +280,7 @@ extension AppDelegate {
             + "\n\nPi Web 仍保持更新前的版本；可以手动更新，或修好环境后重试。"
         alert.addButton(withTitle: "好")
         alert.addButton(withTitle: "清除警告")
-        alert.beginSheetModal(for: window) { [weak self] response in
+        presentAlert(alert) { [weak self] response in
             guard response == .alertSecondButtonReturn else { return }
             self?.clearPiWebUpdateWarning()
         }
@@ -401,7 +401,7 @@ extension AppDelegate {
         alert.informativeText = detail
         alert.addButton(withTitle: "停止服务并更新")
         alert.addButton(withTitle: "取消")
-        alert.beginSheetModal(for: window) { [weak self] response in
+        presentAlert(alert) { [weak self] response in
             guard response == .alertFirstButtonReturn else { return }
             self?.performManualPiWebUpdate(plan: plan)
         }
@@ -480,7 +480,7 @@ extension AppDelegate {
         alert.messageText = title
         alert.informativeText = detail
         alert.addButton(withTitle: "好")
-        alert.beginSheetModal(for: window)
+        presentAlert(alert)
     }
 
     private func manualUpdateUnavailableText(_ decision: PiWebUpdateDecision) -> String {

@@ -140,7 +140,7 @@ extension AppDelegate {
         if !commands.isEmpty {
             alert.addButton(withTitle: "复制命令")
         }
-        alert.beginSheetModal(for: window) { response in
+        presentAlert(alert) { response in
             guard response == .alertSecondButtonReturn, !commands.isEmpty else { return }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(commands.joined(separator: "\n"), forType: .string)
@@ -172,7 +172,7 @@ extension AppDelegate {
             if !commands.isEmpty {
                 alert.addButton(withTitle: "复制命令")
             }
-            alert.beginSheetModal(for: window) { response in
+            presentAlert(alert) { response in
                 guard response == .alertSecondButtonReturn, !commands.isEmpty else { return }
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(commands.joined(separator: "\n"), forType: .string)
@@ -204,7 +204,7 @@ extension AppDelegate {
         // 取消是第一个按钮 = 默认按钮：回车即取消，不执行、不改状态。
         alert.addButton(withTitle: "取消")
         alert.addButton(withTitle: "确认更新")
-        alert.beginSheetModal(for: window) { [weak self] response in
+        presentAlert(alert) { [weak self] response in
             guard let self else { return }
             guard response == .alertSecondButtonReturn else {
                 self.piPackageUpdateCoordinator?.recordCancellation(plans)
@@ -252,7 +252,7 @@ extension AppDelegate {
                 .filter { !$0.isEmpty }
                 .joined(separator: "\n")
             alert.addButton(withTitle: "好")
-            alert.beginSheetModal(for: window)
+            presentAlert(alert)
         }
         piPackageUpdatePlanSet = nil
         refreshUpdateMenuState()
@@ -285,7 +285,7 @@ extension AppDelegate {
             + "\n\n可以重新打开“查看 Pi 扩展包更新…”确认后重试；应用不会自动重试、也不会回滚。"
         alert.addButton(withTitle: "好")
         alert.addButton(withTitle: "清除警告")
-        alert.beginSheetModal(for: window) { [weak self] response in
+        presentAlert(alert) { [weak self] response in
             guard response == .alertSecondButtonReturn else { return }
             self?.clearPiPackageUpdateWarning()
         }
@@ -296,7 +296,7 @@ extension AppDelegate {
         alert.messageText = title
         alert.informativeText = detail
         alert.addButton(withTitle: "好")
-        alert.beginSheetModal(for: window)
+        presentAlert(alert)
     }
 
     private func logPiPackageUpdate(_ message: String) {

@@ -441,7 +441,7 @@ extension AppDelegate {
         alert.messageText = "无法使用所选的 pi-web 路径"
         alert.informativeText = message
         alert.addButton(withTitle: "好")
-        alert.beginSheetModal(for: window)
+        presentAlert(alert)
     }
 
     /// 首次设置完成：记录状态后用最近一次报告重新走路由，随即进入主窗口。

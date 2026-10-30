@@ -130,7 +130,7 @@ extension AppDelegate {
         )
         alert.addButton(withTitle: "确认更新")
         alert.addButton(withTitle: "取消")
-        alert.beginSheetModal(for: window) { [weak self] response in
+        presentAlert(alert) { [weak self] response in
             guard response == .alertFirstButtonReturn else { return }
             self?.performPiCLIManualUpdate(plan: plan)
         }
@@ -266,7 +266,7 @@ extension AppDelegate {
             + "\n\n应用不会自动回滚，也不会重试无上限；可以手动重试“立即更新 Pi CLI…”。"
         alert.addButton(withTitle: "好")
         alert.addButton(withTitle: "清除警告")
-        alert.beginSheetModal(for: window) { [weak self] response in
+        presentAlert(alert) { [weak self] response in
             guard response == .alertSecondButtonReturn else { return }
             self?.clearPiCLIUpdateWarning()
         }
@@ -286,7 +286,7 @@ extension AppDelegate {
         alert.messageText = title
         alert.informativeText = detail
         alert.addButton(withTitle: "好")
-        alert.beginSheetModal(for: window)
+        presentAlert(alert)
     }
 
     func logPiCLIUpdate(_ message: String) {

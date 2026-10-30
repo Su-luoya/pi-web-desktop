@@ -569,6 +569,38 @@ private func configured(_ piWebPath: String) -> ServiceConfiguration {
 // MARK: - Tests
 
 final class ServiceManagerTests: XCTestCase {
+    func testRetryThatFindsAReadyServerRestartsHealthMonitoring() throws {
+        let retryActions: [(ServiceManager) -> Void] = [
+            { $0.ensureServerIsRunning() },
+            { $0.startService() },
+            { $0.reloadAfterConfigurationChange() }
+        ]
+        for retry in retryActions {
+            let harness = try makeHarness(fileManager: ManagerFakeFileManager())
+            defer { harness.cleanUp() }
+            harness.manager.startManagedService()
+            guard case .failed = harness.manager.currentState else { return XCTFail("expected startup failure") }
+            XCTAssertEqual(harness.scheduler.repeatTokens.count, 1)
+            XCTAssertEqual(harness.scheduler.repeatTokens.first?.invalidateCount, 1)
+
+            harness.probe.ready = true
+            retry(harness.manager)
+
+            XCTAssertEqual(harness.manager.currentState, .running)
+            XCTAssertEqual(harness.loadRequests, 1)
+            XCTAssertEqual(harness.scheduler.repeatTokens.count, 2)
+            XCTAssertEqual(harness.scheduler.repeatTokens.last?.invalidateCount, 0)
+            retry(harness.manager)
+            XCTAssertEqual(harness.scheduler.repeatTokens.count, 2, "retries must not duplicate health timers")
+
+            harness.probe.ready = false
+            for _ in 0..<ServiceManager.healthDisconnectThreshold {
+                XCTAssertTrue(harness.scheduler.runHealthCheck())
+            }
+            XCTAssertEqual(harness.manager.currentState, .stopped)
+        }
+    }
+
     // MARK: Status text
 
     func testStatusTextLabelsOwnershipOnlyForRunningStates() {
@@ -917,6 +949,32 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(environment["no_proxy"], "localhost,127.0.0.1,::1")
     }
 
+    func testStartDecisionResolvesTheConfiguredExecutableBeforeLaunching() throws {
+        let fileManager = ManagerFakeFileManager()
+        let harness = try makeHarness(fileManager: fileManager)
+        defer { harness.cleanUp() }
+        let expanded = ("~/bin/pi-web" as NSString).expandingTildeInPath
+        fileManager.executablePaths = [expanded]
+        harness.manager.updateConfiguration(configured("  ~/bin/pi-web\n"))
+        harness.manager.setPortAvailability { _, _ in true }
+
+        guard case .launch(let specification) = harness.manager.startDecision() else {
+            return XCTFail("expected a launch with the resolved configured path")
+        }
+        XCTAssertEqual(specification.executablePath, expanded)
+    }
+
+    func testStartDecisionRejectsAMissingConfiguredExecutable() throws {
+        let fileManager = ManagerFakeFileManager()
+        fileManager.executablePaths = ["/opt/homebrew/bin/pi-web"]
+        let harness = try makeHarness(fileManager: fileManager)
+        defer { harness.cleanUp() }
+        harness.manager.updateConfiguration(configured("/missing/bin/pi-web"))
+
+        XCTAssertEqual(harness.manager.startDecision(), .missingExecutable)
+        XCTAssertTrue(harness.runner.invocations.isEmpty, "an explicit path must not fall back to another installation")
+    }
+
     // MARK: 监听地址回环回落
 
     /// 配置的监听地址不在本机（Tailscale 掉线）：启动参数用回环地址、探测用回环 URL、
@@ -1038,6 +1096,24 @@ final class ServiceManagerTests: XCTestCase {
         }
         XCTAssertEqual(specification.arguments, ["--hostname", "127.0.0.1", "--port", "30141", "--no-open"])
         XCTAssertEqual(probedHosts, ["127.0.0.1"])
+    }
+
+    func testChangingListeningAddressClearsThePreviousPortFallback() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+        var configuration = configured(try harness.makeExecutable())
+        harness.manager.updateConfiguration(configuration)
+        harness.manager.setPortAvailability { _, port in port != configuration.port }
+        guard case .launch = harness.manager.startDecision() else { return XCTFail("expected .launch") }
+        XCTAssertEqual(harness.manager.effectiveListeningPort, configuration.port + 1)
+
+        configuration.hostname = "localhost"
+        harness.manager.updateConfiguration(configuration)
+
+        XCTAssertEqual(harness.manager.effectiveListeningAddress, "localhost")
+        XCTAssertEqual(harness.manager.effectiveListeningPort, configuration.port)
+        XCTAssertFalse(harness.manager.listeningPortFallback.isActive)
+        XCTAssertEqual(harness.manager.effectiveServiceURL, configuration.serviceURL)
     }
 
     func testStartDecisionAppliesProxyAndAllowedHosts() throws {

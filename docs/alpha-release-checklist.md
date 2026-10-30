@@ -2264,3 +2264,32 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
     它判定“无变化”并 exit 0，run 显示 success 但 `appcast` 分支从未建立（桌面更新静默走 API 回落）。
     PR #231 改成先 `git add` 再比 `git diff --cached`，并用 `workflow_dispatch` 补登本版。
     教训：发布链路上“跳过”和“成功”必须在日志里可区分，否则 CI 绿着也会漏掉一半功能。
+
+## 本次发布执行记录（v0.1.0-alpha.27）
+
+- 内容：三处 —— GitHub #233 删掉菜单「最近工作目录」切换与启动时的“系统代理已开启”告警
+  （PR #233 → `d2db526`）、GitHub #234 远程访问走 `tailscale serve`（PR #234 → `2f97bbe`）、
+  GitHub #235 Pi Web 版本检查改由本机服务的 `/api/app-update` 代理（PR #235 → `0e4f78b`）。
+- 版本号提交 PR #236 → `3d40436`；tag `v0.1.0-alpha.27`，release workflow 的 build 与 publish
+  两个 job 均通过，已发布为 prerelease。
+- 全量测试 1005 项 0 失败（新增 23 项 `TailscaleServeTests`）；
+  `check-identity.sh` `PASSED (45 checks)`；`check-release-version.sh` `PASSED`；
+  `scan-secrets.sh` `PASS`。
+- 发布前硬门禁 `<待填写` 计数 0；发布后 `gh release download` + `shasum -a 256 -c` 复验 `OK`。
+- appcast workflow 把 `appcast` 分支的 `appcast.json` 更新到本版，sha256 与 Release 资产一致。
+- 发布资产的 checksum `9ecbdf84e5e4b9eab9942209b162d5e2466a53c9ff7108b5b73f88bdcd7097e7`，
+  体积 1738256 字节（CI 重新构建；本地 `package-release.sh` 的结果是
+  `f4a8f19804bbbbec9346f93626950e129dd4f60e873988849d64c66055806dc0` / 1696114 字节，
+  只用于发版前自检）。
+- 发布记录：Release Issue #237。
+- 真机环境：Mac16,10 / Apple M4，macOS 27.2（26B123），Node v26.13.0，Pi 1.4.0，
+  `@agegr/pi-web` 0.13.0（Homebrew 全局安装）。
+- 本版特有的判定：
+  - `check-identity.sh` 的“版本号不得硬编码”在本版没有再触发：新增的源码与脚本里没有写死
+    版本字面量，版本号只出现在 xcconfig 与 `docs/` 的发布说明里，这一点没有为了过检查而放宽规则。
+  - 远程访问的菜单流程（启用 → 扫码 → 关闭）没有自动化覆盖，本版验证到的是命令行层面的
+    `serve` 启用/撤销（真机 tailnet）以及 `RemoteAccessPlanner`/解析器的单元测试；
+    这是本版最大的验证缺口，下一版若改动 App 层要补上。
+  - 合并方式变了：本版三个功能 PR 全部 squash 合入，因此本地 `main` 上的原分支提交与远端
+    历史不再一致（本地用 `git reset --hard origin/main` 对齐）。tag 打在 squash 之后的
+    `3d40436` 上，`check-release-version.sh` 对 tag 的比对仍然通过。

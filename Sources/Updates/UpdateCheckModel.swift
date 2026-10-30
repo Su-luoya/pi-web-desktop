@@ -144,7 +144,7 @@ enum UpdateCheckDisclosure {
         return """
         更新检查本身只做只读的版本查询，不下载、不安装任何东西；只有下面“启动前自动更新 Pi Web”打开且条件满足时才会执行一次受限安装。
 
-        · 访问的域名：\(AppcastFeed.host)（桌面应用更新通道：一个静态 JSON，只含版本号与下载直链）、\(UpdateCheckUpstream.githubHost)（桌面应用发布的回落通道，仅当更新通道不可用时访问）、\(UpdateCheckUpstream.npmRegistryHost)（Pi CLI、Pi Web 与扩展包）。
+        · 访问的域名：\(AppcastFeed.host)（桌面应用更新通道：一个静态 JSON，只含版本号与下载直链）、\(UpdateCheckUpstream.githubHost)（桌面应用发布的回落通道，仅当更新通道不可用时访问）、\(UpdateCheckUpstream.npmRegistryHost)（Pi CLI 与扩展包）、本机 pi-web 服务的 `/api/app-update`（Pi Web：由服务自己向 \(UpdateCheckUpstream.npmRegistryHost) 查最新版本，桌面端不再直连 npm；服务未运行时这一项不检查）。
         · 请求内容：GET + JSON 解析；User-Agent 只含应用名、版本与 bundle identifier；不发送 cookies、账号凭据、会话内容或诊断信息。
         · 频率：应用启动后立即检查一次；之后桌面应用 / Pi CLI / Pi Web 默认每 \(desktopHours) 小时（每日）、Pi 扩展包默认每 \(packageDays) 天（检查并通知）复查。四类可分别设为关闭 / 每日 / 每周（扩展包为关闭 / 检查并通知 / 询问后更新）；关闭后不发起对应请求，也不安排复查。应用关闭后不检查（不安装 LaunchAgent）。
         · 提示方式：应用内提示框（不使用系统通知中心、不申请通知权限）；提示只含组件名与版本。发现可用更新时最多在本次运行里提示一次，忽略某个版本后不再提示它。

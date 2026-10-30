@@ -14,6 +14,9 @@ import XCTest
 // 每个用例都断言请求落在白名单主机上、只使用 GET、且不含 cookies /
 // Authorization / 会话 / 诊断字段；关闭的分类断言请求次数为 0。
 
+/// Pi Web 的版本查询走本机服务的 `/api/app-update`（`ServiceManager.effectiveServiceURL`）。
+private let testPiWebServiceURL = URL(string: "http://127.0.0.1:30141/")!
+
 final class UpdateCheckerTests: XCTestCase {
 
     // MARK: - 固定输入
@@ -193,6 +196,7 @@ final class UpdateCheckerTests: XCTestCase {
         cached: UpdateCheckCacheFile = .empty,
         intervals: UpdateCheckIntervals = .standard,
         ignoredVersions: UpdateIgnoredVersions = .empty,
+        piWebServiceURL: URL? = testPiWebServiceURL,
         responder: ((UpdateHTTPRequest) -> Result<UpdateHTTPResponse, UpdateHTTPFailure>)? = nil
     ) -> World {
         let clock = FixedClock(referenceDate)
@@ -215,6 +219,7 @@ final class UpdateCheckerTests: XCTestCase {
             intervals: intervals,
             preferences: preferences,
             ignoredVersions: ignoredVersions,
+            piWebServiceURL: { piWebServiceURL },
             log: { logs.append($0) }
         )
         return World(checker: checker, client: client, scheduler: scheduler, clock: clock, store: store, logs: logs, identity: identity)
@@ -298,17 +303,39 @@ final class UpdateCheckerTests: XCTestCase {
         ))
     }
 
+    /// 本机服务 `/api/app-update` 形状的响应：`{"currentVersion":…,"latestVersion":…}`。
+    private static func appUpdateHTTPResponse(
+        latestVersion: String,
+        statusCode: Int = 200,
+        body: String? = nil
+    ) -> Result<UpdateHTTPResponse, UpdateHTTPFailure> {
+        let defaultBody = "{\"currentVersion\":\"0.9.0\",\"latestVersion\":\"\(latestVersion)\",\"updateAvailable\":true,\"releaseUrl\":\"https://github.com/agegr/pi-web/releases/tag/v\(latestVersion)\"}"
+        return .success(UpdateHTTPResponse(
+            statusCode: statusCode,
+            headers: [:],
+            body: Data((body ?? defaultBody).utf8),
+            finalURL: nil
+        ))
+    }
+
     private func automaticResponder() -> (UpdateHTTPRequest) -> Result<UpdateHTTPResponse, UpdateHTTPFailure> {
         { request in
             if request.url.host == AppcastFeed.host {
                 return Self.appcastHTTPResponse(tags: ["v2.4.1-alpha.2"])
+            }
+            if request.url.path == "/api/app-update" {
+                return Self.appUpdateHTTPResponse(latestVersion: "2.0.0")
             }
             return Self.npmHTTPResponse(version: "2.0.0")
         }
     }
 
     private func expectedHost(for category: UpdateCheckCategory) -> String {
-        category == .desktopApp ? AppcastFeed.host : UpdateCheckUpstream.npmRegistryHost
+        switch category {
+        case .desktopApp: return AppcastFeed.host
+        case .piWeb: return testPiWebServiceURL.host ?? ""
+        case .piCLI, .piPackages: return UpdateCheckUpstream.npmRegistryHost
+        }
     }
 
     /// 桌面应用的主端点是更新通道，回落端点才是 GitHub API：两条都算“它的请求”。
@@ -327,7 +354,7 @@ final class UpdateCheckerTests: XCTestCase {
         case .piCLI:
             return request.url.absoluteString.contains("pi-coding-agent")
         case .piWeb:
-            return request.url.absoluteString.contains("%2Fpi-web") || request.url.absoluteString.contains("%2fpi-web")
+            return request.url.path == "/api/app-update"
         case .piPackages:
             guard let packageName = target.packageName else { return false }
             let encoded = UpdateEndpoint.encodedPackageName(packageName) ?? packageName
@@ -348,7 +375,7 @@ final class UpdateCheckerTests: XCTestCase {
         case .piCLI:
             return request.url.absoluteString.contains("pi-coding-agent")
         case .piWeb:
-            return request.url.absoluteString.contains("%2Fpi-web") || request.url.absoluteString.contains("%2fpi-web")
+            return request.url.path == "/api/app-update"
         case .piPackages:
             return request.url.absoluteString.contains("pi-extension-demo")
         }
@@ -1299,6 +1326,7 @@ final class UpdateCheckerTests: XCTestCase {
             identity: UpdateCheckIdentity(appName: "Pi Web Desktop", version: desktopInstalledVersion, bundleIdentifier: nil),
             intervals: .standard,
             preferences: .factoryDefaults,
+            piWebServiceURL: { testPiWebServiceURL },
             log: { logs.append($0) }
         )
 
@@ -1506,8 +1534,14 @@ final class UpdateCheckerTests: XCTestCase {
         let forbiddenHeaderNames = ["cookie", "authorization", "session", "diagnostic", "token", "password", "secret"]
         for request in world.client.requests {
             XCTAssertEqual(request.method, "GET")
-            XCTAssertEqual(request.url.scheme, "https")
-            XCTAssertTrue(allowedHosts.contains(request.url.host ?? ""))
+            if request.url.path == "/api/app-update" {
+                // Pi Web 的唯一例外：明文 http，但必须落在本机回环地址上。
+                XCTAssertEqual(request.url.scheme, "http")
+                XCTAssertTrue(UpdateEndpoint.isLoopbackHost(request.url.host ?? ""))
+            } else {
+                XCTAssertEqual(request.url.scheme, "https")
+                XCTAssertTrue(allowedHosts.contains(request.url.host ?? ""))
+            }
             for name in request.headers.keys {
                 let lowered = name.lowercased()
                 XCTAssertTrue(
@@ -1590,6 +1624,123 @@ final class UpdateCheckerTests: XCTestCase {
         )
     }
 
+    /// Pi Web 的端点由本机服务地址生成：只接受回环地址，主机与路径都被固定在
+    /// 服务上——服务绑到局域网地址时版本查询不能跟着发出去。
+    func testPiWebEndpointOnlyAcceptsLoopbackServiceURLs() {
+        let endpoint = UpdateEndpoint.piWebAppUpdate(serviceURL: URL(string: "http://127.0.0.1:30141/")!)
+        XCTAssertEqual(endpoint?.url.absoluteString, "http://127.0.0.1:30141/api/app-update")
+        XCTAssertEqual(endpoint?.allowedHosts, ["127.0.0.1"])
+        XCTAssertEqual(endpoint?.kind, .piWebAppUpdate)
+
+        XCTAssertNotNil(UpdateEndpoint.piWebAppUpdate(serviceURL: URL(string: "http://localhost:30141/")!))
+        XCTAssertNotNil(UpdateEndpoint.piWebAppUpdate(serviceURL: URL(string: "http://[::1]:30141/")!))
+
+        // 绑到具体网卡地址、或任何上游域名，都不该把检查发出去。
+        XCTAssertNil(UpdateEndpoint.piWebAppUpdate(serviceURL: URL(string: "http://192.168.1.5:30141/")!))
+        XCTAssertNil(UpdateEndpoint.piWebAppUpdate(serviceURL: URL(string: "https://example.com/")!))
+        XCTAssertNil(UpdateEndpoint.piWebAppUpdate(serviceURL: URL(string: "http://127.0.0.1.example.com/")!))
+
+        // 服务地址上带的查询串与路径不带进端点。
+        XCTAssertEqual(
+            UpdateEndpoint.piWebAppUpdate(serviceURL: URL(string: "http://127.0.0.1:30141/?from=menu")!)?.url.absoluteString,
+            "http://127.0.0.1:30141/api/app-update"
+        )
+    }
+
+    // MARK: - Pi Web 走本机服务
+
+    func testPiWebAppUpdateEndpointTargetsTheLocalService() {
+        let endpoint = UpdateEndpoint.piWebAppUpdate(serviceURL: testPiWebServiceURL)
+        XCTAssertEqual(endpoint?.url.absoluteString, "http://127.0.0.1:30141/api/app-update")
+        XCTAssertEqual(endpoint?.kind, .piWebAppUpdate)
+        XCTAssertEqual(endpoint?.allowedHosts, ["127.0.0.1"])
+        // 非回环地址一律拒绝：用户把服务绑到局域网地址时，版本查询不该跟着出机器。
+        XCTAssertNil(UpdateEndpoint.piWebAppUpdate(serviceURL: URL(string: "http://192.168.1.10:30141/")!))
+        XCTAssertNil(UpdateEndpoint.piWebAppUpdate(serviceURL: URL(string: "https://evil.example/")!))
+        XCTAssertNil(UpdateEndpoint.piWebAppUpdate(serviceURL: URL(string: "http://localhost.:30141/")!))
+    }
+
+    func testPiWebParsesLatestVersionFromTheServiceResponse() {
+        let world = makeWorld(responder: automaticResponder())
+
+        world.checker.start(inventory: fullInventory())
+
+        let result = world.checker.summary.results.first { $0.target.category == .piWeb }
+        XCTAssertEqual(result?.latestVersion, "2.0.0")
+        XCTAssertEqual(result?.status, .updateAvailable)
+        XCTAssertEqual(result?.origin, .network)
+        XCTAssertEqual(result?.failure, nil)
+    }
+
+    func testPiWebServiceErrorIsUnknownNotACrash() {
+        let world = makeWorld(responder: { request in
+            if request.url.path == "/api/app-update" {
+                return Self.appUpdateHTTPResponse(latestVersion: "0.9.0", statusCode: 502, body: "{\"error\":\"npm registry returned HTTP 503\"}")
+            }
+            return Self.npmHTTPResponse(version: "2.0.0")
+        })
+
+        world.checker.start(inventory: fullInventory())
+
+        let result = world.checker.summary.results.first { $0.target.category == .piWeb }
+        XCTAssertEqual(result?.status, .unknown)
+        // 服务把上游的 5xx 转成自己的 502，桌面端按 5xx 归入 serverError。
+        XCTAssertEqual(result?.failure, .serverError)
+    }
+
+    func testPiWebCheckIsSkippedWhenTheServiceIsNotRunning() {
+        let world = makeWorld(piWebServiceURL: nil, responder: automaticResponder())
+
+        world.checker.start(inventory: fullInventory())
+
+        // 服务没起来时 /api/app-update 不存在：不发请求、不报失败、不写缓存。
+        XCTAssertEqual(requestCount(world, category: .piWeb), 0)
+        XCTAssertNil(world.checker.summary.results.first { $0.target.category == .piWeb })
+        XCTAssertTrue(world.checker.summary.results.contains { $0.target.category == .desktopApp })
+    }
+
+    func testPiWebAppUpdateParserRejectsMissingOrInvalidVersion() {
+        let ok = UpdateResponseParser.latestPiWebAppUpdate(from: Data("{\"latestVersion\":\"1.4.2\"}".utf8))
+        guard case let .success(version) = ok else {
+            return XCTFail("合法响应应解析成功，实际 \(ok)")
+        }
+        XCTAssertEqual(version.version, "1.4.2")
+        XCTAssertEqual(version.semanticVersion, SemanticVersion("1.4.2"))
+
+        XCTAssertEqual(
+            failureReason { UpdateResponseParser.latestPiWebAppUpdate(from: Data("{\"currentVersion\":\"1.0.0\"}".utf8)) },
+            .missingVersion
+        )
+        XCTAssertEqual(
+            failureReason { UpdateResponseParser.latestPiWebAppUpdate(from: Data("{\"latestVersion\":\"not-a-version\"}".utf8)) },
+            .unparsableVersion
+        )
+        XCTAssertEqual(
+            failureReason { UpdateResponseParser.latestPiWebAppUpdate(from: Data("[]".utf8)) },
+            .unexpectedStructure
+        )
+        XCTAssertEqual(
+            failureReason { UpdateResponseParser.latestPiWebAppUpdate(from: Data("not json".utf8)) },
+            .malformedJSON
+        )
+    }
+
+    /// 断言解析结果是失败且失败原因符合预期（`UpdateParseFailure` 放在 `Result`
+    /// 的失败位，测试不需要额外解包工具）。
+    private func failureReason(
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ parse: () -> Result<UpdateUpstreamVersion, UpdateParseFailure>
+    ) -> UpdateParseFailure? {
+        switch parse() {
+        case .success:
+            XCTFail("应当解析失败，实际成功", file: file, line: line)
+            return nil
+        case let .failure(reason):
+            return reason
+        }
+    }
+
     func testRequestsOnlyHitTheInjectedClient() {
         // 替身记录每一次请求；断言请求总数与白名单主机完全一致，等价于
         // “没有任何请求绕过替身打到真实网络”。
@@ -1599,9 +1750,11 @@ final class UpdateCheckerTests: XCTestCase {
         world.scheduler.fireTimers()
 
         let recorded = world.client.requests.count
-        let whitelisted = world.client.requests.filter {
-            [AppcastFeed.host, UpdateCheckUpstream.githubHost, UpdateCheckUpstream.npmRegistryHost]
-                .contains($0.url.host ?? "")
+        let whitelisted = world.client.requests.filter { request in
+            // Pi Web 的本机服务请求也算已知目标：主机必须是回环地址。
+            if request.url.host.map(UpdateEndpoint.isLoopbackHost) == true { return true }
+            return [AppcastFeed.host, UpdateCheckUpstream.githubHost, UpdateCheckUpstream.npmRegistryHost]
+                .contains(request.url.host ?? "")
         }.count
         XCTAssertEqual(recorded, whitelisted)
         XCTAssertGreaterThan(recorded, 0)
@@ -1864,6 +2017,7 @@ final class UpdateCheckerTests: XCTestCase {
             identity: UpdateCheckIdentity(appName: "Pi Web Desktop", version: desktopInstalledVersion, bundleIdentifier: nil),
             intervals: .standard,
             preferences: .factoryDefaults,
+            piWebServiceURL: { testPiWebServiceURL },
             log: { logs.append($0) }
         )
 
@@ -1915,7 +2069,8 @@ final class UpdateCheckerTests: XCTestCase {
             scheduler: ImmediateUpdateCheckScheduler(),
             identity: UpdateCheckIdentity(appName: "Pi Web Desktop", version: desktopInstalledVersion, bundleIdentifier: nil),
             intervals: .standard,
-            preferences: .factoryDefaults
+            preferences: .factoryDefaults,
+            piWebServiceURL: { testPiWebServiceURL }
         )
 
         checker.checkNow(triggeredBy: .manual, inventory: fullInventory())
@@ -1942,6 +2097,9 @@ final class UpdateCheckerTests: XCTestCase {
         let world = makeWorld(responder: { request in
             if request.url.host == AppcastFeed.host {
                 return Self.appcastHTTPResponse(tags: ["v2.4.0"])
+            }
+            if request.url.path == "/api/app-update" {
+                return Self.appUpdateHTTPResponse(latestVersion: "1.0.0")
             }
             return Self.npmHTTPResponse(version: "1.0.0")
         })
@@ -1980,6 +2138,7 @@ final class UpdateCheckerTests: XCTestCase {
 
         XCTAssertTrue(text.contains(UpdateCheckUpstream.githubHost))
         XCTAssertTrue(text.contains(UpdateCheckUpstream.npmRegistryHost))
+        XCTAssertTrue(text.contains("/api/app-update"))
         XCTAssertTrue(text.contains("24 小时"))
         XCTAssertTrue(text.contains("7 天"))
         XCTAssertTrue(text.contains("关闭"))
@@ -2169,6 +2328,9 @@ final class UpdateCheckerTests: XCTestCase {
                 if request.url.host == AppcastFeed.host {
                     return Self.appcastHTTPResponse(tags: ["v2.4.0"])
                 }
+                if request.url.path == "/api/app-update" {
+                    return Self.appUpdateHTTPResponse(latestVersion: "2.1.0")
+                }
                 return Self.npmHTTPResponse(version: "2.1.0")
             }
         )
@@ -2286,7 +2448,8 @@ final class UpdateCheckerTests: XCTestCase {
             cacheStore: InMemoryUpdateCacheStore(),
             scheduler: scheduler,
             identity: UpdateCheckIdentity(appName: "Pi Web Desktop", version: desktopInstalledVersion, bundleIdentifier: "io.github.su-luoya.pi-web-desktop"),
-            preferences: preferences
+            preferences: preferences,
+            piWebServiceURL: { testPiWebServiceURL }
         )
         var completed = false
         checker.checkNow(triggeredBy: .launch, inventory: UpdateCheckInventory(piPackages: [first, second])) {
@@ -2317,7 +2480,8 @@ final class UpdateCheckerTests: XCTestCase {
             cacheStore: InMemoryUpdateCacheStore(),
             scheduler: scheduler,
             identity: UpdateCheckIdentity(appName: "Pi Web Desktop", version: desktopInstalledVersion, bundleIdentifier: "io.github.su-luoya.pi-web-desktop"),
-            preferences: preferences
+            preferences: preferences,
+            piWebServiceURL: { testPiWebServiceURL }
         )
         let oldInventory = UpdateCheckInventory(piWebVersion: "0.8.0")
         let newInventory = UpdateCheckInventory(piWebVersion: "0.9.0")
@@ -2362,7 +2526,8 @@ final class UpdateCheckerTests: XCTestCase {
             cacheStore: InMemoryUpdateCacheStore(),
             scheduler: scheduler,
             identity: UpdateCheckIdentity(appName: "Pi Web Desktop", version: desktopInstalledVersion, bundleIdentifier: "io.github.su-luoya.pi-web-desktop"),
-            preferences: .factoryDefaults
+            preferences: .factoryDefaults,
+            piWebServiceURL: { testPiWebServiceURL }
         )
         var completions = 0
         checker.checkNow(triggeredBy: .launch, inventory: UpdateCheckInventory(desktopAppVersion: desktopInstalledVersion)) { completions += 1 }
@@ -2394,7 +2559,8 @@ final class UpdateCheckerTests: XCTestCase {
                 version: desktopInstalledVersion,
                 bundleIdentifier: "io.github.su-luoya.pi-web-desktop"
             ),
-            preferences: .factoryDefaults
+            preferences: .factoryDefaults,
+            piWebServiceURL: { testPiWebServiceURL }
         )
         let inventory = UpdateCheckInventory(desktopAppVersion: desktopInstalledVersion)
         var firstCompletion = false
@@ -2533,7 +2699,8 @@ final class UpdateCheckerTests: XCTestCase {
                 appName: "Pi Web Desktop",
                 version: desktopInstalledVersion,
                 bundleIdentifier: "io.github.su-luoya.pi-web-desktop"
-            )
+            ),
+            piWebServiceURL: { testPiWebServiceURL }
         )
         checker.start(inventory: fullInventory())
         XCTAssertEqual(client.requests.count, 0, "受控调度器：检查主体应已入队但未执行")

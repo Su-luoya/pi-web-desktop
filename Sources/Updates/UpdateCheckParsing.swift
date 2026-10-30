@@ -140,6 +140,35 @@ enum UpdateResponseParser {
         ))
     }
 
+    /// 解析本机 pi-web 服务的 `/api/app-update`：只读 `latestVersion`。
+    ///
+    /// `currentVersion` 与 `updateAvailable` 都不采信：前者是服务进程的版本
+    /// （可能不等与本机安装的版本），后者是服务按它自己的版本算的结论；本机
+    /// 版本与新旧判定一律由检查器自己重算。`releaseUrl` 本轮也不用（提示里仍
+    /// 用安装命令）。
+    static func latestPiWebAppUpdate(from data: Data) -> Result<UpdateUpstreamVersion, UpdateParseFailure> {
+        guard let object = try? JSONSerialization.jsonObject(with: data) else {
+            return .failure(.malformedJSON)
+        }
+        guard let document = object as? [String: Any] else {
+            return .failure(.unexpectedStructure)
+        }
+        // 服务在拿不到上游版本时回 502 + {"error":…}；HTTP 层已经拦下非 2xx，
+        // 这里只防御“200 但字段缺失”的情况。
+        guard let text = document["latestVersion"] as? String else {
+            return .failure(.missingVersion)
+        }
+        guard let version = SemanticVersion(text) else {
+            return .failure(.unparsableVersion)
+        }
+        return .success(UpdateUpstreamVersion(
+            version: version.description,
+            semanticVersion: version,
+            isPrerelease: version.prerelease != nil,
+            tag: nil
+        ))
+    }
+
     /// 解析 npm registry `/latest` 文档：只读顶层 `version` 字段。
     static func latestNpmVersion(from data: Data) -> Result<UpdateUpstreamVersion, UpdateParseFailure> {
         guard let object = try? JSONSerialization.jsonObject(with: data) else {

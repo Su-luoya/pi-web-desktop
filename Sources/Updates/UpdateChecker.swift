@@ -39,6 +39,9 @@ final class UpdateChecker {
     private let identity: UpdateCheckIdentity
     private let intervals: UpdateCheckIntervals
     private let log: ((String) -> Void)?
+    /// 本机 pi-web 服务的地址（服务运行时才有值）。Pi Web 的版本查询走服务的
+    /// `/api/app-update`：服务没跑起来时没有答案，那一轮就跳过这一项，不记失败。
+    private let piWebServiceURL: () -> URL?
 
     /// 结果变化回调（主线程）。只传汇总，不含请求细节。
     var onResultsChanged: ((UpdateCheckSummary) -> Void)?
@@ -138,6 +141,7 @@ final class UpdateChecker {
         intervals: UpdateCheckIntervals = .standard,
         preferences: UpdateCheckPreferences = .factoryDefaults,
         ignoredVersions: UpdateIgnoredVersions = .empty,
+        piWebServiceURL: @escaping () -> URL? = { nil },
         log: ((String) -> Void)? = nil
     ) {
         self.httpClient = httpClient
@@ -148,6 +152,7 @@ final class UpdateChecker {
         self.intervals = intervals
         self.preferencesValue = preferences
         self.ignoredVersionsValue = ignoredVersions
+        self.piWebServiceURL = piWebServiceURL
         self.log = log
     }
 
@@ -481,6 +486,9 @@ final class UpdateChecker {
             case .piCLI:
                 appendItem(category: category, packageName: nil, installedVersion: inventory.piCLIVersion, onlyDueAt: onlyDueAt, into: &items)
             case .piWeb:
+                // `/api/app-update` 只存在于运行中的服务里：服务没起来时这一轮
+                // 不检查、不记失败、不写缓存，菜单沿用上次结果，而不是报“检查失败”。
+                guard endpoint(for: .piWeb, packageName: nil) != nil else { break }
                 appendItem(category: category, packageName: nil, installedVersion: inventory.piWebVersion, onlyDueAt: onlyDueAt, into: &items)
             case .piPackages:
                 for package in inventory.piPackages {
@@ -526,7 +534,8 @@ final class UpdateChecker {
         case .piCLI:
             return UpdateEndpoint.npmLatest(packageName: UpdateCheckUpstream.piCLIPackageName)
         case .piWeb:
-            return UpdateEndpoint.npmLatest(packageName: UpdateCheckUpstream.piWebPackageName)
+            // 交给本机服务判断：它自己比对上游版本，桌面端不再向 npm 查 Pi Web。
+            return piWebServiceURL().flatMap { UpdateEndpoint.piWebAppUpdate(serviceURL: $0) }
         case .piPackages:
             guard let packageName else { return nil }
             return UpdateEndpoint.npmLatest(packageName: packageName)
@@ -612,7 +621,7 @@ final class UpdateChecker {
         response: Result<UpdateHTTPResponse, UpdateHTTPFailure>
     ) -> UpdateEndpoint? {
         guard item.target.category == .desktopApp,
-              endpoint.allowedHosts.contains(AppcastFeed.host) else { return nil }
+              endpoint.kind == .appcast else { return nil }
         switch response {
         case .success(let http) where (200..<300).contains(http.statusCode):
             return nil
@@ -918,13 +927,16 @@ final class UpdateChecker {
     }
 
     private func parse(endpoint: UpdateEndpoint, body: Data) -> Result<UpdateUpstreamVersion, UpdateParseFailure> {
-        if endpoint.allowedHosts.contains(AppcastFeed.host) {
+        switch endpoint.kind {
+        case .appcast:
             return UpdateResponseParser.latestAppcastRelease(from: body)
-        }
-        if endpoint.allowedHosts.contains(UpdateCheckUpstream.githubHost) {
+        case .githubReleases:
             return UpdateResponseParser.latestGitHubRelease(from: body)
+        case .npmLatest:
+            return UpdateResponseParser.latestNpmVersion(from: body)
+        case .piWebAppUpdate:
+            return UpdateResponseParser.latestPiWebAppUpdate(from: body)
         }
-        return UpdateResponseParser.latestNpmVersion(from: body)
     }
 
     /// 失败时的结论。

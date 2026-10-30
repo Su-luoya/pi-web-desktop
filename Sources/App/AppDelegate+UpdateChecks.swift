@@ -285,7 +285,15 @@ extension AppDelegate {
             guard let self else { return }
             // 进度窗口（GitHub #219）：资产与校验值都核对完了，进入安装阶段。
             self.setDesktopAppUpdateProgressStep(0, .succeeded, detail: source)
-            self.setDesktopAppUpdateProgressStep(1, .succeeded, detail: "已取得更新包与校验值")
+            // 预下载命中时第 1 步直接算完成：用户看到的是“已预下载”而不是一段
+            // 其实不会发生的下载。
+            let prefetched = DesktopUpdatePackageCache.shared
+                .package(matching: asset.version, releaseTag: releaseTag) != nil
+            self.setDesktopAppUpdateProgressStep(
+                1,
+                prefetched ? .succeeded : .running,
+                detail: prefetched ? "更新包已预下载，直接校验" : "正在下载更新包与校验和…"
+            )
             self.setDesktopAppUpdateProgressStep(2, .running, detail: "正在校验安装包（SHA-256）…")
             guard self.desktopAppUpdateInstaller == nil else {
                 // 安装器已存在（入口闸控已挡住第二轮，这里只是兜底）：这轮
@@ -721,6 +729,7 @@ extension AppDelegate {
         refreshUpdateMenuState()
         syncUpdateSettingsWindow()
         diagnosticsWindowController?.refreshUpdateStatus()
+        prefetchDesktopUpdateIfAvailable(summary)
         // Pi CLI 的受限自动更新（GitHub #21）：只在拿到本次检查结果后判定一次。
         // 推迟路径依赖这次判定再调一次检查，因此必须排在下面的
         // `pendingManualUpdateCheck` 分支之前。
@@ -731,6 +740,37 @@ extension AppDelegate {
         }
         pendingManualUpdateCheck = false
         presentUpdateCheckResults(summary)
+    }
+
+    /// 检查发现桌面应用有新版本时，后台先把包下好（只用无配额的 appcast 通道）。
+    ///
+    /// 只下不装：安装入口仍然只在用户点击时出现。命中后点“更新”只剩解压与替换，
+    /// 不再等一次 1.6MB 下载（GitHub #219 的进度窗口里下载通常是最长的一段）。
+    /// 失败不重试也不提示：下一轮检查会再试一次。
+    private func prefetchDesktopUpdateIfAvailable(_ summary: UpdateCheckSummary) {
+        guard let updateChecker,
+              updateChecker.preferences.isEnabled(.desktopApp),
+              desktopAppUpdateInstaller == nil,
+              desktopAppPrefetcher == nil,
+              let result = summary.results.first(where: { $0.target.category == .desktopApp }),
+              result.status == .updateAvailable,
+              let version = result.latestVersion,
+              let releaseTag = result.upstreamTag,
+              DesktopAppReleaseAssetSelector.isReleaseTag(releaseTag),
+              prefetchedDesktopUpdateVersion != version else { return }
+        fetchDesktopAppReleaseAssetsFromAppcast(version: version, releaseTag: releaseTag) { [weak self] asset in
+            guard let self, let asset else { return }
+            DispatchQueue.main.async {
+                guard self.desktopAppUpdateInstaller == nil, self.desktopAppPrefetcher == nil else { return }
+                let prefetcher = DesktopAppUpdateInstaller()
+                self.desktopAppPrefetcher = prefetcher
+                prefetcher.prefetch(asset: asset) { [weak self, weak prefetcher] stored in
+                    guard let self else { return }
+                    if self.desktopAppPrefetcher === prefetcher { self.desktopAppPrefetcher = nil }
+                    if stored { self.prefetchedDesktopUpdateVersion = version }
+                }
+            }
+        }
     }
 
     /// 自动检查（启动 / 周期）的通知：尊重策略与忽略版本，同一个版本在一次

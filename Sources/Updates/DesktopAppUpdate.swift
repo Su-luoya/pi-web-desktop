@@ -368,6 +368,7 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
     private let fileManager: FileManager
     private let session: URLSession?
     private let completionQueue: DispatchQueue
+    private let packageCache: DesktopUpdatePackageCache
     static let downloadResourceTimeout: TimeInterval = 300
 
     private lazy var ownedDownloadSession: URLSession = {
@@ -382,17 +383,20 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
         return URLSession(configuration: configuration, delegate: DesktopAppArchiveRedirectDelegate(), delegateQueue: nil)
     }()
     private var installInProgress = false
+    private var prefetchInProgress = false
     private var completionDelivered = false
     private var activeCompletion: ((DesktopAppUpdateResult) -> Void)?
     private var replacementProcessDidStart = false
     private let stateLock = NSLock()
 
     init(applicationURL: URL = Bundle.main.bundleURL, fileManager: FileManager = .default,
-         session: URLSession = .shared, completionQueue: DispatchQueue = .main) {
+         session: URLSession = .shared, completionQueue: DispatchQueue = .main,
+         packageCache: DesktopUpdatePackageCache = .shared) {
         self.applicationURL = applicationURL.standardizedFileURL
         self.fileManager = fileManager
         self.session = session == URLSession.shared ? nil : session
         self.completionQueue = completionQueue
+        self.packageCache = packageCache
     }
 
     func install(asset: DesktopAppReleaseAsset, completion: @escaping (DesktopAppUpdateResult) -> Void) {
@@ -422,6 +426,18 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
         }
 
         let downloader = session ?? ownedDownloadSession
+        // 预下载命中：跳过下载，直接用已经校验过的包。安装前仍会再算一次 SHA-256
+        // ——缓存目录是用户可写的，不能只信写缓存那一刻的结果。
+        if let cached = Self.cachedArchive(
+            for: asset,
+            expectedHash: expectedHash,
+            packageCache: packageCache,
+            verify: { try? Self.sha256(of: $0) }
+        ) {
+            installArchive(at: cached, asset: asset, bundleIdentifier: id, expectedHash: expectedHash)
+            return
+        }
+
         let task = downloader.downloadTask(with: URLRequest(url: asset.downloadURL)) { [weak self] file, response, error in
             guard let self, let file, error == nil,
                   let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode,
@@ -429,39 +445,115 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
                   DesktopAppReleaseAssetSelector.allowsAssetRedirect(finalURL) else {
                 self?.finish(.failed(.downloadFailed)); return
             }
-            do {
-                guard try Self.sha256(of: file) == expectedHash else { self.finish(.failed(.checksumMismatch)); return }
-                let staging = self.fileManager.temporaryDirectory.appendingPathComponent("PiWebDesktop-update-\(UUID().uuidString)", isDirectory: true)
-                try self.fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
-                // 解压失败（包括下载到的“zip”其实不是 zip）必须清掉 staging 目录。
-                // 下载包约 1.6MB，每次失败都不清理就会在 /tmp 里留下一个个
-                // `PiWebDesktop-update-<uuid>/`；用户反复重试就在无提示地堆积。
-                // 成功路径把 staging 移交给替换脚本，由脚本收尾，不在这里删。
-                do {
-                    try self.unzip(file, into: staging)
-                } catch {
-                    try? self.fileManager.removeItem(at: staging)
-                    throw error
-                }
-                let staged = try Self.findBundle(in: staging, fileManager: self.fileManager)
-                guard Self.isValidBundle(staged, fileManager: self.fileManager, expectedBundleIdentifier: id, expectedVersion: asset.version) else {
-                    try? self.fileManager.removeItem(at: staging); self.finish(.failed(.invalidBundle)); return
-                }
-                // 解压出来的包自带 `LSMinimumSystemVersion`：它比本机高就不能装。
-                // 这条检查是本机唯一能拦住「装完打不开」的地方；旧版本应用不会带它，
-                // 所以它保护的是以后每一次提高下限，而不是已经装好的旧版本。
-                guard Self.requiresNoNewerSystem(staged) else {
-                    try? self.fileManager.removeItem(at: staging); self.finish(.failed(.requiresNewerSystem)); return
-                }
-                try self.launchReplacement(stagedApp: staged, staging: staging)
-                self.finish(.updated(version: asset.version))
-            } catch let failure as DesktopAppUpdateFailure {
-                // staging 在抛错前已清；这里只负责给出结论。
-                self.finish(.failed(failure))
-            }
-            catch { self.finish(.failed(.invalidArchive)) }
+            self.installArchive(at: file, asset: asset, bundleIdentifier: id, expectedHash: expectedHash)
         }
         task.resume()
+    }
+
+    /// 预下载命中判定：版本、tag、校验值三项都对上才算命中。
+    ///
+    /// `verify` 是“重算一遍磁盘上那个包的 SHA-256”：缓存目录在用户可写的位置，
+    /// 不能只信写缓存那一刻的结果。
+    static func cachedArchive(
+        for asset: DesktopAppReleaseAsset,
+        expectedHash: String,
+        packageCache: DesktopUpdatePackageCache,
+        verify: (URL) -> String?
+    ) -> URL? {
+        guard let tag = asset.releaseTag,
+              let cached = packageCache.package(matching: asset.version, releaseTag: tag),
+              DesktopAppReleaseAssetSelector.normalizedChecksum(cached.sha256) == expectedHash,
+              verify(cached.archiveURL) == expectedHash else { return nil }
+        return cached.archiveURL
+    }
+
+    /// 预下载：把包下好、校验过、放进缓存，不做任何安装动作。
+    ///
+    /// 只给无配额的通道用（调用方负责从 appcast 取资产）。任何一步不合规都
+    /// 静默放弃：预下载只是省下一次等待，失败不该让用户看见任何东西。
+    func prefetch(asset: DesktopAppReleaseAsset, completion: @escaping (Bool) -> Void) {
+        guard let tag = asset.releaseTag, let name = asset.assetName,
+              DesktopAppReleaseAssetSelector.allowsDownloadURL(asset.downloadURL, assetName: name, releaseTag: tag),
+              let expectedHash = DesktopAppReleaseAssetSelector.normalizedChecksum(asset.sha256) else {
+            completionQueue.async { completion(false) }
+            return
+        }
+        stateLock.lock()
+        let busy = prefetchInProgress || installInProgress || replacementProcessDidStart
+        if !busy { prefetchInProgress = true }
+        stateLock.unlock()
+        guard !busy else { completionQueue.async { completion(false) }; return }
+
+        let downloader = session ?? ownedDownloadSession
+        let task = downloader.downloadTask(with: URLRequest(url: asset.downloadURL)) { [weak self] file, response, error in
+            guard let self else { return }
+            self.stateLock.lock(); self.prefetchInProgress = false; self.stateLock.unlock()
+            guard let file, error == nil,
+                  let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode,
+                  let finalURL = http.url,
+                  DesktopAppReleaseAssetSelector.allowsAssetRedirect(finalURL),
+                  (try? Self.sha256(of: file)) == expectedHash else {
+                self.completionQueue.async { completion(false) }
+                return
+            }
+            let stored = (try? self.packageCache.store(archiveAt: file, asset: asset)) != nil
+            self.completionQueue.async { completion(stored) }
+        }
+        task.resume()
+    }
+
+    /// 下载（或缓存）到手的包 → 校验 → 解压 → 替换。两条来源共用这一段。
+    private func installArchive(
+        at archive: URL,
+        asset: DesktopAppReleaseAsset,
+        bundleIdentifier id: String?,
+        expectedHash: String
+    ) {
+        do {
+            guard try Self.sha256(of: archive) == expectedHash else { finish(.failed(.checksumMismatch)); return }
+            let staging = stagingDirectory()
+            // 解压失败（包括下载到的“zip”其实不是 zip）必须清掉 staging 目录。
+            // 下载包约 1.6MB，每次失败都不清理就会在磁盘上留下一个个
+            // `.PiWebDesktop-staging-<uuid>/`；用户反复重试就在无提示地堆积。
+            // 成功路径把 staging 移交给替换脚本，由脚本收尾，不在这里删。
+            do {
+                try unzip(archive, into: staging)
+            } catch {
+                try? fileManager.removeItem(at: staging)
+                throw error
+            }
+            let staged = try Self.findBundle(in: staging, fileManager: fileManager)
+            guard Self.isValidBundle(staged, fileManager: fileManager, expectedBundleIdentifier: id, expectedVersion: asset.version) else {
+                try? fileManager.removeItem(at: staging); finish(.failed(.invalidBundle)); return
+            }
+            // 解压出来的包自带 `LSMinimumSystemVersion`：它比本机高就不能装。
+            // 这条检查是本机唯一能拦住「装完打不开」的地方；旧版本应用不会带它，
+            // 所以它保护的是以后每一次提高下限，而不是已经装好的旧版本。
+            guard Self.requiresNoNewerSystem(staged) else {
+                try? fileManager.removeItem(at: staging); finish(.failed(.requiresNewerSystem)); return
+            }
+            try launchReplacement(stagedApp: staged, staging: staging)
+            finish(.updated(version: asset.version))
+        } catch let failure as DesktopAppUpdateFailure {
+            // staging 在抛错前已清；这里只负责给出结论。
+            finish(.failed(failure))
+        }
+        catch { finish(.failed(.invalidArchive)) }
+    }
+
+    /// staging 目录，建好返回。优先放在目标应用旁边：替换脚本最后两步 `mv`
+    /// 只有同卷才是 rename（原子且瞬时）；放在 /tmp 时跨卷 `mv` 会退化成拷贝，
+    /// 拷到一半崩溃就在 /Applications 里留下半个应用。父目录不可写时退回临时目录。
+    private func stagingDirectory() -> URL {
+        let candidate = applicationURL.deletingLastPathComponent()
+            .appendingPathComponent(".PiWebDesktop-staging-\(UUID().uuidString)", isDirectory: true)
+        if (try? fileManager.createDirectory(at: candidate, withIntermediateDirectories: true)) != nil {
+            return candidate
+        }
+        let fallback = fileManager.temporaryDirectory
+            .appendingPathComponent("PiWebDesktop-update-\(UUID().uuidString)", isDirectory: true)
+        try? fileManager.createDirectory(at: fallback, withIntermediateDirectories: true)
+        return fallback
     }
 
     private func finish(_ result: DesktopAppUpdateResult) {

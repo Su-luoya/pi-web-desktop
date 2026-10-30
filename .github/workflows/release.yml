@@ -4,8 +4,9 @@ name: release
 #
 #   * push a protected `v*` tag -> build, verify, package, then create a DRAFT
 #     prerelease with the ZIP, its SHA-256 and the signature/Gatekeeper evidence.
-#     A maintainer fills the real-machine versions from the Release Issue into the
-#     draft notes and publishes it (see docs/alpha-release-checklist.md).
+#     The body is rendered from docs/release-notes-template.md plus the "## 摘要"
+#     section of docs/release-notes-<tag>.md, so publishing the draft needs no
+#     manual editing (see docs/alpha-release-checklist.md).
 #   * workflow_dispatch -> rehearsal only: the same build, verification,
 #     packaging and release-notes rendering, but the result is a workflow
 #     artifact and no release is created, even when dispatched on a tag.
@@ -112,18 +113,41 @@ jobs:
         run: ./Scripts/package-release.sh --app build/Pi-Web-Desktop.app --out dist --tag "${RELEASE_TAG}"
 
       - name: Render the release notes from the template
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.value }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC1091
           . dist/release-metadata.env
+
+          # 发布说明分两层：Release 页面只放摘要 + 安装/校验/已知问题，完整的验证
+          # 记录留在仓库里的 notes 文件（打 tag 之前就已提交）。因此发布草稿不需要
+          # 再手工编辑正文，`<待填写` 也从「人工门禁」变成硬错误。
+          notes_file="docs/release-notes-${RELEASE_TAG}.md"
+          if [ ! -f "${notes_file}" ]; then
+            echo "::error::missing ${notes_file}: every release needs its notes file in the repository (see docs/releasing.md)"
+            exit 1
+          fi
+          notes_url="https://github.com/${GITHUB_REPOSITORY}/blob/main/${notes_file}"
+          # 摘要段落：从 "## 摘要" 到下一个二级标题。缺少这一段时退化为一句提示，
+          # 不因此让发布失败——notes 文件的结构由维护者掌握。
+          awk '/^## 摘要[[:space:]]*$/ { inside = 1; next } inside && /^## / { exit } inside { if (!printed && $0 ~ /^[[:space:]]*$/) next; printed = 1; print }' \
+            "${notes_file}" > dist/release-summary.md
+          if [ ! -s dist/release-summary.md ]; then
+            printf '本版改动见[完整记录](%s)。\n' "${notes_url}" > dist/release-summary.md
+            echo "::warning::${notes_file} has no '## 摘要' section; the release body links to the full record instead"
+          fi
+
           awk -v version="${VERSION}" \
               -v build="${BUILD}" \
               -v zip_name="${ZIP_NAME}" \
               -v sha256="${SHA256}" \
-              -v evidence="dist/${EVIDENCE_NAME}" '
+              -v evidence_name="${EVIDENCE_NAME}" \
+              -v notes_url="${notes_url}" \
+              -v summary_file="dist/release-summary.md" '
             BEGIN {
-              while ((getline line < evidence) > 0) { evidence_text = evidence_text line "\n" }
-              close(evidence)
+              while ((getline line < summary_file) > 0) { summary = summary line "\n" }
+              close(summary_file)
             }
             {
               # Everything before the first "# " heading is template
@@ -135,10 +159,13 @@ jobs:
               gsub(/\{\{BUILD\}\}/, build)
               gsub(/\{\{ZIP_NAME\}\}/, zip_name)
               gsub(/\{\{SHA256\}\}/, sha256)
-              if ($0 ~ /<!-- RELEASE-EVIDENCE -->/) { printf "%s", evidence_text; next }
+              gsub(/\{\{EVIDENCE_NAME\}\}/, evidence_name)
+              gsub(/\{\{NOTES_URL\}\}/, notes_url)
+              if ($0 ~ /<!-- SUMMARY -->/) { printf "%s", summary; next }
               print
             }
           ' docs/release-notes-template.md > dist/release-body.md
+
           if grep -q '{{' dist/release-body.md; then
             echo "::error::the rendered release notes still contain template placeholders"
             grep -n '{{' dist/release-body.md
@@ -148,15 +175,15 @@ jobs:
             echo "::error::the rendered release notes do not contain the ZIP checksum"
             exit 1
           fi
-          # 匹配前缀而不是完整标签：模板里出现过 `<待填写：说明>` 变体，
-          # 只匹配 `<待填写>` 会把它漏数（发布后回填时才发现）。
+          # 正文按原样发布，占位符会直接到达用户：匹配前缀（历史上出现过
+          # `<待填写：说明>` 变体），任何残留都是缺陷而不是待办。
           unfilled="$(grep -c '<待填写' dist/release-body.md || true)"
-          # Warning, not error: the draft must still be created so a maintainer can
-          # fill these fields from the Release Issue. The hard gate is the manual
-          # pre-publish check documented in docs/releasing.md and
-          # docs/alpha-release-checklist.md; this count must reach 0 before the
-          # draft is published (undrafted), and publishing with it > 0 is a defect.
-          echo "::warning::${unfilled} field(s) still marked 待填写; they must be filled from the Release Issue and this count must be 0 before the release is published (undrafted)"
+          if [ "${unfilled}" != "0" ]; then
+            echo "::error::${unfilled} field(s) still marked 待填写 in the release body"
+            grep -n '<待填写' dist/release-body.md
+            exit 1
+          fi
+          echo "Rendered a $(wc -c < dist/release-body.md) byte release body from docs/release-notes-template.md + ${notes_file}."
 
       - name: Summarize the artifact and evidence
         run: |
@@ -239,6 +266,7 @@ jobs:
             echo "### Draft prerelease created for ${RELEASE_TAG}"
             echo
             echo "Assets uploaded: \`${ZIP_NAME}\`, \`${ZIP_NAME}.sha256\`, \`${EVIDENCE_NAME}\`."
-            echo "Fill the real-machine versions from the Release Issue into the release notes, confirm the alpha checklist, then publish the draft as a prerelease."
+            echo "The body was rendered from docs/release-notes-template.md and docs/release-notes-${RELEASE_TAG}.md; no manual editing is needed."
+            echo "Confirm the assets and checksum, then publish the draft as a prerelease (alpha checklist)."
             echo "Draft: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
           } >> "${GITHUB_STEP_SUMMARY}"

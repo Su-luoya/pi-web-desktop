@@ -94,11 +94,32 @@ extension AppDelegate {
         presentDesktopUpdateFailure(failure)
     }
 
+    /// 安装入口：先问更新通道（appcast），通道不可用再回落 GitHub API。
+    ///
+    /// 通道优先的理由是配额：GitHub 未认证 API 每小时 60 次、按出口 IP 共享，
+    /// 用完就让整个更新失败（GitHub #225）。appcast 走 CDN，不占配额。
     private func downloadAndInstallDesktopApp(version: String, releaseTag: String) {
         guard beginDesktopAppUpdateActivity(releaseTag: releaseTag) else { return }
+        guard DesktopAppReleaseAssetSelector.isReleaseTag(releaseTag) else {
+            failDesktopAppUpdateRound(.invalidAssetURL, releaseTag: releaseTag)
+            return
+        }
+        fetchDesktopAppReleaseAssetsFromAppcast(version: version, releaseTag: releaseTag) { [weak self] asset in
+            guard let self else { return }
+            if let asset {
+                self.beginDesktopAppUpdateDownload(
+                    asset: asset, releaseTag: releaseTag, source: "已从更新通道取得资产信息"
+                )
+                return
+            }
+            self.fetchDesktopAppReleaseAssetsFromGitHubAPI(version: version, releaseTag: releaseTag)
+        }
+    }
+
+    /// GitHub API 回落路径（更新通道不可用时的原路径）。
+    private func fetchDesktopAppReleaseAssetsFromGitHubAPI(version: String, releaseTag: String) {
         let tagCharacters = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
-        guard DesktopAppReleaseAssetSelector.isReleaseTag(releaseTag),
-              let encodedTag = releaseTag.addingPercentEncoding(withAllowedCharacters: tagCharacters),
+        guard let encodedTag = releaseTag.addingPercentEncoding(withAllowedCharacters: tagCharacters),
               let releaseURL = URL(string: "https://api.github.com/repos/\(UpdateCheckUpstream.desktopRepository)/releases/tags/\(encodedTag)"),
               let components = URLComponents(url: releaseURL, resolvingAgainstBaseURL: false),
               components.scheme == "https",
@@ -203,46 +224,102 @@ extension AppDelegate {
                     return
                 }
                 checksumSession.finishTasksAndInvalidate()
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    guard self.desktopAppUpdateInstaller == nil else {
-                        // 安装器已存在（入口闸控已挡住第二轮，这里只是兜底）：这轮
-                        // 到此结束，不创建第二个安装器。
-                        self.finishDesktopAppUpdateRound(releaseTag: releaseTag)
-                        return
-                    }
-                    guard self.desktopAppUpdateRound.markInstalling(releaseTag: releaseTag) else {
-                        // 这一轮已被取消或已被新一轮顶掉：不要再开一个安装器。
-                        self.finishDesktopAppUpdateRound(releaseTag: releaseTag)
-                        return
-                    }
-                    let installer = DesktopAppUpdateInstaller()
-                    self.desktopAppUpdateInstaller = installer
-                    // 进度窗口（GitHub #219）：校验和已匹配，安装器接手下载与替换。
-                    self.setDesktopAppUpdateProgressStep(1, .succeeded, detail: "已取得更新包与校验和")
-                    self.setDesktopAppUpdateProgressStep(2, .running, detail: "正在校验安装包（SHA-256）…")
-                    self.refreshUpdateMenuState()
-                    installer.install(asset: verifiedAsset) { [weak self, weak installer] result in
-                        if self?.desktopAppUpdateInstaller === installer {
-                            self?.desktopAppUpdateInstaller = nil
-                        }
-                        // 安装器交付结果即整轮结束：成功时应用即将被替换，失败时入口
-                        // 必须重新可用（否则菜单永久置灰）。
-                        switch result {
-                        case .updated:
-                            self?.setDesktopAppUpdateProgressStep(2, .succeeded, detail: "校验和匹配")
-                            self?.setDesktopAppUpdateProgressStep(3, .succeeded, detail: "已替换应用，即将重新启动")
-                            self?.finishDesktopAppUpdateRound(releaseTag: releaseTag)
-                            self?.finishDesktopAppUpdateProgress(.succeeded(version: version))
-                        case .failed(let failure):
-                            // 失败停在真正失败的那一步，而不是笼统地“跳过”。
-                            self?.failRunningDesktopAppUpdateStep(detail: failure.text)
-                            self?.failDesktopAppUpdateRound(failure, releaseTag: releaseTag)
-                        }
-                    }
-                }
+                self?.beginDesktopAppUpdateDownload(
+                    asset: verifiedAsset,
+                    releaseTag: releaseTag,
+                    source: "已核对发布页与资产列表"
+                )
             }.resume()
         }.resume()
+    }
+
+    /// 更新通道（appcast）优先。回调 nil 表示「通道不可用」，由调用方回落
+    /// GitHub API —— feed 是加速器，不是新的单点依赖。
+    private func fetchDesktopAppReleaseAssetsFromAppcast(
+        version: String,
+        releaseTag: String,
+        completion: @escaping (DesktopAppReleaseAsset?) -> Void
+    ) {
+        guard let feedURL = AppcastFeed.url else {
+            completion(nil)
+            return
+        }
+        var request = URLRequest(url: feedURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = UpdateChecker.requestTimeout
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(UpdateCheckIdentity.current.userAgent, forHTTPHeaderField: "User-Agent")
+        let session = URLSession(
+            configuration: .ephemeral,
+            delegate: AppcastRedirectDelegate(),
+            delegateQueue: nil
+        )
+        session.dataTask(with: request) { data, response, error in
+            session.finishTasksAndInvalidate()
+            guard let data, error == nil,
+                  (response as? HTTPURLResponse)?.statusCode == 200,
+                  let finalURL = response?.url, AppcastFeed.allows(finalURL: finalURL),
+                  let release = AppcastFeed.release(tag: releaseTag, in: data),
+                  release.version == version,
+                  let asset = DesktopAppReleaseAssetSelector.select(
+                      version: version,
+                      assets: [(name: release.zip.name, url: release.zip.url)],
+                      checksum: release.zip.sha256,
+                      releaseTag: releaseTag
+                  ) else {
+                // 任何一处不合规都退回 GitHub API：feed 坏了不该让更新失败。
+                completion(nil)
+                return
+            }
+            completion(asset)
+        }.resume()
+    }
+
+    /// 两条通道的共同出口：资产与校验值都到手后，创建安装器接管下载与替换。
+    private func beginDesktopAppUpdateDownload(
+        asset: DesktopAppReleaseAsset,
+        releaseTag: String,
+        source: String
+    ) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            // 进度窗口（GitHub #219）：资产与校验值都核对完了，进入安装阶段。
+            self.setDesktopAppUpdateProgressStep(0, .succeeded, detail: source)
+            self.setDesktopAppUpdateProgressStep(1, .succeeded, detail: "已取得更新包与校验值")
+            self.setDesktopAppUpdateProgressStep(2, .running, detail: "正在校验安装包（SHA-256）…")
+            guard self.desktopAppUpdateInstaller == nil else {
+                // 安装器已存在（入口闸控已挡住第二轮，这里只是兜底）：这轮
+                // 到此结束，不创建第二个安装器。
+                self.finishDesktopAppUpdateRound(releaseTag: releaseTag)
+                return
+            }
+            guard self.desktopAppUpdateRound.markInstalling(releaseTag: releaseTag) else {
+                // 这一轮已被取消或已被新一轮顶掉：不要再开一个安装器。
+                self.finishDesktopAppUpdateRound(releaseTag: releaseTag)
+                return
+            }
+            let installer = DesktopAppUpdateInstaller()
+            self.desktopAppUpdateInstaller = installer
+            self.refreshUpdateMenuState()
+            installer.install(asset: asset) { [weak self, weak installer] result in
+                if self?.desktopAppUpdateInstaller === installer {
+                    self?.desktopAppUpdateInstaller = nil
+                }
+                // 安装器交付结果即整轮结束：成功时应用即将被替换，失败时入口
+                // 必须重新可用（否则菜单永久置灰）。
+                switch result {
+                case .updated:
+                    self?.setDesktopAppUpdateProgressStep(2, .succeeded, detail: "校验和匹配")
+                    self?.setDesktopAppUpdateProgressStep(3, .succeeded, detail: "已替换应用，即将重新启动")
+                    self?.finishDesktopAppUpdateRound(releaseTag: releaseTag)
+                    self?.finishDesktopAppUpdateProgress(.succeeded(version: asset.version))
+                case .failed(let failure):
+                    // 失败停在真正失败的那一步，而不是笼统地“跳过”。
+                    self?.failRunningDesktopAppUpdateStep(detail: failure.text)
+                    self?.failDesktopAppUpdateRound(failure, releaseTag: releaseTag)
+                }
+            }
+        }
     }
 
     private func presentDesktopUpdateFailure(_ failure: DesktopAppUpdateFailure) {
@@ -725,6 +802,23 @@ extension AppDelegate {
 
 /// Checksummed assets use a dedicated session so the redirect policy cannot be toggled
 /// while an unrelated archive download is in flight.
+/// appcast 重定向闸控：只跟随到 feed 主机（与校验和下载同一策略）。
+private final class AppcastRedirectDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let url = request.url, AppcastFeed.allows(finalURL: url) else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
+    }
+}
+
 private final class ChecksumRedirectDelegate: NSObject, URLSessionTaskDelegate {
     func urlSession(
         _ session: URLSession,

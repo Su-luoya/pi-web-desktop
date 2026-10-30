@@ -274,21 +274,53 @@ final class UpdateCheckerTests: XCTestCase {
         ))
     }
 
+    /// 更新通道（appcast）形状的响应：`{"schema":1,"releases":[{"tag":…}]}`。
+    /// 桌面应用的默认端点就是它（GitHub API 只做回落）。
+    private static func appcastHTTPResponse(
+        tags: [String],
+        statusCode: Int = 200,
+        etag: String? = nil,
+        finalURL: URL? = nil,
+        body: String? = nil,
+        headers extraHeaders: [String: String] = [:]
+    ) -> Result<UpdateHTTPResponse, UpdateHTTPFailure> {
+        let defaultBody = "{\"schema\":1,\"releases\":[" + tags.map {
+            "{\"tag\":\"\($0)\",\"version\":\"\($0)\"}"
+        }.joined(separator: ",") + "]}"
+        var headers: [String: String] = [:]
+        if let etag { headers["etag"] = etag }
+        headers.merge(extraHeaders) { _, new in new }
+        return .success(UpdateHTTPResponse(
+            statusCode: statusCode,
+            headers: headers,
+            body: Data((body ?? defaultBody).utf8),
+            finalURL: finalURL
+        ))
+    }
+
     private func automaticResponder() -> (UpdateHTTPRequest) -> Result<UpdateHTTPResponse, UpdateHTTPFailure> {
         { request in
-            if request.url.host == UpdateCheckUpstream.githubHost {
-                return Self.githubHTTPResponse(tags: ["v2.4.1-alpha.2"])
+            if request.url.host == AppcastFeed.host {
+                return Self.appcastHTTPResponse(tags: ["v2.4.1-alpha.2"])
             }
             return Self.npmHTTPResponse(version: "2.0.0")
         }
     }
 
     private func expectedHost(for category: UpdateCheckCategory) -> String {
-        category == .desktopApp ? UpdateCheckUpstream.githubHost : UpdateCheckUpstream.npmRegistryHost
+        category == .desktopApp ? AppcastFeed.host : UpdateCheckUpstream.npmRegistryHost
+    }
+
+    /// 桌面应用的主端点是更新通道，回落端点才是 GitHub API：两条都算“它的请求”。
+    private func isDesktopRequest(_ request: UpdateHTTPRequest) -> Bool {
+        request.url.host == AppcastFeed.host || request.url.host == UpdateCheckUpstream.githubHost
     }
 
     private func requestMatches(_ request: UpdateHTTPRequest, target: UpdateCheckTarget) -> Bool {
-        guard request.url.host == expectedHost(for: target.category) else { return false }
+        let hostMatches = target.category == .desktopApp
+            ? isDesktopRequest(request)
+            : request.url.host == expectedHost(for: target.category)
+        guard hostMatches else { return false }
         switch target.category {
         case .desktopApp:
             return true
@@ -312,7 +344,7 @@ final class UpdateCheckerTests: XCTestCase {
     private func requestMatchesCategory(_ request: UpdateHTTPRequest, _ category: UpdateCheckCategory) -> Bool {
         switch category {
         case .desktopApp:
-            return request.url.host == UpdateCheckUpstream.githubHost
+            return isDesktopRequest(request)
         case .piCLI:
             return request.url.absoluteString.contains("pi-coding-agent")
         case .piWeb:
@@ -619,11 +651,11 @@ final class UpdateCheckerTests: XCTestCase {
             (.failure(.timedOut), .timedOut, "请求超时"),
             (Self.npmHTTPResponse(version: "0.2.0", statusCode: 429), .rateLimited, "429"),
             // GitHub 的未认证 API 限流是 403 + `x-ratelimit-remaining: 0`，不是 429。
-            (Self.githubHTTPResponse(
+            (Self.appcastHTTPResponse(
                 tags: ["v0.2.0"], statusCode: 403, headers: ["x-ratelimit-remaining": "0"]
             ), .rateLimited, "上游限流"),
             // 剩余额度不为 0 的 403 是真正的禁止访问，不能报成「限流」。
-            (Self.githubHTTPResponse(
+            (Self.appcastHTTPResponse(
                 tags: ["v0.2.0"], statusCode: 403, headers: ["x-ratelimit-remaining": "12"]
             ), .httpError, "403"),
             (Self.npmHTTPResponse(version: "0.2.0", statusCode: 503), .serverError, "503")
@@ -724,7 +756,7 @@ final class UpdateCheckerTests: XCTestCase {
             etag: "\"v1\""
         ))
         let world = makeWorld(cached: cached, responder: { _ in
-            Self.githubHTTPResponse(tags: [], body: "{\"not\":\"a release list\"}")
+            Self.appcastHTTPResponse(tags: [], body: "{\"not\":\"a release list\"}")
         })
 
         world.checker.checkNow(
@@ -795,7 +827,7 @@ final class UpdateCheckerTests: XCTestCase {
             lastSuccessAt: lastSuccess
         ))
         let world = makeWorld(cached: cached, responder: { _ in
-            Self.githubHTTPResponse(
+            Self.appcastHTTPResponse(
                 tags: ["v9.9.9"],
                 finalURL: URL(string: "https://unexpected.example/releases")
             )
@@ -815,7 +847,7 @@ final class UpdateCheckerTests: XCTestCase {
 
     func testRedirectStatusIsUnknown() {
         let world = makeWorld(responder: { _ in
-            Self.githubHTTPResponse(tags: ["v9.9.9"], statusCode: 301)
+            Self.appcastHTTPResponse(tags: ["v9.9.9"], statusCode: 301)
         })
 
         world.checker.checkNow(
@@ -844,7 +876,7 @@ final class UpdateCheckerTests: XCTestCase {
             etag: "\"v1\""
         ))
         let world = makeWorld(cached: cached, responder: { _ in
-            Self.githubHTTPResponse(tags: [], statusCode: 304, etag: "\"v1\"")
+            Self.appcastHTTPResponse(tags: [], statusCode: 304, etag: "\"v1\"")
         })
 
         world.checker.checkNow(
@@ -1303,8 +1335,8 @@ final class UpdateCheckerTests: XCTestCase {
 
     func testUpdateAvailableUsesSemanticComparisonIncludingPrereleases() {
         let world = makeWorld(responder: { request in
-            if request.url.host == UpdateCheckUpstream.githubHost {
-                return Self.githubHTTPResponse(tags: ["v2.4.1-alpha.2"])
+            if request.url.host == AppcastFeed.host {
+                return Self.appcastHTTPResponse(tags: ["v2.4.1-alpha.2"])
             }
             return Self.npmHTTPResponse(version: "2.4.1-alpha.2")
         })
@@ -1320,8 +1352,8 @@ final class UpdateCheckerTests: XCTestCase {
 
     func testStableInstalledVersionIsNotDowngradedByPrerelease() {
         let world = makeWorld(responder: { request in
-            if request.url.host == UpdateCheckUpstream.githubHost {
-                return Self.githubHTTPResponse(tags: ["v2.4.0-alpha.9"])
+            if request.url.host == AppcastFeed.host {
+                return Self.appcastHTTPResponse(tags: ["v2.4.0-alpha.9"])
             }
             return Self.npmHTTPResponse(version: "0.9.0")
         })
@@ -1334,16 +1366,15 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertEqual(desktop?.latestVersion, "2.4.0-alpha.9")
     }
 
-    func testGitHubParserPicksHighestVersionAndIgnoresDrafts() {
+    func testAppcastParserPicksHighestVersion() {
         let body = """
-        [
-          {"tag_name":"v2.4.1-alpha.2","draft":false,"prerelease":true},
-          {"tag_name":"v2.4.1-alpha.10","draft":false,"prerelease":true},
-          {"tag_name":"v9.9.9","draft":true,"prerelease":false}
-        ]
+        {"schema":1,"releases":[
+          {"tag":"v2.4.1-alpha.2","version":"2.4.1-alpha.2"},
+          {"tag":"v2.4.1-alpha.10","version":"2.4.1-alpha.10"}
+        ]}
         """
         let world = makeWorld(responder: { _ in
-            Self.githubHTTPResponse(tags: [], body: body)
+            Self.appcastHTTPResponse(tags: [], body: body)
         })
 
         world.checker.checkNow(triggeredBy: .manual, inventory: fullInventory())
@@ -1351,6 +1382,73 @@ final class UpdateCheckerTests: XCTestCase {
         let desktop = world.checker.summary.result(for: UpdateCheckTarget(category: .desktopApp).id)
         XCTAssertEqual(desktop?.latestVersion, "2.4.1-alpha.10")
         XCTAssertEqual(desktop?.status, .updateAvailable)
+    }
+
+    // MARK: - 更新通道（appcast）与回落
+
+    /// 主端点必须是更新通道：它不占 GitHub API 配额（未认证 60 次/小时、按出口
+    /// IP 共享），而配额耗尽就是 GitHub #225 里那个「更新包下载失败」。
+    func testDesktopCheckUsesAppcastInsteadOfGitHubAPI() {
+        let world = makeWorld(responder: { request in
+            if request.url.host == AppcastFeed.host {
+                return Self.appcastHTTPResponse(tags: ["v2.4.1-alpha.2"])
+            }
+            return Self.githubHTTPResponse(tags: ["v2.4.1-alpha.2"])
+        })
+
+        world.checker.checkNow(
+            triggeredBy: .manual,
+            inventory: UpdateCheckInventory(desktopAppVersion: desktopInstalledVersion)
+        )
+
+        XCTAssertEqual(world.client.requests.first?.url.host, AppcastFeed.host)
+        XCTAssertEqual(world.client.requests.count, 1)
+        let desktop = world.checker.summary.result(for: UpdateCheckTarget(category: .desktopApp).id)
+        XCTAssertEqual(desktop?.latestVersion, "2.4.1-alpha.2")
+        XCTAssertEqual(desktop?.status, .updateAvailable)
+        XCTAssertEqual(desktop?.confidence, .verified)
+    }
+
+    /// 更新通道不可达时回落 GitHub API：一次 CDN 抖动不该等于「检查失败」。
+    func testDesktopCheckFallsBackToGitHubAPIWhenAppcastFails() {
+        let world = makeWorld(responder: { request in
+            if request.url.host == AppcastFeed.host {
+                return .failure(.timedOut)
+            }
+            return Self.githubHTTPResponse(tags: ["v2.4.1-alpha.2"])
+        })
+
+        world.checker.checkNow(
+            triggeredBy: .manual,
+            inventory: UpdateCheckInventory(desktopAppVersion: desktopInstalledVersion)
+        )
+
+        XCTAssertEqual(
+            world.client.requests.map(\.url.host),
+            [AppcastFeed.host, UpdateCheckUpstream.githubHost]
+        )
+        let desktop = world.checker.summary.result(for: UpdateCheckTarget(category: .desktopApp).id)
+        XCTAssertEqual(desktop?.latestVersion, "2.4.1-alpha.2")
+        XCTAssertEqual(desktop?.status, .updateAvailable)
+        XCTAssertNil(desktop?.failure)
+    }
+
+    /// feed 拿到了响应但内容不合规：不回落（那是我们自己的 feed 格式问题，
+    /// 应该被发布演练发现），本次结论记为 unknown。
+    func testAppcastParseFailureDoesNotFallBack() {
+        let world = makeWorld(responder: { _ in
+            Self.appcastHTTPResponse(tags: [], body: "{\"schema\":99}")
+        })
+
+        world.checker.checkNow(
+            triggeredBy: .manual,
+            inventory: UpdateCheckInventory(desktopAppVersion: desktopInstalledVersion)
+        )
+
+        XCTAssertEqual(world.client.requests.count, 1)
+        let desktop = world.checker.summary.result(for: UpdateCheckTarget(category: .desktopApp).id)
+        XCTAssertEqual(desktop?.status, .unknown)
+        XCTAssertNotNil(desktop?.failure)
     }
 
     func testSemanticVersionPrereleaseOrdering() {
@@ -1404,7 +1502,7 @@ final class UpdateCheckerTests: XCTestCase {
         world.checker.start(inventory: fullInventory())
 
         XCTAssertFalse(world.client.requests.isEmpty)
-        let allowedHosts: Set<String> = [UpdateCheckUpstream.githubHost, UpdateCheckUpstream.npmRegistryHost]
+        let allowedHosts: Set<String> = [AppcastFeed.host, UpdateCheckUpstream.githubHost, UpdateCheckUpstream.npmRegistryHost]
         let forbiddenHeaderNames = ["cookie", "authorization", "session", "diagnostic", "token", "password", "secret"]
         for request in world.client.requests {
             XCTAssertEqual(request.method, "GET")
@@ -1424,7 +1522,7 @@ final class UpdateCheckerTests: XCTestCase {
             XCTAssertEqual(request.headers["Accept"], "application/json")
         }
         // 条件请求字段来自缓存。
-        let desktopRequest = world.client.requests.first { $0.url.host == UpdateCheckUpstream.githubHost }
+        let desktopRequest = world.client.requests.first { $0.url.host == AppcastFeed.host }
         XCTAssertEqual(desktopRequest?.headers["If-None-Match"], "\"v1\"")
         XCTAssertEqual(desktopRequest?.headers["If-Modified-Since"], "Mon, 01 Jan 2024 00:00:00 GMT")
         XCTAssertFalse(world.client.requests.contains { $0.url.query?.contains("password") == true })
@@ -1502,7 +1600,8 @@ final class UpdateCheckerTests: XCTestCase {
 
         let recorded = world.client.requests.count
         let whitelisted = world.client.requests.filter {
-            [UpdateCheckUpstream.githubHost, UpdateCheckUpstream.npmRegistryHost].contains($0.url.host ?? "")
+            [AppcastFeed.host, UpdateCheckUpstream.githubHost, UpdateCheckUpstream.npmRegistryHost]
+                .contains($0.url.host ?? "")
         }.count
         XCTAssertEqual(recorded, whitelisted)
         XCTAssertGreaterThan(recorded, 0)
@@ -1841,8 +1940,8 @@ final class UpdateCheckerTests: XCTestCase {
 
     func testAllUpToDateSummary() {
         let world = makeWorld(responder: { request in
-            if request.url.host == UpdateCheckUpstream.githubHost {
-                return Self.githubHTTPResponse(tags: ["v2.4.0"])
+            if request.url.host == AppcastFeed.host {
+                return Self.appcastHTTPResponse(tags: ["v2.4.0"])
             }
             return Self.npmHTTPResponse(version: "1.0.0")
         })
@@ -2067,8 +2166,8 @@ final class UpdateCheckerTests: XCTestCase {
         let newerWorld = makeWorld(
             ignoredVersions: ignored,
             responder: { request in
-                if request.url.host == UpdateCheckUpstream.githubHost {
-                    return Self.githubHTTPResponse(tags: ["v2.4.0"])
+                if request.url.host == AppcastFeed.host {
+                    return Self.appcastHTTPResponse(tags: ["v2.4.0"])
                 }
                 return Self.npmHTTPResponse(version: "2.1.0")
             }
@@ -2316,7 +2415,7 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertFalse(secondCompletion)
         XCTAssertNil(checker.summary.result(for: UpdateCheckTarget(category: .desktopApp).id))
 
-        client.completeNext(with: Self.githubHTTPResponse(tags: ["v2.4.1-alpha.2"]))
+        client.completeNext(with: Self.appcastHTTPResponse(tags: ["v2.4.1-alpha.2"]))
         scheduler.runNext()
 
         XCTAssertTrue(firstCompletion)

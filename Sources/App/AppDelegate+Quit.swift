@@ -125,7 +125,7 @@ extension AppDelegate {
         // 把这个窗口重新显示出来（“刚隐藏的窗口自己回来了”，与用户状态不一致）。
         // 因此窗口不可见时改用应用级模态（`runModal`），窗口保持隐藏。
         if window.isVisible {
-            alert.beginSheetModal(for: window, completionHandler: decide)
+            presentAlert(alert, completionHandler: decide)
         } else {
             NSApp.activate()
             decide(alert.runModal())

@@ -395,6 +395,35 @@ final class UpdateChecker {
         }
     }
 
+    /// 把本轮结果与上一次汇总合并（复审 Fix 1）：`onlyDue` 局部检查（启动补检、
+    /// 周期复查、清单变更补检）不再整包替换汇总——否则用户刚看过的手动全量结果
+    /// 会被下一次周期检查冲掉，菜单与提示出现闪变。规则：本轮覆盖到的对象用
+    /// 新结果；未覆盖对象的旧结果保留；分类已关闭的旧结论作废；分类快照按合并
+    /// 后的结果用 `UpdateCategoryStatusBuilder` 重建。
+    private func mergedSummary(_ summary: UpdateCheckSummary) -> UpdateCheckSummary {
+        let previous = self.summary
+        guard !previous.results.isEmpty, !summary.allDisabled else { return summary }
+        let kept = previous.results.filter { result in
+            !summary.results.contains { $0.target.id == result.target.id }
+                && summary.enabledCategories.contains(result.target.category)
+        }
+        guard !kept.isEmpty else { return summary }
+        let results = summary.results + kept
+        return UpdateCheckSummary(
+            results: results,
+            checkedAt: summary.checkedAt,
+            trigger: summary.trigger,
+            enabledCategories: summary.enabledCategories,
+            categoryStatuses: UpdateCategoryStatusBuilder.statuses(
+                preferences: preferences,
+                intervals: intervals,
+                cache: cache,
+                ignoredVersions: ignoredVersions,
+                results: results
+            )
+        )
+    }
+
     private func finishCheck(with summary: UpdateCheckSummary) {
         guard !stopped else {
             finishStoppedCheck()
@@ -413,8 +442,9 @@ final class UpdateChecker {
             self.isChecking = true
             self.scheduler.deliver { [weak self] in
                 guard let self else { return }
-                self.summary = summary
-                self.onResultsChanged?(summary)
+                let published = self.mergedSummary(summary)
+                self.summary = published
+                self.onResultsChanged?(published)
                 self.scheduler.perform { [weak self] in
                     guard let self else { return }
                     guard var next = self.queuedCheck else { return }
@@ -433,8 +463,9 @@ final class UpdateChecker {
         isChecking = false
         scheduler.deliver { [weak self] in
             guard let self else { return }
-            self.summary = summary
-            self.onResultsChanged?(summary)
+            let published = self.mergedSummary(summary)
+            self.summary = published
+            self.onResultsChanged?(published)
             waiters.forEach { $0() }
         }
     }

@@ -40,7 +40,7 @@ extension AppDelegate {
         alert.addButton(withTitle: "取消")
         alert.alertStyle = .warning
         refreshUpdateMenuState()
-        alert.beginSheetModal(for: window) { [weak self] response in
+        presentAlert(alert) { [weak self] response in
             guard let self else { return }
             guard response == .alertFirstButtonReturn else {
                 // 用户取消：阶段位必须复位（否则入口永久置灰、菜单永久显示「等待确认」）。
@@ -209,7 +209,7 @@ extension AppDelegate {
         alert.messageText = "桌面应用更新未完成"
         alert.informativeText = failure.text
         alert.addButton(withTitle: "好")
-        alert.beginSheetModal(for: window)
+        presentAlert(alert)
     }
 
     // MARK: - 更新检查（GitHub #17）
@@ -357,7 +357,7 @@ extension AppDelegate {
             cachePath: logRedactor.redact(appConfiguration.paths.updateCheckCacheURL.path)
         )
         alert.addButton(withTitle: "好")
-        alert.beginSheetModal(for: window)
+        presentAlert(alert)
     }
 
     /// 把更新相关的可点项追加进顶层“更新”菜单。
@@ -646,7 +646,7 @@ extension AppDelegate {
         for entry in entries {
             alert.addButton(withTitle: "忽略 \(entry.latestVersion)")
         }
-        alert.beginSheetModal(for: window) { [weak self] response in
+        presentAlert(alert) { [weak self] response in
             // 第一个按钮是“好”，其后的每个按钮对应一个条目。
             let index = response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue - 1
             guard index >= 0, entries.indices.contains(index) else { return }
@@ -668,7 +668,7 @@ extension AppDelegate {
         }
         alert.informativeText = summary.detailText
         alert.addButton(withTitle: "好")
-        alert.beginSheetModal(for: window)
+        presentAlert(alert)
     }
 }
 

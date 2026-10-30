@@ -228,6 +228,26 @@ extension AppDelegate {
         }
     }
 
+    /// 统一的告警呈现入口：主窗口可见时挂 sheet，否则应用级模态（复审 Fix 2）。
+    ///
+    /// `window` 是隐式解包（NSWindow!），多窗口下窗口全部关闭时为 nil——
+    /// 直接 `beginSheetModal(for: window)` 会崩溃（启动前更新、后台失败路径都会
+    /// 走到无窗口状态）。另外在隐藏窗口上挂 sheet 会让 AppKit 把它重新显示出来
+    /// （W4 L5，与用户状态不一致），所以只在可见时挂 sheet。与
+    /// `DiagnosticsClipboard.confirmExport` 同一规则；`runModal` 前先激活应用，
+    /// 避免后台触发的模态面板落到其他应用后面。
+    func presentAlert(
+        _ alert: NSAlert,
+        completionHandler: ((NSApplication.ModalResponse) -> Void)? = nil
+    ) {
+        if let window, window.isVisible {
+            alert.beginSheetModal(for: window, completionHandler: completionHandler)
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            completionHandler?(alert.runModal())
+        }
+    }
+
     private func presentWorkspaceAlert(_ alert: NSAlert, completion: @escaping (NSApplication.ModalResponse) -> Void) {
         if let window, window.isVisible {
             alert.beginSheetModal(for: window, completionHandler: completion)
@@ -511,7 +531,7 @@ extension AppDelegate {
         alert.messageText = "无法打开日志"
         alert.informativeText = message
         alert.addButton(withTitle: "好")
-        alert.beginSheetModal(for: window) { _ in }
+        presentAlert(alert) { _ in }
     }
 
     /// 导出用的主线程快照：只读取已经在内存里的状态（配置、依赖报告、服务

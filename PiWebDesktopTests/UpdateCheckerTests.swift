@@ -480,6 +480,27 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertEqual(requestCount(world, category: .desktopApp), 1)
     }
 
+    /// Fix 1 回归：`onlyDue` 局部检查（周期复查）不得整包替换汇总——未到期
+    /// 对象的结果保留（checkedAt 保持旧值），到期对象刷新为新结论。
+    func testScheduledDueCheckKeepsResultsOfTargetsThatWereNotDue() {
+        let world = makeWorld(responder: automaticResponder())
+        world.checker.start(inventory: fullInventory())
+        XCTAssertEqual(world.checker.summary.results.count, 4)
+        XCTAssertEqual(world.checker.summary.trigger, .launch)
+
+        // 3 天：每日分类到期复查；扩展包（7 天）未到期，不发起请求。
+        world.clock.now = referenceDate.addingTimeInterval(3 * 24 * 3600)
+        world.scheduler.fireTimers()
+
+        XCTAssertEqual(requestCount(world, category: .piPackages, packageName: "pi-extension-demo"), 1)
+        XCTAssertEqual(world.checker.summary.results.count, 4)
+        XCTAssertEqual(world.checker.summary.trigger, .scheduled)
+        let package = world.checker.summary.result(for: "pi-packages:pi-extension-demo")
+        XCTAssertEqual(package?.checkedAt, referenceDate)
+        let desktop = world.checker.summary.result(for: "desktop-app")
+        XCTAssertEqual(desktop?.checkedAt, referenceDate.addingTimeInterval(3 * 24 * 3600))
+    }
+
     func testDisablingCategoryStopsItsRequestsAndRemovesItsTimer() {
         let world = makeWorld(responder: automaticResponder())
         world.checker.start(inventory: fullInventory())

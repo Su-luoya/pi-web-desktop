@@ -80,7 +80,7 @@ extension AppDelegate {
         alert.informativeText = notice
         alert.addButton(withTitle: "好")
         alert.addButton(withTitle: "打开设置")
-        alert.beginSheetModal(for: window) { [weak self] response in
+        presentAlert(alert) { [weak self] response in
             guard response == .alertSecondButtonReturn else { return }
             self?.showPreferences(nil)
         }
@@ -98,7 +98,7 @@ extension AppDelegate {
         alert.informativeText = notice
         alert.addButton(withTitle: "好")
         alert.addButton(withTitle: "打开设置")
-        alert.beginSheetModal(for: window) { [weak self] response in
+        presentAlert(alert) { [weak self] response in
             guard response == .alertSecondButtonReturn else { return }
             self?.showPreferences(nil)
         }
@@ -113,7 +113,7 @@ extension AppDelegate {
         alert.addButton(withTitle: "重试")
         alert.addButton(withTitle: "打开日志")
         alert.addButton(withTitle: "退出")
-        alert.beginSheetModal(for: window) { [weak self] response in
+        presentAlert(alert) { [weak self] response in
             guard let self else { return }
             switch response {
             case .alertFirstButtonReturn: self.serviceManager.ensureServerIsRunning()
@@ -248,7 +248,7 @@ extension AppDelegate {
         alert.informativeText = warning.text
         alert.addButton(withTitle: "好")
         alert.addButton(withTitle: "清除警告")
-        alert.beginSheetModal(for: window) { [weak self] response in
+        presentAlert(alert) { [weak self] response in
             guard response == .alertSecondButtonReturn else { return }
             self?.clearSystemProxyWarning()
         }

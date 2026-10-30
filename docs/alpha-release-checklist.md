@@ -2211,3 +2211,37 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
 - 回落只在启动时判断一次：运行中地址消失（覆盖网络掉线）需要重启应用才重新绑定；
 - 本版只覆盖「地址不在本机」这一种启动失败，端口占用等其它原因仍显示通用提示，具体原因需看日志；
 - 本版不针对 macOS 14 / 15 做任何验证（支持范围外）。
+
+## 本次发布执行记录（v0.1.0-alpha.24 与 v0.1.0-alpha.25）
+
+两个版本在同一天连续发布（2026-10-30），都走完了本文门槛；详细证据在各自的 Release Issue 里，
+这里只记录执行结果与两个版本共同的判定。
+
+### v0.1.0-alpha.24
+
+- 内容：全仓库评审修复 5 个已复现缺陷（服务侧 3 个、更新检查 2 个），PR #216 → `76fc0ae`。
+- 版本号提交 PR #217 → `ea3b23b`；tag `v0.1.0-alpha.24`，release workflow 通过，已发布为 prerelease。
+- 全量测试 962 项 0 失败；checksum `4f90e9b550f289cd7ed66cf800d3af2d821095b0bc4bdf659fdd0970e70326aa`。
+- 发布记录：Release Issue #217 关联的版本提交；正文由 workflow 模板渲染。
+- 补记：本版当时漏了 `docs/release-notes-v0.1.0-alpha.24.md` 存档，已在 alpha.25 发布时补齐。
+
+### v0.1.0-alpha.25
+
+- 内容：GitHub #219 四类更新的实时进度窗口，PR #220 → `0fe4be2`。
+- 版本号提交 PR #222 → `27a4fcd`；tag `v0.1.0-alpha.25`，release workflow run 41008695137 的
+  build 与 publish 两个 job 均通过，已发布为 prerelease。
+- 全量测试 981 项 0 失败（新增 19 项）；`check-identity.sh` `PASSED (45 checks)`；
+  `scan-secrets.sh` `PASS`（`suppressed 17 lines`，无 `rejected` 行）。
+- 发布前硬门禁 `<待填写` 计数 0；发布后 `gh release download` + `shasum -a 256 -c` 复验 `OK`。
+- checksum `6333a829c973824649bd0e76b304ae22472218980282c8f42e2078a2eaec938a`。
+- 发布记录：Release Issue #221（含 S1–S8 复核评论）。
+- 真机环境：Mac16,10 / Apple M4，macOS 27.2（26B123），Node v26.13.0，Pi 1.4.0，
+  `@agegr/pi-web` 0.13.0（Homebrew 全局安装）。
+
+### 两个版本共同的说明
+
+- 都没有改变支持边界：Apple Silicon、macOS 26+、ad-hoc 签名、未公证。
+- 都只改了 `Sources/`、`PiWebDesktopTests/`、`docs/` 与版本号，没有新增依赖、没有新增网络请求、
+  没有新增子进程或文件写入路径。
+- 已知的非阻塞项继续挂着：非 loopback 监听没有认证层（需可信网络或外部保护）；
+  `UpdateChecker` 中三处 `Task { }` 的取消语义。

@@ -844,7 +844,7 @@ final class UpdateChecker {
                     keepSuccessFields: true
                 )
             default:
-                let failure = Self.failure(forStatusCode: http.statusCode)
+                let failure = Self.failure(for: http)
                 // 重定向属于未经验证的响应；限流 / 5xx 等明确的上游回答可以沿用旧缓存。
                 let allowCachedStatus = failure != .unexpectedRedirect
                 let fallback = cachedFallback(
@@ -980,9 +980,15 @@ final class UpdateChecker {
         )
     }
 
-    private static func failure(forStatusCode statusCode: Int) -> UpdateCheckFailure {
-        switch statusCode {
+    private static func failure(for http: UpdateHTTPResponse) -> UpdateCheckFailure {
+        switch http.statusCode {
         case 429:
+            return .rateLimited
+        // GitHub 的未认证 API 限流不是 `429`，而是 `403` + `x-ratelimit-remaining: 0`。
+        // 只认剩余为 0 的 403：真正的「禁止访问」仍按非预期状态码上报，不给用户
+        // 「等一会儿就好」的错觉。
+        case 403 where http.headers["x-ratelimit-remaining"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) == "0":
             return .rateLimited
         case 500...599:
             return .serverError

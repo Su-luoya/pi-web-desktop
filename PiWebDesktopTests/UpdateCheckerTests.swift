@@ -257,13 +257,15 @@ final class UpdateCheckerTests: XCTestCase {
         statusCode: Int = 200,
         etag: String? = nil,
         finalURL: URL? = nil,
-        body: String? = nil
+        body: String? = nil,
+        headers extraHeaders: [String: String] = [:]
     ) -> Result<UpdateHTTPResponse, UpdateHTTPFailure> {
         let defaultBody = "[" + tags.map {
             "{\"tag_name\":\"\($0)\",\"draft\":false,\"prerelease\":false}"
         }.joined(separator: ",") + "]"
         var headers: [String: String] = [:]
         if let etag { headers["etag"] = etag }
+        headers.merge(extraHeaders) { _, new in new }
         return .success(UpdateHTTPResponse(
             statusCode: statusCode,
             headers: headers,
@@ -616,6 +618,14 @@ final class UpdateCheckerTests: XCTestCase {
         let cases: [(Result<UpdateHTTPResponse, UpdateHTTPFailure>, UpdateCheckFailure, String)] = [
             (.failure(.timedOut), .timedOut, "请求超时"),
             (Self.npmHTTPResponse(version: "0.2.0", statusCode: 429), .rateLimited, "429"),
+            // GitHub 的未认证 API 限流是 403 + `x-ratelimit-remaining: 0`，不是 429。
+            (Self.githubHTTPResponse(
+                tags: ["v0.2.0"], statusCode: 403, headers: ["x-ratelimit-remaining": "0"]
+            ), .rateLimited, "上游限流"),
+            // 剩余额度不为 0 的 403 是真正的禁止访问，不能报成「限流」。
+            (Self.githubHTTPResponse(
+                tags: ["v0.2.0"], statusCode: 403, headers: ["x-ratelimit-remaining": "12"]
+            ), .httpError, "403"),
             (Self.npmHTTPResponse(version: "0.2.0", statusCode: 503), .serverError, "503")
         ]
         for (response, expectedFailure, expectedText) in cases {

@@ -111,7 +111,7 @@ struct UpdateHTTPResponse: Equatable {
     var finalURL: URL?
 
     /// 生产客户端从 `HTTPURLResponse` 里保留的响应头。
-    static let retainedHeaderNames: Set<String> = ["etag", "last-modified", "content-type"]
+    static let retainedHeaderNames: Set<String> = ["etag", "last-modified", "content-type", "x-ratelimit-remaining"]
 
     var etag: String? { headers["etag"]?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty }
     var lastModified: String? { headers["last-modified"]?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty }

@@ -336,6 +336,17 @@ gh release view v<MARKETING_VERSION> --json body --jq .body | grep -c '<待填�
 
 应用自身（`Pi Web Desktop.app`）的应用内更新自 PR #174 起实现，并且只由用户点击触发：入口仅在本轮刚从 GitHub API 核实出更高版本时出现，确认框说明当前包未签名、未公证；下载固定名字的资产并校验发布的 `.sha256`，只替换 `/Applications/Pi-Web-Desktop.app`，替换后退出并重启。缓存结论不触发安装，没有无人值守路径，也没有降级路径。检查行为由设置控制：四类组件默认“每日 / 扩展包检查并通知”，可逐类关闭或改为每周，可忽略某个具体版本（上游出现更高版本会重新提示）；提示使用应用内提示框，不使用系统通知中心。设置里的“启动前自动更新 Pi Web”开关自 alpha.3 实现（GitHub #20）起生效，但只对“来源为已验证的 npm 全局安装”的 Pi Web 执行受限安装；同一版本新增的“启动前自动更新 Pi CLI”（GitHub #21）也只对“来源为已验证的 npm/pnpm 全局安装”的 Pi CLI 生效，并且在检测到运行中的 Pi 进程或进程状态不确定时自动推迟（应用不会向 Pi 进程发送任何信号）；其它来源仍只显示命令，桌面应用自身仍不自动更新。
 
+### 更新通道（appcast）
+
+桌面应用的版本查询与安装资产信息优先读 `appcast` 分支根目录的 `appcast.json`（`https://raw.githubusercontent.com/Su-luoya/pi-web-desktop/appcast/appcast.json`）：一个静态 JSON，含最近 10 个版本的 tag、更新包直链与 SHA-256。理由：GitHub 未认证 API 每小时只给 60 次、按出口 IP 共享，配额耗尽时更新会失败（GitHub #225 的“更新包下载失败”就是它）；`raw.githubusercontent.com` 走 CDN，不占配额，一个请求带齐检查与安装所需的全部字段。
+
+- 写入时机：Release **正式发布后**由 `.github/workflows/appcast.yml` 写，草稿阶段不写（草稿资产 URL 尚不存在）。发布动作仍是人工确认。
+- 内容来源：脚本 `Scripts/make-appcast.sh` 只接受发布资产里的 `.zip.sha256`，tag 必须形如 `v<MARKETING_VERSION>`，zip 地址必须钉在 `github.com/<repo>/releases/download/<tag>/<name>`；客户端再用 `DesktopAppReleaseAssetSelector` 复核一遍，因此 feed 无法把下载引到别的主机。
+- 回落：feed 不可达（网络失败、非 2xx）时检查与安装都回落到 GitHub API，行为与 PR #174 时一致；feed 拿到响应但格式不合规时**不**回落——那说明是我们自己的发布流程坏了，应该在演练里发现，而不是用两次请求掩盖。
+- 维护：`main` 有分支保护，因此 feed 不放 `main`；重发或补登某个版本用 `workflow_dispatch` 手动跑一次该 workflow。
+- 隐私：检查说明与 `docs/privacy.md` 已把 `raw.githubusercontent.com` 列为访问域名。
+
+
 ## CI 与依赖固定策略
 
 - GitHub Actions 全部按提交 SHA 固定，不使用浮动 tag；例如 `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`。

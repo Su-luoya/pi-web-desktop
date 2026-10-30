@@ -1,0 +1,123 @@
+name: appcast
+
+# 桌面更新的静态 feed（`appcast` 分支根目录的 appcast.json）。
+#
+# 只在 Release 正式发布后更新：草稿发布的资产 URL 还不存在，提前写进 feed 会让
+# 用户点到 404。发布动作本身仍是人工确认（见 docs/alpha-release-checklist.md），
+# 这里只负责把「已经可下载的版本」记进索引。
+#
+# 为什么单独一个分支：`main` 有分支保护（必须过 PR + CI），而这份文件是发布流程
+# 自动生成的派生数据，不该为它走一遍评审；它也不该出现在 `main` 的目录树里。
+#
+# 也可以手动跑一次（workflow_dispatch）来补登某个版本，例如 feed 被回滚。
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to add to the feed (for example v0.1.0-alpha.26)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: appcast
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Add the published release to the update feed
+    runs-on: macos-14
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Resolve the release tag
+        id: tag
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-$EVENT_TAG}"
+          [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || {
+            echo "::error::'${tag}' is not a v<semantic version> tag"
+            exit 1
+          }
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Read the published checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # 只信发布出来的资产本身：feed 里的校验值必须与用户下载到的一致。
+          gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft' \
+            | grep -qx 'false' || {
+              echo "::error::${TAG} is still a draft; publish it first"
+              exit 1
+            }
+          mkdir -p dist
+          gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern '*.zip.sha256' --dir dist --clobber
+          sha_file="$(ls dist/*.zip.sha256)"
+          echo "ZIP_NAME=$(basename "${sha_file}" .sha256)" >> "${GITHUB_ENV}"
+          echo "SHA256=$(cut -d' ' -f1 < "${sha_file}")" >> "${GITHUB_ENV}"
+
+      - name: Update the feed
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          notes_url=""
+          if [ -f "docs/release-notes-${TAG}.md" ]; then
+            notes_url="https://github.com/${GITHUB_REPOSITORY}/blob/main/docs/release-notes-${TAG}.md"
+          fi
+          # 先写进构建目录：appcast 分支可能是旧快照，脚本以 main 上的这份为准。
+          ./Scripts/make-appcast.sh \
+            --tag "${TAG}" \
+            --zip-name "${ZIP_NAME}" \
+            --zip-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ZIP_NAME}" \
+            --sha256 "${SHA256}" \
+            --notes-url "${notes_url}" \
+            --published-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --file .build/appcast.json
+          jq . .build/appcast.json
+
+      - name: Commit the feed
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin appcast >/dev/null 2>&1; then
+            git fetch --depth=1 origin appcast
+            git checkout -B appcast FETCH_HEAD
+          else
+            # 首次：从 main 分出分支，之后只在它上面写 appcast.json。
+            git checkout -B appcast origin/main
+          fi
+          cp .build/appcast.json appcast.json
+          if git diff --quiet -- appcast.json; then
+            echo "Feed already lists ${TAG}; nothing to commit."
+            exit 0
+          fi
+          git add appcast.json
+          git commit -m "chore(appcast): ${TAG}"
+          git push origin appcast
+          {
+            echo "### Update feed: ${TAG}"
+            echo
+            echo "- Feed: \`appcast\` branch, \`appcast.json\` (schema 1)"
+            echo "- Zip: \`${ZIP_NAME}\`"
+            echo "- Clients pick this up on their next check (raw.githubusercontent.com CDN, a few minutes)."
+          } >> "${GITHUB_STEP_SUMMARY}"

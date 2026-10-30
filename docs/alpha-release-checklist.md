@@ -2239,3 +2239,23 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
   没有新增子进程或文件写入路径。
 - 已知的非阻塞项继续挂着：非 loopback 监听没有认证层（需可信网络或外部保护）；
   `UpdateChecker` 中三处 `Task { }` 的取消语义。
+
+## 本次发布执行记录（v0.1.0-alpha.26）
+
+- 内容：三处“更新”链路改进 —— GitHub #225 自建 appcast 通道（PR #226）、发布说明瘦身（同 PR #226）、
+  GitHub #228 更新包后台预下载 + 同卷原子替换（PR #228 → `adc6c0c`）。
+- 版本号提交 PR #230；tag `v0.1.0-alpha.26`，release workflow 的 build 与 publish 两个 job 均通过，
+  已发布为 prerelease。
+- 全量测试 1000 项 0 失败（新增 7 项 `DesktopUpdatePackageCacheTests`）；
+  `check-identity.sh` `PASSED (45 checks)`；`check-release-version.sh` `PASSED`；
+  `scan-secrets.sh` `PASS`。
+- 发布前硬门禁 `<待填写` 计数 0；发布后 `gh release download` + `shasum -a 256 -c` 复验 `OK`。
+- checksum `686964951cd5122e79369619e8bb0ba61f0183c1d0522ad5ac2625590f068017`，体积 1687180 字节。
+- 发布记录：Release Issue #229。
+- 真机环境：Mac16,10 / Apple M4，macOS 27.2（26B123），Node v26.13.0，Pi 1.4.0，
+  `@agegr/pi-web` 0.13.0（Homebrew 全局安装）。
+- 本版特有的判定：
+  - `check-identity.sh` 的“版本号不得硬编码”检查在改版本号后立刻发现两处新写的版本字面量
+    （`Scripts/make-appcast.sh` 的用法示例、新测试里的夹具版本），分别改为 `alpha.N` 占位与
+    与真实版本无关的 `1.2.x` 夹具；这类检查的价值正在于此，不要为了过检查而放宽它。
+  - 真机完整替换流程（装进 `/Applications` 并真的替换一次）仍无自动化覆盖，本版只验证到打包与冒烟。

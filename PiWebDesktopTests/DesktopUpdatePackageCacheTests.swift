@@ -22,9 +22,9 @@ final class DesktopUpdatePackageCacheTests: XCTestCase {
     }
 
     private func asset(
-        version: String = "0.1.0-alpha.27",
-        tag: String = "v0.1.0-alpha.27",
-        name: String = "Pi-Web-Desktop-0.1.0-alpha.27+build.5.zip",
+        version: String = "1.2.3",
+        tag: String = "v1.2.3",
+        name: String = "Pi-Web-Desktop-1.2.3+build.5.zip",
         sha256: String? = String(repeating: "a", count: 64)
     ) -> DesktopAppReleaseAsset {
         DesktopAppReleaseAsset(
@@ -46,11 +46,11 @@ final class DesktopUpdatePackageCacheTests: XCTestCase {
         let cache = cache()
         let stored = try cache.store(archiveAt: try downloadedFile(), asset: asset())
 
-        XCTAssertEqual(stored.version, "0.1.0-alpha.27")
-        XCTAssertEqual(stored.releaseTag, "v0.1.0-alpha.27")
+        XCTAssertEqual(stored.version, "1.2.3")
+        XCTAssertEqual(stored.releaseTag, "v1.2.3")
         XCTAssertTrue(fileManager.fileExists(atPath: stored.archiveURL.path))
 
-        let hit = cache.package(matching: "0.1.0-alpha.27", releaseTag: "v0.1.0-alpha.27")
+        let hit = cache.package(matching: "1.2.3", releaseTag: "v1.2.3")
         XCTAssertEqual(hit?.archiveURL, stored.archiveURL)
         XCTAssertEqual(hit?.sha256, String(repeating: "a", count: 64))
     }
@@ -59,8 +59,8 @@ final class DesktopUpdatePackageCacheTests: XCTestCase {
         let cache = cache()
         _ = try cache.store(archiveAt: try downloadedFile(), asset: asset())
 
-        XCTAssertNil(cache.package(matching: "0.1.0-alpha.26", releaseTag: "v0.1.0-alpha.27"))
-        XCTAssertNil(cache.package(matching: "0.1.0-alpha.27", releaseTag: "v0.1.0-alpha.26"))
+        XCTAssertNil(cache.package(matching: "1.2.2", releaseTag: "v1.2.3"))
+        XCTAssertNil(cache.package(matching: "1.2.3", releaseTag: "v1.2.2"))
     }
 
     func testKeepsOnlyTheLatestArchive() throws {
@@ -69,16 +69,16 @@ final class DesktopUpdatePackageCacheTests: XCTestCase {
         let latest = try cache.store(
             archiveAt: try downloadedFile(contents: "new"),
             asset: asset(
-                version: "0.1.0-alpha.28",
-                tag: "v0.1.0-alpha.28",
-                name: "Pi-Web-Desktop-0.1.0-alpha.28+build.6.zip"
+                version: "1.2.4",
+                tag: "v1.2.4",
+                name: "Pi-Web-Desktop-1.2.4+build.6.zip"
             )
         )
 
         let entries = try fileManager.contentsOfDirectory(atPath: root.appendingPathComponent("cache").path)
         XCTAssertEqual(Set(entries), Set([latest.archiveName, "package.json"]))
-        XCTAssertNil(cache.package(matching: "0.1.0-alpha.27", releaseTag: "v0.1.0-alpha.27"))
-        XCTAssertNotNil(cache.package(matching: "0.1.0-alpha.28", releaseTag: "v0.1.0-alpha.28"))
+        XCTAssertNil(cache.package(matching: "1.2.3", releaseTag: "v1.2.3"))
+        XCTAssertNotNil(cache.package(matching: "1.2.4", releaseTag: "v1.2.4"))
     }
 
     func testRefusesAssetWithoutPinnedFields() throws {
@@ -88,7 +88,7 @@ final class DesktopUpdatePackageCacheTests: XCTestCase {
             try cache.store(
                 archiveAt: try downloadedFile(),
                 asset: DesktopAppReleaseAsset(
-                    version: "0.1.0-alpha.27",
+                    version: "1.2.3",
                     downloadURL: URL(string: "https://example.com/x.zip")!,
                     sha256: String(repeating: "a", count: 64),
                     releaseTag: nil,
@@ -129,7 +129,7 @@ final class DesktopUpdatePackageCacheTests: XCTestCase {
         let cache = cache()
         _ = try cache.store(archiveAt: try downloadedFile(), asset: asset())
         cache.removeAll()
-        XCTAssertNil(cache.package(matching: "0.1.0-alpha.27", releaseTag: "v0.1.0-alpha.27"))
+        XCTAssertNil(cache.package(matching: "1.2.3", releaseTag: "v1.2.3"))
     }
 
     /// 预下载只接受钉在 releases/download/<tag>/ 下的地址；不合规直接放弃，不发请求。
@@ -139,11 +139,11 @@ final class DesktopUpdatePackageCacheTests: XCTestCase {
             packageCache: cache()
         )
         let bogus = DesktopAppReleaseAsset(
-            version: "0.1.0-alpha.27",
-            downloadURL: URL(string: "https://example.com/Pi-Web-Desktop-0.1.0-alpha.27.zip")!,
+            version: "1.2.3",
+            downloadURL: URL(string: "https://example.com/Pi-Web-Desktop-1.2.3.zip")!,
             sha256: String(repeating: "a", count: 64),
-            releaseTag: "v0.1.0-alpha.27",
-            assetName: "Pi-Web-Desktop-0.1.0-alpha.27+build.5.zip"
+            releaseTag: "v1.2.3",
+            assetName: "Pi-Web-Desktop-1.2.3+build.5.zip"
         )
         let done = expectation(description: "prefetch")
         installer.prefetch(asset: bogus) { stored in

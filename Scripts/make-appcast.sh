@@ -6,7 +6,7 @@
 # 走 raw.githubusercontent.com 的 CDN，不占配额，一个请求就带齐版本号与下载直链。
 #
 # 用法：
-#   Scripts/make-appcast.sh --tag v0.1.0-alpha.26 --zip-name NAME --zip-url URL \
+#   Scripts/make-appcast.sh --tag v0.1.0-alpha.N --zip-name NAME --zip-url URL \
 #       --sha256 HEX [--notes-url URL] [--published-at ISO8601] [--file docs/appcast.json]
 #
 # 版本号由 tag 去掉前缀 v 得到（与 docs/releasing.md 的 tag 规则一致：tag 必须是

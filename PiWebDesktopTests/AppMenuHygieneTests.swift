@@ -147,10 +147,6 @@ final class AppMenuHygieneTests: XCTestCase {
             "服务菜单不该有状态行（它在“状态”菜单里）"
         )
         XCTAssertFalse(
-            serviceMenuBody.contains("systemProxyWarningMenuItem"),
-            "代理告警不该挤在服务菜单里"
-        )
-        XCTAssertFalse(
             serviceMenuBody.contains("检查更新…"),
             "更新入口不该挤在服务菜单里"
         )

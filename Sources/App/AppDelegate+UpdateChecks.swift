@@ -612,9 +612,7 @@ extension AppDelegate {
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        if menu === recentWorkspacesMenu {
-            rebuildRecentWorkspacesMenu()
-        } else if phoneAccessMenus.contains(where: { $0 === menu }) {
+        if phoneAccessMenus.contains(where: { $0 === menu }) {
             rebuildPhoneAccessMenu(menu)
         } else if menu === updateMenu {
             refreshUpdateMenuState()

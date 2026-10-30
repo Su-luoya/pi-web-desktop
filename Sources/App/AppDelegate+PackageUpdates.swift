@@ -35,8 +35,6 @@ extension AppDelegate {
         serviceManager.setState(.checking)
         webViewController.showLoadingPage(message: "正在检查运行环境…")
         refreshWorkspaceState()
-        recordCurrentWorkspace()
-        rebuildRecentWorkspacesMenu()
         // 更新检查立即开始：先把应用自身版本发出去；依赖检测完成后补齐
         // Pi / Pi Web / 扩展包版本（见 `startUpdateChecking`）。
         startUpdateChecking(with: UpdateCheckInventory(desktopAppVersion: ApplicationInstallationProbe.current.version))

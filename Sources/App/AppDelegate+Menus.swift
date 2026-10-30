@@ -13,8 +13,6 @@ extension AppDelegate {
         serviceControlMenuItems.removeAll()
         phoneAccessMenus.removeAll()
         statusMenuItem = nil
-        systemProxyWarningMenuItem = nil
-        recentWorkspacesMenu = nil
         // 更新检查：状态行、设置子菜单、四类快捷开关与各组件菜单项
         updateStatusMenuItem = nil
         updateMenu = nil
@@ -96,7 +94,7 @@ extension AppDelegate {
         let serviceMenuItem = NSMenuItem()
         mainMenu.addItem(serviceMenuItem)
         let serviceMenu = NSMenu(title: "服务")
-        // 服务菜单只放"我要对服务做什么"。状态、地址、日志、代理告警这类信息
+        // 服务菜单只放"我要对服务做什么"。状态、地址、日志这类信息
         // 归“状态”菜单，更新归“更新”菜单：一屏能看完的选择项才是可用的菜单。
         serviceMenu.addItem(makeServiceControlMenuItem(title: "启动服务", action: #selector(startServiceAction(_:))))
         serviceMenu.addItem(makeServiceControlMenuItem(title: "重启服务", action: #selector(restartServiceAction(_:))))
@@ -108,12 +106,6 @@ extension AppDelegate {
         servicePhoneAccessItem.submenu = makePhoneAccessMenu()
         serviceMenu.addItem(servicePhoneAccessItem)
         serviceMenu.addItem(.separator())
-        let recentWorkspacesItem = NSMenuItem(title: "最近工作目录", action: nil, keyEquivalent: "")
-        let recentWorkspacesMenu = NSMenu(title: "最近工作目录")
-        recentWorkspacesMenu.delegate = self
-        recentWorkspacesItem.submenu = recentWorkspacesMenu
-        self.recentWorkspacesMenu = recentWorkspacesMenu
-        serviceMenu.addItem(recentWorkspacesItem)
         serviceMenu.addItem(withTitle: "在 Finder 中打开工作目录", action: #selector(openCurrentWorkspace(_:)), keyEquivalent: "")
         serviceMenu.addItem(.separator())
         serviceMenu.addItem(withTitle: "设置…", action: #selector(showPreferences(_:)), keyEquivalent: "")
@@ -126,16 +118,6 @@ extension AppDelegate {
         let statusMenu = NSMenu(title: "状态")
         statusMenuItem = statusMenu.addItem(withTitle: "状态：正在检查…", action: nil, keyEquivalent: "")
         statusMenuItem?.isEnabled = false
-        // 系统代理告警项（GitHub #157）：条件成立时常显并可点开，不成立时隐藏。
-        let proxyWarningItem = NSMenuItem(
-            title: "",
-            action: #selector(showSystemProxyWarning(_:)),
-            keyEquivalent: ""
-        )
-        proxyWarningItem.target = self
-        proxyWarningItem.isHidden = true
-        systemProxyWarningMenuItem = proxyWarningItem
-        statusMenu.addItem(proxyWarningItem)
         statusMenu.addItem(.separator())
         statusMenu.addItem(withTitle: "打开日志", action: #selector(openLog(_:)), keyEquivalent: "")
         statusMenu.addItem(withTitle: "打开日志文件夹", action: #selector(openLogsFolder(_:)), keyEquivalent: "")
@@ -176,9 +158,6 @@ extension AppDelegate {
         NSApp.windowsMenu = windowMenu
 
         NSApp.mainMenu = mainMenu
-
-        // 菜单装好后同步一次代理告警项（首次检测可能早于菜单创建）。
-        refreshSystemProxyWarning()
     }
 
     /// 依赖门控禁用的服务控件菜单项（启动/停止/重启）；菜单打开时由
@@ -191,44 +170,6 @@ extension AppDelegate {
 
 
     // MARK: - Actions
-
-    /// Finder 拖放、`open -a` 与菜单选择共用同一套校验和确认流程。
-    func requestWorkspaceSwitch(to url: URL) {
-        let currentPath = appConfiguration.workspaceDirectory(for: serviceManager.configuration).path
-        switch WorkspaceSwitchDecision.decide(
-            requestedPath: url.path,
-            currentPath: currentPath,
-            probe: workspaceProbe
-        ) {
-        case .unchanged:
-            recordWorkspace(path: currentPath)
-        case .reject(let validation):
-            presentWorkspaceSwitchFailure(validation)
-        case .confirm(let path):
-            let managed = serviceManager.managedServicePID() != nil
-            // GitHub #135 F2：三种情形的生效时机不同，文案必须分开讲。正在响应但
-            // 所有权不属于本应用的进程不会被本应用发信号或重启，用户要自己重启它；
-            // 未运行时只是等下次启动。只有受托管服务才提示“确认后将重启服务”。
-            let detail: String
-            if managed {
-                detail = "将工作目录切换到：\n\(path)\n\n当前服务由应用管理并正在运行，确认后将重启服务。"
-            } else if case .running = serviceManager.currentState {
-                detail = "将工作目录切换到：\n\(path)\n\n当前服务不是由本应用启动的，本应用不会重启它；新目录要等你自行重启该服务后才会生效。"
-            } else {
-                detail = "将工作目录切换到：\n\(path)\n\n当前服务未运行，新目录会在下次启动服务时生效。"
-            }
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = "切换工作目录？"
-            alert.informativeText = detail
-            alert.addButton(withTitle: managed ? "切换并重启" : "切换")
-            alert.addButton(withTitle: "取消")
-            presentWorkspaceAlert(alert) { [weak self] response in
-                guard response == .alertFirstButtonReturn else { return }
-                self?.applyWorkspaceSwitch(path: path)
-            }
-        }
-    }
 
     /// 统一的告警呈现入口：主窗口可见时挂 sheet，否则应用级模态（复审 Fix 2）。
     ///
@@ -250,72 +191,14 @@ extension AppDelegate {
         }
     }
 
-    private func presentWorkspaceAlert(_ alert: NSAlert, completion: @escaping (NSApplication.ModalResponse) -> Void) {
-        if let window, window.isVisible {
-            alert.beginSheetModal(for: window, completionHandler: completion)
-        } else {
-            completion(alert.runModal())
-        }
-    }
-
     private func presentWorkspaceSwitchFailure(_ validation: WorkspaceDirectoryValidation) {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "无法切换工作目录"
+        alert.messageText = "无法打开工作目录"
         alert.informativeText = validation.problem?.message(path: validation.path, isDefaultLocation: false)
             ?? "请选择一个已存在且可写的文件夹。"
         alert.addButton(withTitle: "好")
-        presentWorkspaceAlert(alert) { _ in }
-    }
-
-    private func applyWorkspaceSwitch(path: String) {
-        var configuration = serviceManager.configuration
-        configuration.workspacePath = path
-        applyPreferencesConfiguration(configuration)
-    }
-
-    func recordCurrentWorkspace() {
-        recordWorkspace(path: appConfiguration.workspaceDirectory(for: serviceManager.configuration).path)
-    }
-
-    func recordWorkspace(path: String) {
-        _ = appConfiguration.recentWorkspaceStore.record(path: path)
-        rebuildRecentWorkspacesMenu()
-    }
-
-    func rebuildRecentWorkspacesMenu() {
-        guard let menu = recentWorkspacesMenu else { return }
-        menu.removeAllItems()
-        let currentPath = RecentWorkspaceStore.normalizedPath(
-            appConfiguration.workspaceDirectory(for: serviceManager.configuration).path
-        )
-        let paths = appConfiguration.recentWorkspaceStore.load()
-        if paths.isEmpty {
-            let empty = NSMenuItem(title: "无最近工作目录", action: nil, keyEquivalent: "")
-            empty.isEnabled = false
-            menu.addItem(empty)
-        } else {
-            for path in paths {
-                let item = NSMenuItem(title: path, action: #selector(selectRecentWorkspace(_:)), keyEquivalent: "")
-                item.representedObject = path
-                item.state = path == currentPath ? .on : .off
-                menu.addItem(item)
-            }
-        }
-        menu.addItem(.separator())
-        let clear = NSMenuItem(title: "清除历史记录", action: #selector(clearRecentWorkspaces(_:)), keyEquivalent: "")
-        clear.isEnabled = !paths.isEmpty
-        menu.addItem(clear)
-    }
-
-    @objc private func selectRecentWorkspace(_ sender: NSMenuItem) {
-        guard let path = sender.representedObject as? String else { return }
-        requestWorkspaceSwitch(to: URL(fileURLWithPath: path, isDirectory: true))
-    }
-
-    @objc private func clearRecentWorkspaces(_ sender: Any?) {
-        appConfiguration.recentWorkspaceStore.clear()
-        rebuildRecentWorkspacesMenu()
+        presentAlert(alert)
     }
 
     @objc private func openCurrentWorkspace(_ sender: Any?) {
@@ -408,8 +291,8 @@ extension AppDelegate {
 
     // MARK: - 复制手机访问链接（GitHub #150）
 
-    /// 「复制手机访问链接」候选子菜单：与 `recentWorkspacesMenu` 同一写法（delegate +
-    /// 打开时重建）。候选地址只出现在菜单项里，不写日志与诊断导出。
+    /// 「复制手机访问链接」候选子菜单：与更新菜单同一写法（delegate + 打开时重建）。
+    /// 候选地址只出现在菜单项里，不写日志与诊断导出。
     private func makePhoneAccessMenu() -> NSMenu {
         let menu = NSMenu(title: "复制手机访问链接")
         menu.delegate = self

@@ -64,6 +64,8 @@ Release 页面只渲染 `docs/release-notes-template.md` + 本次 notes 的「�
 - `./Scripts/check-identity.sh`：`PASSED (45 checks)`；`./Scripts/check-release-version.sh`：`PASSED`（`MARKETING_VERSION 0.1.0-alpha.26`、`CURRENT_PROJECT_VERSION 26`）；`./Scripts/scan-secrets.sh --self-test` 与 `./Scripts/scan-secrets.sh`：`PASS`；`sh -n Scripts/*.sh` 与 `git diff --check` 干净。
 - `./Scripts/build.sh`：成功；`./Scripts/package-release.sh --tag v0.1.0-alpha.26`：`OK`（白名单条目一致、无 `__MACOSX/`、ad-hoc 签名验证通过）；`./Scripts/smoke.sh`：两种模式均 exit 0。
 - 发布 workflow（tag `v0.1.0-alpha.26`）：build 与 publish 两个 job 通过；发布前占位符计数为 0；发布后 `gh release download` + `shasum -a 256 -c` 复验。
+- 下表的 checksum 与体积是**发布出来的那份资产**（CI 重新构建，与本地 `package-release.sh` 的结果不同）；本地那份只用于发版前自检。
+- appcast：发布后 workflow 首次跑因 `git diff` 看不到未跟踪文件而静默跳过（分支从未建立），已由 PR #231 修复，并用 `workflow_dispatch` 补登本版；`appcast.json` 里的 `sha256` 与上表一致。
 
 ## 已知限制
 
@@ -80,8 +82,8 @@ Release 页面只渲染 `docs/release-notes-template.md` + 本次 notes 的「�
 | 资产 | 值 |
 | --- | --- |
 | ZIP | `Pi-Web-Desktop-0.1.0-alpha.26+build.26.zip` |
-| SHA-256 | `686964951cd5122e79369619e8bb0ba61f0183c1d0522ad5ac2625590f068017` |
-| 体积 | 1687180 字节 |
+| SHA-256 | `095f795ccaffff6d3c20c85ec8bc2b4aabb69df32411d2dfd0273cfd2d9c5069` |
+| 体积 | 1727671 字节 |
 | 签名 | ad-hoc（`TeamIdentifier=not set`），未公证 |
 | 最低系统 | macOS 26.0 |
 | 架构 | arm64（Apple Silicon） |

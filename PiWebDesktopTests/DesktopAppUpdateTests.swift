@@ -143,6 +143,36 @@ final class DesktopAppUpdateTests: XCTestCase {
         XCTAssertNil(DesktopAppReleaseAssetSelector.normalizedChecksum("not-a-sha256"))
     }
 
+    /// GitHub 的未认证 API 限流（403 + `x-ratelimit-remaining: 0`）必须与真正的
+    /// 下载失败分开：前者等一会儿就能好，后者不能。否则用户只看到「更新包下载
+    /// 失败」，既不知道原因也不知道该不该重试（GitHub #225）。
+    func testReleasePageFailureSeparatesRateLimitFromDownloadFailure() {
+        XCTAssertEqual(
+            DesktopAppUpdateFailure.releasePageFailure(status: 403, rateLimitRemaining: "0"),
+            .rateLimited
+        )
+        XCTAssertEqual(
+            DesktopAppUpdateFailure.releasePageFailure(status: 429, rateLimitRemaining: nil),
+            .rateLimited
+        )
+        // 真正的禁止访问（剩余额度不为 0）与 5xx / 无响应仍按下载失败处理。
+        XCTAssertEqual(
+            DesktopAppUpdateFailure.releasePageFailure(status: 403, rateLimitRemaining: "12"),
+            .downloadFailed
+        )
+        XCTAssertEqual(
+            DesktopAppUpdateFailure.releasePageFailure(status: 500, rateLimitRemaining: nil),
+            .downloadFailed
+        )
+        XCTAssertEqual(
+            DesktopAppUpdateFailure.releasePageFailure(status: nil, rateLimitRemaining: nil),
+            .downloadFailed
+        )
+        // 文案必须给出可执行的下一步，不能只说「失败」。
+        XCTAssertTrue(DesktopAppUpdateFailure.rateLimited.text.contains("60"))
+        XCTAssertTrue(DesktopAppUpdateFailure.rateLimited.text.contains("重试"))
+    }
+
     /// 人工更新流程的准入：网络往返成功就够（含 304 重验证的缓存版本值），但要有
     /// 可联网复核的 tag，且目标版本必须比正在运行的版本新。（版本字符串用与项目自身
     /// 无关的值：check-identity.sh 禁止本机 MARKETING_VERSION 出现在源码里。）

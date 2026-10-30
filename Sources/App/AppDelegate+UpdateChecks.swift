@@ -77,8 +77,18 @@ extension AppDelegate {
     /// 态的菜单项（只能重启应用才能再试，alpha.17 修的正是这个）；只复位不提示则是
     /// 静默失败。调用方一律走这里，而不是先 `present…` 再指望自己记得 `finish…`。
     /// 调用方负责确保已在主线程（`desktopAppUpdateRound` 是主线程独占的状态）。
-    private func failDesktopAppUpdateRound(_ failure: DesktopAppUpdateFailure, releaseTag: String?) {
+    private func failDesktopAppUpdateRound(
+        _ failure: DesktopAppUpdateFailure,
+        releaseTag: String?,
+        detail: String? = nil
+    ) {
         finishDesktopAppUpdateRound(releaseTag: releaseTag)
+        // 失败必须留痕：这条路径过去一行日志都不写，用户截图报错时日志里查不到
+        // 任何线索（GitHub #225 的排查成本就是这么来的）。
+        let tag = releaseTag.map { "（\($0)）" } ?? ""
+        _ = logWriter.append(logRedactor.redact(
+            "桌面应用更新失败\(tag)：\(failure.text)" + (detail.map { " 原因：\($0)" } ?? "")
+        ))
         // 进度窗口（GitHub #219）：失败必须停在这一步可见，所以用同一句原因收尾。
         finishDesktopAppUpdateProgress(.failed(reason: failure.text))
         presentDesktopUpdateFailure(failure)
@@ -106,15 +116,29 @@ extension AppDelegate {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(UpdateCheckIdentity.current.userAgent, forHTTPHeaderField: "User-Agent")
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            let http = response as? HTTPURLResponse
+            let status = http?.statusCode
+            let remaining = http?.value(forHTTPHeaderField: "x-ratelimit-remaining")
             guard let data, error == nil,
                   response?.url == releaseURL,
-                  (response as? HTTPURLResponse)?.statusCode == 200,
+                  status == 200,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let tag = json["tag_name"] as? String,
                   tag == releaseTag,
                   let assets = json["assets"] as? [[String: Any]] else {
+                // 发布页请求失败与「整包下载失败」不是一回事：GitHub 的未认证 API
+                // 每小时只给 60 次，用完返回 403 + `x-ratelimit-remaining: 0`。
+                // 旧实现一律报「更新包下载失败」，用户既不知道原因，也不知道
+                // 等一会儿就能好（GitHub #225）。
+                let failure = error == nil
+                    ? DesktopAppUpdateFailure.releasePageFailure(
+                        status: status, rateLimitRemaining: remaining)
+                    : .downloadFailed
+                let detail = "发布页请求失败（HTTP \(status.map(String.init) ?? "无响应")"
+                    + "\(remaining.map { "，限流剩余 \($0)" } ?? "")"
+                    + "\(error.map { "，\($0.localizedDescription)" } ?? "")"
                 DispatchQueue.main.async {
-                    self?.failDesktopAppUpdateRound(.downloadFailed, releaseTag: releaseTag)
+                    self?.failDesktopAppUpdateRound(failure, releaseTag: releaseTag, detail: detail)
                 }
                 return
             }

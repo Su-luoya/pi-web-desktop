@@ -37,6 +37,9 @@ enum DesktopAppUpdateResult: Equatable {
 
 enum DesktopAppUpdateFailure: String, Error, Equatable {
     case unsupportedInstallation, missingAsset, invalidAssetURL, downloadFailed
+    /// 发布页请求被 GitHub 限流（未认证 API 每小时 60 次）。与 `downloadFailed`
+    /// 分开：限流等一会儿就能好，网络故障不能（GitHub #225）。
+    case rateLimited
     case invalidArchive, checksumUnavailable, checksumMismatch, invalidBundle
     case notWritable, replacementFailed, relaunchFailed
     /// 更新包自述的最低系统高于本机：装进去只会得到一个打不开的应用。
@@ -56,6 +59,9 @@ enum DesktopAppUpdateFailure: String, Error, Equatable {
         case .missingAsset: return "该版本没有可用的桌面应用 ZIP 发布包。"
         case .invalidAssetURL: return "更新包地址不在允许的 GitHub 主机上。"
         case .downloadFailed: return "更新包下载失败。"
+        case .rateLimited:
+            return "GitHub 接口限流：未认证请求每小时 60 次已用完，等配额重置后重试即可；"
+                + "也可以直接在浏览器打开 GitHub 发布页手动下载。"
         case .invalidArchive: return "更新包不是有效的桌面应用归档。"
         case .checksumUnavailable: return "更新包缺少 SHA-256 校验值，已停止安装。"
         case .checksumMismatch: return "更新包校验失败，已停止安装。"
@@ -65,6 +71,23 @@ enum DesktopAppUpdateFailure: String, Error, Equatable {
         case .replacementFailed: return "替换桌面应用失败，原应用未被删除。"
         case .relaunchFailed: return "应用已更新，但重新启动失败，请从 /Applications 手动打开。"
         }
+    }
+}
+
+extension DesktopAppUpdateFailure {
+    /// 发布页请求失败的归类。GitHub 的未认证 API 每小时只给 60 次，用完返回的不是
+    /// `429` 而是 `403` + `x-ratelimit-remaining: 0`；其余状态码仍按「下载失败」处理。
+    /// 把限流单独列出来是因为它「等一会儿就能好」，与网络故障的处置完全不同：
+    /// 旧实现一律报「更新包下载失败」，用户既不知道原因，也不知道该不该重试
+    /// （GitHub #225）。
+    static func releasePageFailure(status: Int?, rateLimitRemaining: String?) -> DesktopAppUpdateFailure {
+        guard let status else { return .downloadFailed }
+        if status == 429 { return .rateLimited }
+        if status == 403,
+           rateLimitRemaining?.trimmingCharacters(in: .whitespacesAndNewlines) == "0" {
+            return .rateLimited
+        }
+        return .downloadFailed
     }
 }
 

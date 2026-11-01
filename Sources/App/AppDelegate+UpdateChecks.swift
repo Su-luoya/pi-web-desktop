@@ -760,7 +760,7 @@ extension AppDelegate {
               prefetchedDesktopUpdateVersion != version else { return }
         fetchDesktopAppReleaseAssetsFromAppcast(version: version, releaseTag: releaseTag) { [weak self] asset in
             guard let self, let asset else { return }
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [self] in
                 guard self.desktopAppUpdateInstaller == nil, self.desktopAppPrefetcher == nil else { return }
                 let prefetcher = DesktopAppUpdateInstaller()
                 self.desktopAppPrefetcher = prefetcher

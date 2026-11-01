@@ -5,6 +5,84 @@ final class DesktopAppUpdateTests: XCTestCase {
         XCTAssertGreaterThan(DesktopAppUpdateInstaller.downloadResourceTimeout, UpdateChecker.requestTimeout)
     }
 
+    private final class ReplacementDeniedFileManager: FileManager {
+        private(set) var replacementScript: String?
+
+        override func setAttributes(_ attributes: [FileAttributeKey: Any], ofItemAtPath path: String) throws {
+            if URL(fileURLWithPath: path).lastPathComponent.hasPrefix("PiWebDesktop-replace-") {
+                replacementScript = path
+                throw CocoaError(.fileWriteNoPermission)
+            }
+            try super.setAttributes(attributes, ofItemAtPath: path)
+        }
+    }
+
+    private func makeArchive(in root: URL, withBundle: Bool) throws -> URL {
+        let files = FileManager.default
+        let payload = root.appendingPathComponent("payload", isDirectory: true)
+        try files.createDirectory(at: payload, withIntermediateDirectories: true)
+        if withBundle {
+            let contents = payload.appendingPathComponent("Pi-Web-Desktop.app/Contents", isDirectory: true)
+            let executable = contents.appendingPathComponent("MacOS/TestApp")
+            try files.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+            try files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+            let info = [
+                "CFBundleIdentifier": "io.github.su-luoya.pi-web-desktop",
+                "CFBundleShortVersionString": "2.5.0",
+                "CFBundleExecutable": "TestApp",
+                "CFBundlePackageType": "APPL"
+            ]
+            try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+                .write(to: contents.appendingPathComponent("Info.plist"))
+        } else {
+            try Data("not an application".utf8).write(to: payload.appendingPathComponent("README.txt"))
+        }
+        let archive = root.appendingPathComponent("update.zip")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        process.arguments = ["-c", "-k", payload.path, archive.path]
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        return archive
+    }
+
+    private func installLocalArchive(_ archive: URL, in root: URL, fileManager: FileManager = .default) throws {
+        let installer = DesktopAppUpdateInstaller(
+            applicationURL: root.appendingPathComponent("Pi-Web-Desktop.app"), fileManager: fileManager
+        )
+        installer.installArchive(
+            at: archive,
+            asset: DesktopAppReleaseAsset(version: "2.5.0", downloadURL: archive),
+            bundleIdentifier: "io.github.su-luoya.pi-web-desktop",
+            expectedHash: try DesktopAppUpdateInstaller.sha256(of: archive)
+        )
+    }
+
+    func testArchiveWithoutAppCleansStagingDirectory() throws {
+        let files = FileManager.default
+        let root = files.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? files.removeItem(at: root) }
+        try installLocalArchive(makeArchive(in: root, withBundle: false), in: root)
+        let entries = try files.contentsOfDirectory(atPath: root.path)
+        XCTAssertFalse(entries.contains { $0.hasPrefix(".PiWebDesktop-staging-") })
+    }
+
+    func testReplacementSetupFailureCleansStagingAndScript() throws {
+        let files = ReplacementDeniedFileManager()
+        let root = files.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            try? files.removeItem(at: root)
+            if let script = files.replacementScript { try? files.removeItem(atPath: script) }
+        }
+        try installLocalArchive(makeArchive(in: root, withBundle: true), in: root, fileManager: files)
+        let script = try XCTUnwrap(files.replacementScript, "Must reach replacement setup without launching the app")
+        XCTAssertFalse(files.fileExists(atPath: script))
+        let entries = try files.contentsOfDirectory(atPath: root.path)
+        XCTAssertFalse(entries.contains { $0.hasPrefix(".PiWebDesktop-staging-") })
+    }
+
     func testSelectsOnlyPinnedGitHubZipAndValidChecksum() {
         let archiveName = "Pi-Web-Desktop-2.5.0+build.42.zip"
         let archiveURL = URL(string: "https://github.com/Su-luoya/pi-web-desktop/releases/download/v2.5.0/Pi-Web-Desktop-2.5.0%2Bbuild.42.zip")!

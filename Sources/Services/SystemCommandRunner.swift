@@ -27,8 +27,8 @@ final class SystemCommandRunner: CommandRunning {
     let environment: [String: String]?
     private let spawn: ([String], [String: String]?) throws -> ProbeProcess
     private let lock = NSLock()
-    /// 最近一次正在进行的探针（取消时发信号的对象）。
-    private var activeProcess: ProbeProcess?
+    /// 以 token 跟踪全部进行中的子进程，取消时不能只终止最后启动的那个。
+    private var runningProcesses: [UInt64: ProbeProcess] = [:]
     /// 每个进行中的探针各自一个 token：取消标记按 token 记账。
     ///
     /// 旧实现用一个共享布尔：新探针注册时无条件把它清零，于是并发时 A 的取消
@@ -36,7 +36,6 @@ final class SystemCommandRunner: CommandRunning {
     /// cancelled（诊断导出在后台跑 `ps`、主线程菜单校验同时也跑 `ps`，用的是
     /// 同一个实例）。按 token 记账后，取消只影响“取消那一刻真的在跑”的探针。
     private var nextRunToken: UInt64 = 0
-    private var runningTokens: Set<UInt64> = []
     private var cancelledTokens: Set<UInt64> = []
 
     init(
@@ -75,17 +74,13 @@ final class SystemCommandRunner: CommandRunning {
         lock.lock()
         let token = nextRunToken
         nextRunToken &+= 1
-        runningTokens.insert(token)
-        activeProcess = process
+        runningProcesses[token] = process
         lock.unlock()
         defer {
             lock.lock()
             // token 在这里回收：`wasCancelled` 已经在下面读过了，所以不会丢。
-            runningTokens.remove(token)
+            runningProcesses.removeValue(forKey: token)
             cancelledTokens.remove(token)
-            if activeProcess === process {
-                activeProcess = nil
-            }
             lock.unlock()
         }
 
@@ -112,10 +107,10 @@ final class SystemCommandRunner: CommandRunning {
     func cancelRunningProbe() {
         lock.lock()
         // 取消“现在真的在跑”的全部探针，不碰之后才启动的。
-        cancelledTokens.formUnion(runningTokens)
-        let process = activeProcess
+        cancelledTokens.formUnion(runningProcesses.keys)
+        let processes = Array(runningProcesses.values)
         lock.unlock()
-        // 只对本次启动的子进程发 SIGTERM；不按名字或进程组发信号。
-        _ = process?.terminate()
+        // 只对这些探针各自的子进程发 SIGTERM；不按名字或进程组发信号。
+        for process in processes { process.terminate() }
     }
 }

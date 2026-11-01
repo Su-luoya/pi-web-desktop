@@ -23,6 +23,9 @@ extension AppDelegate {
             let item = NSMenuItem(title: reason, action: nil, keyEquivalent: "")
             item.isEnabled = false
             menu.addItem(item)
+            if remoteAccessController.activePort != nil {
+                menu.addItem(remoteAccessItem(title: "重试关闭远程访问", action: #selector(disableRemoteAccess(_:))))
+            }
         case .off:
             menu.addItem(remoteAccessItem(title: "启用远程访问…", action: #selector(enableRemoteAccess(_:))))
         case .on:
@@ -91,7 +94,7 @@ extension AppDelegate {
         NSWorkspace.shared.open(url)
     }
 
-    /// 关闭：CLI 失败也清掉本机记录，但要如实告诉用户「那条入口可能还在」。
+    /// 关闭失败保留本机记录与重试入口，并如实告诉用户「那条入口可能还在」。
     @objc func disableRemoteAccess(_ sender: Any?) {
         remoteAccessController.disable { [weak self] succeeded in
             guard let self, !succeeded else { return }

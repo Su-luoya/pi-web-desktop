@@ -1,5 +1,91 @@
 import XCTest
 
+final class RemoteAccessControllerTests: XCTestCase {
+    private final class RecordingRunner: CommandRunning {
+        var snapshot: String? = "{}"
+        var succeeds = false
+
+        func run(_ arguments: [String]) -> String? {
+            if arguments == ["/fake/tail-cli", "status", "--json"] {
+                return "{\"BackendState\": \"Running\", \"Self\": {\"DNSName\": \"mini.example-tailnet\"}}"
+            }
+            if arguments.contains("--json") { return snapshot }
+            return succeeds ? "ok" : nil
+        }
+    }
+
+    private var defaults: UserDefaults!
+    private var suite: String!
+    private var runner: RecordingRunner!
+    private var controller: RemoteAccessController!
+
+    override func setUpWithError() throws {
+        suite = "RemoteAccessControllerTests.\(UUID().uuidString)"
+        defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        runner = RecordingRunner()
+        controller = RemoteAccessController(serve: TailscaleServe(
+            runner: runner, candidates: ["/fake/tail-cli"], isExecutable: { _ in true }
+        ), defaults: defaults)
+        defaults.set(443, forKey: RemoteAccessController.DefaultsKey.port)
+    }
+
+    override func tearDown() {
+        defaults.removePersistentDomain(forName: suite)
+        controller = nil
+        runner = nil
+        defaults = nil
+    }
+
+    func testFailedDisableKeepsPortSoTheUserCanRetry() {
+        let finished = expectation(description: "disable failed")
+        controller.disable { success in
+            XCTAssertFalse(success)
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 5)
+        XCTAssertEqual(controller.activePort, 443)
+    }
+
+    func testSuccessfulDisableForgetsPort() {
+        runner.succeeds = true
+        let finished = expectation(description: "disabled")
+        controller.disable { success in
+            XCTAssertTrue(success)
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 5)
+        XCTAssertNil(controller.activePort)
+        XCTAssertEqual(controller.state, .off)
+    }
+
+    func testQuitKeepsPortWhenRevocationFails() {
+        controller.revokeForQuit()
+        XCTAssertEqual(controller.activePort, 443)
+    }
+
+    func testRefreshKeepsPortWhenSnapshotIsUnreadable() {
+        runner.snapshot = nil
+        let finished = expectation(description: "refresh completed")
+        controller.onChange = { _ in finished.fulfill() }
+        controller.refresh(configuration: .default)
+        wait(for: [finished], timeout: 5)
+        XCTAssertEqual(controller.activePort, 443)
+        XCTAssertEqual(controller.state, .unavailable(RemoteAccessController.Failure.commandFailed.message))
+    }
+
+    func testRefreshRecognizesNormalizedProxyTarget() {
+        runner.snapshot = """
+        {"Web": {"mini.example-tailnet:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:30141"}}}}}
+        """
+        let finished = expectation(description: "refresh completed")
+        controller.onChange = { _ in finished.fulfill() }
+        controller.refresh(configuration: .default)
+        wait(for: [finished], timeout: 5)
+        XCTAssertEqual(controller.activePort, 443)
+        XCTAssertEqual(controller.state.url?.absoluteString, "https://mini.example-tailnet/")
+    }
+}
+
 /// Tailscale serve 编排层的纯逻辑测试：状态解析、端口选择、命令参数、
 /// 「不覆盖别人条目」与「没装时不报错只降级」。
 ///
@@ -74,7 +160,7 @@ final class TailscaleServeTests: XCTestCase {
 
     // MARK: - serve 配置解析
 
-    func testSnapshotReadsPortsAndProxyTargets() {
+    func testSnapshotReadsPortsAndProxyTargets() throws {
         let json = """
         {
           "TCP": { "443": { "HTTPS": true }, "8444": { "HTTPS": true } },
@@ -84,15 +170,15 @@ final class TailscaleServeTests: XCTestCase {
           }
         }
         """
-        let snapshot = TailscaleServe.snapshot(fromServeStatusJSON: json)
+        let snapshot = try XCTUnwrap(TailscaleServe.snapshot(fromServeStatusJSON: json))
         XCTAssertEqual(snapshot.proxy(for: 443), "http://127.0.0.1:30141")
         XCTAssertEqual(snapshot.proxy(for: 8444), "http://127.0.0.1:8765")
         XCTAssertEqual(snapshot.ports, [443, 8444])
     }
 
-    func testSnapshotKeepsTCPOnlyPortsOccupied() {
+    func testSnapshotKeepsTCPOnlyPortsOccupied() throws {
         let json = "{\"TCP\": {\"8443\": {\"HTTPS\": true}}}"
-        let snapshot = TailscaleServe.snapshot(fromServeStatusJSON: json)
+        let snapshot = try XCTUnwrap(TailscaleServe.snapshot(fromServeStatusJSON: json))
         XCTAssertEqual(snapshot.ports, [8443])
         // 只有 TCP 监听、读不到 handler 时目标为空串：归属未知一律算占用，
         // 因此绝不会被我们的 `enable` 覆盖。
@@ -101,8 +187,55 @@ final class TailscaleServeTests: XCTestCase {
     }
 
     func testEmptySnapshotIsNotOccupied() {
-        XCTAssertEqual(TailscaleServe.snapshot(fromServeStatusJSON: ""), TailscaleServeSnapshot())
+        XCTAssertNil(TailscaleServe.snapshot(fromServeStatusJSON: ""))
+        XCTAssertEqual(TailscaleServe.snapshot(fromServeStatusJSON: "null\n"), TailscaleServeSnapshot())
+        XCTAssertEqual(TailscaleServe.snapshot(fromServeStatusJSON: "{}"), TailscaleServeSnapshot())
         XCTAssertFalse(TailscaleServeSnapshot().isOccupied(443, by: "http://127.0.0.1:30141"))
+    }
+
+    func testSnapshotRejectsUnreadableOrInvalidConfiguration() {
+        for json in ["not json", "[]", "{\"TCP\": []}", "{\"Web\": []}"] {
+            XCTAssertNil(TailscaleServe.snapshot(fromServeStatusJSON: json), json)
+        }
+        XCTAssertNil(makeServe(runner: RecordingRunner()).snapshot())
+    }
+
+    func testSnapshotDoesNotAdoptAPortWithOtherHandlers() throws {
+        let json = """
+        {"Web": {"mini.example-tailnet:443": {"Handlers": {
+          "/": {"Proxy": "http://127.0.0.1:30141/"},
+          "/other": {"Text": "another service"}
+        }}}}
+        """
+        let snapshot = try XCTUnwrap(TailscaleServe.snapshot(fromServeStatusJSON: json))
+        XCTAssertTrue(snapshot.isOccupied(443, by: "http://127.0.0.1:30141/"))
+    }
+
+    func testSnapshotKeepsPublicFunnelPortsOccupiedEvenForOurTarget() throws {
+        let json = """
+        {"Web": {"mini.example-tailnet:443": {"Handlers": {
+          "/": {"Proxy": "http://127.0.0.1:30141/"}
+        }}}, "AllowFunnel": {"mini.example-tailnet:443": true}}
+        """
+        let snapshot = try XCTUnwrap(TailscaleServe.snapshot(fromServeStatusJSON: json))
+        XCTAssertTrue(snapshot.isOccupied(443, by: target.absoluteString))
+    }
+
+    func testSnapshotKeepsPortsSharedByMultipleHostsOccupied() throws {
+        let json = """
+        {"Web": {
+          "mini.example-tailnet:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:30141/"}}},
+          "other.example-tailnet:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:30141/"}}}
+        }}
+        """
+        let snapshot = try XCTUnwrap(TailscaleServe.snapshot(fromServeStatusJSON: json))
+        XCTAssertTrue(snapshot.isOccupied(443, by: target.absoluteString))
+    }
+
+    func testProxyComparisonAcceptsTheCLIsNormalizedRootPath() {
+        let snapshot = TailscaleServeSnapshot(proxies: [443: "http://127.0.0.1:30141"])
+        XCTAssertFalse(snapshot.isOccupied(443, by: target.absoluteString))
+        XCTAssertTrue(snapshot.isOccupied(443, by: "http://127.0.0.1:30141/path"))
     }
 
     func testPortFromWebKey() {
@@ -110,6 +243,8 @@ final class TailscaleServeTests: XCTestCase {
         XCTAssertEqual(TailscaleServe.port(fromWebKey: "mini.example-tailnet"), 443)
         XCTAssertEqual(TailscaleServe.port(fromWebKey: "[fd7a:115c::1]:9443"), 9443)
         XCTAssertNil(TailscaleServe.port(fromWebKey: "mini.example-tailnet:http"))
+        XCTAssertNil(TailscaleServe.port(fromWebKey: "mini.example-tailnet:0"))
+        XCTAssertNil(TailscaleServe.port(fromWebKey: "mini.example-tailnet:65536"))
     }
 
     // MARK: - 地址与端口
@@ -156,6 +291,24 @@ final class TailscaleServeTests: XCTestCase {
             XCTAssertEqual(error as? TailscaleServeError, .noFreePort)
         }
         XCTAssertEqual(runner.calls.filter { $0.contains("--bg") }.count, 0)
+    }
+
+    func testEnableRefusesToMutateWhenConfigurationCannotBeRead() {
+        for response in [nil, "", "not json", "{\"Web\": []}"] as [String?] {
+            let runner = RecordingRunner()
+            runner.responses["\(binary) serve status --json"] = response
+            runner.responses["\(binary) serve --bg --https=443 http://127.0.0.1:30141/"] = "ok"
+            XCTAssertThrowsError(try makeServe(runner: runner).enable(port: 443, target: target))
+            XCTAssertFalse(runner.calls.contains { $0.contains("--bg") })
+        }
+    }
+
+    func testEnableAcceptsTheCLIsNullConfiguration() throws {
+        let runner = RecordingRunner()
+        runner.responses["\(binary) serve status --json"] = "null\n"
+        runner.responses["\(binary) serve --bg --https=443 http://127.0.0.1:30141/"] = "ok"
+        try makeServe(runner: runner).enable(port: 443, target: target)
+        XCTAssertTrue(runner.calls.contains { $0.contains("--bg") })
     }
 
     func testEnableReportsCommandFailure() {

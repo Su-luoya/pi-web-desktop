@@ -393,6 +393,50 @@ final class ProcessInspectorTests: XCTestCase {
         XCTAssertEqual(later.terminateCount, 0)
     }
 
+    func testCancellingConcurrentProbesTerminatesEachChild() {
+        let first = BlockingProbeProcess()
+        let second = BlockingProbeProcess()
+        let runner = SystemCommandRunner(spawn: { arguments, _ in
+            arguments == ["first"] ? first : second
+        })
+        let firstFinished = expectation(description: "first probe cancelled")
+        let secondFinished = expectation(description: "second probe cancelled")
+        DispatchQueue.global().async {
+            XCTAssertTrue(runner.run(["first"], timeout: 5).cancelled)
+            firstFinished.fulfill()
+        }
+        XCTAssertEqual(first.started.wait(timeout: .now() + 5), .success)
+        DispatchQueue.global().async {
+            XCTAssertTrue(runner.run(["second"], timeout: 5).cancelled)
+            secondFinished.fulfill()
+        }
+        XCTAssertEqual(second.started.wait(timeout: .now() + 5), .success)
+
+        runner.cancelRunningProbe()
+        wait(for: [firstFinished, secondFinished], timeout: 6)
+        XCTAssertEqual(first.terminateCount, 1)
+        XCTAssertEqual(second.terminateCount, 1)
+        XCTAssertEqual(first.forceTerminateCount + second.forceTerminateCount, 0)
+    }
+
+    func testCancellingAfterTheLatestProbeFinishesStillTerminatesEarlierProbe() {
+        let blocking = BlockingProbeProcess()
+        let runner = SystemCommandRunner(spawn: { arguments, _ in
+            if arguments == ["blocking"] { return blocking }
+            return FakeProbeProcess(waitAnswers: [true])
+        })
+        let finished = expectation(description: "earlier probe cancelled")
+        DispatchQueue.global().async {
+            XCTAssertTrue(runner.run(["blocking"], timeout: 5).cancelled)
+            finished.fulfill()
+        }
+        XCTAssertEqual(blocking.started.wait(timeout: .now() + 5), .success)
+        XCTAssertFalse(runner.run(["quick"], timeout: 1).cancelled)
+        runner.cancelRunningProbe()
+        wait(for: [finished], timeout: 6)
+        XCTAssertEqual(blocking.terminateCount, 1)
+    }
+
     /// 没有正在进行的探针时取消是安全的（不崩溃、不发信号）；启动失败既不是超时
     /// 也不是取消。
     func testCancelWithoutActiveProbeIsSafeAndLaunchFailureIsPlainUnavailable() {

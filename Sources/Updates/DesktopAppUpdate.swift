@@ -503,7 +503,8 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
     }
 
     /// 下载（或缓存）到手的包 → 校验 → 解压 → 替换。两条来源共用这一段。
-    private func installArchive(
+    // internal：失败路径测试直接喂本地归档，不联网、不触碰已安装应用。
+    func installArchive(
         at archive: URL,
         asset: DesktopAppReleaseAsset,
         bundleIdentifier id: String?,
@@ -512,30 +513,27 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
         do {
             guard try Self.sha256(of: archive) == expectedHash else { finish(.failed(.checksumMismatch)); return }
             let staging = stagingDirectory()
-            // 解压失败（包括下载到的“zip”其实不是 zip）必须清掉 staging 目录。
-            // 下载包约 1.6MB，每次失败都不清理就会在磁盘上留下一个个
-            // `.PiWebDesktop-staging-<uuid>/`；用户反复重试就在无提示地堆积。
-            // 成功路径把 staging 移交给替换脚本，由脚本收尾，不在这里删。
-            do {
-                try unzip(archive, into: staging)
-            } catch {
-                try? fileManager.removeItem(at: staging)
-                throw error
+            // 只有成功启动替换脚本才移交 staging；此前任何失败都由这里收尾。
+            var replacementStarted = false
+            defer {
+                if !replacementStarted { try? fileManager.removeItem(at: staging) }
             }
+            try unzip(archive, into: staging)
             let staged = try Self.findBundle(in: staging, fileManager: fileManager)
             guard Self.isValidBundle(staged, fileManager: fileManager, expectedBundleIdentifier: id, expectedVersion: asset.version) else {
-                try? fileManager.removeItem(at: staging); finish(.failed(.invalidBundle)); return
+                finish(.failed(.invalidBundle)); return
             }
             // 解压出来的包自带 `LSMinimumSystemVersion`：它比本机高就不能装。
             // 这条检查是本机唯一能拦住「装完打不开」的地方；旧版本应用不会带它，
             // 所以它保护的是以后每一次提高下限，而不是已经装好的旧版本。
             guard Self.requiresNoNewerSystem(staged) else {
-                try? fileManager.removeItem(at: staging); finish(.failed(.requiresNewerSystem)); return
+                finish(.failed(.requiresNewerSystem)); return
             }
             try launchReplacement(stagedApp: staged, staging: staging)
+            replacementStarted = true
             finish(.updated(version: asset.version))
         } catch let failure as DesktopAppUpdateFailure {
-            // staging 在抛错前已清；这里只负责给出结论。
+            // defer 已清理未移交的 staging；这里只负责给出结论。
             finish(.failed(failure))
         }
         catch { finish(.failed(.invalidArchive)) }
@@ -564,6 +562,10 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
 
     private func launchReplacement(stagedApp: URL, staging: URL) throws {
         let script = fileManager.temporaryDirectory.appendingPathComponent("PiWebDesktop-replace-\(UUID().uuidString).sh")
+        var scriptStarted = false
+        defer {
+            if !scriptStarted { try? fileManager.removeItem(at: script) }
+        }
         let old = Self.shellQuote(applicationURL.path), new = Self.shellQuote(stagedApp.path)
         let parent = Self.shellQuote(applicationURL.deletingLastPathComponent().path)
         let stagingArg = Self.shellQuote(staging.path), scriptArg = Self.shellQuote(script.path)
@@ -589,11 +591,12 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
         let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/sh"); process.arguments = [script.path]
         stateLock.lock(); let alreadyStarted = replacementProcessDidStart
         if !alreadyStarted { replacementProcessDidStart = true }; stateLock.unlock()
-        guard !alreadyStarted else { try? fileManager.removeItem(at: script); throw DesktopAppUpdateFailure.replacementFailed }
+        guard !alreadyStarted else { throw DesktopAppUpdateFailure.replacementFailed }
         do { try process.run() } catch {
             stateLock.lock(); replacementProcessDidStart = false; stateLock.unlock()
-            try? fileManager.removeItem(at: script); throw DesktopAppUpdateFailure.replacementFailed
+            throw DesktopAppUpdateFailure.replacementFailed
         }
+        scriptStarted = true
         // `URLSession.downloadTask` 的完成回调不在主线程（实测 completionQueue 为
         // nil 时落在一个 NSThread 上，不是 Thread.isMainThread），而 `NSApp.terminate`
         // 是 AppKit 调用，必须在主线程。直接调会在子线程上动 AppKit 状态，轻则

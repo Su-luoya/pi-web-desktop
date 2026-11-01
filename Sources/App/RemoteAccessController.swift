@@ -40,8 +40,12 @@ final class RemoteAccessController {
     /// 状态变化（主线程回调）。菜单用它刷新标题与可用性。
     var onChange: ((RemoteAccessViewState) -> Void)?
 
-    init(runner: CommandRunning, defaults: UserDefaults = .standard) {
-        self.serve = TailscaleServe(runner: runner)
+    convenience init(runner: CommandRunning, defaults: UserDefaults = .standard) {
+        self.init(serve: TailscaleServe(runner: runner), defaults: defaults)
+    }
+
+    init(serve: TailscaleServe, defaults: UserDefaults = .standard) {
+        self.serve = serve
         self.defaults = defaults
     }
 
@@ -72,8 +76,12 @@ final class RemoteAccessController {
             case .notRunning:
                 self.update(.unavailable(Failure.notRunning.message))
             case let .ready(dnsName):
+                guard let snapshot else {
+                    self.update(.unavailable(Failure.commandFailed.message))
+                    return
+                }
                 let target = configuration.serviceURL.absoluteString
-                guard snapshot.proxy(for: port) == target,
+                guard snapshot.proxy(for: port) != nil, !snapshot.isOccupied(port, by: target),
                       let url = TailscaleServe.publicURL(dnsName: dnsName, port: port) else {
                     // 配置变了（监听地址/端口）或那条 serve 已经不在了：记录作废。
                     self.forget()
@@ -115,6 +123,10 @@ final class RemoteAccessController {
                 return
             case let .ready(name):
                 dnsName = name
+            }
+            guard let snapshot else {
+                completion(.failure(.commandFailed))
+                return
             }
             let plan: RemoteAccessPlan
             switch RemoteAccessPlanner.plan(
@@ -171,8 +183,7 @@ final class RemoteAccessController {
 
     // MARK: - 关闭
 
-    /// 撤销自己那一条。`success` 为 false 表示 CLI 失败了（记录仍会被清掉：
-    /// 留着一条指向未知状态的记录比丢失它更糟）。
+    /// 撤销成功才清掉记录；失败时保留端口与状态，以便重试或下次启动对账。
     func disable(completion: @escaping (Bool) -> Void) {
         guard let port = activePort else {
             update(.off)
@@ -184,20 +195,20 @@ final class RemoteAccessController {
             serve.disable(port: port)
         }) { [weak self] succeeded in
             guard let self else { return }
-            self.forget()
-            self.update(.off)
+            if succeeded {
+                self.forget()
+                self.update(.off)
+            }
             completion(succeeded)
         }
     }
 
     /// 退出时的同步撤销：不留后台任务，`applicationWillTerminate` 返回前做完。
     ///
-    /// 失败也不阻止退出（这里只尽力而为），但记录会被清掉，下次启动不会再假装
-    /// 远程访问还开着。
+    /// 失败也不阻止退出，但保留记录供下次启动核对并重试撤销。
     func revokeForQuit() {
         guard let port = activePort else { return }
-        serve.disable(port: port)
-        forget()
+        if serve.disable(port: port) { forget() }
     }
 
     // MARK: - 内部

@@ -41,7 +41,13 @@ struct TailscaleServeSnapshot: Equatable {
     /// 该端口是否已被别的目标占用（占用时不得覆盖）。
     func isOccupied(_ port: Int, by target: String) -> Bool {
         guard let existing = proxies[port] else { return false }
-        return existing != target
+        return Self.normalizedProxy(existing) != Self.normalizedProxy(target)
+    }
+
+    private static func normalizedProxy(_ target: String) -> String {
+        guard var components = URLComponents(string: target), components.path == "/" else { return target }
+        components.path = ""
+        return components.string ?? target
     }
 }
 
@@ -105,13 +111,10 @@ struct TailscaleServe {
         return Self.availability(fromStatusJSON: output)
     }
 
-    /// 读现有 serve 配置；读不到时返回空快照（保守：不会因此覆盖任何条目）。
-    func snapshot() -> TailscaleServeSnapshot {
+    /// nil 表示配置不可读，不能据此认定端口空闲。
+    func snapshot() -> TailscaleServeSnapshot? {
         guard let binary = binaryPath,
-              let output = runner.run([binary, "serve", "status", "--json"]),
-              !output.isEmpty else {
-            return TailscaleServeSnapshot()
-        }
+              let output = runner.run([binary, "serve", "status", "--json"]) else { return nil }
         return Self.snapshot(fromServeStatusJSON: output)
     }
 
@@ -122,7 +125,9 @@ struct TailscaleServe {
     /// 目标端口已被别的条目占用时直接抛 `noFreePort`，不覆盖别人的配置。
     func enable(port: Int, target: URL) throws {
         guard let binary = binaryPath else { throw TailscaleServeError.notInstalled }
-        let existing = snapshot()
+        guard let existing = snapshot() else {
+            throw TailscaleServeError.commandFailed(arguments: ["serve", "status", "--json"])
+        }
         if existing.isOccupied(port, by: target.absoluteString) {
             throw TailscaleServeError.noFreePort
         }
@@ -169,23 +174,37 @@ struct TailscaleServe {
     ///
     /// 端口同时来自 `TCP` 与 `Web` 两处：前者是监听端口，后者是 handler 所在的
     /// `host:port`（443 时可能不带端口）。
-    static func snapshot(fromServeStatusJSON json: String) -> TailscaleServeSnapshot {
-        guard let root = jsonObject(json) else { return TailscaleServeSnapshot() }
+    static func snapshot(fromServeStatusJSON json: String) -> TailscaleServeSnapshot? {
+        // CLI 在尚未配置 serve 时输出 JSON null；命令失败或坏 JSON 则不能当作空配置。
+        if json.trimmingCharacters(in: .whitespacesAndNewlines) == "null" { return TailscaleServeSnapshot() }
+        guard let root = jsonObject(json) else { return nil }
+        for field in ["Web", "TCP", "AllowFunnel"] {
+            if let value = root[field], !(value is NSNull), !(value is [String: Any]) { return nil }
+        }
         var proxies: [Int: String] = [:]
         if let web = root["Web"] as? [String: Any] {
             for (key, value) in web {
-                guard let port = port(fromWebKey: key) else { continue }
+                guard let port = port(fromWebKey: key) else { return nil }
                 let handlers = (value as? [String: Any])?["Handlers"] as? [String: Any]
-                if let proxy = handlers?["/"] as? [String: Any], let target = proxy["Proxy"] as? String {
+                if proxies[port] == nil, handlers?.count == 1,
+                   let proxy = handlers?["/"] as? [String: Any], proxy.count == 1,
+                   let target = proxy["Proxy"] as? String, !target.isEmpty {
                     proxies[port] = target
                 } else {
-                    proxies[port] = proxies[port] ?? ""
+                    // 多个 host 或 handler 共用端口时，关闭该端口会删掉别人的入口。
+                    proxies[port] = ""
                 }
             }
         }
         if let tcp = root["TCP"] as? [String: Any] {
             for key in tcp.keys {
-                guard let port = Int(key.trimmingCharacters(in: .whitespaces)), proxies[port] == nil else { continue }
+                guard let port = Int(key), (1...65535).contains(port) else { return nil }
+                if proxies[port] == nil { proxies[port] = "" }
+            }
+        }
+        if let funnel = root["AllowFunnel"] as? [String: Any] {
+            for (key, value) in funnel where (value as? Bool) != false {
+                guard let port = port(fromWebKey: key) else { return nil }
                 proxies[port] = ""
             }
         }
@@ -197,7 +216,7 @@ struct TailscaleServe {
         guard let separator = key.lastIndex(of: ":") else { return 443 }
         let suffix = key[key.index(after: separator)...]
         // IPv6 形式 `[fd7a::1]:443` 也走这里：只有末尾是数字才算端口。
-        guard !suffix.contains("]"), let port = Int(suffix) else { return nil }
+        guard !suffix.contains("]"), let port = Int(suffix), (1...65535).contains(port) else { return nil }
         return port
     }
 

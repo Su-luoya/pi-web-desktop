@@ -2293,3 +2293,36 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
   - 合并方式变了：本版三个功能 PR 全部 squash 合入，因此本地 `main` 上的原分支提交与远端
     历史不再一致（本地用 `git reset --hard origin/main` 对齐）。tag 打在 squash 之后的
     `3d40436` 上，`check-release-version.sh` 对 tag 的比对仍然通过。
+
+## 本次发布执行记录（v0.1.0-alpha.28）
+
+- 内容：一处 —— GitHub #239 的评审修复（PR #239 → `f47de32`）：serve 配置读取失败不再当作
+  空闲（`snapshot()` 返回可选值，只有 CLI 输出 `null` 才算空配置）、关闭远程访问失败保留记录
+  并在菜单给「重试关闭远程访问」、应用自更新失败不留 staging 与移交标记、取消时终止全部子进程。
+  本版无新功能。
+- 版本号提交 PR #240 → `ab86ea2`；tag `v0.1.0-alpha.28`，release workflow 的 build 与 publish
+  两个 job 均通过，已发布为 prerelease。
+- 全量测试 1021 项 0 失败（新增 14 项，覆盖配置不可读、坏 JSON、多 host/handler 占端口、
+  `AllowFunnel` 占用、端口上下界、根路径归一化、关闭失败重试、解压后失败清理与多子进程取消）；
+  `check-identity.sh` `PASSED (45 checks)`；`check-release-version.sh` `PASSED`；
+  `scan-secrets.sh` `PASS`（`suppressed 17 lines`，无 `rejected`）。
+- 发布前硬门禁 `<待填写` 与 `{{...}}` 计数均为 0；prerelease 标记保持；发布后
+  `gh release download` + `shasum -a 256 -c` 复验 `OK`。
+- appcast workflow 把 `appcast` 分支的 `appcast.json` 更新到本版，sha256 与 Release 资产一致。
+- 发布资产的 checksum `b1dbe0d84da44463c4e28a96e41bb57127d69a6b5de744b5bf94e1bad0034da2`，
+  体积 1740629 字节（CI 重新构建；本地 `package-release.sh --tag v0.1.0-alpha.28` 的结果是
+  `b42bef966e38cafa357fc8338c6cd6ae8bc5dc425e7a4e1b5b496b8ff43c7b17` / 1699881 字节，
+  只用于发版前自检）。
+- 发布记录：Release Issue #241。
+- 真机环境：Mac16,10 / Apple M4，macOS 27.2（26B123），Node v26.13.0，Pi 1.4.0，
+  `@agegr/pi-web` 0.13.0（Homebrew 全局安装）。
+- 本版特有的判定：
+  - PR #239 描述里把 `check-identity.sh` 写成 56 checks，实际输出是 `PASSED (45 checks)`，
+    脚本本版未改动；Issue #241、PR #240 与本节都按实际输出记录，没有把数字改成好看的那个。
+  - 菜单「重试关闭远程访问」是本版新增入口，但它需要先制造一次撤销失败才能看到，真机
+    tailnet 上没有跑通；覆盖它的是注入失败 serve 的单元测试。alpha.27 起就存在的
+    「菜单启用 → 扫码打开 → 关闭」端到端缺口延续到本版。
+  - 退出应用时撤销失败保留记录的路径同样只有单元测试覆盖；下次启动对账是否真的把那条
+    遗留入口收干净，未做端到端验证。
+  - 安全门槛 S1–S8 在 `ab86ea2` 上重跑并记入 Issue #241；本版没有开新的一轮独立安全审查，
+    `Sources/Diagnostics/` 仍未覆盖（post-alpha.16 审查已把它列为下一轮对象）。

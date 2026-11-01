@@ -42,6 +42,7 @@ alpha.27 的撤销流程在 `tailscale serve` 撤销命令失败时只写日志�
 - `./Scripts/check-identity.sh`：`PASSED (45 checks)`；`./Scripts/check-release-version.sh v0.1.0-alpha.28`：`PASSED`；`./Scripts/scan-secrets.sh --self-test` 与 `./Scripts/scan-secrets.sh`：`PASS`（`suppressed 17 lines`，无 `rejected` 行）；`sh -n Scripts/*.sh` 与 `git diff --check` 干净。
 - `./Scripts/build.sh`：成功；`./Scripts/package-release.sh --tag v0.1.0-alpha.28`：`OK`（8 条白名单条目、无 `__MACOSX/`、ad-hoc 签名验证通过）；`./Scripts/smoke.sh`：两种模式均 exit 0。
 - 本机演练产物（不是发布资产，CI 会重新构建）：SHA-256 `b42bef966e38cafa357fc8338c6cd6ae8bc5dc425e7a4e1b5b496b8ff43c7b17`，1699881 字节。
+- 发布 workflow（tag `v0.1.0-alpha.28`）：build 与 publish 两个 job 通过；发布前 `<待填写` 与 `{{...}}` 计数均为 0；发布后 `gh release download` + `shasum -a 256 -c` 复验 `OK`；appcast 已更新到本版，sha256 与 Release 资产一致。
 
 ## 已知限制
 
@@ -59,7 +60,8 @@ alpha.27 的撤销流程在 `tailscale serve` 撤销命令失败时只写日志�
 | 资产 | 值 |
 | --- | --- |
 | ZIP | `Pi-Web-Desktop-0.1.0-alpha.28+build.28.zip` |
-| SHA-256 | 见 Release 页面同名资产（CI 重新构建，发布后回填到本节） |
+| SHA-256 | `b1dbe0d84da44463c4e28a96e41bb57127d69a6b5de744b5bf94e1bad0034da2` |
+| 体积 | 1740629 字节 |
 | 签名 | ad-hoc（`TeamIdentifier=not set`），未公证 |
 | 最低系统 | macOS 26.0 |
 | 架构 | arm64（Apple Silicon） |

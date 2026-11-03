@@ -662,6 +662,11 @@ final class ServiceManager {
         startHealthMonitorIfNeeded()
     }
 
+    /// 唯一的“先探测、再选连接或启动”入口。菜单“启动服务”、启动前自动更新
+    /// 后的重启、设置页的重试都走这里：探测、代次校验与门控只需一份。
+    ///
+    /// 依赖门控关闭时只报告缺口，不产生进程或页面副作用；异步回调里路径可能
+    /// 被重新检查过，因此代次与门控都要再确认一次。
     func ensureServerIsRunning() {
         guard isStartPermitted else {
             reportStartRequirementIfNeeded()
@@ -692,28 +697,7 @@ final class ServiceManager {
     /// managed one. The dependency gate is enforced again inside the async
     /// callback and in `startManagedService()`.
     func startService() {
-        guard isStartPermitted else {
-            reportStartRequirementIfNeeded()
-            return
-        }
-        startHealthMonitorIfNeeded()
-        let generation = lifecycleGeneration
-        checkServer { [weak self] ready in
-            guard let self else { return }
-            self.scheduler.onMain {
-                guard self.lifecycleGeneration == generation else {
-                    self.discardStaleCallback("启动探测", generation: generation)
-                    return
-                }
-                guard self.isStartPermitted else { return }
-                if ready {
-                    self.setState(.running)
-                    self.requestLoad()
-                } else {
-                    self.startManagedService()
-                }
-            }
-        }
+        ensureServerIsRunning()
     }
 
     /// 唯一的受托管启动入口：启动、重启、配置变更、重试和健康恢复都收敛到这里，

@@ -6,6 +6,7 @@ build/
 
 # Xcode user state and derived data
 DerivedData/
+.review-build/
 xcuserdata/
 *.xcuserstate
 

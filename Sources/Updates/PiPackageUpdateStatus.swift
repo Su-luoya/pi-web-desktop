@@ -109,56 +109,53 @@ struct PiPackageUpdateWarning: Equatable {
 }
 
 /// 持久警告的 UserDefaults 存取（只经 `AppConfiguration` 调用）。
+/// 读写本身在 `UpdateWarningStore` 里只实现一份（三类告警同构）；包名额外要求
+/// 通过 npm 包名校验，写之前与读之后都拒绝非法值。
 enum PiPackageUpdateWarningStore {
+    private static let keys = UpdateWarningKeys(
+        kind: UpdateSettingKeys.piPackageUpdateWarningKind,
+        oldVersion: UpdateSettingKeys.piPackageUpdateWarningOldVersion,
+        newVersion: UpdateSettingKeys.piPackageUpdateWarningNewVersion,
+        targetVersion: UpdateSettingKeys.piPackageUpdateWarningTargetVersion,
+        reason: UpdateSettingKeys.piPackageUpdateWarningReason,
+        recordedAt: UpdateSettingKeys.piPackageUpdateWarningRecordedAt,
+        all: UpdateSettingKeys.allPiPackageUpdateWarningKeys
+    )
+
     static func load(from defaults: UserDefaults) -> PiPackageUpdateWarning? {
-        guard let kindText = defaults.string(forKey: UpdateSettingKeys.piPackageUpdateWarningKind),
-              let kind = PiPackageUpdateWarning.Kind(rawValue: kindText) else { return nil }
-        guard let reason = defaults.string(forKey: UpdateSettingKeys.piPackageUpdateWarningReason),
-              !reason.isEmpty else { return nil }
+        guard let stored = UpdateWarningStore.load(keys, from: defaults),
+              let kind = PiPackageUpdateWarning.Kind(rawValue: stored.kind) else { return nil }
         guard let packageName = defaults.string(forKey: UpdateSettingKeys.piPackageUpdateWarningPackage),
               ComponentInstallationDetector.isPackageName(packageName) else { return nil }
-        let recordedAt = UpdateIgnoredVersions.timestamp(
-            defaults.object(forKey: UpdateSettingKeys.piPackageUpdateWarningRecordedAt)
-        ) ?? Date(timeIntervalSince1970: 0)
         return PiPackageUpdateWarning(
             kind: kind,
             packageName: packageName,
-            oldVersion: version(defaults, UpdateSettingKeys.piPackageUpdateWarningOldVersion),
-            newVersion: version(defaults, UpdateSettingKeys.piPackageUpdateWarningNewVersion),
-            targetVersion: version(defaults, UpdateSettingKeys.piPackageUpdateWarningTargetVersion),
-            reason: reason,
-            recordedAt: recordedAt
+            oldVersion: stored.oldVersion,
+            newVersion: stored.newVersion,
+            targetVersion: stored.targetVersion,
+            reason: stored.reason,
+            recordedAt: stored.recordedAt
         )
     }
 
     static func save(_ warning: PiPackageUpdateWarning?, to defaults: UserDefaults) {
         guard let warning,
               ComponentInstallationDetector.isPackageName(warning.packageName) else {
-            for key in UpdateSettingKeys.allPiPackageUpdateWarningKeys {
-                defaults.removeObject(forKey: key)
-            }
+            UpdateWarningStore.save(nil, keys: keys, to: defaults)
             return
         }
-        defaults.set(warning.kind.rawValue, forKey: UpdateSettingKeys.piPackageUpdateWarningKind)
         defaults.set(warning.packageName, forKey: UpdateSettingKeys.piPackageUpdateWarningPackage)
-        defaults.set(warning.reason, forKey: UpdateSettingKeys.piPackageUpdateWarningReason)
-        defaults.set(warning.recordedAt.timeIntervalSince1970, forKey: UpdateSettingKeys.piPackageUpdateWarningRecordedAt)
-        setVersion(warning.oldVersion, key: UpdateSettingKeys.piPackageUpdateWarningOldVersion, defaults: defaults)
-        setVersion(warning.newVersion, key: UpdateSettingKeys.piPackageUpdateWarningNewVersion, defaults: defaults)
-        setVersion(warning.targetVersion, key: UpdateSettingKeys.piPackageUpdateWarningTargetVersion, defaults: defaults)
+        UpdateWarningStore.save(stored(from: warning), keys: keys, to: defaults)
     }
 
-    /// 只接受可解析为语义化版本的字符串；否则写入 nil（删除键）。
-    static func setVersion(_ version: String?, key: String, defaults: UserDefaults) {
-        guard let version, SemanticVersion(version) != nil else {
-            defaults.removeObject(forKey: key)
-            return
-        }
-        defaults.set(version, forKey: key)
-    }
-
-    static func version(_ defaults: UserDefaults, _ key: String) -> String? {
-        guard let text = defaults.string(forKey: key), SemanticVersion(text) != nil else { return nil }
-        return text
+    private static func stored(from warning: PiPackageUpdateWarning) -> StoredUpdateWarning {
+        StoredUpdateWarning(
+            kind: warning.kind.rawValue,
+            oldVersion: warning.oldVersion,
+            newVersion: warning.newVersion,
+            targetVersion: warning.targetVersion,
+            reason: warning.reason,
+            recordedAt: warning.recordedAt
+        )
     }
 }

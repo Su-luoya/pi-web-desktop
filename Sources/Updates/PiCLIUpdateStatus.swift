@@ -122,51 +122,43 @@ struct PiCLIUpdateWarning: Equatable {
 }
 
 /// 持久警告的 UserDefaults 存取（只经 `AppConfiguration` 调用）。
+/// 读写本身在 `UpdateWarningStore` 里只实现一份（三类告警同构）。
 enum PiCLIUpdateWarningStore {
+    private static let keys = UpdateWarningKeys(
+        kind: UpdateSettingKeys.piCLIUpdateWarningKind,
+        oldVersion: UpdateSettingKeys.piCLIUpdateWarningOldVersion,
+        newVersion: UpdateSettingKeys.piCLIUpdateWarningNewVersion,
+        targetVersion: UpdateSettingKeys.piCLIUpdateWarningTargetVersion,
+        reason: UpdateSettingKeys.piCLIUpdateWarningReason,
+        recordedAt: UpdateSettingKeys.piCLIUpdateWarningRecordedAt,
+        all: UpdateSettingKeys.allPiCLIUpdateWarningKeys
+    )
+
     static func load(from defaults: UserDefaults) -> PiCLIUpdateWarning? {
-        guard let kindText = defaults.string(forKey: UpdateSettingKeys.piCLIUpdateWarningKind),
-              let kind = PiCLIUpdateWarning.Kind(rawValue: kindText) else { return nil }
-        guard let reason = defaults.string(forKey: UpdateSettingKeys.piCLIUpdateWarningReason),
-              !reason.isEmpty else { return nil }
-        let recordedAt = UpdateIgnoredVersions.timestamp(
-            defaults.object(forKey: UpdateSettingKeys.piCLIUpdateWarningRecordedAt)
-        ) ?? Date(timeIntervalSince1970: 0)
+        guard let stored = UpdateWarningStore.load(keys, from: defaults),
+              let kind = PiCLIUpdateWarning.Kind(rawValue: stored.kind) else { return nil }
         return PiCLIUpdateWarning(
             kind: kind,
-            oldVersion: version(defaults, UpdateSettingKeys.piCLIUpdateWarningOldVersion),
-            newVersion: version(defaults, UpdateSettingKeys.piCLIUpdateWarningNewVersion),
-            targetVersion: version(defaults, UpdateSettingKeys.piCLIUpdateWarningTargetVersion),
-            reason: reason,
-            recordedAt: recordedAt
+            oldVersion: stored.oldVersion,
+            newVersion: stored.newVersion,
+            targetVersion: stored.targetVersion,
+            reason: stored.reason,
+            recordedAt: stored.recordedAt
         )
     }
 
     static func save(_ warning: PiCLIUpdateWarning?, to defaults: UserDefaults) {
-        guard let warning else {
-            for key in UpdateSettingKeys.allPiCLIUpdateWarningKeys {
-                defaults.removeObject(forKey: key)
-            }
-            return
-        }
-        defaults.set(warning.kind.rawValue, forKey: UpdateSettingKeys.piCLIUpdateWarningKind)
-        defaults.set(warning.reason, forKey: UpdateSettingKeys.piCLIUpdateWarningReason)
-        defaults.set(warning.recordedAt.timeIntervalSince1970, forKey: UpdateSettingKeys.piCLIUpdateWarningRecordedAt)
-        setVersion(warning.oldVersion, key: UpdateSettingKeys.piCLIUpdateWarningOldVersion, defaults: defaults)
-        setVersion(warning.newVersion, key: UpdateSettingKeys.piCLIUpdateWarningNewVersion, defaults: defaults)
-        setVersion(warning.targetVersion, key: UpdateSettingKeys.piCLIUpdateWarningTargetVersion, defaults: defaults)
+        UpdateWarningStore.save(warning.map { stored(from: $0) }, keys: keys, to: defaults)
     }
 
-    /// 只接受可解析为语义化版本的字符串；否则写入 nil（删除键）。
-    static func setVersion(_ version: String?, key: String, defaults: UserDefaults) {
-        guard let version, SemanticVersion(version) != nil else {
-            defaults.removeObject(forKey: key)
-            return
-        }
-        defaults.set(version, forKey: key)
-    }
-
-    static func version(_ defaults: UserDefaults, _ key: String) -> String? {
-        guard let text = defaults.string(forKey: key), SemanticVersion(text) != nil else { return nil }
-        return text
+    private static func stored(from warning: PiCLIUpdateWarning) -> StoredUpdateWarning {
+        StoredUpdateWarning(
+            kind: warning.kind.rawValue,
+            oldVersion: warning.oldVersion,
+            newVersion: warning.newVersion,
+            targetVersion: warning.targetVersion,
+            reason: warning.reason,
+            recordedAt: warning.recordedAt
+        )
     }
 }

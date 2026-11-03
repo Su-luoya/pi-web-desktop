@@ -1,5 +1,15 @@
 # Pi Web Desktop `0.1.0-alpha.10` 安全评审（delta）
 
+<!-- 路径说明（#143） -->
+> **路径说明（#143 之后）**：本文写于 `03e06f5 refactor(sources): Sources 按领域分目录、大文件按职责拆分` 之前。
+> 能唯一对应的路径已就地改成当前路径（`Sources/*.swift` → `Sources/{App,Services,Diagnostics,Updates}/`，
+> `PiWebDesktopTests/*AdapterTests.swift` → `*UpdateFlowTests.swift`），但**行号仍是当时的**，不保证与今天的文件对齐。
+> 下列文件已按职责拆成多个文件（同名类型都还在），本文中它们的路径与行号只对应**当时**的位置：
+> `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+> `Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、`Sources/ProcessInspector.swift`。
+> 另外 `Sources/RecentWorkspace.swift`、`Sources/KeychainStore.swift`、`Sources/SystemProxyWarning.swift` 及其测试
+> 已在 #233 / #195 删除。
+
 评审对象：`git diff 21ce459..09f1264` —— 即 `v0.1.0-alpha.9` 的发布提交到本版候选
 （`v0.1.0-alpha.9` 之后的全部提交）。区间基点是 `21ce459`（PR #133，alpha.9 发布值回填，纯文档），
 它本身不在 diff 内；这段区间里只有一个提交 `09f1264`（PR #136，关闭
@@ -15,10 +25,10 @@
 ## 0. 变更面
 
 - `git diff --stat 21ce459..09f1264`：**10 个文件、350 行新增、9 行删除**。
-- 文件清单：`Sources/RecentWorkspace.swift`（新增）、`Sources/PiWebApp.swift`、`Sources/AppConfiguration.swift`、
+- 文件清单：`Sources/RecentWorkspace.swift`（新增）、`Sources/PiWebApp.swift`、`Sources/App/AppConfiguration.swift`、
   `PiWebDesktopTests/RecentWorkspaceTests.swift`（新增）、`Scripts/build.sh`、`PiWebDesktop.xcodeproj/project.pbxproj`、
   `docs/settings-and-workspace.md`、`docs/privacy.md`、`docs/architecture.md`、`README.md`。
-- 本版**没有**改动：更新检查与更新流水线的任何文件（`Sources/UpdateChecker.swift`、`Sources/UpdateVerifier.swift`、
+- 本版**没有**改动：更新检查与更新流水线的任何文件（`Sources/Updates/UpdateChecker.swift`、`Sources/Updates/UpdateVerifier.swift`、
   `Sources/UpdateTransaction.swift`、三个更新适配器）、服务启动与探测命令、密钥与脱敏规则、CSP / 网站数据、
   CI 与发布脚本的判定逻辑。因此 [alpha.1 审查](security-review-alpha.1.md) 与
   [alpha.3 审查](security-review-alpha.3.md) 的结论继续适用，本文只评审这个 delta。

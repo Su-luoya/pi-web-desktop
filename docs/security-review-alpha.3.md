@@ -1,11 +1,21 @@
 # alpha.3 更新流水线安全审查（delta，只读）
 
+<!-- 路径说明（#143） -->
+> **路径说明（#143 之后）**：本文写于 `03e06f5 refactor(sources): Sources 按领域分目录、大文件按职责拆分` 之前。
+> 能唯一对应的路径已就地改成当前路径（`Sources/*.swift` → `Sources/{App,Services,Diagnostics,Updates}/`，
+> `PiWebDesktopTests/*AdapterTests.swift` → `*UpdateFlowTests.swift`），但**行号仍是当时的**，不保证与今天的文件对齐。
+> 下列文件已按职责拆成多个文件（同名类型都还在），本文中它们的路径与行号只对应**当时**的位置：
+> `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+> `Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、`Sources/ProcessInspector.swift`。
+> 另外 `Sources/RecentWorkspace.swift`、`Sources/KeychainStore.swift`、`Sources/SystemProxyWarning.swift` 及其测试
+> 已在 #233 / #195 删除。
+
 - **审查对象**：`0.1.0-alpha.3` 相对 `0.1.0-alpha.2` 新增/变更的**更新流水线**（GitHub #16–#23），
   即工作区里的
   `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、
-  `Sources/PiProcessInspector.swift`、`Sources/PiPackageUpdateAdapter.swift`、
-  `Sources/UpdateTransaction.swift`、`Sources/UpdateVerifier.swift`、
-  `Sources/UpdateSettings.swift` 与 `Sources/PiWebApp.swift` 中调用它们的部分。
+  `Sources/Services/PiProcessInspector.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+  `Sources/UpdateTransaction.swift`、`Sources/Updates/UpdateVerifier.swift`、
+  `Sources/Updates/UpdateSettingsModel.swift` 与 `Sources/PiWebApp.swift` 中调用它们的部分。
 - **基线**：`v0.1.0-alpha.2`（tag 指向 `7699a3b`）之后的 5 个功能/文档提交
   （`471bd2c` #53、`86eaadf` #54、`6fa22a5` #57、`dfd8043` #56、`4c53df0` #58），加上本次
   `v0.1.0-alpha.3` 发布提交（版本 bump 与文档，不改动上述功能代码）。
@@ -31,7 +41,7 @@
 | `./Scripts/scan-secrets.sh` | 退出 0；`scan-secrets: suppressed 11 lines`、`scan-secrets: PASS` |
 | `sh Scripts/check-release-version.sh v0.1.0-alpha.3` | 退出 0 |
 | `./Scripts/package-release.sh --tag v0.1.0-alpha.3` | 退出 0；产出 ZIP、`.sha256`、证据 Markdown 与 `release-metadata.env` |
-| `git grep -nE 'kill\(|killpg|SIGTERM|SIGKILL|signal\(|\.terminate\(\)' -- Sources/PiCLIUpdateAdapter.swift Sources/PiPackageUpdateAdapter.swift Sources/PiProcessInspector.swift` | 只有注释命中（3 行，均为“不发送信号”的说明），**没有调用点** |
+| `git grep -nE 'kill\(|killpg|SIGTERM|SIGKILL|signal\(|\.terminate\(\)' -- Sources/PiCLIUpdateAdapter.swift Sources/PiPackageUpdateAdapter.swift Sources/Services/PiProcessInspector.swift` | 只有注释命中（3 行，均为“不发送信号”的说明），**没有调用点** |
 | `git grep -nE 'process\.(executableURL|arguments|environment)|standardInput' -- Sources/Pi*UpdateAdapter.swift` | 三个执行器都是 `Process` + 参数数组 + 白名单环境 + `/dev/null` 标准输入（见 §3 各条证据） |
 
 **本次没有做的事**（因此下列结论不能从这些角度被反驳或被支持）：
@@ -117,7 +127,7 @@
 
 ### A-1 更新检查缓存与本地设置可影响自动更新的目标版本（低）
 
-- **事实**：`UpdateChecker.cachedFallback(entry:at:allowStatus:)`（`Sources/UpdateChecker.swift:1433`）
+- **事实**：`UpdateChecker.cachedFallback(entry:at:allowStatus:)`（`Sources/Updates/UpdateChecker.swift:1433`）
   在网络失败时可以从 `update-check-cache.json` 里读回 `status = updateAvailable` 与
   `confidence = verified`（`entry.decodedConfidence`，字段见 `UpdateCacheEntry`，同文件
   `:545`、`:693`），并且 `entry.isReusable(at:ttl:)` 只检查 TTL。`PiWebApp.piWebUpdatePlanningInput`
@@ -125,7 +135,7 @@
   直接作为 `targetConfidence` 传给规划器，`PiWebUpdatePlanner.decide`（`Sources/PiWebUpdateAdapter.swift:323`）
   与 `PiCLIUpdatePlanner.decide`（`Sources/PiCLIUpdateAdapter.swift:297`）据此允许自动安装。
   缓存文件在用户目录下、无完整性校验（无签名/HMAC），同用户进程可改写；`UpdateCheckSettingsMigration`
-  对策略/开关的非法值会回退默认（`Sources/UpdateSettings.swift:302`），但**不会**校验缓存文件的真实性。
+  对策略/开关的非法值会回退默认（`Sources/Updates/UpdateSettingsModel.swift:302`），但**不会**校验缓存文件的真实性。
 - **影响**：同用户对手可以让应用自动安装**同一个官方包**的任意一个已发布版本（仍需满足“目标版本可
   解析且高于本机版本”、来源为已验证的 npm/pnpm 全局安装、开关已打开）；不能换包名、不能换 registry、
   不能注入本地文件。由于对手已经能直接操作这些文件与进程，这属于“同用户威胁模型内的残余风险”，
@@ -161,7 +171,7 @@
 
 - **事实**：验证只有五条检查——可执行文件存在且带可执行位、解析后的真实路径可读、版本能被 #16
   识别器重新检测并达到目标、`package.json` 的 `name` 与期望包名一致、服务健康检查
-  （`UpdateVerificationCheck`，`Sources/UpdateVerifier.swift:106`；边界文案 `capabilityBoundary` `:124`；
+  （`UpdateVerificationCheck`，`Sources/Updates/UpdateVerifier.swift:106`；边界文案 `capabilityBoundary` `:124`；
   实现 `verify(_:probe:)` `:256`、`executableCheck` `:321`、`versionCheck` `:390`、
   `identityCheck` `:426`）。代码里显式列出**不做**的验证（`notVerifiedCapabilities`，`:138`）：
   不做代码签名验证、不声称能验证官方签名或发布来源、不做安装包内容哈希或上游文件比对。
@@ -194,7 +204,7 @@
 
 ### A-5 进程保护会读取本机可读进程的 argv，摘要遮罩基于固定模式（低）
 
-- **事实**：`LibprocPiProcessProbe.snapshot(of:)`（`Sources/PiProcessInspector.swift:137`）对枚举出的
+- **事实**：`LibprocPiProcessProbe.snapshot(of:)`（`Sources/Services/PiProcessInspector.swift:137`）对枚举出的
   每个 PID 都调用 `arguments(of:)`（`:193`，`sysctl KERN_PROCARGS2`，上限 1 MiB）；image path 来自
   `proc_pidpath`（`:181`）。判定为 Pi 以后，`makeRecord` 只保留脱敏后的记录
   （`PiProcessInspector.classify` `:474`、`classifyInterpreterProcess` `:519`、`commandSummary` `:683`），
@@ -256,7 +266,7 @@
 
 ### A-9 本地持久状态可被同用户读取/改写，且依赖模式化脱敏（低）
 
-- **事实**：更新相关的持久数据只有三类——策略/开关/忽略版本（`Sources/UpdateSettings.swift:68`
+- **事实**：更新相关的持久数据只有三类——策略/开关/忽略版本（`Sources/Updates/UpdateSettingsModel.swift:68`
   起的键常量）、上次失败告警（`PiWebUpdateWarningStore` 等，`Sources/PiWebUpdateAdapter.swift:1061`
   起的实现）、统一更新历史（`UpdateHistoryStore`，`Sources/UpdateTransaction.swift:722`，最多 20 条，
   `sanitize(_:)` `:756` 会丢弃非法包名/版本、截断长文本、剔除控制字符）。历史/告警字段是固定枚举、
@@ -350,7 +360,7 @@ sh Scripts/check-release-version.sh v0.1.0-alpha.3
 
 # 负向证据（#21 / #22 / 进程检查器不应出现信号调用）
 git grep -nE 'kill\(|killpg|SIGTERM|SIGKILL|signal\(|\.terminate\(\)' -- \
-  Sources/PiCLIUpdateAdapter.swift Sources/PiPackageUpdateAdapter.swift Sources/PiProcessInspector.swift
+  Sources/PiCLIUpdateAdapter.swift Sources/PiPackageUpdateAdapter.swift Sources/Services/PiProcessInspector.swift
 
 # 参数数组执行（三个执行器）
 git grep -nE 'process\.(executableURL|arguments|environment)' -- Sources/Pi*UpdateAdapter.swift

@@ -1,5 +1,15 @@
 # Alpha 发布门槛清单（Issue 驱动）
 
+<!-- 路径说明（#143） -->
+> **路径说明（#143 之后）**：本文写于 `03e06f5 refactor(sources): Sources 按领域分目录、大文件按职责拆分` 之前。
+> 能唯一对应的路径已就地改成当前路径（`Sources/*.swift` → `Sources/{App,Services,Diagnostics,Updates}/`，
+> `PiWebDesktopTests/*AdapterTests.swift` → `*UpdateFlowTests.swift`），但**行号仍是当时的**，不保证与今天的文件对齐。
+> 下列文件已按职责拆成多个文件（同名类型都还在），本文中它们的路径与行号只对应**当时**的位置：
+> `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+> `Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、`Sources/ProcessInspector.swift`。
+> 另外 `Sources/RecentWorkspace.swift`、`Sources/KeychainStore.swift`、`Sources/SystemProxyWarning.swift` 及其测试
+> 已在 #233 / #195 删除。
+
 每个 alpha 版本（`v<MARKETING_VERSION>`）由一个 Release Issue 驱动：Issue 是发布记录的唯一入口，
 本文列出的每一项都要在 Issue 里留下可核对的证据，缺任何一项就不发布。
 
@@ -322,9 +332,9 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
 | 15 | checksum 复验 | `cd dist && shasum -a 256 -c Pi-Web-Desktop-0.1.0-alpha.2.zip.sha256` | `Pi-Web-Desktop-0.1.0-alpha.2.zip: OK` | 退出 0，通过 |
 | 16 | 版本字面值门禁（回归） | `./Scripts/check-identity.sh` 第 6 节 | `ok no hardcoded MARKETING_VERSION outside Configuration/AppIdentity.xcconfig`（见下方“发布前置修复”） | 通过 |
 
-### 发布前置修复：`Sources/UpdateChecker.swift` 的版本字面值
+### 发布前置修复：`Sources/Updates/UpdateChecker.swift` 的版本字面值
 
-- 现象：PR #50 在 `Sources/UpdateChecker.swift` 的 User-Agent 文档注释里写了与下一版相同的版本
+- 现象：PR #50 在 `Sources/Updates/UpdateChecker.swift` 的 User-Agent 文档注释里写了与下一版相同的版本
   字面值。`MARKETING_VERSION` bump 到 `0.1.0-alpha.2` 后，`check-identity.sh` 的“xcconfig 之外
   不得出现版本字面值”门禁命中该注释，`check-identity.sh` 退出 1，`package-release.sh`（内部调用
   `check-identity.sh`）随之失败。
@@ -640,7 +650,7 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
 **第 12 项的 N=15 归因（与 alpha.4 记录的 11 不同）**：本次确实新增了内联标记，用
 `grep -c 'scan-secrets: allow'` 在 `v0.1.0-alpha.4` 与本工作区上对逐个文件核对，计数为：
 `PiWebDesktopTests/ToolPathTests.swift` alpha.4 不存在 / 本版 6（#89 新增文件）、
-`PiWebDesktopTests/PiWebUpdateAdapterTests.swift` 0 / 2（#95）、
+`PiWebDesktopTests/PiWebUpdateFlowTests.swift` 0 / 2（#95）、
 `PiWebDesktopTests/ServiceManagerTests.swift`
 0 / 1、`PiWebDesktopTests/UpdateTransactionTests.swift` 0 / 1、`PiWebDesktopTests/LogWriterTests.swift`
 3 / 6；同时 #78 收紧了抑制标记格式（旧的无 `reason` 标记按违规处理，见本版自检项）。15 行全部是
@@ -666,7 +676,7 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
   `Sources/`、`Scripts/`、`.github/`，也没有打 tag、push 或跑打包脚本）。
 - 范围：`git diff v0.1.0-alpha.4..838cb25`，即 #72–#93 / PR #76–#95（12 个修复提交 + 1 个版本 bump 提交，
   55 个文件、+10547 / −1045 行）。本版**没有新增功能面**，全部是修复与加固；新增两个独立文件
-  `Sources/QuitCoordinator.swift`（286 行）与 `Sources/ToolPath.swift`（584 行）及对应测试。
+  `Sources/App/QuitCoordinator.swift`（286 行）与 `Sources/Services/ToolPath.swift`（584 行）及对应测试。
   服务所有权与 Keychain、监听地址、脱敏规则本身、CI/发布脚本、依赖供应链、CSP/WebKit 与网站数据
   沿用 [alpha.1 审查](security-review-alpha.1.md)，alpha.4 已覆盖但本次未改动的部分沿用
   [alpha.4 审查](security-review-alpha.4.md)。
@@ -723,7 +733,7 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
 
 | # | 门槛 | 覆盖位置 | 本机状态 |
 | --- | --- | --- | --- |
-| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖。本版新增的 XCTest 文件：`PiWebDesktopTests/QuitCoordinatorTests.swift`（#72）、`PiWebDesktopTests/ToolPathTests.swift`（#89）；`PiWebDesktopTests/` 下另外 16 个既有文件带增量用例（`git diff --name-only v0.1.0-alpha.4..6821ecd -- PiWebDesktopTests/` 共 18 个文件），其中 #94 改动 `PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`、`PiWebDesktopTests/UpdateTransactionTests.swift`，#95 改动 `PiWebDesktopTests/PiWebUpdateAdapterTests.swift`、`PiWebDesktopTests/PiCLIUpdateAdapterTests.swift`、`PiWebDesktopTests/UpdateAbandonedAttemptTests.swift`、`PiWebDesktopTests/UpdateTransactionTests.swift` |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖。本版新增的 XCTest 文件：`PiWebDesktopTests/QuitCoordinatorTests.swift`（#72）、`PiWebDesktopTests/ToolPathTests.swift`（#89）；`PiWebDesktopTests/` 下另外 16 个既有文件带增量用例（`git diff --name-only v0.1.0-alpha.4..6821ecd -- PiWebDesktopTests/` 共 18 个文件），其中 #94 改动 `PiWebDesktopTests/PiPackageUpdateFlowTests.swift`、`PiWebDesktopTests/UpdateTransactionTests.swift`，#95 改动 `PiWebDesktopTests/PiWebUpdateFlowTests.swift`、`PiWebDesktopTests/PiCLIUpdateFlowTests.swift`、`PiWebDesktopTests/UpdateAbandonedAttemptTests.swift`、`PiWebDesktopTests/UpdateTransactionTests.swift` |
 | C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds`（`check-identity.sh --test-bundle …`） | 本机只检查了脚本产物（`check-identity: PASSED (45 checks)`），Xcode 产物与 `.xctest` 由 CI 覆盖 |
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`（自检 + 仓库扫描）；该步骤由 CI 覆盖 |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；Issue 中记录 run 链接。合并前各提交的 CI 结果：#94 的 `b99e501` pass 4m23s、`87f124b` pass；#95 的 `6622b5d` pass 3m34s；合并后 main `6821ecd` pass 4m16s（run `35491357493`） |
@@ -856,7 +866,7 @@ Release 使用；未在本机执行的门槛在第 2 张表里单独标出，不
 
 | # | 门槛 | 覆盖位置 | 本机状态 |
 | --- | --- | --- | --- |
-| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖。本版新增/改动的测试只有 `PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`（+94 行）与 `PiWebDesktopTests/PiCLIUpdateAdapterTests.swift`（+59 行），共 5 个确定性用例（#102） |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖。本版新增/改动的测试只有 `PiWebDesktopTests/PiPackageUpdateFlowTests.swift`（+94 行）与 `PiWebDesktopTests/PiCLIUpdateFlowTests.swift`（+59 行），共 5 个确定性用例（#102） |
 | C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds`（`check-identity.sh --test-bundle …`） | 本机只检查了脚本产物（`check-identity: PASSED (45 checks)`），Xcode 产物与 `.xctest` 由 CI 覆盖 |
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`（自检 + 仓库扫描）；该步骤由 CI 覆盖 |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；本版三个提交的 main run 均为 **success**：`3306398`（#100）run `35493841592`、`a47dd46`（#102）run `35494635211`、`8b591c9`（#104）run `35494836484` |
@@ -989,7 +999,7 @@ squash 合入 main → `fba1f12`（CI run `35499346342`，`build` success）；t
 
 | # | 门槛 | 覆盖位置 | 本机状态与回填结果 |
 | --- | --- | --- | --- |
-| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖。本版新增/改动的测试集中在 `PiWebDesktopTests/UpdateTransactionTests.swift`（#105 / #106）、`PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`（#107）、`PiWebDesktopTests/PiCLIUpdateAdapterTests.swift` 与 `PiWebDesktopTests/PiWebUpdateAdapterTests.swift`（#108） |
+| C1 | `xcodebuild build` / `xcodebuild test`（含 XCTest 与集成测试） | `.github/workflows/build.yml` 的 `Build and test Xcode project`；`release.yml` 的 `Build the Xcode project (arm64)` | 本机未执行（无完整 Xcode），由 CI 的 `macos-26` job 覆盖。本版新增/改动的测试集中在 `PiWebDesktopTests/UpdateTransactionTests.swift`（#105 / #106）、`PiWebDesktopTests/PiPackageUpdateFlowTests.swift`（#107）、`PiWebDesktopTests/PiCLIUpdateFlowTests.swift` 与 `PiWebDesktopTests/PiWebUpdateFlowTests.swift`（#108） |
 | C2 | Xcode 产物 + `.xctest` bundle 的身份检查 | `build.yml` 的 `Check application identity of Xcode and script builds`（`check-identity.sh --test-bundle …`） | 本机只检查了脚本产物（`check-identity: PASSED (45 checks)`），Xcode 产物与 `.xctest` 由 CI 覆盖 |
 | C3 | CI personal-data `git grep` 步骤 | `build.yml` 的 `Check for accidental personal data` | 本机只复现了 `scan-secrets.sh`（自检 + 仓库扫描）；该步骤由 CI 覆盖 |
 | C4 | main CI 在候选提交之后仍为绿 | `build.yml` 的 `push: branches: [main]` 运行 | 由 CI 覆盖；本版六个提交的 main run 均为 **success**：`af47866`（#112）run `35496917660`、`9ede020`（#113）run `35497135814`、`be13c88`（#114）run `35497336171`、`0c1610c`（#115）run `35497649990`、`fbae499`（#117）run `35497954810`、`4e6e332`（#116）run `35498186531` |
@@ -1053,9 +1063,9 @@ squash 合入 main → `fba1f12`（CI run `35499346342`，`build` success）；t
 
 | issue | 本版改的内容 | 发布说明里的位置 | 证据 |
 | --- | --- | --- | --- |
-| [#119](https://github.com/Su-luoya/pi-web-desktop/issues/119) | 日志尾句改成「本次没有执行任何回滚动作」；`detectedVersion == nil` 不再句内自相矛盾；Pi CLI 的「更新进行中」拒绝补上恢复提示 | 摘要第 1 条、第 1 节 | `Sources/PiCLIUpdateAdapter.swift`、`Sources/PiWebUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、`Sources/PiWebApp.swift`；`PiWebDesktopTests/PiWebUpdateAdapterTests.swift` 的旧断言同步更新 |
-| [#121](https://github.com/Su-luoya/pi-web-desktop/issues/121) | `F1` 完成回调改走专用投递队列；`F2` UTF-8 分块解码在 EOF 冲刷；`F4` 只在常规文件上读取；`F5` 取消落在收尾窗口时被记录；`F6` 失败输出先脱敏；`F3` 信任边界写入文档 | 摘要第 2 条、第 2 节、第 5 节 | `Sources/PiPackageUpdateAdapter.swift`、`Sources/UpdateVerifier.swift`、`Sources/PiWebUpdateAdapter.swift`、`docs/security-ownership.md`、`docs/architecture.md`；测试：`UpdateVerifierTests` 9 例 + 包执行器两个用例 |
-| [#124](https://github.com/Su-luoya/pi-web-desktop/issues/124) | npm `integrity` 的基准版本固定为本次更新的目标版本（同一条 `node_modules` 路径、同一个包名） | 摘要第 3 条、第 3 节 | `Sources/UpdateVerifier.swift`、`Sources/UpdateTransaction.swift`；`UpdateTransactionTests.testIdentityWordingFollowsTheEvidenceSource` |
+| [#119](https://github.com/Su-luoya/pi-web-desktop/issues/119) | 日志尾句改成「本次没有执行任何回滚动作」；`detectedVersion == nil` 不再句内自相矛盾；Pi CLI 的「更新进行中」拒绝补上恢复提示 | 摘要第 1 条、第 1 节 | `Sources/PiCLIUpdateAdapter.swift`、`Sources/PiWebUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、`Sources/PiWebApp.swift`；`PiWebDesktopTests/PiWebUpdateFlowTests.swift` 的旧断言同步更新 |
+| [#121](https://github.com/Su-luoya/pi-web-desktop/issues/121) | `F1` 完成回调改走专用投递队列；`F2` UTF-8 分块解码在 EOF 冲刷；`F4` 只在常规文件上读取；`F5` 取消落在收尾窗口时被记录；`F6` 失败输出先脱敏；`F3` 信任边界写入文档 | 摘要第 2 条、第 2 节、第 5 节 | `Sources/PiPackageUpdateAdapter.swift`、`Sources/Updates/UpdateVerifier.swift`、`Sources/PiWebUpdateAdapter.swift`、`docs/security-ownership.md`、`docs/architecture.md`；测试：`UpdateVerifierTests` 9 例 + 包执行器两个用例 |
+| [#124](https://github.com/Su-luoya/pi-web-desktop/issues/124) | npm `integrity` 的基准版本固定为本次更新的目标版本（同一条 `node_modules` 路径、同一个包名） | 摘要第 3 条、第 3 节 | `Sources/Updates/UpdateVerifier.swift`、`Sources/UpdateTransaction.swift`；`UpdateTransactionTests.testIdentityWordingFollowsTheEvidenceSource` |
 | [#120](https://github.com/Su-luoya/pi-web-desktop/issues/120) | 测试面 `T-1` / `T-2` / `T-3` | 摘要第 4 条、第 4 节 | 新增 `PiWebDesktopTests/UpdateVerifierTests.swift`（9 个对抗用例，`PiWebDesktop.xcodeproj/project.pbxproj` 四处登记）+ 三个行为用例 |
 
 ### 本版本的安全审查结论（alpha.7 → alpha.8 delta）
@@ -1136,8 +1146,8 @@ squash 合入 main → `fba1f12`（CI run `35499346342`，`build` success）；t
 | 项 | 本版改的内容 | 发布说明里的位置 | 证据 |
 | --- | --- | --- | --- |
 | [#127](https://github.com/Su-luoya/pi-web-desktop/issues/127) `L-1` | 新增 `UpdateWarningText.oldVersionClaimText(detectedVersion:)`，四处「验证失败」日志行（Pi CLI、Pi Web、扩展包两条路径）改用三态措辞 | 摘要第 1 条、第 1 节 | `Sources/UpdateTransaction.swift`、`Sources/PiCLIUpdateAdapter.swift:1350`、`Sources/PiWebUpdateAdapter.swift:1726`、`Sources/PiPackageUpdateAdapter.swift:1598` 与 `:1860`；`PiWebDesktopTests/UpdateTransactionTests.swift` 的 `testOldVersionClaimFollowsTheDetectedVersionEvidence` |
-| [#127](https://github.com/Su-luoya/pi-web-desktop/issues/127) `L-3` | `openRegularFile(atPath:)` 对已打开句柄复核 `S_IFREG`，不满足即关闭并放弃 | 摘要第 2 条、第 2 节 | `Sources/UpdateVerifier.swift`；既有用例（符号链接到常规文件可读、FIFO 不可读）继续覆盖判定结果 |
-| [#127](https://github.com/Su-luoya/pi-web-desktop/issues/127) `L-4` | `completeLocked` 在结束流程里冲刷 stdout / stderr 增量解码器 | 摘要第 3 条、第 3 节 | `Sources/PiPackageUpdateAdapter.swift`；`PiWebDesktopTests/PiPackageUpdateAdapterTests.swift` 的 `testRealExecutorDrainGraceExpiryFlushesPendingDecoderBytes` |
+| [#127](https://github.com/Su-luoya/pi-web-desktop/issues/127) `L-3` | `openRegularFile(atPath:)` 对已打开句柄复核 `S_IFREG`，不满足即关闭并放弃 | 摘要第 2 条、第 2 节 | `Sources/Updates/UpdateVerifier.swift`；既有用例（符号链接到常规文件可读、FIFO 不可读）继续覆盖判定结果 |
+| [#127](https://github.com/Su-luoya/pi-web-desktop/issues/127) `L-4` | `completeLocked` 在结束流程里冲刷 stdout / stderr 增量解码器 | 摘要第 3 条、第 3 节 | `Sources/PiPackageUpdateAdapter.swift`；`PiWebDesktopTests/PiPackageUpdateFlowTests.swift` 的 `testRealExecutorDrainGraceExpiryFlushesPendingDecoderBytes` |
 | [#127](https://github.com/Su-luoya/pi-web-desktop/issues/127) `L-5` | 退出时「已放弃等待」的日志不再断言旧版本仍在原位 | 摘要第 4 条、第 4 节 | `Sources/PiWebApp.swift:1684`；退出日志的直接复核（`O-1` 之外的版本断言已消除） |
 
 ### 本版本的安全审查结论（alpha.8 → alpha.9 delta）
@@ -1215,7 +1225,7 @@ bump 与四份文档（发布说明、安全评审、本次执行记录、`docs/
 
 | 项 | 本版改的内容 | 发布说明里的位置 | 证据 |
 | --- | --- | --- | --- |
-| [#134](https://github.com/Su-luoya/pi-web-desktop/issues/134) | 新增「最近工作目录与快速切换」：`RecentWorkspaceStore`（UserDefaults 单键 `workspace.recentPaths`，最多 10 条、标准化路径去重、最近优先）与纯逻辑 `WorkspaceSwitchDecision`（绝对路径 + 存在/目录/可写校验）；服务菜单子菜单（含「在 Finder 中打开当前工作目录」与「清除历史记录」）；`application(_:open:)` 统一处理拖放 / `open -a` / 「打开方式」入口；切换写 `service.workspacePath` 并重启托管服务，外部进程服务不停止不重启；`CFBundleDocumentTypes`（`public.folder`、`Editor`）使拖放可用 | 摘要第 1–3 条、第 1–3 节 | `Sources/RecentWorkspace.swift`、`Sources/PiWebApp.swift`、`Sources/AppConfiguration.swift`、`Scripts/build.sh`、`PiWebDesktopTests/RecentWorkspaceTests.swift`（5 个用例） |
+| [#134](https://github.com/Su-luoya/pi-web-desktop/issues/134) | 新增「最近工作目录与快速切换」：`RecentWorkspaceStore`（UserDefaults 单键 `workspace.recentPaths`，最多 10 条、标准化路径去重、最近优先）与纯逻辑 `WorkspaceSwitchDecision`（绝对路径 + 存在/目录/可写校验）；服务菜单子菜单（含「在 Finder 中打开当前工作目录」与「清除历史记录」）；`application(_:open:)` 统一处理拖放 / `open -a` / 「打开方式」入口；切换写 `service.workspacePath` 并重启托管服务，外部进程服务不停止不重启；`CFBundleDocumentTypes`（`public.folder`、`Editor`）使拖放可用 | 摘要第 1–3 条、第 1–3 节 | `Sources/RecentWorkspace.swift`、`Sources/PiWebApp.swift`、`Sources/App/AppConfiguration.swift`、`Scripts/build.sh`、`PiWebDesktopTests/RecentWorkspaceTests.swift`（5 个用例） |
 | [#134](https://github.com/Su-luoya/pi-web-desktop/issues/134) 的文档同步 | `docs/settings-and-workspace.md` 新增功能节与 `CFBundleDocumentTypes` 代价；`docs/privacy.md` 补 `workspace.recentPaths`；`docs/architecture.md` 补组件与 UserDefaults 键；`README.md` 补菜单入口与拖放 | 第 4 节 | 同一提交内的四份文档改动（`git diff 21ce459..09f1264 -- docs/ README.md`） |
 | [#135](https://github.com/Su-luoya/pi-web-desktop/issues/135) | 评审的 `F1`–`F4`（重叠切换竞态、外部服务文案、open 事件处理、路径接受面加固）**不在本版修**，登记为后续迭代 | 「已知问题」第 1 小节 | `docs/security-review-alpha.10.md` 第 6 节；issue #135 |
 

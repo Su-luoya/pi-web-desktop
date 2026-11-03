@@ -1,9 +1,19 @@
 # v0.1.0-alpha.5 安全评审（delta，只读）
 
+<!-- 路径说明（#143） -->
+> **路径说明（#143 之后）**：本文写于 `03e06f5 refactor(sources): Sources 按领域分目录、大文件按职责拆分` 之前。
+> 能唯一对应的路径已就地改成当前路径（`Sources/*.swift` → `Sources/{App,Services,Diagnostics,Updates}/`，
+> `PiWebDesktopTests/*AdapterTests.swift` → `*UpdateFlowTests.swift`），但**行号仍是当时的**，不保证与今天的文件对齐。
+> 下列文件已按职责拆成多个文件（同名类型都还在），本文中它们的路径与行号只对应**当时**的位置：
+> `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+> `Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、`Sources/ProcessInspector.swift`。
+> 另外 `Sources/RecentWorkspace.swift`、`Sources/KeychainStore.swift`、`Sources/SystemProxyWarning.swift` 及其测试
+> 已在 #233 / #195 删除。
+
 - **审查对象**：`0.1.0-alpha.5` 相对 `0.1.0-alpha.4` 的改动，即 `git diff v0.1.0-alpha.4..838cb25`
   （12 个修复提交 + 1 个版本 bump 提交，共 55 个文件、+10547 / −1045 行）。本版**没有新增功能面**，
   全部改动是修复与加固，外加两份新文件：
-  `Sources/QuitCoordinator.swift`（286 行，全新）、`Sources/ToolPath.swift`（584 行，全新）
+  `Sources/App/QuitCoordinator.swift`（286 行，全新）、`Sources/Services/ToolPath.swift`（584 行，全新）
   与对应测试 `PiWebDesktopTests/QuitCoordinatorTests.swift`、`PiWebDesktopTests/ToolPathTests.swift`（1026 行）。
 - **基线**：`v0.1.0-alpha.4` → `838cb25`（`chore(release): v0.1.0-alpha.5 版本 bump 与发布说明`）。
   12 个修复提交（newest first）：`6821ecd`（#95 / PR #95）、`75b8e0d`（#94 / PR #94）、
@@ -50,7 +60,7 @@
 
 | 命令（针对本 delta 涉及的源码） | 结果 |
 | --- | --- |
-| `git grep -nE 'kill\(\|killpg\|SIGKILL\|posix_spawn\|Process\(\)' -- Sources/{QuitCoordinator,ToolPath,DiagnosticsCollector,LogWriter}.swift` | 5 个可执行命中：`Sources/DiagnosticsCollector.swift:178`（`Process()`）、`:221`（`kill(process.processIdentifier, SIGKILL)`）、`Sources/LogWriter.swift:767/813`（`posix_spawn` 启动 `/bin/cat` 排空进程）；`QuitCoordinator`/`ToolPath` **0 命中**。`Sources/ToolPath.swift:257` 命中 `/bin/sh`，但它是**登录 shell 候选路径列表的一项**（数据，不是命令字符串） |
+| `git grep -nE 'kill\(\|killpg\|SIGKILL\|posix_spawn\|Process\(\)' -- Sources/{QuitCoordinator,ToolPath,DiagnosticsCollector,LogWriter}.swift` | 5 个可执行命中：`Sources/Diagnostics/DiagnosticsCollector.swift:178`（`Process()`）、`:221`（`kill(process.processIdentifier, SIGKILL)`）、`Sources/Diagnostics/LogWriter.swift:767/813`（`posix_spawn` 启动 `/bin/cat` 排空进程）；`QuitCoordinator`/`ToolPath` **0 命中**。`Sources/Services/ToolPath.swift:257` 命中 `/bin/sh`，但它是**登录 shell 候选路径列表的一项**（数据，不是命令字符串） |
 | `git grep -nE 'moveItem\|copyItem\|removeItem\|unlink\(\|rmdir\|rename\(\|truncate\|write\(to:\|createFile' -- PiWeb/CLI/PackageUpdateAdapter + UpdateTransaction + UpdateVerifier + ToolPath + QuitCoordinator` | **0 命中**：这些文件不移动、不复制、不删除、不写任何被更新组件所在目录的文件 |
 | `git grep -n 'sudo' -- Sources/{ToolPath,QuitCoordinator,DiagnosticsCollector,LogWriter}.swift` | 0 命中 |
 
@@ -64,7 +74,7 @@
 
 ## 1. 本版变化摘要（按 delta 逐项，结论独立得出）
 
-1. **退出决策状态机（#72 / PR #76，新文件 `Sources/QuitCoordinator.swift`，286 行）**：状态机的
+1. **退出决策状态机（#72 / PR #76，新文件 `Sources/App/QuitCoordinator.swift`，286 行）**：状态机的
    AppKit 回复只有 `terminateNow` / `cancelPendingDecision` 两态（`QuitCoordinator.swift:26-38`），
    不存在 `.terminateLater`；用户入口（⌘Q / 菜单）与 AppKit 终止序列入口（Dock、注销/关机、
    `terminate:`）分成两条输入，决策前一律 `cancelPendingDecision`，决策后再由状态机产生
@@ -72,7 +82,7 @@
    （`QuitCoordinator.swift:100`），超时走 `decisionTimedOutKeepingServiceRunning`
    （保持服务运行并退出）。因此本版不存在「等待回复期间主队列不排水 / 漏回复导致退出悬空」这条路径。
 2. **更新检查结论现算（#74 / PR #77）**：新增 `UpdateVersionVerdict.status(installed:upstream:)`
-   （`Sources/UpdateChecker.swift:502`），由「当前本机版本 vs 上游版本」现场比较；缓存条目新增
+   （`Sources/Updates/UpdateChecker.swift:502`），由「当前本机版本 vs 上游版本」现场比较；缓存条目新增
    `installedVersion`（`:785`），schema 升到 2（`:835`）并兼容读 1（`:840`）；缓存里的 `status`
    字段不再作为可复用结论——缺 `installedVersion` 的旧条目或本机版本不可解析时统一降级为
    `unknown`（`cachedFallback`，`:1787-1830`，其中 `:1804` 的 `undecidable()` 是唯一出口）。
@@ -82,7 +92,7 @@
    `rejected` 计数；每次运行打印 `scan-secrets: suppressed N lines`，且被抑制的行本身也会以
    `scan-secrets: suppressed:` 前缀打印出来（保持可见）。`--self-test` 断言了规则命中、
    look-alike 不误报、抑制/拒绝计数与未跟踪门禁。
-4. **日志（#73 / PR #79，`Sources/LogWriter.swift` +665/−77）**：子进程 stdout/stderr 从
+4. **日志（#73 / PR #79，`Sources/Diagnostics/LogWriter.swift` +665/−77）**：子进程 stdout/stderr 从
    「直接写日志文件」改为**管道 + 应用侧串行 `O_APPEND` 写入**（`openChildOutput()` `:223`、
    `writerHandleOnQueue()` `:350`，`open(path, O_WRONLY|O_APPEND|O_CREAT|O_CLOEXEC, 0o644)`；
    句柄按 inode 校验，`:376`）。读端在专用串行队列上以 `DispatchSourceRead` + `O_NONBLOCK`
@@ -91,21 +101,21 @@
    管道与文件解耦。新增 `/bin/cat` 排空进程的移交（`:726`、`:756`，`POSIX_SPAWN_CLOEXEC_DEFAULT`
    + 空环境 + stdin=dup(读端) / stdout=stderr=/dev/null），只用于「退出但保持服务运行」。
 5. **设置窗口单例、诊断导出后台化、argv 遮罩（#81 / PR #87）**：设置窗口改为复用同一控制器，
-   每次展示前用 `update(configuration:)` 重置控件（`Sources/PreferencesWindowController.swift:209-220`）；
-   诊断导出改用 `TimeoutCommandRunner`（`Sources/DiagnosticsCollector.swift:159-160`：
+   每次展示前用 `update(configuration:)` 重置控件（`Sources/App/PreferencesWindowController.swift:209-220`）；
+   诊断导出改用 `TimeoutCommandRunner`（`Sources/Diagnostics/DiagnosticsCollector.swift:159-160`：
    3 s 超时 + 1 s 宽限，先 `terminate()` 后 `SIGKILL`，只对本次 `Process()` 启动的子进程）；
    外部监听进程的 argv 经 `maskedProcessDescription`（`:312`）交给更新路径同一套
    `PiProcessInspector.commandSummary`。
 6. **隐私遮罩与依赖探针（#82 / PR #85，#84 / PR #84）**：`ProcessInspector` 增加有界超时与取消
-   （`Sources/ProcessInspector.swift:198-200`，默认 10 s + 0.5 s 宽限；`cancelRunningProbe()`
+   （`Sources/Services/ProcessInspector.swift:198-200`，默认 10 s + 0.5 s 宽限；`cancelRunningProbe()`
    只终止本次启动的子进程）；`ServiceManager` 的启动/停止/退出回调全部加代次校验
-   （`lifecycleGeneration` / 会话预算，`Sources/ServiceManager.swift:897-1199`）。
+   （`lifecycleGeneration` / 会话预算，`Sources/Services/ServiceManager.swift:897-1199`）。
 7. **发布脚本加固（#83 / PR #86）**：`Scripts/package-release.sh` +490/−22 增加标签/资产名/
    build 号白名单与 **bundle 内容白名单**（`is_allowed_bundle_path`，拒绝白名单外的条目与
    `.DS_Store`/`._*`）；`Scripts/check-release-version.sh` +287/−44 把「MARKETING_VERSION →
    build 号」规则做成了带 `--self-test` 的断言。
 8. **CI 抖动（#88 / PR #90）**：只改测试的排空屏障，无生产代码变化（`3d10727` 仅触及测试）。
-9. **合并工具 PATH（#89 / PR #91，新文件 `Sources/ToolPath.swift`，584 行）**：PATH 的唯一来源，
+9. **合并工具 PATH（#89 / PR #91，新文件 `Sources/Services/ToolPath.swift`，584 行）**：PATH 的唯一来源，
    合并顺序为 应用 PATH → 登录 shell PATH → 已知目录 → node 目录 → `npm prefix -g` 的 bin
    （`ToolPathBuilder.directories()`，`ToolPath.swift:183-201`）；`probeEnvironment()`
    （`:215`）额外丢掉 `credentialKeyWords`（`:51-58`）命中的环境变量键。登录 shell 从
@@ -113,7 +123,7 @@
    `printf '__PI_WEB_TOOL_PATH__%s' "$PATH"`（`:283`，固定 argv 第三个元素，无字符串拼接），
    3 s 超时（`:285`），失败后再试一次交互式 `-ilc`；结果单次缓存。`DependencyChecker`、
    `ComponentInstallation` 的探测、三个更新子进程环境与 `ServiceManager` 的启动环境全部改为
-   复用它（`Sources/PiWebApp.swift:166-174`、`:221-226`；`Sources/ServiceManager.swift:149`），
+   复用它（`Sources/PiWebApp.swift:166-174`、`:221-226`；`Sources/Services/ServiceManager.swift:149`），
    原先写死 PATH 的 `fallbackPathDirectories` 被删除。
 10. **扩展包更新执行器每轮独立状态、结论不超出证据（#92 / PR #94）**：`PiPackageUpdateAdapter`
     增加 `running` 忙拒（`.executorBusy` / `.notAttempted`）、按身份登记的
@@ -121,7 +131,7 @@
     `UpdateTransaction` 新增 `UpdateRollbackEligibility.stateNotVerified`（`:364`），
     `installFailure` 不再声称「系统状态未改变」（`:496`），降级判定在缺内容哈希时**不再默认通过**
     （`:687-688` 改为 `?? false`，且两个元数据都缺失直接拒绝）；`UpdateVerifier.identityCheck`
-    不再把计划里的期望包名当作检测值（`Sources/UpdateVerifier.swift:438`）。
+    不再把计划里的期望包名当作检测值（`Sources/Updates/UpdateVerifier.swift:438`）。
 11. **应用自更新可重入与事务门控（#93 / PR #95）**：新增 `UpdateEntryState`
     （`Sources/PiWebUpdateAdapter.swift:30-59`）、安装器级 `abandonedChildrenInFlight`（`:981`）、
     重叠 install 整体拒绝并回终态（`:1069-1075`）、门控提升到整轮事务
@@ -133,16 +143,16 @@
 
 | 项 | 攻击面方向 | 依据 |
 | --- | --- | --- |
-| 1 退出状态机 | 中性偏好：不再有「无人回复 → 终止序列永久悬空」这条可用性面，新增 5 分钟上限 | `Sources/QuitCoordinator.swift:26-38`、`:100` |
-| 2 结论现算 | **收窄**：本机缓存不能再决定「有新版本」结论，旧缓存降级为不可判定 | `Sources/UpdateChecker.swift:502`、`:835-840`、`:1787-1830` |
+| 1 退出状态机 | 中性偏好：不再有「无人回复 → 终止序列永久悬空」这条可用性面，新增 5 分钟上限 | `Sources/App/QuitCoordinator.swift:26-38`、`:100` |
+| 2 结论现算 | **收窄**：本机缓存不能再决定「有新版本」结论，旧缓存降级为不可判定 | `Sources/Updates/UpdateChecker.swift:502`、`:835-840`、`:1787-1830` |
 | 3 秘密扫描 | **收窄（门禁）**：不再有文件/目录/pathspec 级豁免；裸标记不再静默抑制 | `Scripts/scan-secrets.sh:110-121` |
-| 4 日志管道 | **收窄**：子进程输出不再有「轮转写旧 inode / 丢日志」面；新增管道读端、背压与 `/bin/cat` 排空进程（有界约 4 MB） | `Sources/LogWriter.swift:120-125`、`:611-720`、`:726-813` |
-| 5 设置窗口/诊断导出 | **收窄**：外部进程 argv 走同一套遮罩；探针 3 s 有界且只杀自己启动的子进程 | `Sources/DiagnosticsCollector.swift:159-160`、`:312-318`；`Sources/PreferencesWindowController.swift:209-220` |
-| 6 探针超时/取消、服务状态机 | **收窄**：探针不再无限等待、可取消；回调加代次校验与会话预算 | `Sources/ProcessInspector.swift:198-200`、`:292-296`；`Sources/ServiceManager.swift:897-1199` |
+| 4 日志管道 | **收窄**：子进程输出不再有「轮转写旧 inode / 丢日志」面；新增管道读端、背压与 `/bin/cat` 排空进程（有界约 4 MB） | `Sources/Diagnostics/LogWriter.swift:120-125`、`:611-720`、`:726-813` |
+| 5 设置窗口/诊断导出 | **收窄**：外部进程 argv 走同一套遮罩；探针 3 s 有界且只杀自己启动的子进程 | `Sources/Diagnostics/DiagnosticsCollector.swift:159-160`、`:312-318`；`Sources/App/PreferencesWindowController.swift:209-220` |
+| 6 探针超时/取消、服务状态机 | **收窄**：探针不再无限等待、可取消；回调加代次校验与会话预算 | `Sources/Services/ProcessInspector.swift:198-200`、`:292-296`；`Sources/Services/ServiceManager.swift:897-1199` |
 | 7 发布脚本 | **收窄**：bundle 内容白名单 + 标签/build 号断言（本轮未执行打包） | `Scripts/package-release.sh`、`Scripts/check-release-version.sh` |
 | 8 CI 抖动 | 无（测试专用提交） | `3d10727` |
-| 9 合并工具 PATH | **扩大**：更新子进程与探测的 PATH 新增多个**用户可写**目录，npm 解析按 PATH 顺序取首个可执行文件；新增一次性登录 shell 子进程 | `Sources/ToolPath.swift:23-45`、`:183-201`、`:421-446`；见 L-1、L-7、M-1 |
-| 10 扩展包执行器 | **收窄**：忙拒 + 每轮独立状态；身份与回滚结论不再超出证据 | `Sources/PiPackageUpdateAdapter.swift:237`、`:370-399`；`Sources/UpdateTransaction.swift:364`、`:687-688`；`Sources/UpdateVerifier.swift:438` |
+| 9 合并工具 PATH | **扩大**：更新子进程与探测的 PATH 新增多个**用户可写**目录，npm 解析按 PATH 顺序取首个可执行文件；新增一次性登录 shell 子进程 | `Sources/Services/ToolPath.swift:23-45`、`:183-201`、`:421-446`；见 L-1、L-7、M-1 |
+| 10 扩展包执行器 | **收窄**：忙拒 + 每轮独立状态；身份与回滚结论不再超出证据 | `Sources/PiPackageUpdateAdapter.swift:237`、`:370-399`；`Sources/UpdateTransaction.swift:364`、`:687-688`；`Sources/Updates/UpdateVerifier.swift:438` |
 | 11 应用自更新门控 | **收窄（同一应用运行内）**：整轮事务门控、拒绝也有终态回调；跨重启仍只有持久记录（L-3） | `Sources/PiWebUpdateAdapter.swift:30-59`、`:1069-1075`、`:1460` |
 | 12 版本 bump | 无功能变化（校验链见信息 I-2） | `Configuration/AppIdentity.xcconfig` |
 
@@ -166,13 +176,13 @@ E 误操作的用户）。
 | --- | --- | --- | --- |
 | B1 | 存在「来源不可信（非 `verified`）仍会自动安装/自动执行」的路径 | 未触发 | 自动安装仍要求 `source == .npmGlobal && confidence == .verified`（`Sources/PiWebUpdateAdapter.swift:407-414`）与本次网络结论 `targetOrigin`（默认 `.unavailable`，`:388-392`）；#89 只把 PATH 换成合并结果，没有放宽这三条前置 |
 | B2 | 存在无人值守的扩展包更新路径 | 未触发 | `PiPackageUpdatePlan.allowsUnattendedExecution = false`（`Sources/PiPackageUpdateAdapter.swift:377`），`isAutomaticallyExecutable` 恒等于它（`:399`）；#94 追加忙拒（`.executorBusy`，`:237`、`:281`）只会更严 |
-| B3 | 更新命令经 shell 字符串执行、调用 `sudo`、或 argv 元素来自未校验的外部文本 | 未触发 | 负向 grep 在 `Sources/{ToolPath,QuitCoordinator,DiagnosticsCollector,LogWriter}.swift` 无 `sudo` 命中；登录 shell 查询是固定 argv `[shell, "-lc", "printf '__PI_WEB_TOOL_PATH__%s' \"$PATH\""]`（`Sources/ToolPath.swift:283`），PATH 值不参与构造；更新 argv 仍受字符集与 `forbiddenTokens` 限制（`Sources/PiWebUpdateAdapter.swift:160-176`） |
-| B4 | 任一更新路径向非自己启动的进程或进程组发送信号 | 未触发 | 更新路径的信号点未变（`Sources/PiWebUpdateAdapter.swift:1156-1172`：`usesOwnProcessGroup && group == pid && pid > 1` 三个前置 + `didSignalOwnProcessGroup` 至多一次）；本版新增的唯一信号点是 `Sources/DiagnosticsCollector.swift:221` 的 `kill(process.processIdentifier, SIGKILL)`，作用于同函数 `:178` 刚启动的 `Process()`（Foundation 自己回收该 pid，因此不是 alpha.4 N-4 那种 `posix_spawn` + 自行 `waitpid` 的时序窗口） |
-| B5 | 凭据/秘密进入日志、诊断、更新历史或 UserDefaults | 未触发 | 写入前逐行 `redactor.redact`（`Sources/LogWriter.swift:196`、`:700`）；探测环境显式丢掉凭据键（`Sources/ToolPath.swift:51-58`、`:215`）；诊断导出复用 `PiProcessInspector.commandSummary`（`Sources/DiagnosticsCollector.swift:312-318`）；`scan-secrets.sh` 与其 `--self-test` 在包含本报告的工作区 PASS（§0.1） |
-| B6 | 更新检查发出非白名单主机请求、携带 cookie/Authorization 或跟随重定向 | 未触发 | 本 delta 未触碰请求层（`UpdateRequest.sanitized()` 与拒绝重定向逻辑不在 diff 内）；#77 只改「结论怎么算」与缓存校验（`Sources/UpdateChecker.swift:502`、`:835-840`、`:988`） |
-| B7 | 用户可见文案把「验证」说成「已确认代码签名 / 官方来源 / 可完整回滚」 | 未触发，且本版更严 | 安装失败文案删除了「系统状态未改变」的断言（`Sources/UpdateTransaction.swift:726-732`），降级资格新增 `.stateNotVerified`（`:364`、`:496-513`）；身份核对不再把计划里的期望包名当作检测值（`Sources/UpdateVerifier.swift:438`） |
-| B8 | 回滚/降级路径移动、复制、删除文件，或卸载已安装组件 | 未触发 | 对更新事务相关文件（含本版新增的 `Sources/ToolPath.swift`、`Sources/QuitCoordinator.swift`）的负向 grep **0 命中**（§0.2） |
-| B9 | 存在「向本次启动之外的进程/进程组发信号」的常规路径，或新增的持久状态能在无人值守时执行代码 | 未触发 | 信号边界见 B4；本版**没有新增持久键**（#94/#95 的新状态都在内存里：`Sources/PiWebUpdateAdapter.swift:981`、`:1391`，`Sources/PiPackageUpdateAdapter.swift` 的 `abandonedProcesses`）；`Sources/ToolPath.swift` 只产出 PATH 与子进程环境，不含执行或写入动作 |
+| B3 | 更新命令经 shell 字符串执行、调用 `sudo`、或 argv 元素来自未校验的外部文本 | 未触发 | 负向 grep 在 `Sources/{ToolPath,QuitCoordinator,DiagnosticsCollector,LogWriter}.swift` 无 `sudo` 命中；登录 shell 查询是固定 argv `[shell, "-lc", "printf '__PI_WEB_TOOL_PATH__%s' \"$PATH\""]`（`Sources/Services/ToolPath.swift:283`），PATH 值不参与构造；更新 argv 仍受字符集与 `forbiddenTokens` 限制（`Sources/PiWebUpdateAdapter.swift:160-176`） |
+| B4 | 任一更新路径向非自己启动的进程或进程组发送信号 | 未触发 | 更新路径的信号点未变（`Sources/PiWebUpdateAdapter.swift:1156-1172`：`usesOwnProcessGroup && group == pid && pid > 1` 三个前置 + `didSignalOwnProcessGroup` 至多一次）；本版新增的唯一信号点是 `Sources/Diagnostics/DiagnosticsCollector.swift:221` 的 `kill(process.processIdentifier, SIGKILL)`，作用于同函数 `:178` 刚启动的 `Process()`（Foundation 自己回收该 pid，因此不是 alpha.4 N-4 那种 `posix_spawn` + 自行 `waitpid` 的时序窗口） |
+| B5 | 凭据/秘密进入日志、诊断、更新历史或 UserDefaults | 未触发 | 写入前逐行 `redactor.redact`（`Sources/Diagnostics/LogWriter.swift:196`、`:700`）；探测环境显式丢掉凭据键（`Sources/Services/ToolPath.swift:51-58`、`:215`）；诊断导出复用 `PiProcessInspector.commandSummary`（`Sources/Diagnostics/DiagnosticsCollector.swift:312-318`）；`scan-secrets.sh` 与其 `--self-test` 在包含本报告的工作区 PASS（§0.1） |
+| B6 | 更新检查发出非白名单主机请求、携带 cookie/Authorization 或跟随重定向 | 未触发 | 本 delta 未触碰请求层（`UpdateRequest.sanitized()` 与拒绝重定向逻辑不在 diff 内）；#77 只改「结论怎么算」与缓存校验（`Sources/Updates/UpdateChecker.swift:502`、`:835-840`、`:988`） |
+| B7 | 用户可见文案把「验证」说成「已确认代码签名 / 官方来源 / 可完整回滚」 | 未触发，且本版更严 | 安装失败文案删除了「系统状态未改变」的断言（`Sources/UpdateTransaction.swift:726-732`），降级资格新增 `.stateNotVerified`（`:364`、`:496-513`）；身份核对不再把计划里的期望包名当作检测值（`Sources/Updates/UpdateVerifier.swift:438`） |
+| B8 | 回滚/降级路径移动、复制、删除文件，或卸载已安装组件 | 未触发 | 对更新事务相关文件（含本版新增的 `Sources/Services/ToolPath.swift`、`Sources/App/QuitCoordinator.swift`）的负向 grep **0 命中**（§0.2） |
+| B9 | 存在「向本次启动之外的进程/进程组发信号」的常规路径，或新增的持久状态能在无人值守时执行代码 | 未触发 | 信号边界见 B4；本版**没有新增持久键**（#94/#95 的新状态都在内存里：`Sources/PiWebUpdateAdapter.swift:981`、`:1391`，`Sources/PiPackageUpdateAdapter.swift` 的 `abandonedProcesses`）；`Sources/Services/ToolPath.swift` 只产出 PATH 与子进程环境，不含执行或写入动作 |
 
 **结论的边界**：以上是**静态**判定（读代码 + 只读门禁 + 负向 grep），不覆盖 §5 的未验证项，
 **不构成发布批准**；CI 全绿、真机 smoke、checksum 与 prerelease 标记等仍按
@@ -192,7 +202,7 @@ E 误操作的用户）。
 
 **无高严重性发现。** 判定依据（不是「没找到」而是「有正面理由」）：
 
-- 本版没有新增攻击者可达的**跨权限**动作：所有新代码（`Sources/ToolPath.swift`、`Sources/QuitCoordinator.swift`、
+- 本版没有新增攻击者可达的**跨权限**动作：所有新代码（`Sources/Services/ToolPath.swift`、`Sources/App/QuitCoordinator.swift`、
   `LogWriter` 的管道与排空进程、诊断探针）都以当前用户身份运行，没有提权、没有 setuid、没有以 root
   执行、没有修改系统目录（负向 grep 见 §0.2）。
 - 所有信号发送都指向本应用自己启动的子进程（B4 的依据）；没有任何按名字杀进程或对任意 PID 发信号的路径。
@@ -207,19 +217,19 @@ E 误操作的用户）。
 #### M-1（中，可用性）启动路径上有界但可长达约 26 秒的**主线程**同步阻塞
 
 - **位置**：`Sources/PiWebApp.swift:166-174`（`AppDelegate.init` 内构造 `ToolPathProvider`
-  并立即调用 `probeEnvironment()`）→ `Sources/ToolPath.swift:546`（`resolveLocked()`）→
+  并立即调用 `probeEnvironment()`）→ `Sources/Services/ToolPath.swift:546`（`resolveLocked()`）→
   `:421-446`（`nodePathResolver`：`/usr/bin/env node -p process.execPath`；`npmPrefixResolver`：
   `/usr/bin/env npm prefix -g`）与 `:323-341`（登录 shell 查询，含 `-ilc` 交互式回退）。
-- **描述**：`AppDelegate` 在 `Sources/main.swift:4` 于主线程构造；构造过程中就会解析 PATH 的
+- **描述**：`AppDelegate` 在 `Sources/App/main.swift:4` 于主线程构造；构造过程中就会解析 PATH 的
   全部输入，其中包含 4 次有界子进程等待：登录 shell `-lc`（3 s）+ 交互式回退 `-ilc`（3 s）+
-  `npm prefix -g`（`SystemCommandRunner.defaultTimeout = 10`，`Sources/ProcessInspector.swift:198`）
+  `npm prefix -g`（`SystemCommandRunner.defaultTimeout = 10`，`Sources/Services/ProcessInspector.swift:198`）
   + `/usr/bin/env node -p process.execPath`（同上 10 s）。单次启动最坏约 **26 秒**主线程不返回。
 - **证据**：`Sources/PiWebApp.swift:166-172` 用 `ProcessInfo.processInfo.environment` +
   `NSHomeDirectory()` + 注入的 `commandRunner` 构造 provider，紧接 `:174` 调用
-  `toolPathProvider.probeEnvironment()`；`probeEnvironment()`（`Sources/ToolPath.swift:492`）
+  `toolPathProvider.probeEnvironment()`；`probeEnvironment()`（`Sources/Services/ToolPath.swift:492`）
   → `builder()` → `resolveLocked()`，两个解析器各自最多一次；`LoginShellPathQuery` 的超时是
   3 s（`:285`），交互式回退在上一次拿不到值时再执行一次（`:323-341`，注释自陈「交互式 rc 可能有副作用、
-  可能很慢」）；`SystemCommandRunner` 的默认 10 s 见 `Sources/ProcessInspector.swift:198`
+  可能很慢」）；`SystemCommandRunner` 的默认 10 s 见 `Sources/Services/ProcessInspector.swift:198`
   （超时后 `terminate()`，0.5 s 宽限后 `forceTerminate()`，`:200`）。
 - **触发条件（推测，未实测）**：用户的登录 shell rc 有阻塞（例如 `read`、等待网络挂载、慢的
   `nvm`/`conda` 初始化、`mise` 下载），或 `npm prefix -g`/`node` 位于已卸载的网络卷。此时应用
@@ -237,7 +247,7 @@ E 误操作的用户）。
 
 #### L-1（低，同一用户对手）合并 PATH 让更新子进程多了一批用户可写搜索目录，npm 解析取 PATH 首个可执行文件
 
-- **位置**：`Sources/ToolPath.swift:23-45`（`knownAbsoluteDirectories` / `knownHomeRelativeDirectories` /
+- **位置**：`Sources/Services/ToolPath.swift:23-45`（`knownAbsoluteDirectories` / `knownHomeRelativeDirectories` /
   `systemDirectories`）、`:183-201`（合并顺序）、`:124-144`（候选目录）、`:421-446`（node/npm 解析）；
   `Sources/PiWebUpdateAdapter.swift:203-211`（更新子进程 PATH）、`:550-573`（`PiWebUpdateNPMResolver`
   的候选与 `resolve`）。
@@ -269,17 +279,17 @@ E 误操作的用户）。
 #### L-2（低，可靠性/状态）应用退出时更新子进程的 stdout/stderr 读端不移交
 
 - **位置**：`Sources/PiWebUpdateAdapter.swift:1228-1240`（`finishLocked` 保留读端）、`:1266`
-  （`drainOutput`）、`:981`（`abandonedChildrenInFlight`）；`Sources/LogWriter.swift:726-756`（唯一的
-  移交实现）；`Sources/ServiceManager.swift:1373`（唯一的移交调用点）。
+  （`drainOutput`）、`:981`（`abandonedChildrenInFlight`）；`Sources/Diagnostics/LogWriter.swift:726-756`（唯一的
+  移交实现）；`Sources/Services/ServiceManager.swift:1373`（唯一的移交调用点）。
 - **描述**：#95 解决了「放弃等待后立刻关闭读端 → 子进程下一次写 stdout 收到 SIGPIPE/EPIPE」，
   但那只覆盖**同一次应用运行内**的放弃等待。应用**退出**时，更新子进程的 stdout/stderr 写端仍然
   只有应用进程持有读端（`handle.outputDescriptor` → `attempt.outputHandle`），退出即关闭。
   下一次写入会让子进程收到 `EPIPE`（Node 把它变成 `process.stdout` 的 `error` 事件）或 `SIGPIPE`，
   可能让正在执行的 `npm install -g …` 中途死掉。
 - **证据**：`handOffChildOutputToDrainer()` 是唯一的「把读端交给 `/bin/cat` 继续排空」实现，
-  全仓库只有一个调用点（`git grep -n handOffChildOutputToDrainer` → `Sources/LogWriter.swift:726`
-  定义、`Sources/ServiceManager.swift:1373` 调用），且它服务于**托管服务**的输出管道（注释自陈用途是
-  「退出但保持服务运行」）。退出协调器（`Sources/QuitCoordinator.swift`）与
+  全仓库只有一个调用点（`git grep -n handOffChildOutputToDrainer` → `Sources/Diagnostics/LogWriter.swift:726`
+  定义、`Sources/Services/ServiceManager.swift:1373` 调用），且它服务于**托管服务**的输出管道（注释自陈用途是
+  「退出但保持服务运行」）。退出协调器（`Sources/App/QuitCoordinator.swift`）与
   `applicationShouldTerminate`（`Sources/PiWebApp.swift:464`）里没有「更新进行中」这个输入：
   `isUpdateInProgress` 只出现在菜单/手动入口的门控读取点（`Sources/PiWebApp.swift:1386`、`:1426`、
   `:1593`、`:1647`）。
@@ -319,9 +329,9 @@ E 误操作的用户）。
 
 #### L-4（低，证据强度）诊断与外部进程信息的遮罩是模式化的；导出内容含本机路径
 
-- **位置**：`Sources/DiagnosticsCollector.swift:312-318`（`maskedProcessDescription` 交给
+- **位置**：`Sources/Diagnostics/DiagnosticsCollector.swift:312-318`（`maskedProcessDescription` 交给
   `PiProcessInspector.commandSummary`）、`:277-300`（采集字段）、`:159-160`、`:213-224`（超时与终止）；
-  `Sources/PiProcessInspector.swift:783-840`（凭据前缀/不透明串规则）、`:935`（`commandSummary`）。
+  `Sources/Services/PiProcessInspector.swift:783-840`（凭据前缀/不透明串规则）、`:935`（`commandSummary`）。
 - **描述**：诊断导出把外部监听进程的 argv 按空白切分后交给与更新路径相同的遮罩
   （token 级凭据前缀、长不透明串、`LogRedactor`、长度上限），因此**没有已知前缀**、短于 32 字符的
   自由文本参数会被保留；导出内容仍包含本机路径（应用/服务/日志路径、版本、端口等）——
@@ -364,14 +374,14 @@ E 误操作的用户）。
 
 #### L-6（低，可用性）退出决策的 5 分钟兜底在无人值守场景会推迟注销/关机并保持服务运行
 
-- **位置**：`Sources/QuitCoordinator.swift:100`（`defaultDecisionTimeout = 5 * 60`）、
+- **位置**：`Sources/App/QuitCoordinator.swift:100`（`defaultDecisionTimeout = 5 * 60`）、
   `Sources/PiWebApp.swift:532-534`（计时器）、`:579`（超时日志文案）、`:464-471`
   （`applicationShouldTerminate` 的回复）。
 - **描述**：当退出行为要求用户确认时，AppKit 终止序列会先被 `cancelPendingDecision` 取消，
   由状态机异步弹窗等待；等待上限 5 分钟，超时按「保持服务运行并退出」处理。注销/关机等
   无人值守场景下，最坏会推迟 5 分钟，并且托管服务按设计**保持运行**（释放给系统继续运行）。
 - **证据**：`QuitTerminationReply` 只有 `terminateNow` / `cancelPendingDecision`
-  （`Sources/QuitCoordinator.swift:26-38`）；`appKitTermination` 在 `waitingForUserDecision` /
+  （`Sources/App/QuitCoordinator.swift:26-38`）；`appKitTermination` 在 `waitingForUserDecision` /
   `stoppingManagedService` 阶段返回 `cancelPendingDecision`（同文件「AppKit 终止序列入口」一节）；
   超时事件产出 `decisionTimedOutKeepingServiceRunning`；日志文案在 `Sources/PiWebApp.swift:579`。
 - **当前缓解**：超时有界且行为是「最安全」的一种（不静默停服务、不无限挂起）；决策完成后重新发起
@@ -383,7 +393,7 @@ E 误操作的用户）。
 
 #### L-7（低，信息一致性）登录 shell 查询子进程继承应用环境（与探测环境的「去凭据」策略不一致）
 
-- **位置**：`Sources/ToolPath.swift:286-341`（`LoginShellPathQuery`：`runner` / `environment` 的解析与使用）、
+- **位置**：`Sources/Services/ToolPath.swift:286-341`（`LoginShellPathQuery`：`runner` / `environment` 的解析与使用）、
   `:385-400`（`ToolPathProvider.init` 里 `LoginShellPathQuery(runner: commandRunner, environment: environment, …)`
   与 `self.environment = environment ?? system?.environment ?? ProcessInfo.processInfo.environment`）、
   `:215-222`（`probeEnvironment()` 才丢凭据键）、`Sources/PiWebApp.swift:166-172`（生产用的是默认
@@ -437,18 +447,18 @@ E 误操作的用户）。
 | --- | --- | --- | --- |
 | **N-1** 未记录内容哈希时降级仍可用 size/mtime 通过 | 低（元数据回退） | **部分缓解** | #94 把「没记录的字段一律算未验证」写进判定：`fingerprint.fileSize.map { … } ?? false`、`mtimeMatches … ?? false`（`Sources/UpdateTransaction.swift:687-688`），两个元数据都缺失时直接返回 `cannotAutomaticallyRollback`/`.evidenceChangedOrMissing`（同函数上方的 `guard fingerprint.fileSize != nil || fingerprint.modifiedAt != nil`，`:679-686`）。**仍然残留**：只要 size 与 mtime **都记录过且都一致**，旧文件内容仍不被校验（`contentHashVerified == false` 分支继续走元数据比对），这与 alpha.4 N-1 的描述一致 |
 | **N-2** 「已放弃」重叠防护是记账式的、不检测进程存活 | 低 | **部分缓解** | #95 在同一应用运行内把「已放弃但退出未确认」做成硬门闩：`abandonedChildrenInFlight`（`Sources/PiWebUpdateAdapter.swift:981`）→ `startLocked` 整体拒绝（`:1069-1075`）→ 只有 `childExitedLocked`/`settleAbandonedChildLocked` 才结清（`:1201-1213`）；`UpdateEntryState.component(…:abandonedChildrenUnconfirmed:)` 把「重启应用可恢复」写进菜单文案（`:41-59`）。**仍然残留**：跨重启只有持久记录 + 用户确认，记录里仍不判断被放弃的进程是否还活着（本报告 L-3） |
-| **N-3** npm `integrity` 是展示用附加证据、来自本机可改写文件 | 低 | **仍存在** | 本版没有触碰 `UpdateArtifactProbe.readNpmIntegrity` / `npmIntegrity`：`git diff v0.1.0-alpha.4..838cb25 -- Sources/UpdateVerifier.swift` 只有 `identityCheck` 的一处改动（+6/−1），`evaluateRollbackEvidence` 的通过条件里仍没有它 |
+| **N-3** npm `integrity` 是展示用附加证据、来自本机可改写文件 | 低 | **仍存在** | 本版没有触碰 `UpdateArtifactProbe.readNpmIntegrity` / `npmIntegrity`：`git diff v0.1.0-alpha.4..838cb25 -- Sources/Updates/UpdateVerifier.swift` 只有 `identityCheck` 的一处改动（+6/−1），`evaluateRollbackEvidence` 的通过条件里仍没有它 |
 | **N-4** 进程组终止与 `waitpid` 回收之间的窄窗口（理论 PID 复用） | 低（分析结论） | **仍存在** | `stopWaitingLocked`（`Sources/PiWebUpdateAdapter.swift:1144-1155`）→ `terminateOwnProcessGroupLocked`（`:1156-1172`）的调用顺序与前置条件未变，`waitQueue` 回收与 `stateQueue` 超时处理仍是两个队列；#95 只增加了「拒绝第二次安装」的计数，没有把「已回收」状态并入发信号判定 |
-| **N-5** 缓存回退仍可被同用户改写以影响提示文案 | 低 | **部分缓解** | #77 让**结论**不能再沿用缓存：schema 2 + `installedVersion` 字段（`Sources/UpdateChecker.swift:785`、`:835-840`），缺字段/本机版本不可解析 → `undecidable()` → `unknown`（`:1804-1830`），且结论由 `UpdateVersionVerdict.status(installed:upstream:)`（`:502-511`）现算。**仍然残留**：缓存里的 `latestVersion` 仍是本机可写字段，同用户仍可让界面显示一个伪造的上游版本**提示**（不再能改变 `updateAvailable` 结论、也不参与自动安装；自动路径仍要求 `origin == .network`） |
-| **N-6** 「已放弃」记录可被同用户写入，阻断自动更新并展示 ≤200 字符自定义文本 | 低 | **仍存在** | `Sources/UpdateAbandonedAttempt.swift` 在本版 diff 里没有改动（`git diff --stat` 未列出该文件）；写入/读回校验、展示路径与自动路径拒绝逻辑沿用 alpha.4 |
+| **N-5** 缓存回退仍可被同用户改写以影响提示文案 | 低 | **部分缓解** | #77 让**结论**不能再沿用缓存：schema 2 + `installedVersion` 字段（`Sources/Updates/UpdateChecker.swift:785`、`:835-840`），缺字段/本机版本不可解析 → `undecidable()` → `unknown`（`:1804-1830`），且结论由 `UpdateVersionVerdict.status(installed:upstream:)`（`:502-511`）现算。**仍然残留**：缓存里的 `latestVersion` 仍是本机可写字段，同用户仍可让界面显示一个伪造的上游版本**提示**（不再能改变 `updateAvailable` 结论、也不参与自动安装；自动路径仍要求 `origin == .network`） |
+| **N-6** 「已放弃」记录可被同用户写入，阻断自动更新并展示 ≤200 字符自定义文本 | 低 | **仍存在** | `Sources/Updates/UpdateAbandonedAttempt.swift` 在本版 diff 里没有改动（`git diff --stat` 未列出该文件）；写入/读回校验、展示路径与自动路径拒绝逻辑沿用 alpha.4 |
 | **A-2** 自动安装不传 `--ignore-scripts` 且继承 `HOME` | 低—中（接受） | **仍存在（按现状接受）** | `PiWebUpdateLifecycleScriptPolicy.passesIgnoreScripts = false`（`Sources/PiWebUpdateAdapter.swift:241-243`）；更新子进程白名单键不变（`allowedKeys`，`:184`），不注入任何 `npm_config_*`；本版把 PATH 换成合并结果（`:203-211`），脚本执行语义未变 |
-| **A-3** 「更新后验证」不等于「来源可信」 | 低—中 | **部分缓解（本版更严）** | 安装失败文案不再声称「系统状态未改变」（`Sources/UpdateTransaction.swift:726-732`），资格改为 `.stateNotVerified`（`:364`）；身份核对不再用计划里的期望包名当检测值（`Sources/UpdateVerifier.swift:438`）。来源仍然不可证明（本应用没有签名/公证能力，见 §5） |
+| **A-3** 「更新后验证」不等于「来源可信」 | 低—中 | **部分缓解（本版更严）** | 安装失败文案不再声称「系统状态未改变」（`Sources/UpdateTransaction.swift:726-732`），资格改为 `.stateNotVerified`（`:364`）；身份核对不再用计划里的期望包名当检测值（`Sources/Updates/UpdateVerifier.swift:438`）。来源仍然不可证明（本应用没有签名/公证能力，见 §5） |
 | **A-4** 降级判定依据可被同用户伪造（size/mtime） | 低 | **部分缓解** | 同 N-1：缺元数据不再默认通过（`Sources/UpdateTransaction.swift:679-688`）；记录了内容哈希时哈希是唯一依据（alpha.4 已生效，本版未改）。未记录内容哈希时仍走元数据 |
-| **A-5** 进程保护读取 argv 的面与遮罩边界 | 低 | **部分缓解（遮罩侧加严）** | #85 补齐短开关形态、非绝对路径判 `unknown`、探针超时与取消；诊断导出改为复用同一套遮罩（`Sources/DiagnosticsCollector.swift:312-318`）；遮罩规则 `secretValuePrefixes` / `isOpaqueSecretToken` / `maskSensitiveTokens`（`Sources/PiProcessInspector.swift:783-840`）。**仍然残留**：遮罩是模式化的，短于阈值且无已知前缀的自由文本会保留（本报告 L-4） |
+| **A-5** 进程保护读取 argv 的面与遮罩边界 | 低 | **部分缓解（遮罩侧加严）** | #85 补齐短开关形态、非绝对路径判 `unknown`、探针超时与取消；诊断导出改为复用同一套遮罩（`Sources/Diagnostics/DiagnosticsCollector.swift:312-318`）；遮罩规则 `secretValuePrefixes` / `isOpaqueSecretToken` / `maskSensitiveTokens`（`Sources/Services/PiProcessInspector.swift:783-840`）。**仍然残留**：遮罩是模式化的，短于阈值且无已知前缀的自由文本会保留（本报告 L-4） |
 | **A-6** #20 的超时终止不覆盖派生子进程 | 低 | **仍存在** | 仍是「独立进程组 + 一次 `SIGTERM`」（`Sources/PiWebUpdateAdapter.swift:1156-1172`），没有 `SIGKILL`、不确认派生进程结束；N-4 的时序窗口一并保留 |
 | **A-7** #21/#22 被放弃的命令可能继续运行并重叠 | 低 | **部分缓解** | 同 N-2 的运行内门闩；跨重启 + 手动入口仍可能重叠（L-3） |
 | **A-8** #21 手动入口有意不做进程门控 | 低（设计取舍） | **仍存在（按现状接受）** | 手动路径仍不做进程门控；本版只把手动入口纳入整轮事务门控（`Sources/PiWebUpdateAdapter.swift:1460` 的 `guard !isUpdateInProgress`），确认框行为未变 |
-| **A-9** 本地持久状态可被同用户读写、依赖模式化脱敏 | 低 | **仍存在** | 本版未新增持久键（§2 B9）；`Sources/ToolPath.swift` 只产出 PATH；新增的内存状态（`transactionInFlight`、`abandonedChildrenInFlight`、`abandonedProcesses`）不落盘；模式化脱敏的边界仍由 L-4 承担 |
+| **A-9** 本地持久状态可被同用户读写、依赖模式化脱敏 | 低 | **仍存在** | 本版未新增持久键（§2 B9）；`Sources/Services/ToolPath.swift` 只产出 PATH；新增的内存状态（`transactionInFlight`、`abandonedChildrenInFlight`、`abandonedProcesses`）不落盘；模式化脱敏的边界仍由 L-4 承担 |
 | **A-1** 缓存可影响自动更新的目标版本 | 低 | **已闭环（维持）** | 本版进一步收窄结论来源（N-5 的 `UpdateVersionVerdict`），自动安装的 `origin == .network` 硬前置未变 |
 | **F1** 内容哈希不可得时收紧降级判定 | 建议 | **已处理（部分）** | 即 #94 的 B-7 改动（`:679-688`）；「两者都缺 → 拒绝」这一半已落地，「只有 size+mtime 时是否还叫已降级」这一半未改 |
 | **F2** 让「已放弃」防护判断进程存活 / 清除时更强确认 | 建议 | **未处理** | 记录字段与判定链未变（L-3） |
@@ -500,11 +510,11 @@ E 误操作的用户）。
 ### 5.3 与发布说明 / PR 正文的一致性核对（我实际核对到的事实）
 
 - **一致**：发布说明里关于「退出不再返回 `.terminateLater`」的说法与
-  `Sources/QuitCoordinator.swift:26-38` 的两种回复一致；关于「放弃等待不关闭读端」的说法与
+  `Sources/App/QuitCoordinator.swift:26-38` 的两种回复一致；关于「放弃等待不关闭读端」的说法与
   `Sources/PiWebUpdateAdapter.swift:1228-1240` 的注释与实现一致；关于「菜单文案只有 Pi Web/Pi CLI 有
   重启可恢复提示」的说法与 `Sources/PiWebApp.swift:1386`、`:1426`、`:1593`、`:1647` 的门控读取点一致
   （扩展包入口走 `PiPackageUpdateRefusal`）；关于「PATH 三处共用」的说法与
-  `Sources/PiWebApp.swift:166-174`、`:221-226`、`Sources/ServiceManager.swift:149` 一致。
+  `Sources/PiWebApp.swift:166-174`、`:221-226`、`Sources/Services/ServiceManager.swift:149` 一致。
 - **不一致（唯一一处）**：`docs/release-notes-v0.1.0-alpha.5.md:343-344` 声明本版没有新增
   `docs/security-review-alpha.5.md`；本报告提交后该句不再成立（详见 I-3）。其余引用到的行号我抽查
   `Sources/PiWebUpdateAdapter.swift:1073`（`alreadyRunning: true`）、`:1217`（`String(decoding:)`）、
@@ -527,16 +537,16 @@ E 误操作的用户）。
 
 ### 6.2 本 delta 涉及并在本报告中引用行号的源码
 
-- 退出：`Sources/QuitCoordinator.swift`（新，286 行）、`Sources/PiWebApp.swift`（退出接线）
-- 工具 PATH：`Sources/ToolPath.swift`（新，584 行）、`Sources/ProcessInspector.swift`、
-  `Sources/DependencyChecker.swift`、`Sources/ComponentInstallation.swift`、`Sources/ServiceManager.swift`
-- 更新检查与事务：`Sources/UpdateChecker.swift`、`Sources/UpdateTransaction.swift`、
-  `Sources/UpdateVerifier.swift`、`Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、
+- 退出：`Sources/App/QuitCoordinator.swift`（新，286 行）、`Sources/PiWebApp.swift`（退出接线）
+- 工具 PATH：`Sources/Services/ToolPath.swift`（新，584 行）、`Sources/Services/ProcessInspector.swift`、
+  `Sources/Services/DependencyChecker.swift`、`Sources/Updates/ComponentInstallationDetector.swift`、`Sources/Services/ServiceManager.swift`
+- 更新检查与事务：`Sources/Updates/UpdateChecker.swift`、`Sources/UpdateTransaction.swift`、
+  `Sources/Updates/UpdateVerifier.swift`、`Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、
   `Sources/PiPackageUpdateAdapter.swift`
-- 日志与诊断：`Sources/LogWriter.swift`、`Sources/DiagnosticsCollector.swift`、
-  `Sources/DiagnosticsWindowController.swift`、`Sources/DiagnosticsClipboard.swift`、
-  `Sources/PreferencesWindowController.swift`
-- 遮罩：`Sources/PiProcessInspector.swift`（规则本体）
+- 日志与诊断：`Sources/Diagnostics/LogWriter.swift`、`Sources/Diagnostics/DiagnosticsCollector.swift`、
+  `Sources/Diagnostics/DiagnosticsWindowController.swift`、`Sources/Diagnostics/DiagnosticsClipboard.swift`、
+  `Sources/App/PreferencesWindowController.swift`
+- 遮罩：`Sources/Services/PiProcessInspector.swift`（规则本体）
 - 门禁与发布：`Scripts/scan-secrets.sh`、`Scripts/check-release-version.sh`、
   `Scripts/package-release.sh`、`Scripts/build.sh`、`.github/workflows/build.yml`、
   `.github/workflows/release.yml`、`Configuration/AppIdentity.xcconfig`
@@ -572,12 +582,12 @@ git status --short && git diff --check && sh -n Scripts/*.sh
 ./Scripts/scan-secrets.sh --include-untracked   # 文件已跟踪后可直接 ./Scripts/scan-secrets.sh
 sh Scripts/check-release-version.sh v0.1.0-alpha.5
 # 负向证据
-git grep -n 'sudo' -- Sources/ToolPath.swift Sources/QuitCoordinator.swift
-git grep -nE 'kill\(|killpg|SIGKILL|posix_spawn' -- Sources/ToolPath.swift Sources/QuitCoordinator.swift \
-  Sources/DiagnosticsCollector.swift Sources/LogWriter.swift
+git grep -n 'sudo' -- Sources/Services/ToolPath.swift Sources/App/QuitCoordinator.swift
+git grep -nE 'kill\(|killpg|SIGKILL|posix_spawn' -- Sources/Services/ToolPath.swift Sources/App/QuitCoordinator.swift \
+  Sources/Diagnostics/DiagnosticsCollector.swift Sources/Diagnostics/LogWriter.swift
 git grep -nE 'moveItem|copyItem|removeItem|unlink\(|rmdir|rename\(|truncate|write\(to:|createFile' -- \
   Sources/PiWebUpdateAdapter.swift Sources/PiCLIUpdateAdapter.swift Sources/PiPackageUpdateAdapter.swift \
-  Sources/UpdateTransaction.swift Sources/UpdateVerifier.swift Sources/ToolPath.swift Sources/QuitCoordinator.swift
+  Sources/UpdateTransaction.swift Sources/Updates/UpdateVerifier.swift Sources/Services/ToolPath.swift Sources/App/QuitCoordinator.swift
 ```
 
 设计说明：本报告写在文档提交里，没有修改任何 `Sources/`、`Scripts/`、`Configuration/` 或其它文档；

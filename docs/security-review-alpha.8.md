@@ -1,6 +1,16 @@
 # `v0.1.0-alpha.8` 安全评审（delta）
 
-- 评审对象：`3ed1a09..c4f26a1`（`c4f26a1` 为本次发布提交，GitHub PR #125 / squash 合并到 `main`）。范围为本 delta 的全部改动文件：`Sources/PiPackageUpdateAdapter.swift`、`Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiWebApp.swift`、`Sources/UpdateVerifier.swift`、`Sources/UpdateTransaction.swift`、`docs/security-ownership.md`、`PiWebDesktop.xcodeproj/project.pbxproj`、`PiWebDesktopTests/`（4 个测试文件）。
+<!-- 路径说明（#143） -->
+> **路径说明（#143 之后）**：本文写于 `03e06f5 refactor(sources): Sources 按领域分目录、大文件按职责拆分` 之前。
+> 能唯一对应的路径已就地改成当前路径（`Sources/*.swift` → `Sources/{App,Services,Diagnostics,Updates}/`，
+> `PiWebDesktopTests/*AdapterTests.swift` → `*UpdateFlowTests.swift`），但**行号仍是当时的**，不保证与今天的文件对齐。
+> 下列文件已按职责拆成多个文件（同名类型都还在），本文中它们的路径与行号只对应**当时**的位置：
+> `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+> `Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、`Sources/ProcessInspector.swift`。
+> 另外 `Sources/RecentWorkspace.swift`、`Sources/KeychainStore.swift`、`Sources/SystemProxyWarning.swift` 及其测试
+> 已在 #233 / #195 删除。
+
+- 评审对象：`3ed1a09..c4f26a1`（`c4f26a1` 为本次发布提交，GitHub PR #125 / squash 合并到 `main`）。范围为本 delta 的全部改动文件：`Sources/PiPackageUpdateAdapter.swift`、`Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiWebApp.swift`、`Sources/Updates/UpdateVerifier.swift`、`Sources/UpdateTransaction.swift`、`docs/security-ownership.md`、`PiWebDesktop.xcodeproj/project.pbxproj`、`PiWebDesktopTests/`（4 个测试文件）。
 - 评审方式：只读 delta 审查。以 `git diff 3ed1a09..c4f26a1` 为准逐文件通读，配合重新读取 `Sources/` 中未改动的相关路径（调用链、渲染点、持久化层）核对跨层语义；对涉及文件系统语义的两处做了本机实测（Swift 6.4；`FileManager.attributesOfItem` 对符号链接返回 `NSFileTypeSymbolicLink` 且 `size` 为链接自身大小（25）而非目标大小（5），对 FIFO 返回 `NSFileTypeUnknown` 且 `size == 0`，`resolvingSymlinksInPath()` 返回目标路径，`FileHandle(forReadingAtPath:)` 可穿过符号链接打开）。评审过程未联网，未执行构建与测试，未修改除本文件外的任何文件。
 - 本报告对应的发布物：`docs/release-notes-v0.1.0-alpha.8.md`（工作树中为未跟踪文件，本次评审对其做了逐句与代码的比对）、`Configuration/AppIdentity.xcconfig`（工作树中已有与本 delta 无关的未提交改动，未纳入评审）。
 - 已知过程瑕疵：本报告基于静态审查；`xcodebuild test` 未在评审机上执行（本机仅有 Command Line Tools，无 Xcode），因此对测试是否通过、测试是否覆盖未覆盖路径的判断都只依据代码与 CI 记录（`docs/release-notes-v0.1.0-alpha.8.md:253`、`docs/alpha-release-checklist.md:1020` 记录 `c4f26a1` 上 GitHub Actions run 35501956085 全部成功）。对无法从代码确认的项，一律列入「证据不足 / 无法确认」，不做推断。
@@ -25,7 +35,7 @@
 
 ### 2. `#124` 的基准版本语义是否为「更新前已安装版本」（而非目标版本）
 
-是「更新前版本」，且与读取时点自洽：三个采集点传的都是更新前的已知版本——`version: installation?.version ?? plan.installedVersion`（`Sources/PiCLIUpdateAdapter.swift:1250`）、`capture(installation:probe:)` 内的 `version: installation?.version`（`Sources/PiWebUpdateAdapter.swift:1620`，实现见 `Sources/UpdateTransaction.swift:229-238`）、`versionOnly(version: plan.installedVersion, …)`（`Sources/PiPackageUpdateAdapter.swift:1750-1753`，实现见 `Sources/UpdateTransaction.swift:296-306`）；采集发生在安装命令之前（`Sources/PiCLIUpdateAdapter.swift:1259`、`Sources/PiWebUpdateAdapter.swift:1629`、`Sources/PiPackageUpdateAdapter.swift:1758`），目标是更新前的安装树。`expectedVersion` 的取值顺序（`Sources/UpdateVerifier.swift:263-265`）会让该基准与从 `node_modules/<name>/package.json` 读到的版本互相校验（`Sources/UpdateVerifier.swift:715-738`）。唯一问题是发布说明的措辞（`L-2`）。
+是「更新前版本」，且与读取时点自洽：三个采集点传的都是更新前的已知版本——`version: installation?.version ?? plan.installedVersion`（`Sources/PiCLIUpdateAdapter.swift:1250`）、`capture(installation:probe:)` 内的 `version: installation?.version`（`Sources/PiWebUpdateAdapter.swift:1620`，实现见 `Sources/UpdateTransaction.swift:229-238`）、`versionOnly(version: plan.installedVersion, …)`（`Sources/PiPackageUpdateAdapter.swift:1750-1753`，实现见 `Sources/UpdateTransaction.swift:296-306`）；采集发生在安装命令之前（`Sources/PiCLIUpdateAdapter.swift:1259`、`Sources/PiWebUpdateAdapter.swift:1629`、`Sources/PiPackageUpdateAdapter.swift:1758`），目标是更新前的安装树。`expectedVersion` 的取值顺序（`Sources/Updates/UpdateVerifier.swift:263-265`）会让该基准与从 `node_modules/<name>/package.json` 读到的版本互相校验（`Sources/Updates/UpdateVerifier.swift:715-738`）。唯一问题是发布说明的措辞（`L-2`）。
 
 ### 3. `F1` 扩展包交付队列
 
@@ -37,7 +47,7 @@
 
 ### 5. `F4` 每次读取前的文件识别
 
-`fileType(atPath:)`（`Sources/UpdateVerifier.swift:164-167`）对末级符号链接报 `NSFileTypeSymbolicLink`（本机实测确认，与注释「不跟随末级符号链接，与 `lstat` 同语义」一致）；`openRegularFile`（`:170-174`）先解引用、再要求 `.typeRegular`、最后打开；`readBoundedData`（`:179-208`）在大小闸门之外把实际上限收紧到 `maximumSize`（超限即返回 nil）。整体语义与 `#120` / `F4` 的修法一致；残余 TOCTOU 窗口记为 `L-3`。新增测试覆盖 FIFO（`PiWebDesktopTests/UpdateVerifierTests.swift:233`）与符号链接（`:243`）两种形状。
+`fileType(atPath:)`（`Sources/Updates/UpdateVerifier.swift:164-167`）对末级符号链接报 `NSFileTypeSymbolicLink`（本机实测确认，与注释「不跟随末级符号链接，与 `lstat` 同语义」一致）；`openRegularFile`（`:170-174`）先解引用、再要求 `.typeRegular`、最后打开；`readBoundedData`（`:179-208`）在大小闸门之外把实际上限收紧到 `maximumSize`（超限即返回 nil）。整体语义与 `#120` / `F4` 的修法一致；残余 TOCTOU 窗口记为 `L-3`。新增测试覆盖 FIFO（`PiWebDesktopTests/UpdateVerifierTests.swift:233`）与符号链接（`:243`）两种形状。
 
 ### 6. `F5` 收尾窗口内的取消请求
 
@@ -63,19 +73,19 @@
 - **机制**：四条路径都是同一形态：先写「重新检测到的版本是 未知」（`detected` 为 nil 时用 `detected ?? "未知"` 插值），紧接一句「旧版本保持不变 / 旧版本语义保持不变」。这些路径的入口是 `guard journal.recordVerification(report, detectedVersion:)`（`Sources/PiPackageUpdateAdapter.swift:1833`、`Sources/PiCLIUpdateAdapter.swift:1328`、`Sources/PiWebUpdateAdapter.swift:1704`），而 `detectedVersion == nil` 正是其中一种失败原因——同一个分支的 `warning.reason` 就是为此写了 nil 文案（见逐面结论 1）。
 - **为什么是问题**：这正是 `#119` / `L-2` 要消除的形态（同一句里既写「重新检测到的版本是 未知」又断言旧版本还在原位）。`L-2` 修了 `warning.reason` 与持久警告，未修这四条日志行；而 `docs/release-notes-v0.1.0-alpha.8.md:92-97` 的表述是「不再在同一句里既写『仍在使用更新前的版本』又写『重新检测到的版本是 未知』」，因此发布说明对 `L-2` 的完成度有轻微过度声明。日志是排障的第一手材料：当探针因权限/路径问题读不到新版本时，日志会把「不知道」写成「旧版本仍在」，把技术员引向错误结论。
 - **影响边界**：只影响日志与结果对象的展示行（`Sources/PiPackageUpdateAdapter.swift:1615`、`Sources/PiWebApp.swift:1987` 会把这些行写进日志/界面），不改变任何判定、文件操作、信号处理或凭据处理。
-- **建议**：把这四处的尾句改成与 `warning.reason` 同源的措辞（例如「是否达到目标版本无法判断；本次没有执行任何回滚动作」），并给 `PiWebDesktopTests/PiPackageUpdateAdapterTests.swift` 补一条「nil 版本 + 日志文案」的断言，防止回归。
+- **建议**：把这四处的尾句改成与 `warning.reason` 同源的措辞（例如「是否达到目标版本无法判断；本次没有执行任何回滚动作」），并给 `PiWebDesktopTests/PiPackageUpdateFlowTests.swift` 补一条「nil 版本 + 日志文案」的断言，防止回归。
 
 ### L-2（低，非阻断）发布说明把 `integrity` 的基准版本写成「目标版本」
 
-- **Sources**：`docs/release-notes-v0.1.0-alpha.8.md:121-124`（「…`Sources/UpdateTransaction.swift` 在采集时传入本次更新的目标版本。」）；代码：`Sources/PiCLIUpdateAdapter.swift:1250`、`Sources/PiWebUpdateAdapter.swift:1620` → `Sources/UpdateTransaction.swift:229-238`、`Sources/PiPackageUpdateAdapter.swift:1750-1753`、`Sources/UpdateVerifier.swift:263-265`。
+- **Sources**：`docs/release-notes-v0.1.0-alpha.8.md:121-124`（「…`Sources/UpdateTransaction.swift` 在采集时传入本次更新的目标版本。」）；代码：`Sources/PiCLIUpdateAdapter.swift:1250`、`Sources/PiWebUpdateAdapter.swift:1620` → `Sources/UpdateTransaction.swift:229-238`、`Sources/PiPackageUpdateAdapter.swift:1750-1753`、`Sources/Updates/UpdateVerifier.swift:263-265`。
 - **机制**：三个采集点传的都是**更新前已安装版本**（`plan.installedVersion` / `installation?.version`），而不是 `plan.targetVersion`；采集发生在安装命令之前，读取的是更新前的安装树，"读更新前的锁文件 + 拿更新前的版本当基准"因此是自洽的一对。发布说明写成「目标版本」与代码不符。
-- **为什么是问题**：措辞混淆了两个语义不同的值。若按发布说明的措辞去实现（传 `plan.targetVersion`），反而会引入 `#124` 想避免的错误路径：`readIntegrityValue` 在条目带 `version` 且与基准不符时返回 nil（`Sources/UpdateVerifier.swift:298-302`），更新前锁文件里的条目会被整体跳过，指纹里 `integrity` 一律记成「未获取」——「合法更新被误判为不一致」只有在按错误措辞实现时才成立。
+- **为什么是问题**：措辞混淆了两个语义不同的值。若按发布说明的措辞去实现（传 `plan.targetVersion`），反而会引入 `#124` 想避免的错误路径：`readIntegrityValue` 在条目带 `version` 且与基准不符时返回 nil（`Sources/Updates/UpdateVerifier.swift:298-302`），更新前锁文件里的条目会被整体跳过，指纹里 `integrity` 一律记成「未获取」——「合法更新被误判为不一致」只有在按错误措辞实现时才成立。
 - **影响边界**：只影响发布说明的可核对性与后续维护者的理解；运行时行为正确。
 - **建议**：把该句改成「在采集时传入更新前的已安装版本（`installation.version` / `plan.installedVersion`）」，并保留「与读取时点相同」这一理由。
 
 ### L-3（低，非阻断）`openRegularFile` 的类型检查与打开之间仍有 TOCTOU 窗口
 
-- **Sources**：`Sources/UpdateVerifier.swift:170-174`。
+- **Sources**：`Sources/Updates/UpdateVerifier.swift:170-174`。
 - **机制**：`let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path`，随后 `guard fileType(atPath: resolved) == .typeRegular`，最后 `FileHandle(forReadingAtPath: resolved)`。检查与打开是两次独立的路径查找，中间存在可替换窗口；在窗口内把 `resolved` 从常规文件换成 FIFO（或让路径指向被替换的目录项）即可绕过类型闸门，`FileHandle.read` 可能长时间阻塞。阻塞发生在调用方线程上（调用点：`Sources/PiPackageUpdateAdapter.swift:1813`、`Sources/PiCLIUpdateAdapter.swift:1314`、`Sources/PiWebUpdateAdapter.swift:1690`）。
 - **为什么是问题**：alpha.7 的 `F4`（「有界读只约束字节数，不约束时长」）的原始关切是「读 FIFO 无超时阻塞」。本版用「解引用 + 类型检查」把它从**无条件**收窄为**需要精确撞上窗口**（`attributesOfItem` 对 FIFO 报 `0` 字节且类型不是常规文件，替换必须恰好落在两次调用之间）；窗口极小，且需要本地写权限才能触发，因此不是权限边界被跨越——`docs/security-ownership.md:88` 明确把可执行文件位置的信任交给了 `PATH`。
 - **影响边界**：最坏情况是一次读取挂起（需本地写权限），不产生越权读取、不写文件、不泄漏凭据。
@@ -100,14 +110,14 @@
 
 ## 已核实无问题
 
-1. **`F1` 交付队列**：`deliveryQueue` 声明与忙拒投递、成功收尾投递使用同一自定义队列（`Sources/PiPackageUpdateAdapter.swift:1109`、`:1224-1225`、`:1462-1497`），不会出现「不同队列导致回调顺序颠倒」；`isRunning` / `abandonedChildrenUnconfirmed` 仍在 `stateQueue.sync` 上取值（`:1183-1187`）；忙拒判定 `guard !running, abandonedProcesses.isEmpty` 未被改坏；协调器的忙拒完成回调不再在 `stateQueue` 上运行（新增测试 `PiWebDesktopTests/PiPackageUpdateAdapterTests.swift:1221` 用信号量把完成阻塞住 1 秒并断言 `isRunning` 能读到，覆盖该性质）。
-2. **`F2` 增量 UTF8 解码**：跨块边界的多字节序列被暂存到下一块，EOF 路径冲刷（`Sources/PiPackageUpdateAdapter.swift:1373-1376`），轮次开始前重置（`:1298-1299`），句柄身份拦截防止跨轮串流（`:1366-1368`）；新增测试把「☃」分三段写入（`printf '\342'` / `sleep` / `printf '\230\203'`）并断言尾输出为 `☃`（`PiWebDesktopTests/PiPackageUpdateAdapterTests.swift:1246`，另见 `PiWebDesktopTests/PiWebUpdateAdapterTests.swift` 的同型用例，本 delta 未改 Web 侧解码器）。
-3. **`F4` 文件读取**：类型闸门在解引用之后判断 `.typeRegular`（`Sources/UpdateVerifier.swift:170-174`）；有界读把实际上限收紧到 `maximumSize`（`:179-208`）；FIFO 不被读取（`PiWebDesktopTests/UpdateVerifierTests.swift:233`，`mkfifo` 后断言 `fileType != .typeRegular` 且 `readBoundedData` 返回 nil）；符号链接可读（`:243`，断言 `fileType(atPath: link.path) == .typeSymbolicLink` 且能读到内容）。
+1. **`F1` 交付队列**：`deliveryQueue` 声明与忙拒投递、成功收尾投递使用同一自定义队列（`Sources/PiPackageUpdateAdapter.swift:1109`、`:1224-1225`、`:1462-1497`），不会出现「不同队列导致回调顺序颠倒」；`isRunning` / `abandonedChildrenUnconfirmed` 仍在 `stateQueue.sync` 上取值（`:1183-1187`）；忙拒判定 `guard !running, abandonedProcesses.isEmpty` 未被改坏；协调器的忙拒完成回调不再在 `stateQueue` 上运行（新增测试 `PiWebDesktopTests/PiPackageUpdateFlowTests.swift:1221` 用信号量把完成阻塞住 1 秒并断言 `isRunning` 能读到，覆盖该性质）。
+2. **`F2` 增量 UTF8 解码**：跨块边界的多字节序列被暂存到下一块，EOF 路径冲刷（`Sources/PiPackageUpdateAdapter.swift:1373-1376`），轮次开始前重置（`:1298-1299`），句柄身份拦截防止跨轮串流（`:1366-1368`）；新增测试把「☃」分三段写入（`printf '\342'` / `sleep` / `printf '\230\203'`）并断言尾输出为 `☃`（`PiWebDesktopTests/PiPackageUpdateFlowTests.swift:1246`，另见 `PiWebDesktopTests/PiWebUpdateFlowTests.swift` 的同型用例，本 delta 未改 Web 侧解码器）。
+3. **`F4` 文件读取**：类型闸门在解引用之后判断 `.typeRegular`（`Sources/Updates/UpdateVerifier.swift:170-174`）；有界读把实际上限收紧到 `maximumSize`（`:179-208`）；FIFO 不被读取（`PiWebDesktopTests/UpdateVerifierTests.swift:233`，`mkfifo` 后断言 `fileType != .typeRegular` 且 `readBoundedData` 返回 nil）；符号链接可读（`:243`，断言 `fileType(atPath: link.path) == .typeSymbolicLink` 且能读到内容）。
 4. **`F5` 收尾窗口内的取消请求**：`cancel()` 在收尾分支只置位 `cancelRequestedDuringFinish` 并返回，不向已结束子进程发信号（`Sources/PiWebUpdateAdapter.swift:1140-1143`）；该字段随结果传到协调器并被记入日志（`:1380`、`:1640-1644`）。
 5. **`F6` 尾输出脱敏**：尾输出在进入结果对象前脱敏（`Sources/PiWebUpdateAdapter.swift:1673`、`:1679`）；按路径取用的尾输出在函数体内脱敏（`:1668` → `:1831-1837`）；三份 `outputTailText` 实现均脱敏（`Sources/PiCLIUpdateAdapter.swift:1404-1412`、`Sources/PiPackageUpdateAdapter.swift:1899-1907`）；UI 标注「命令输出片段（已脱敏）」（`Sources/PiWebApp.swift:1693`）；持久化层同源脱敏（`Sources/UpdateTransaction.swift:432`、`:444`、`:588`）。
 6. **`F3` 文档与信任模型**：`docs/security-ownership.md:88` 与 `Sources/PiCLIUpdateAdapter.swift:166-175` 的说明一致（不固定位置、不校验签名、`PATH` 即边界）。
-7. **`#124` 基准版本语义**：三个采集点传的都是更新前已安装版本，且读取发生在安装命令之前（`Sources/PiCLIUpdateAdapter.swift:1249-1259`、`Sources/PiWebUpdateAdapter.swift:1619-1629`、`Sources/PiPackageUpdateAdapter.swift:1748-1758`）；`expectedVersion` 让基准与 `package.json` 版本互相校验（`Sources/UpdateVerifier.swift:263-265`、`:715-738`）；`npmIntegrity` 仅作为证据文本使用（`Sources/UpdateTransaction.swift:210-213`、`:588`），不参与任何判定。
-8. **锁文件选择与形状判定**：`readIntegrityValue` 以 `node_modules/<name>` 精确路径优先、`version` 不符或条目歧义返回 nil、形状校验限制长度与算法白名单（`Sources/UpdateVerifier.swift:230-241`、`:287`–`:302`）；新增测试覆盖精确路径、歧义、版本基准相符/不符、`dependencies` 回退、形状异常（`PiWebDesktopTests/UpdateVerifierTests.swift:53`、`:75`、`:98`、`:125`、`:148`）；协调器侧的「重新检测发现版本未变 → 不写成功、不静默重试」与「验证失败 → 不自动回滚」判定未被放宽（`Sources/UpdateTransaction.swift:620-700`）。
+7. **`#124` 基准版本语义**：三个采集点传的都是更新前已安装版本，且读取发生在安装命令之前（`Sources/PiCLIUpdateAdapter.swift:1249-1259`、`Sources/PiWebUpdateAdapter.swift:1619-1629`、`Sources/PiPackageUpdateAdapter.swift:1748-1758`）；`expectedVersion` 让基准与 `package.json` 版本互相校验（`Sources/Updates/UpdateVerifier.swift:263-265`、`:715-738`）；`npmIntegrity` 仅作为证据文本使用（`Sources/UpdateTransaction.swift:210-213`、`:588`），不参与任何判定。
+8. **锁文件选择与形状判定**：`readIntegrityValue` 以 `node_modules/<name>` 精确路径优先、`version` 不符或条目歧义返回 nil、形状校验限制长度与算法白名单（`Sources/Updates/UpdateVerifier.swift:230-241`、`:287`–`:302`）；新增测试覆盖精确路径、歧义、版本基准相符/不符、`dependencies` 回退、形状异常（`PiWebDesktopTests/UpdateVerifierTests.swift:53`、`:75`、`:98`、`:125`、`:148`）；协调器侧的「重新检测发现版本未变 → 不写成功、不静默重试」与「验证失败 → 不自动回滚」判定未被放宽（`Sources/UpdateTransaction.swift:620-700`）。
 9. **`#119` 文案的其余部分与 `#120` 测试**：`UpdateWarningText.installFailed` / `verificationFailed` 的措辞与三态判定（nil 时写「未知」且不声称回滚）一致（`Sources/UpdateTransaction.swift:743-752`、`:766-773`、`:417-440`）；`PiWebDesktopTests/UpdateTransactionTests.swift:46` 的 `npmIntegrity: { [self] path,_,_ in npmIntegrities[path] }`（真实可执行文件 + 假探针）测的是「传指纹版本为基准」这一条（`:38-73`）；`PiWebApp.swift:1708-1713` 的恢复提示只使用 `abandonedChildrenUnconfirmed`（`Sources/PiCLIUpdateAdapter.swift:648`）这一既有状态，未引入新的等待/轮询路径。
 10. **工程完整性**：`project.pbxproj` 四处新增（`PiWebDesktop.xcodeproj/project.pbxproj:90`、`:162`、`:180`、`:200`）齐全、无 ID 冲突（`A1…5B` 2 处、`A2…60` 3 处）；新测试文件只依赖 `Darwin` / `XCTest` 系统模块（`PiWebDesktopTests/UpdateVerifierTests.swift:1-2`）；无新增第三方依赖。
 

@@ -1,5 +1,8 @@
 # Pi Web Desktop 0.1.0-alpha.13（build 13）— Apple Silicon alpha（未公证）
 
+<!-- 路径说明（#143） -->
+> **路径说明**：本文提到的 `Sources/Services/KeychainStore.swift`、`Sources/Services/SystemProxyWarning.swift`、`Sources/App/RecentWorkspace.swift` 及其测试已在 #195 / #233 整体删除，路径是**当时**的位置。其余扁平的 `Sources/*.swift` 已就地改成 `Sources/{App,Services,Diagnostics,Updates}/` 下的当前路径，但**行号仍是当时的**。
+
 ## 摘要 / Summary
 
 Pi Web Desktop `0.1.0-alpha.13` 是面向 **Apple Silicon（arm64）、macOS 14 或更高版本** 的第十三个

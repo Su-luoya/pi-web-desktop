@@ -1,5 +1,15 @@
 # Pi Web Desktop 0.1.0-alpha.6（build 6）— Apple Silicon alpha（未公证）
 
+<!-- 路径说明（#143） -->
+> **路径说明（#143 之后）**：本文写于 `03e06f5 refactor(sources): Sources 按领域分目录、大文件按职责拆分` 之前。
+> 能唯一对应的路径已就地改成当前路径（`Sources/*.swift` → `Sources/{App,Services,Diagnostics,Updates}/`，
+> `PiWebDesktopTests/*AdapterTests.swift` → `*UpdateFlowTests.swift`），但**行号仍是当时的**，不保证与今天的文件对齐。
+> 下列文件已按职责拆成多个文件（同名类型都还在），本文中它们的路径与行号只对应**当时**的位置：
+> `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+> `Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、`Sources/ProcessInspector.swift`。
+> 另外 `Sources/RecentWorkspace.swift`、`Sources/KeychainStore.swift`、`Sources/SystemProxyWarning.swift` 及其测试
+> 已在 #233 / #195 删除。
+
 ## 摘要 / Summary
 
 Pi Web Desktop `0.1.0-alpha.6` 是面向 **Apple Silicon（arm64）、macOS 14 或更高版本** 的第六个
@@ -74,11 +84,11 @@ does not compare package contents**.
 ### 1. 设置窗口可以自由缩放，表单滚动而底部按钮固定在视口（#99 / PR #100）
 
 - 窗口现在是可缩放的：风格掩码加入 `.resizable` / `.miniaturizable`
-  （`Sources/PreferencesWindowController.swift:229`），设置 `contentMinSize`
+  （`Sources/App/PreferencesWindowController.swift:229`），设置 `contentMinSize`
   （`:233`）并启用窗口位置的自动保存（`:238`）。
 - 表单放进滚动视图，**底部按钮固定在窗口底部**，窗口变小时不会被表单挤出屏幕。
 - 说明文字与行内标签随宽度折行；输入框的最小宽度为 200pt
-  （`Sources/PreferencesWindowController.swift:10`），因此最小可用宽度由“表单列”决定，而不是由
+  （`Sources/App/PreferencesWindowController.swift:10`），因此最小可用宽度由“表单列”决定，而不是由
   某一行最长文本决定。
 - 行为说明同步到 [设置与工作区](settings-and-workspace.md)。
 
@@ -102,8 +112,8 @@ does not compare package contents**.
   写端时，`abandon()` 不再记录一条“已放弃等待”的历史。包侧与 CLI 侧都加了守卫
   （`Sources/PiPackageUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`）；CLI 的超时排期补上
   同型守卫与有界让出（超时重试用例有次数上限），`pipeDrainGrace` 改为可注入以便确定性测试。
-- **测试**：本版新增 5 个确定性用例（`PiWebDesktopTests/PiPackageUpdateAdapterTests.swift` 94 行、
-  `PiWebDesktopTests/PiCLIUpdateAdapterTests.swift` 59 行），覆盖“子进程正常退出胜过排水宽限超时”
+- **测试**：本版新增 5 个确定性用例（`PiWebDesktopTests/PiPackageUpdateFlowTests.swift` 94 行、
+  `PiWebDesktopTests/PiCLIUpdateFlowTests.swift` 59 行），覆盖“子进程正常退出胜过排水宽限超时”
   与“abandon 落在排水窗口”两类竞态。
 - **没有改变的能力边界**：信号语义不变（Pi Web 只对自己启动的独立进程组发一次 `SIGTERM`；
   Pi CLI 与扩展包不发任何信号）；不确认被放弃的进程是否结束；仍不保证所有来源都能回滚。其余同类
@@ -135,7 +145,7 @@ does not compare package contents**.
 ## 更新检查与自动更新的边界（本版无变化）
 
 本版**没有改动**更新检查的域名、频率、开关与自动更新的前置条件，也没有新增任何安装路径：
-`Sources/UpdateChecker.swift` 的两个主机常量（`api.github.com`、`registry.npmjs.org`）未变，两条
+`Sources/Updates/UpdateChecker.swift` 的两个主机常量（`api.github.com`、`registry.npmjs.org`）未变，两条
 自动更新开关仍然默认关闭。完整边界（会做/不会做、域名与关闭方式、三种更新路径的命令与超时行为）
 以 [alpha.5 Release 说明](release-notes-v0.1.0-alpha.5.md) 的
 “更新检查访问的域名、频率与关闭方式”“自动更新的准确边界”两节为准；本版只改了**失败时的文案**与

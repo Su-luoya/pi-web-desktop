@@ -1,5 +1,15 @@
 # `v0.1.0-alpha.7` 安全评审（delta）
 
+<!-- 路径说明（#143） -->
+> **路径说明（#143 之后）**：本文写于 `03e06f5 refactor(sources): Sources 按领域分目录、大文件按职责拆分` 之前。
+> 能唯一对应的路径已就地改成当前路径（`Sources/*.swift` → `Sources/{App,Services,Diagnostics,Updates}/`，
+> `PiWebDesktopTests/*AdapterTests.swift` → `*UpdateFlowTests.swift`），但**行号仍是当时的**，不保证与今天的文件对齐。
+> 下列文件已按职责拆成多个文件（同名类型都还在），本文中它们的路径与行号只对应**当时**的位置：
+> `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+> `Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、`Sources/ProcessInspector.swift`。
+> 另外 `Sources/RecentWorkspace.swift`、`Sources/KeychainStore.swift`、`Sources/SystemProxyWarning.swift` 及其测试
+> 已在 #233 / #195 删除。
+
 - **评审对象**：`git diff b162544..4e6e332`，即 `v0.1.0-alpha.6`（`b162544`）到本版发布提交之前的 `HEAD`
   之间的六个提交 —— 修复 `af47866`（#105 / PR #112）、`0c1610c`（#106 / PR #115）、`fbae499`
   （#107 / PR #117）、`4e6e332`（#108 / PR #116），文档同步 `be13c88`（#109 / PR #114）与发布值回填
@@ -39,7 +49,7 @@ delta 只**增加**拒绝分支（`:526-532`），未引入新的参数插值路
 的概率 —— 更保守，且被 `testProcessInstallerKeepsTailWrittenAfterParentExit` 覆盖。
 
 **(c) 有界性 — 基本合格，一处时长无界（`F4`）。** 新增的硬上限：`package.json` 512 KiB、锁文件
-4 MiB（`Sources/UpdateVerifier.swift:71-72`、`:158-193`）、输出尾巴 2000 字符
+4 MiB（`Sources/Updates/UpdateVerifier.swift:71-72`、`:158-193`）、输出尾巴 2000 字符
 （`Sources/PiWebUpdateAdapter.swift:1021`、`:1312-1314`）、解码器暂存 ≤3 字节（`:24-45`）、排水宽限
 0.5s（`:1023`、`:1324-1336`）。超时：Pi Web 单次 300s 不重试（`:1499`），Pi CLI 与扩展包
 `maxTimeoutRetries = 5`（`Sources/PiCLIUpdateAdapter.swift:517/732`、
@@ -51,7 +61,7 @@ delta 只**增加**拒绝分支（`:526-532`），未引入新的参数插值路
 含相对项时给出明确拒绝（`:526-530`），并对已解析路径再做一次形状校验（`:531-532`）。局限见 `F3`。
 
 **(e) 文件 / JSON / 锁文件解析边界 — 无新漏洞（配合 `F4`）。** 三个上限足以拒绝超大文件，且
-`readBoundedData` 以 `maximumSize + 1` 读取以侦测「读前变大」（`Sources/UpdateVerifier.swift:158-193`）；
+`readBoundedData` 以 `maximumSize + 1` 读取以侦测「读前变大」（`Sources/Updates/UpdateVerifier.swift:158-193`）；
 损坏 JSON 让 `JSONSerialization` 失败即返回 nil，不会崩。符号链接：`attributesOfItem` 跟随链接，大小
 上限作用于目标，大文件仍被拒。`integrity` 取值确定化正确：`packages["node_modules/<name>"]` 命中即
 返回、**不回退**（`:280-283`），后缀歧义计数 >1 时返回 nil（`:285-291`），有条目版本时要求版本严格
@@ -59,7 +69,7 @@ delta 只**增加**拒绝分支（`:526-532`），未引入新的参数插值路
 
 **(f) 权限与 npm 语义 — 无变化。** 没有新增 `--ignore-scripts`、`--prefix`、提权，也没有改变全局安装
 语义：仍是 `install -g <name>@<version>`（`Sources/PiWebUpdateAdapter.swift:331`），并且刻意不传
-`--ignore-scripts` 并附了理由（`:283-293`、`:328`）；`Sources/InstallCommandManifest.swift:37`、`:60`
+`--ignore-scripts` 并附了理由（`:283-293`、`:328`）；`Sources/Services/InstallCommandManifest.swift:37`、`:60`
 的手动命令文案未改。生命周期脚本照旧执行 —— 这是既有取舍，不是本 delta 引入。
 
 **(g) 日志与脱敏 — 新增日志均脱敏；一处既有类型边界未脱敏（`F6`）。** 新增的写入路径：`logOutputTail`
@@ -136,7 +146,7 @@ Pi CLI 同构的「跨块 UTF-8」测试。
 
 ### F4（低）有界读只约束字节数，不约束时长
 
-`Sources/UpdateVerifier.swift:151-193`、`:259-264` 的 `fileSize` 走 `attributesOfItem`；若
+`Sources/Updates/UpdateVerifier.swift:151-193`、`:259-264` 的 `fileSize` 走 `attributesOfItem`；若
 `package.json` / 锁文件被替换为 FIFO（或指向 FIFO 的符号链接），大小可读为 0 通过
 `size <= maximumSize`，随后 `FileHandle.read` 阻塞，`verify()` 会无超时地挂住（代码可证
 `readBoundedData` 没有超时参数；FIFO 语义为推断，评审时未在本机复现）。

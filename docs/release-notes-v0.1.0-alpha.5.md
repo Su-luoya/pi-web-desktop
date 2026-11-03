@@ -28,6 +28,16 @@ PR #94 与 PR #95 的正文包含完整的 file:line 与验证证据。
 
 # Pi Web Desktop 0.1.0-alpha.5（build 5）— Apple Silicon alpha（未公证）
 
+<!-- 路径说明（#143） -->
+> **路径说明（#143 之后）**：本文写于 `03e06f5 refactor(sources): Sources 按领域分目录、大文件按职责拆分` 之前。
+> 能唯一对应的路径已就地改成当前路径（`Sources/*.swift` → `Sources/{App,Services,Diagnostics,Updates}/`，
+> `PiWebDesktopTests/*AdapterTests.swift` → `*UpdateFlowTests.swift`），但**行号仍是当时的**，不保证与今天的文件对齐。
+> 下列文件已按职责拆成多个文件（同名类型都还在），本文中它们的路径与行号只对应**当时**的位置：
+> `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+> `Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、`Sources/ProcessInspector.swift`。
+> 另外 `Sources/RecentWorkspace.swift`、`Sources/KeychainStore.swift`、`Sources/SystemProxyWarning.swift` 及其测试
+> 已在 #233 / #195 删除。
+
 ## 摘要 / Summary
 
 Pi Web Desktop `0.1.0-alpha.5` 是面向 **Apple Silicon（arm64）、macOS 14 或更高版本** 的第五个
@@ -103,10 +113,10 @@ does not compare package contents**.
 - **问题**：`applicationShouldTerminate` 的三条分支都返回 `.terminateLater`，但代码里从未调用
   `reply(toApplicationShouldTerminate:)`。AppKit 因此一直等不到回复，主队列也不排水：应用既不
   退出、也没有可用的确认对话框；点“退出并停止服务”时连服务都不会停。
-- **行为变化**：新增 `Sources/QuitCoordinator.swift`（退出决策状态机，286 行），**从不返回
+- **行为变化**：新增 `Sources/App/QuitCoordinator.swift`（退出决策状态机，286 行），**从不返回
   `.terminateLater`**，只返回 `.terminateNow` 或 `.terminateCancel`；`PiWebApp` 在收到决策后立即
   回复 AppKit。等待用户决策有超时兜底（`QuitCoordinator.defaultDecisionTimeout = 5 * 60` 秒，
-  `Sources/QuitCoordinator.swift:100`），超时按最安全的行为处理：保持服务运行并退出；取消决策后
+  `Sources/App/QuitCoordinator.swift:100`），超时按最安全的行为处理：保持服务运行并退出；取消决策后
   应用继续可用。
 - **用户可见后果**：⌘Q / 关闭应用不再出现“点了没反应、应用挂在半死状态”；“退出并停止服务”
   会真的停服务，选择相反分支则服务继续运行。
@@ -156,7 +166,7 @@ does not compare package contents**.
   迁移从启动路径移出主线程（原来会造成约 **3.9 s** 的主线程冻结）。
 - **用户可见后果**：轮转后不再丢日志；应用启动更快；并发日志写入不再互相覆盖。
 - **边界**：轮转语义、保留份数与脱敏规则都没有放宽——每份上限 10 MB、保留 5 份
-  （`Sources/LogWriter.swift:9-10`）。机制说明同步到
+  （`Sources/Diagnostics/LogWriter.swift:9-10`）。机制说明同步到
   [日志与诊断导出](logging-and-diagnostics.md)。
 
 ### 5. 设置窗口单例、诊断导出后台化、外部进程 argv 遮罩（#81 / PR #87）
@@ -196,9 +206,9 @@ does not compare package contents**.
   running** 并加载页面；③每个入口都挂一条新的轮询链、共享同一份启动预算，多次启动会成倍耗尽
   预算并产生多份提示；④`stopService` 的提前返回分支不清理 `isStoppingService`，之后启动会被
   永久拒绝。
-- **行为变化**：为启动/停止/重启引入代次（`lifecycleGeneration`，`Sources/ServiceManager.swift:554`、
+- **行为变化**：为启动/停止/重启引入代次（`lifecycleGeneration`，`Sources/Services/ServiceManager.swift:554`、
   `:897`），所有异步回调先校验代次，过期回调只记日志、不改状态；启动预算按“一次启动会话”记账
-  （`isCurrentStartupSession`，`Sources/ServiceManager.swift:1194`），重试重新开始轮询；同一次启动
+  （`isCurrentStartupSession`，`Sources/Services/ServiceManager.swift:1194`），重试重新开始轮询；同一次启动
   只允许一条轮询链；停止路径用 `defer` 集中清理停止标志。
 - **用户可见后果**：不再出现“状态显示运行中但其实没跑”、重复弹窗、“重试”直接失败、启动按钮
   永久灰掉。
@@ -246,9 +256,9 @@ does not compare package contents**.
   原因：`pi` / `pi-web` / `npm` 是 `#!/usr/bin/env node` 包装脚本，探测子进程继承了 Finder
   launchd 的最小 `PATH`，找不到 `node` 就直接 exit 127 → 被判 `unknown` → 启动门控拦住。
   服务启动路径自带一份 `PATH` 拼装，依赖探测路径此前没有，两处不一致；本版起三处（依赖探测、
-  更新子进程、服务启动环境）共用 `Sources/ToolPath.swift` 的结果（服务启动环境在
-  `Sources/ServiceManager.swift:149` 注入）；`node` 本身是 Mach-O 二进制，所以不受影响。
-- **行为变化**：新增 `Sources/ToolPath.swift` 作为唯一来源构造子进程 `PATH`，顺序为：应用 `PATH`
+  更新子进程、服务启动环境）共用 `Sources/Services/ToolPath.swift` 的结果（服务启动环境在
+  `Sources/Services/ServiceManager.swift:149` 注入）；`node` 本身是 Mach-O 二进制，所以不受影响。
+- **行为变化**：新增 `Sources/Services/ToolPath.swift` 作为唯一来源构造子进程 `PATH`，顺序为：应用 `PATH`
   → 登录 shell `PATH` → 已知目录（Homebrew arm64/Intel、MacPorts、用户级前缀）→ `node` 所在
   目录 → `npm prefix -g` 的 bin；去重，不引入凭据类变量。登录 shell 不写死 zsh（用户数据库 →
   `$SHELL` → `/bin/zsh`），带超时、单次缓存，拿不到值时再试交互式查询。`DependencyChecker`、
@@ -279,7 +289,7 @@ does not compare package contents**.
   （`Sources/PiPackageUpdateAdapter.swift:1164`，回调在 `:1168`）；被放弃但退出未确认的旧子进程跨轮保留在
   `abandonedProcesses` 中，退出确认前同样按忙拒绝；超时判定在有“待完成”进程时不生效
   （`pendingFinish`），只在 `exitCode == nil` 时保留 `timedOut`，超时计时有界让出（0.2 s × 5），
-  排水宽限可注入；协调器不再把计划包名当检测值（`Sources/UpdateVerifier.swift:438`）；安装失败
+  排水宽限可注入；协调器不再把计划包名当检测值（`Sources/Updates/UpdateVerifier.swift:438`）；安装失败
   新增回滚资格 `.stateNotVerified`（`Sources/UpdateTransaction.swift:364` 等）；无内容哈希时缺失的
   size/mtime 判“未验证”，两者都缺 → `.cannotAutomaticallyRollback`
   （`Sources/UpdateTransaction.swift:680`）。
@@ -348,7 +358,7 @@ does not compare package contents**.
 ## 更新检查访问的域名、频率与关闭方式
 
 只读版本检查**不是遥测**：请求只用于比较“本机版本”与“上游最新版”，不携带使用数据、会话内容、
-认证信息或诊断报告。**本版没有改变域名、频率或关闭方式**（`Sources/UpdateChecker.swift:119-120`
+认证信息或诊断报告。**本版没有改变域名、频率或关闭方式**（`Sources/Updates/UpdateChecker.swift:119-120`
 的两个主机常量未变）；#77 只修正了缓存回退结论的现算方式。
 
 | 检查对象 | 域名与请求 | 请求内容 |
@@ -472,7 +482,7 @@ does not compare package contents**.
   pi-web（可执行文件、版本、真实路径与符号链接目标、`package.json` 名称）、默认端口
   （只做本机 `bind(2)`，不连网）和 Pi 配置目录 `~/.pi/agent`（只判断存在/可读，不读取内容）；
   六项诊断条目还会给出安装来源与可信度。
-- **本版起探测子进程使用合并后的工具 `PATH`**（`Sources/ToolPath.swift`，见上文 #89）：应用
+- **本版起探测子进程使用合并后的工具 `PATH`**（`Sources/Services/ToolPath.swift`，见上文 #89）：应用
   `PATH` → 登录 shell `PATH` → 已知目录 → `node` 目录 → npm 全局 bin。因此在 Finder 启动
   （launchd 最小 `PATH`）下，Homebrew 安装的 `pi` 不再被误判成 `unknown`；依赖探测、更新命令与
   服务启动环境使用的是同一份 `PATH`。

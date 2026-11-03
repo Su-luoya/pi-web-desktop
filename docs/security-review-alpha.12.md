@@ -1,5 +1,8 @@
 # Pi Web Desktop `0.1.0-alpha.12` 安全评审（delta）
 
+<!-- 路径说明（#143） -->
+> **路径说明**：本文提到的 `Sources/Services/KeychainStore.swift`、`Sources/Services/SystemProxyWarning.swift`、`Sources/App/RecentWorkspace.swift` 及其测试已在 #195 / #233 整体删除，路径是**当时**的位置。其余扁平的 `Sources/*.swift` 已就地改成 `Sources/{App,Services,Diagnostics,Updates}/` 下的当前路径，但**行号仍是当时的**。
+
 评审对象：`main` 上的 `f938773`（#147 / #148 / #149 / #150 四个 Issue 的修复，PR #152 / #151 / #154 /
 #153 合并后的 main；main CI run `35596701327`）。基线：`main` = `895f6a7`（alpha.11 发布值回填提交）。
 本报告是**只读评审**：没有修改任何代码、工程文件或脚本，只读取源码、脚本、工程文件与文档。

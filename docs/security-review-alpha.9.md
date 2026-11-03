@@ -1,5 +1,15 @@
 # Pi Web Desktop `0.1.0-alpha.9` 安全评审（delta）
 
+<!-- 路径说明（#143） -->
+> **路径说明（#143 之后）**：本文写于 `03e06f5 refactor(sources): Sources 按领域分目录、大文件按职责拆分` 之前。
+> 能唯一对应的路径已就地改成当前路径（`Sources/*.swift` → `Sources/{App,Services,Diagnostics,Updates}/`，
+> `PiWebDesktopTests/*AdapterTests.swift` → `*UpdateFlowTests.swift`），但**行号仍是当时的**，不保证与今天的文件对齐。
+> 下列文件已按职责拆成多个文件（同名类型都还在），本文中它们的路径与行号只对应**当时**的位置：
+> `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+> `Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、`Sources/ProcessInspector.swift`。
+> 另外 `Sources/RecentWorkspace.swift`、`Sources/KeychainStore.swift`、`Sources/SystemProxyWarning.swift` 及其测试
+> 已在 #233 / #195 删除。
+
 评审对象：`git diff 5f8f38b..8b7e74d` —— 即 `v0.1.0-alpha.8` 的发布提交到本版候选（`v0.1.0-alpha.8` 之后的全部提交）。这段区间里只有两个提交：`8b7e74d`（PR #130，关闭 [#127](https://github.com/Su-luoya/pi-web-desktop/issues/127) 的修复）与它之前的一个纯文档提交（PR #129，回填 alpha.8 的发布值）。真正的代码改动只有 PR #130。
 
 评审性质：只读 delta 评审。逐处对照修复代码、测试与门槛输出，不修改文件、不提交、不联网。
@@ -21,7 +31,7 @@
 
 ## 3. `L-3`：类型复核是否真的收窄了窗口
 
-- `Sources/UpdateVerifier.swift` 的 `openRegularFile(atPath:)`：先 `URL(fileURLWithPath:).resolvingSymlinksInPath()`，再看 `fileType(atPath:) == .typeRegular`，然后 `FileHandle(forReadingAtPath:)`；拿到句柄后调用 `fstat`，只有 `(UInt32(st_mode) & UInt32(S_IFMT)) == UInt32(S_IFREG)` 才把句柄交出去，否则 `try? handle.close()` 并返回 `nil`。
+- `Sources/Updates/UpdateVerifier.swift` 的 `openRegularFile(atPath:)`：先 `URL(fileURLWithPath:).resolvingSymlinksInPath()`，再看 `fileType(atPath:) == .typeRegular`，然后 `FileHandle(forReadingAtPath:)`；拿到句柄后调用 `fstat`，只有 `(UInt32(st_mode) & UInt32(S_IFMT)) == UInt32(S_IFREG)` 才把句柄交出去，否则 `try? handle.close()` 并返回 `nil`。
 - 也就是说：判定依据从「路径指向什么」变成「已经打开的这个句柄是什么」。即使路径在解析与打开之间被换成 FIFO、目录或设备节点，那个句柄也不会被交给调用方，也不会被读取。
 - 可读文件的范围没有变化：常规文件、以及指向常规文件的符号链接仍可读；FIFO / 目录 / 字符设备仍被判为不可读。既有用例继续覆盖这两类结果（见第 5 节）。
 - 新增 `import Darwin` 只为 `fstat` / `S_IFMT` / `S_IFREG` 常量，不改变进程能力、不改变权限语义、不涉及特权操作。
@@ -35,7 +45,7 @@
 
 ## 5. 测试面
 
-- 新增两个用例：`testOldVersionClaimFollowsTheDetectedVersionEvidence`（`PiWebDesktopTests/UpdateTransactionTests.swift`，覆盖有/无版本证据两种措辞）、`testRealExecutorDrainGraceExpiryFlushesPendingDecoderBytes`（`PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`，覆盖 `L-4`）。
+- 新增两个用例：`testOldVersionClaimFollowsTheDetectedVersionEvidence`（`PiWebDesktopTests/UpdateTransactionTests.swift`，覆盖有/无版本证据两种措辞）、`testRealExecutorDrainGraceExpiryFlushesPendingDecoderBytes`（`PiWebDesktopTests/PiPackageUpdateFlowTests.swift`，覆盖 `L-4`）。
 - `L-5` 由 `Sources/PiWebApp.swift:1684` 退出日志的直接复核覆盖（语句本身不再断言文件在位）。
 - `L-3` 是窗口收窄而非新接口：窗口本身依赖调度，无法用确定性用例复现。本版以代码复核 + 既有类型闸门用例（「指向常规文件的符号链接可读」「FIFO 被判为不可读」）承担，**不作窗口级的断言**，这一点在此明确记录。
 - 本机串行结果：`UpdateVerifierTests` 9 / 0、`PiPackageUpdateAdapterTests` 57 / 0、`UpdateTransactionTests` 36 / 0、`PiWebUpdateAdapterTests` 44 / 0、`PiCLIUpdateAdapterTests` 44 / 0（合计 190 passed / 0 failed）。并行跑多个测试文件时出现过两个依赖亚秒级进程启动的既有用例假失败（0.3s / 1s 窗口被启动耗时吃掉），单独跑该文件时全绿；CI 串行执行不受影响。

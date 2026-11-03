@@ -1,5 +1,8 @@
 # 第二阶段审计修复汇总（alpha.16 之后）
 
+<!-- 路径说明（#143） -->
+> **路径说明**：本文提到的 `Sources/Services/KeychainStore.swift`、`Sources/Services/SystemProxyWarning.swift`、`Sources/App/RecentWorkspace.swift` 及其测试已在 #195 / #233 整体删除，路径是**当时**的位置。其余扁平的 `Sources/*.swift` 已就地改成 `Sources/{App,Services,Diagnostics,Updates}/` 下的当前路径，但**行号仍是当时的**。
+
 本文档记录 `v0.1.0-alpha.16`（发布提交 `761f783`）之后的一轮审计修复。
 范围是六份只读审计报告列出的 `outA`–`outE` 条目中判定为真实缺陷的部分。
 

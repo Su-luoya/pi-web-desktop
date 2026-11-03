@@ -1,5 +1,15 @@
 # Pi Web Desktop 0.1.0-alpha.9（build 9）— Apple Silicon alpha（未公证）
 
+<!-- 路径说明（#143） -->
+> **路径说明（#143 之后）**：本文写于 `03e06f5 refactor(sources): Sources 按领域分目录、大文件按职责拆分` 之前。
+> 能唯一对应的路径已就地改成当前路径（`Sources/*.swift` → `Sources/{App,Services,Diagnostics,Updates}/`，
+> `PiWebDesktopTests/*AdapterTests.swift` → `*UpdateFlowTests.swift`），但**行号仍是当时的**，不保证与今天的文件对齐。
+> 下列文件已按职责拆成多个文件（同名类型都还在），本文中它们的路径与行号只对应**当时**的位置：
+> `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+> `Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、`Sources/ProcessInspector.swift`。
+> 另外 `Sources/RecentWorkspace.swift`、`Sources/KeychainStore.swift`、`Sources/SystemProxyWarning.swift` 及其测试
+> 已在 #233 / #195 删除。
+
 ## 摘要 / Summary
 
 Pi Web Desktop `0.1.0-alpha.9` 是面向 **Apple Silicon（arm64）、macOS 14 或更高版本** 的第九个
@@ -93,7 +103,7 @@ and does not compare installer contents**.
 
 ### 2. 判定基于已打开的句柄（`L-3`）
 
-- `Sources/UpdateVerifier.swift` 的 `openRegularFile(atPath:)` 现在有两道闸门：解析符号链接后先看 `fileType`，打开之后再对**句柄本身**跑一次 `fstat`，只有 `(st_mode & S_IFMT) == S_IFREG` 才交给调用方，否则关闭句柄并返回 `nil`。
+- `Sources/Updates/UpdateVerifier.swift` 的 `openRegularFile(atPath:)` 现在有两道闸门：解析符号链接后先看 `fileType`，打开之后再对**句柄本身**跑一次 `fstat`，只有 `(st_mode & S_IFMT) == S_IFREG` 才交给调用方，否则关闭句柄并返回 `nil`。
 - 路径解析/类型判断与打开之间的窗口不再影响判定结果。**可读文件的范围没有变化**：指向常规文件的符号链接仍可读，FIFO、目录、字符设备仍被判为不可读。
 - 这是把判定依据从路径搬到句柄，不是新增限制；同一改动同时覆盖 `readBoundedData` 与 `readContentHash` 两条路径。
 
@@ -116,7 +126,7 @@ and does not compare installer contents**.
 ## 更新检查与自动更新的边界（本版无变化）
 
 本版**没有改动**更新检查的域名、频率、开关与自动更新的前置条件，也没有新增任何安装路径：
-`Sources/UpdateChecker.swift` 的两个主机常量（`api.github.com`、`registry.npmjs.org`）未变，两条
+`Sources/Updates/UpdateChecker.swift` 的两个主机常量（`api.github.com`、`registry.npmjs.org`）未变，两条
 自动更新开关仍然默认关闭。完整边界（会做/不会做、域名与关闭方式、三种更新路径的命令与超时行为）
 以 [alpha.5 Release 说明](release-notes-v0.1.0-alpha.5.md) 的
 “更新检查访问的域名、频率与关闭方式”“自动更新的准确边界”两节为准；本版只改了**失败时的文案**与

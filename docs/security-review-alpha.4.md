@@ -1,15 +1,25 @@
 # alpha.4 更新流水线安全审查（delta，只读）
 
+<!-- 路径说明（#143） -->
+> **路径说明（#143 之后）**：本文写于 `03e06f5 refactor(sources): Sources 按领域分目录、大文件按职责拆分` 之前。
+> 能唯一对应的路径已就地改成当前路径（`Sources/*.swift` → `Sources/{App,Services,Diagnostics,Updates}/`，
+> `PiWebDesktopTests/*AdapterTests.swift` → `*UpdateFlowTests.swift`），但**行号仍是当时的**，不保证与今天的文件对齐。
+> 下列文件已按职责拆成多个文件（同名类型都还在），本文中它们的路径与行号只对应**当时**的位置：
+> `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+> `Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、`Sources/ProcessInspector.swift`。
+> 另外 `Sources/RecentWorkspace.swift`、`Sources/KeychainStore.swift`、`Sources/SystemProxyWarning.swift` 及其测试
+> 已在 #233 / #195 删除。
+
 - **审查对象**：`0.1.0-alpha.4` 相对 `0.1.0-alpha.3` 的改动，即 GitHub #59–#63（PR #68、#69、
   #66、#67、#70）涉及的更新流水线代码与文档：
-  `Sources/UpdateChecker.swift`（来源标注与缓存校验）、
+  `Sources/Updates/UpdateChecker.swift`（来源标注与缓存校验）、
   `Sources/PiWebUpdateAdapter.swift`（生命周期脚本策略、独立进程组、超时终止、「已放弃」记录接线）、
-  `Sources/PiProcessInspector.swift`（候选筛选与遮罩边界）、
+  `Sources/Services/PiProcessInspector.swift`（候选筛选与遮罩边界）、
   `Sources/UpdateTransaction.swift`（指纹证据等级与降级判定）、
-  `Sources/UpdateVerifier.swift`（内容哈希与 npm `integrity` 探针）、
-  `Sources/UpdateAbandonedAttempt.swift`（新增：记录类型、存储、重叠防护、展示）、
+  `Sources/Updates/UpdateVerifier.swift`（内容哈希与 npm `integrity` 探针）、
+  `Sources/Updates/UpdateAbandonedAttempt.swift`（新增：记录类型、存储、重叠防护、展示）、
   `Sources/PiCLIUpdateAdapter.swift` / `Sources/PiPackageUpdateAdapter.swift`（来源硬前置与记录接线）、
-  `Sources/UpdateSettings.swift` / `Sources/AppConfiguration.swift`（新的持久键）与
+  `Sources/Updates/UpdateSettingsModel.swift` / `Sources/App/AppConfiguration.swift`（新的持久键）与
   `Sources/PiWebApp.swift` 中调用它们、以及菜单/诊断/确认框的部分，另有 `README.md` 与 `docs/` 的
   同步改动。
 - **基线**：`v0.1.0-alpha.3`（tag 指向 `e367e06`）之后的 5 个功能/文档提交——
@@ -124,7 +134,7 @@
   身份名称与 inode 通过之后，若 `evidence.contentHashVerified == false`
   （`UpdateTransaction.swift:672` 起的回退分支）只比对 `fileSize` 与 `modificationDate` 是否与指纹
   一致；内容哈希可能因为文件超过上限（`UpdateArtifactProbe.contentHashSizeLimitBytes = 16 MiB`，
-  `Sources/UpdateVerifier.swift:70`）、文件不可读或没有探针而缺失，缺失原因会写进
+  `Sources/Updates/UpdateVerifier.swift:70`）、文件不可读或没有探针而缺失，缺失原因会写进
   `UpdateContentHashUnavailableReason`（`UpdateTransaction.swift:125`）。同一分支的文案会写明
   “不校验旧文件内容”（`UpdateTransaction.swift:429` 的 `contentVerificationClause`）。
 - **影响**：同用户对手只要**就地把旧文件改写**（保留 inode）、并把大小与 mtime 恢复成指纹里的值，
@@ -139,7 +149,7 @@
 
 ### N-2 「已放弃」重叠防护是记账式的，不检测被放弃的进程是否仍在运行（低）
 
-- **事实**：`UpdateAbandonedAttemptGate.allowsAutomaticExecution`（`Sources/UpdateAbandonedAttempt.swift:377`）
+- **事实**：`UpdateAbandonedAttemptGate.allowsAutomaticExecution`（`Sources/Updates/UpdateAbandonedAttempt.swift:377`）
   只看已存记录是否存在；记录里 `finishedAt` 与 `derivedProcessesConfirmedEnded` **恒为空**
   （`:82`、`:88` 的字段文档与 `:277` 的 `valid(_:)` 校验），判定链里没有对“那个进程是否还活着”的
   任何检查。清除只发生在用户显式清除（`PiWebApp.swift:1043` 的 `clearAllAbandonedAttempts`）或
@@ -157,7 +167,7 @@
 
 ### N-3 npm `integrity` 是展示用附加证据，且来自本机可改写文件（低）
 
-- **事实**：`UpdateArtifactProbe.readNpmIntegrity`（`Sources/UpdateVerifier.swift:187`）从可执行文件
+- **事实**：`UpdateArtifactProbe.readNpmIntegrity`（`Sources/Updates/UpdateVerifier.swift:187`）从可执行文件
   向上最多 6 层查找 `package-lock.json` / `.package-lock.json` / `node_modules/.package-lock.json`
   （单个锁文件上限 4 MiB），`isIntegrityValue`（`:168`）只校验形状（已知算法名 + base64 字符集 +
   长度 ≤ 200）。值存进指纹的 `npmIntegrity`（`UpdateTransaction.swift:177`），只通过
@@ -188,17 +198,17 @@
 - **缓解（现有）**：三个前置条件把“共享进程组/降级句柄”排除在外（`:1029-1036`）；一次尝试至多
   一次信号（`didSignalOwnProcessGroup`，`:1031-1033`）；没有 `SIGKILL`、没有按名杀进程、不触碰
   任何 Pi 进程；测试用替身断言“超时只出现一次 `terminateOwnProcessGroup` 调用且参数是本次子进程”
-  （`PiWebDesktopTests/PiWebUpdateAdapterTests.swift` 的超时用例）。
+  （`PiWebDesktopTests/PiWebUpdateFlowTests.swift` 的超时用例）。
 - **残留风险**：理论上的 PID 复用；本次没有动态复现，也没有用测试覆盖这个时序。
 - **建议**：见 §7 F4。
 
 ### N-5 缓存回退仍可被同用户改写以影响提示文案（低）
 
-- **事实**：`UpdateCacheEntry.validationRejection`（`Sources/UpdateChecker.swift:911`）与
+- **事实**：`UpdateCacheEntry.validationRejection`（`Sources/Updates/UpdateChecker.swift:911`）与
   `UpdateCheckCacheFile.validated`（`:947`）只校验结构、形状与一致性（分类/包名/目标 id 匹配、
   枚举已知、语义化版本规范化、时间戳不在未来、条件请求字段长度受限），**不做**真实性校验；
   `cachedFallback`（`:1709`）会读回 `status = updateAvailable` 与 `decodedConfidence ??
-  .unknown`（`:797`、`:1743`），`UpdateCategoryStatusBuilder`（`Sources/UpdateSettings.swift:635-644`）
+  .unknown`（`:797`、`:1743`），`UpdateCategoryStatusBuilder`（`Sources/Updates/UpdateSettingsModel.swift:635-644`）
   在没有本次结果但缓存里有版本时也标成 `cachedFallback`，`UpdateStatusPresenter.line`
   （`:704` 起）与 `UpdateCheckResult.cacheOriginAnnotation`（`UpdateChecker.swift:653`）会标注
   “来源：本机缓存（写入于 …）；缓存不是可信输入，只用于提示，不用于自动安装”。
@@ -214,7 +224,7 @@
 
 ### N-6 「已放弃」记录可被同用户写入，用于阻断自动更新并展示最多 200 字符的自定义文本（低）
 
-- **事实**：`UpdateAbandonedAttemptStore.save`（`Sources/UpdateAbandonedAttempt.swift:196`）与
+- **事实**：`UpdateAbandonedAttemptStore.save`（`Sources/Updates/UpdateAbandonedAttempt.swift:196`）与
   `valid(_:)`（`:277`）只做形状校验——结束时间必须为空、摘要非空且无控制字符、上限 200 字符、
   超时在 `(0, 24h]`、时间不早于固定起点、动作必须与组件匹配（只有 Pi Web 可能出现“发送过信号”的
   记录，`:349` 起的 `isRecordable(for:)`（定义在 `:352`））；扩展包包名必须通过 npm 包名校验（`:124` 的
@@ -361,21 +371,21 @@ sh Scripts/check-release-version.sh v0.1.0-alpha.4
 git grep -nE 'kill\(|killpg|SIGTERM|SIGKILL|signal\(|\.terminate\(\)' -- Sources/
 git grep -nE '/bin/(sh|bash|zsh)|sudo|shell' -- Sources/PiWebUpdateAdapter.swift \
   Sources/PiCLIUpdateAdapter.swift Sources/PiPackageUpdateAdapter.swift \
-  Sources/UpdateTransaction.swift Sources/UpdateVerifier.swift Sources/UpdateAbandonedAttempt.swift
+  Sources/UpdateTransaction.swift Sources/Updates/UpdateVerifier.swift Sources/Updates/UpdateAbandonedAttempt.swift
 git grep -nE 'moveItem|copyItem|removeItem|unlink\(|rmdir|rename\(|truncate|write\(to:|createFile' -- \
   Sources/PiWebUpdateAdapter.swift Sources/PiCLIUpdateAdapter.swift Sources/PiPackageUpdateAdapter.swift \
-  Sources/UpdateTransaction.swift Sources/UpdateVerifier.swift Sources/UpdateAbandonedAttempt.swift
+  Sources/UpdateTransaction.swift Sources/Updates/UpdateVerifier.swift Sources/Updates/UpdateAbandonedAttempt.swift
 git grep -nE 'Process\(\)|posix_spawn\(' -- Sources/PiWebUpdateAdapter.swift \
   Sources/PiCLIUpdateAdapter.swift Sources/PiPackageUpdateAdapter.swift
 
 # 关键判定点的定位（本报告引用的行号）
-git grep -n 'isEligibleForAutomaticInstall\|func autoInstallRefusalText' -- Sources/UpdateChecker.swift
-git grep -n 'func validationRejection\|static func validated\|private func cachedFallback' -- Sources/UpdateChecker.swift
+git grep -n 'isEligibleForAutomaticInstall\|func autoInstallRefusalText' -- Sources/Updates/UpdateChecker.swift
+git grep -n 'func validationRejection\|static func validated\|private func cachedFallback' -- Sources/Updates/UpdateChecker.swift
 git grep -n 'enum PiWebUpdateLifecycleScriptPolicy\|terminateOwnProcessGroup\|stopWaitingLocked' -- Sources/PiWebUpdateAdapter.swift
-git grep -n 'static func isCandidate\|secretValuePrefixes\|isOpaqueSecretToken\|maskSensitiveTokens' -- Sources/PiProcessInspector.swift
+git grep -n 'static func isCandidate\|secretValuePrefixes\|isOpaqueSecretToken\|maskSensitiveTokens' -- Sources/Services/PiProcessInspector.swift
 git grep -n 'static func evaluateRollbackEvidence\|static func verificationFailure\|contentHashVerified' -- Sources/UpdateTransaction.swift
-git grep -n 'readContentHash\|isIntegrityValue\|readNpmIntegrity\|notVerifiedCapabilities' -- Sources/UpdateVerifier.swift
-git grep -n 'enum UpdateAbandonedAttemptGate\|static func valid\|allowsAutomaticExecution' -- Sources/UpdateAbandonedAttempt.swift
+git grep -n 'readContentHash\|isIntegrityValue\|readNpmIntegrity\|notVerifiedCapabilities' -- Sources/Updates/UpdateVerifier.swift
+git grep -n 'enum UpdateAbandonedAttemptGate\|static func valid\|allowsAutomaticExecution' -- Sources/Updates/UpdateAbandonedAttempt.swift
 ```
 
 设计说明：本报告写在文档提交里，没有修改任何 `Sources/`、`Scripts/` 或 `.github/` 文件；文件本身

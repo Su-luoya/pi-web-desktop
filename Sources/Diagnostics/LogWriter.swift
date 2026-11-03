@@ -573,7 +573,6 @@ final class LogWriter {
         let readDescriptor: Int32
         let readerQueue: DispatchQueue
         let capacity = DispatchSemaphore(value: LogWriter.childPipeCapacityChunks)
-        var source: DispatchSourceRead?
         /// 只在读取队列上访问。
         var pendingLine = Data()
         /// 跨读取块的脱敏状态（PEM 私钥块）：与 `pendingLine` 一样只在读取队列上
@@ -582,6 +581,9 @@ final class LogWriter {
 
         private let stateLock = NSLock()
         private var stopped = false
+        /// 由 `attach(_:)` 在锁内写入，`stop()` 在锁内读取：读取处理器可能在
+        /// 别的队列上取消自身，不加锁就是一个真实的指针读写竞态（TSan 报点）。
+        private var source: DispatchSourceRead?
 
         init(writeHandle: FileHandle, readDescriptor: Int32, readerQueue: DispatchQueue) {
             self.writeHandle = writeHandle
@@ -589,13 +591,21 @@ final class LogWriter {
             self.readerQueue = readerQueue
         }
 
+        /// 绑定读取源（在 `resume()` 之前调用，且此时管道还没发布到 `childPipe`，
+        /// 因此不会与 `stop()` 竞争）。
+        func attach(_ source: DispatchSourceRead) {
+            stateLock.lock()
+            self.source = source
+            stateLock.unlock()
+        }
+
         /// 取消读取端（幂等）。取消处理器关闭读端 fd；子进程持有的写端不受影响。
         func stop() {
             stateLock.lock()
             let alreadyStopped = stopped
             stopped = true
+            let source = alreadyStopped ? nil : self.source
             stateLock.unlock()
-            guard !alreadyStopped else { return }
             source?.cancel()
         }
     }
@@ -649,10 +659,10 @@ final class LogWriter {
     /// 创建子进程输出管道并启动读取端，返回管道写端。目录/文件的可写性由
     /// `openChildOutput()` 在调用前保证；这里只做 O(1) 的 fd 操作，不等写入队列。
     private func makeChildOutputPipe() throws -> FileHandle {
-        // 上一个管道（如果有）先读干净再取消，避免重启时既丢尾部输出、又留下一个
-        // 再也读不到 EOF 的读端。
-        drainAndStopCurrentChildPipe()
-
+        // 新管道先建好再处理旧管道：旧管道排空会先置空 `childPipe` 并把
+        // `childOutputFinished` 置 true（见 `takeCurrentChildPipe()`），如果那个
+        // 窗口里 `pipe()` 失败抛错，状态就成了“既没有管道、又声称已排空”，而
+        // 重启后的子进程 stdout 其实还开着。所以 `pipe()` 失败要在碰旧管道之前。
         var descriptors: [Int32] = [0, 0]
         guard pipe(&descriptors) == 0 else {
             throw WriterError.cannotCreateChildOutputPipe(errno)
@@ -681,13 +691,19 @@ final class LogWriter {
             self.readChildOutput(pipe)
         }
         source.setCancelHandler { close(readDescriptor) }
-        pipe.source = source
-        source.resume()
+        pipe.attach(source)
+
+        // 上一个管道（如果有）先读干净再取消，避免重启时既丢尾部输出、又留下一个
+        // 再也读不到 EOF 的读端。取消处理器会关闭旧读端；新读端此刻还没启动。
+        drainAndStopCurrentChildPipe()
 
         pipeLock.lock()
         childPipe = pipe
         childOutputFinished = false
         pipeLock.unlock()
+        // 先登记再启动：反过来的话，处理器可能在新管道还没登记时就看到 EOF
+        // （`stopChildPipe` 不会把它当成已排空），于是 settled 状态永远差一拍。
+        source.resume()
         return pipe.writeHandle
     }
 

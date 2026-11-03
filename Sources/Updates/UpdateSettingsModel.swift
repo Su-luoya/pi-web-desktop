@@ -481,6 +481,81 @@ struct UpdateIgnoredVersions: Equatable {
     }
 }
 
+// MARK: - 更新告警的共用存取
+
+/// 一类更新告警在 UserDefaults 里的键。
+///
+/// Pi Web / Pi CLI / Pi 扩展包三类告警字段同构（类别、旧/新/目标版本、原因、
+/// 时间），只有键前缀不同，扩展包另有一个包名键。读写实现因此只保留一份：
+/// 新增一类组件时只需给出键，不需要再抄一遍解析与版本校验。
+struct UpdateWarningKeys {
+    var kind: String
+    var oldVersion: String
+    var newVersion: String
+    var targetVersion: String
+    var reason: String
+    var recordedAt: String
+    /// 该类告警写入的全部键（含扩展包的包名键）：清除时按它逐个删除。
+    var all: [String]
+}
+
+/// 从 UserDefaults 读回的告警原始字段。`kind` 仍是字符串，由各组件的 `Kind`
+/// 枚举解析；解析失败时整条记录视为无效。
+struct StoredUpdateWarning: Equatable {
+    var kind: String
+    var oldVersion: String?
+    var newVersion: String?
+    var targetVersion: String?
+    var reason: String
+    var recordedAt: Date
+}
+
+/// 三类更新告警共用的读写：读到的值必须通过类型与版本校验，否则整条记录无效。
+enum UpdateWarningStore {
+    static func load(_ keys: UpdateWarningKeys, from defaults: UserDefaults) -> StoredUpdateWarning? {
+        guard let kind = defaults.string(forKey: keys.kind) else { return nil }
+        guard let reason = defaults.string(forKey: keys.reason), !reason.isEmpty else { return nil }
+        return StoredUpdateWarning(
+            kind: kind,
+            oldVersion: version(defaults, keys.oldVersion),
+            newVersion: version(defaults, keys.newVersion),
+            targetVersion: version(defaults, keys.targetVersion),
+            reason: reason,
+            recordedAt: UpdateIgnoredVersions.timestamp(defaults.object(forKey: keys.recordedAt))
+                ?? Date(timeIntervalSince1970: 0)
+        )
+    }
+
+    static func save(_ warning: StoredUpdateWarning?, keys: UpdateWarningKeys, to defaults: UserDefaults) {
+        guard let warning else {
+            for key in keys.all {
+                defaults.removeObject(forKey: key)
+            }
+            return
+        }
+        defaults.set(warning.kind, forKey: keys.kind)
+        defaults.set(warning.reason, forKey: keys.reason)
+        defaults.set(warning.recordedAt.timeIntervalSince1970, forKey: keys.recordedAt)
+        setVersion(warning.oldVersion, key: keys.oldVersion, defaults: defaults)
+        setVersion(warning.newVersion, key: keys.newVersion, defaults: defaults)
+        setVersion(warning.targetVersion, key: keys.targetVersion, defaults: defaults)
+    }
+
+    /// 只接受可解析为语义化版本的字符串；否则写入 nil（删除键）。
+    static func setVersion(_ version: String?, key: String, defaults: UserDefaults) {
+        guard let version, SemanticVersion(version) != nil else {
+            defaults.removeObject(forKey: key)
+            return
+        }
+        defaults.set(version, forKey: key)
+    }
+
+    static func version(_ defaults: UserDefaults, _ key: String) -> String? {
+        guard let text = defaults.string(forKey: key), SemanticVersion(text) != nil else { return nil }
+        return text
+    }
+}
+
 // MARK: - 复查间隔
 
 /// 策略对应的复查间隔（秒）。

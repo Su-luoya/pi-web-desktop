@@ -438,53 +438,44 @@ struct PiWebUpdateWarning: Equatable {
 /// 持久警告的 UserDefaults 存取（只经 `AppConfiguration` 调用）。
 ///
 /// 键与其它更新检查设置分开：保存策略不会清掉警告，保存警告也不会改动策略。
-/// 读到的值必须通过类型与版本校验，否则整条记录视为无效（返回 nil）。
+/// 读写本身在 `UpdateWarningStore` 里只实现一份（三类告警同构）。
 enum PiWebUpdateWarningStore {
+    private static let keys = UpdateWarningKeys(
+        kind: UpdateSettingKeys.piWebUpdateWarningKind,
+        oldVersion: UpdateSettingKeys.piWebUpdateWarningOldVersion,
+        newVersion: UpdateSettingKeys.piWebUpdateWarningNewVersion,
+        targetVersion: UpdateSettingKeys.piWebUpdateWarningTargetVersion,
+        reason: UpdateSettingKeys.piWebUpdateWarningReason,
+        recordedAt: UpdateSettingKeys.piWebUpdateWarningRecordedAt,
+        all: UpdateSettingKeys.allPiWebUpdateWarningKeys
+    )
+
     static func load(from defaults: UserDefaults) -> PiWebUpdateWarning? {
-        guard let kindText = defaults.string(forKey: UpdateSettingKeys.piWebUpdateWarningKind),
-              let kind = PiWebUpdateWarning.Kind(rawValue: kindText) else { return nil }
-        guard let reason = defaults.string(forKey: UpdateSettingKeys.piWebUpdateWarningReason),
-              !reason.isEmpty else { return nil }
-        let recordedAt = UpdateIgnoredVersions.timestamp(
-            defaults.object(forKey: UpdateSettingKeys.piWebUpdateWarningRecordedAt)
-        ) ?? Date(timeIntervalSince1970: 0)
+        guard let stored = UpdateWarningStore.load(keys, from: defaults),
+              let kind = PiWebUpdateWarning.Kind(rawValue: stored.kind) else { return nil }
         return PiWebUpdateWarning(
             kind: kind,
-            oldVersion: version(defaults, UpdateSettingKeys.piWebUpdateWarningOldVersion),
-            newVersion: version(defaults, UpdateSettingKeys.piWebUpdateWarningNewVersion),
-            targetVersion: version(defaults, UpdateSettingKeys.piWebUpdateWarningTargetVersion),
-            reason: reason,
-            recordedAt: recordedAt
+            oldVersion: stored.oldVersion,
+            newVersion: stored.newVersion,
+            targetVersion: stored.targetVersion,
+            reason: stored.reason,
+            recordedAt: stored.recordedAt
         )
     }
 
     static func save(_ warning: PiWebUpdateWarning?, to defaults: UserDefaults) {
-        guard let warning else {
-            for key in UpdateSettingKeys.allPiWebUpdateWarningKeys {
-                defaults.removeObject(forKey: key)
-            }
-            return
-        }
-        defaults.set(warning.kind.rawValue, forKey: UpdateSettingKeys.piWebUpdateWarningKind)
-        defaults.set(warning.reason, forKey: UpdateSettingKeys.piWebUpdateWarningReason)
-        defaults.set(warning.recordedAt.timeIntervalSince1970, forKey: UpdateSettingKeys.piWebUpdateWarningRecordedAt)
-        setVersion(warning.oldVersion, key: UpdateSettingKeys.piWebUpdateWarningOldVersion, defaults: defaults)
-        setVersion(warning.newVersion, key: UpdateSettingKeys.piWebUpdateWarningNewVersion, defaults: defaults)
-        setVersion(warning.targetVersion, key: UpdateSettingKeys.piWebUpdateWarningTargetVersion, defaults: defaults)
+        UpdateWarningStore.save(warning.map { stored(from: $0) }, keys: keys, to: defaults)
     }
 
-    /// 只接受可解析为语义化版本的字符串；否则写入 nil（删除键）。
-    static func setVersion(_ version: String?, key: String, defaults: UserDefaults) {
-        guard let version, SemanticVersion(version) != nil else {
-            defaults.removeObject(forKey: key)
-            return
-        }
-        defaults.set(version, forKey: key)
-    }
-
-    static func version(_ defaults: UserDefaults, _ key: String) -> String? {
-        guard let text = defaults.string(forKey: key), SemanticVersion(text) != nil else { return nil }
-        return text
+    private static func stored(from warning: PiWebUpdateWarning) -> StoredUpdateWarning {
+        StoredUpdateWarning(
+            kind: warning.kind.rawValue,
+            oldVersion: warning.oldVersion,
+            newVersion: warning.newVersion,
+            targetVersion: warning.targetVersion,
+            reason: warning.reason,
+            recordedAt: warning.recordedAt
+        )
     }
 }
 

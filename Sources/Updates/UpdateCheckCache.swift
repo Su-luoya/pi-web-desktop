@@ -221,7 +221,7 @@ extension UpdateCacheEntry {
                 return .invalidEntry
             }
         }
-        // 时间戳不能落在未来；允许小幅时钟偏移，但偏移必须小于容差。
+        // 时间戳不能落在未来；允许小幅时钟偏移，偏移不得超过容差。
         for timestamp in [lastAttemptAt, lastSuccessAt].compactMap({ $0 }) where
             timestamp.timeIntervalSince(now) > UpdateCheckCacheFile.futureTimestampTolerance {
             return .timestampInTheFuture

@@ -1,5 +1,8 @@
 # 第二阶段审计修复的安全评审（alpha.16 之后，delta）
 
+<!-- 路径说明（#143） -->
+> **路径说明**：本文提到的 `Sources/Services/KeychainStore.swift`、`Sources/Services/SystemProxyWarning.swift`、`Sources/App/RecentWorkspace.swift` 及其测试已在 #195 / #233 整体删除，路径是**当时**的位置。其余扁平的 `Sources/*.swift` 已就地改成 `Sources/{App,Services,Diagnostics,Updates}/` 下的当前路径，但**行号仍是当时的**。
+
 评审对象：`main` 上的 `c430c0f`（`v0.1.0-alpha.16` 发布提交 `761f783` 之后的六个提交）。
 基线：`761f783`（alpha.16 发布提交）。
 本报告是**只读评审**：没有修改任何代码、工程文件或脚本，只读取源码、脚本、工程文件与文档。
@@ -85,7 +88,7 @@ static let externalSchemes: Set<String> = ["http", "https", "mailto"]
 `WebViewNavigationDecision` 新增 `case block`（同文件 :14）；`WebViewController.swift:190-196`
 只在白名单命中时调用 `NSWorkspace.shared.open(url)`，否则只上报不打开。
 
-`Sources/App/WebViewNavigationPolicyTests.swift` 新增 56 行覆盖各 scheme 的判定。
+`PiWebDesktopTests/WebViewNavigationPolicyTests.swift` 新增 56 行覆盖各 scheme 的判定。
 其余 `NSWorkspace` 调用点（打开日志目录、工作目录、在浏览器打开）都是应用自身的固定目标，
 不接受网页输入。
 

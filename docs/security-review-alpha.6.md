@@ -1,5 +1,15 @@
 # v0.1.0-alpha.6 安全评审（delta，只读）
 
+<!-- 路径说明（#143） -->
+> **路径说明（#143 之后）**：本文写于 `03e06f5 refactor(sources): Sources 按领域分目录、大文件按职责拆分` 之前。
+> 能唯一对应的路径已就地改成当前路径（`Sources/*.swift` → `Sources/{App,Services,Diagnostics,Updates}/`，
+> `PiWebDesktopTests/*AdapterTests.swift` → `*UpdateFlowTests.swift`），但**行号仍是当时的**，不保证与今天的文件对齐。
+> 下列文件已按职责拆成多个文件（同名类型都还在），本文中它们的路径与行号只对应**当时**的位置：
+> `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+> `Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、`Sources/ProcessInspector.swift`。
+> 另外 `Sources/RecentWorkspace.swift`、`Sources/KeychainStore.swift`、`Sources/SystemProxyWarning.swift` 及其测试
+> 已在 #233 / #195 删除。
+
 - **审查对象**：`0.1.0-alpha.6` 相对 `0.1.0-alpha.5` 的改动，即 `git diff d6fa883..8b591c9`
   （3 个提交、10 个文件、+403 / −213 行）。本版**没有新增功能面**：只有一处界面布局修复、一组
   更新失败文案/门闩提示/放弃等待记录的语义对齐，以及一次 README 重写。
@@ -77,7 +87,7 @@
 不再在排水窗口写失实的「已放弃」记录）。信号语义未变（`killpg` 仍只在 Pi Web 安装器，且只对本次启动的
 进程组发一次 SIGTERM；CLI 与扩展包不发信号）。
 
-### 1.2 设置窗口布局（`3306398`，`Sources/PreferencesWindowController.swift` +127/−24）
+### 1.2 设置窗口布局（`3306398`，`Sources/App/PreferencesWindowController.swift` +127/−24）
 
 逐条检查后全部落在布局：`formMinimumWidth = 520`（`:9`）、`rowFieldMinimumWidth = 200`（`:15`）、
 `windowMinimumContentSize`、`FlippedDocumentView`、`WrappingLabel`（每次布局更新
@@ -256,9 +266,9 @@ Keychain 项、存储键的改动。**唯一新增持久化是窗口尺寸/位�
   [SECURITY.md](../SECURITY.md)。
 - 本 delta 引用行号的主要源码：`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
   `Sources/PiWebUpdateAdapter.swift`、`Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、
-  `Sources/PreferencesWindowController.swift`、`Sources/ServiceOwnership.swift`、`Sources/ServiceManager.swift`、
-  `Sources/KeychainStore.swift`、`Sources/LogWriter.swift`、`Sources/DiagnosticsCollector.swift`、
-  `PiWebDesktopTests/PiCLIUpdateAdapterTests.swift`、`PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`。
+  `Sources/App/PreferencesWindowController.swift`、`Sources/Services/ServiceOwnership.swift`、`Sources/Services/ServiceManager.swift`、
+  `Sources/KeychainStore.swift`、`Sources/Diagnostics/LogWriter.swift`、`Sources/Diagnostics/DiagnosticsCollector.swift`、
+  `PiWebDesktopTests/PiCLIUpdateFlowTests.swift`、`PiWebDesktopTests/PiPackageUpdateFlowTests.swift`。
 - 审查范围：`git diff d6fa883..8b591c9`（3 个提交、10 个文件、+403 / −213 行）。
 - 复现方式（只读）：`git diff d6fa883..8b591c9`、`grep -rn …`（见 §0.1、§0.2 的各条命令）；
   签名与身份复现：`./Scripts/build.sh && ./Scripts/check-identity.sh && codesign -dv --verbose=4 build/Pi-Web-Desktop.app`。

@@ -1,5 +1,15 @@
 # Pi Web Desktop 0.1.0-alpha.8（build 8）— Apple Silicon alpha（未公证）
 
+<!-- 路径说明（#143） -->
+> **路径说明（#143 之后）**：本文写于 `03e06f5 refactor(sources): Sources 按领域分目录、大文件按职责拆分` 之前。
+> 能唯一对应的路径已就地改成当前路径（`Sources/*.swift` → `Sources/{App,Services,Diagnostics,Updates}/`，
+> `PiWebDesktopTests/*AdapterTests.swift` → `*UpdateFlowTests.swift`），但**行号仍是当时的**，不保证与今天的文件对齐。
+> 下列文件已按职责拆成多个文件（同名类型都还在），本文中它们的路径与行号只对应**当时**的位置：
+> `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+> `Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、`Sources/ProcessInspector.swift`。
+> 另外 `Sources/RecentWorkspace.swift`、`Sources/KeychainStore.swift`、`Sources/SystemProxyWarning.swift` 及其测试
+> 已在 #233 / #195 删除。
+
 ## 摘要 / Summary
 Pi Web Desktop `0.1.0-alpha.8` 是面向 **Apple Silicon（arm64）、macOS 14 或更高版本** 的第八个
 alpha 预览。它启动、监控并显示本机已安装的 Pi Web 服务，默认只监听 loopback。相对
@@ -91,7 +101,7 @@ alpha.7 delta 评审的 `F1` … `F6`（[#121](https://github.com/Su-luoya/pi-we
 - **日志尾句**：`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiWebUpdateAdapter.swift`、
   `Sources/PiPackageUpdateAdapter.swift` 里命令失败与放弃等待的日志行从「旧版本保持不变」改为
   「本次没有执行任何回滚动作」，与弹窗和 `reason` 文案同源；
-  `PiWebDesktopTests/PiWebUpdateAdapterTests.swift` 里把旧文案写成断言的用例同步更新。
+  `PiWebDesktopTests/PiWebUpdateFlowTests.swift` 里把旧文案写成断言的用例同步更新。
   `.versionUnchanged` 分支（`Sources/PiPackageUpdateAdapter.swift` 的两处与 CLI / Pi Web 的对应行）的
   「旧版本保持不变」**保留不动**：那里的版本状态有重检测探针支撑。
 - **`detectedVersion == nil` 的句子**：三条路径的验证失败句改成「更新命令已结束，但重新检测没有给出
@@ -111,7 +121,7 @@ alpha.7 delta 评审的 `F1` … `F6`（[#121](https://github.com/Su-luoya/pi-we
   `docs/architecture.md` 的投递说明同步（执行结果经专用投递队列交给调用方、管道 EOF 冲刷、取消落在收尾窗口时的记录）。
 - **增量解码的 EOF 冲刷**（`F2`）：扩展包执行器用 `IncrementalUTF8Decoder` 解码 stdout/stderr，进程
   退出时以空块冲刷暂存的不完整序列并在下一个进程开始前重置；分块切开的多字节字符不再变成 U+FFFD。
-- **只读常规文件**（`F4`）：`Sources/UpdateVerifier.swift` 新增 `fileType(atPath:)` 与
+- **只读常规文件**（`F4`）：`Sources/Updates/UpdateVerifier.swift` 新增 `fileType(atPath:)` 与
   `openRegularFile(atPath:)`（先 `resolvingSymlinksInPath`，再按 `FileAttributeType` 判定），
   `readBoundedData` 与 `readContentHash` 只在 `.typeRegular` 上继续；FIFO、目录与字符设备返回 nil，
   不再可能阻塞在读管道上。
@@ -126,7 +136,7 @@ alpha.7 delta 评审的 `F1` … `F6`（[#121](https://github.com/Su-luoya/pi-we
 ### 3. `integrity` 的基准版本（#124 / PR #125）
 
 - `UpdateArtifactProbe.npmIntegrity` 的签名变为 `(String, String?, String?) -> String?`
-  （`executablePath`、`packageName`、`fingerprintVersion`）：`Sources/UpdateVerifier.swift` 用
+  （`executablePath`、`packageName`、`fingerprintVersion`）：`Sources/Updates/UpdateVerifier.swift` 用
   `fingerprintVersion ?? （包名一致时的 package.json 版本）` 作为基准，`Sources/UpdateTransaction.swift`
   在采集时传入**更新前已安装的版本**（采集发生在安装命令之前，与读取时点自洽）。效果：同一个包的不同版本不再互相采信 `integrity`，条目缺失或
   包名不一致时如实显示「未获取」。
@@ -138,7 +148,7 @@ alpha.7 delta 评审的 `F1` … `F6`（[#121](https://github.com/Su-luoya/pi-we
   未知算法 / 非 base64 / 空载荷 / 超长 / 缺分隔、最近的锁文件优先（含隐藏项）、上层无关锁文件不参与、
   FIFO 视为不可读、符号链接到常规文件可读）；工程文件已在四处登记
   （`PiWebDesktop.xcodeproj/project.pbxproj`）。
-- `PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`：完成回调不阻塞状态队列、UTF-8 按字节切开
+- `PiWebDesktopTests/PiPackageUpdateFlowTests.swift`：完成回调不阻塞状态队列、UTF-8 按字节切开
   两类用例（`T-1` 的缺口用真实执行器覆盖）。
 - `PiWebDesktopTests/UpdateTransactionTests.swift`：`testIdentityWordingFollowsTheEvidenceSource`
   断言事实句必须有证据来源（`T-2`）。
@@ -159,7 +169,7 @@ alpha.7 delta 评审的 `F1` … `F6`（[#121](https://github.com/Su-luoya/pi-we
 ## 更新检查与自动更新的边界（本版无变化）
 
 本版**没有改动**更新检查的域名、频率、开关与自动更新的前置条件，也没有新增任何安装路径：
-`Sources/UpdateChecker.swift` 的两个主机常量（`api.github.com`、`registry.npmjs.org`）未变，两条
+`Sources/Updates/UpdateChecker.swift` 的两个主机常量（`api.github.com`、`registry.npmjs.org`）未变，两条
 自动更新开关仍然默认关闭。完整边界（会做/不会做、域名与关闭方式、三种更新路径的命令与超时行为）
 以 [alpha.5 Release 说明](release-notes-v0.1.0-alpha.5.md) 的
 “更新检查访问的域名、频率与关闭方式”“自动更新的准确边界”两节为准；本版只改了**失败时的文案**与

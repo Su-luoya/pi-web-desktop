@@ -1,5 +1,15 @@
 # Pi Web Desktop 0.1.0-alpha.10（build 10）— Apple Silicon alpha（未公证）
 
+<!-- 路径说明（#143） -->
+> **路径说明（#143 之后）**：本文写于 `03e06f5 refactor(sources): Sources 按领域分目录、大文件按职责拆分` 之前。
+> 能唯一对应的路径已就地改成当前路径（`Sources/*.swift` → `Sources/{App,Services,Diagnostics,Updates}/`，
+> `PiWebDesktopTests/*AdapterTests.swift` → `*UpdateFlowTests.swift`），但**行号仍是当时的**，不保证与今天的文件对齐。
+> 下列文件已按职责拆成多个文件（同名类型都还在），本文中它们的路径与行号只对应**当时**的位置：
+> `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+> `Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、`Sources/ProcessInspector.swift`。
+> 另外 `Sources/RecentWorkspace.swift`、`Sources/KeychainStore.swift`、`Sources/SystemProxyWarning.swift` 及其测试
+> 已在 #233 / #195 删除。
+
 ## 摘要 / Summary
 
 Pi Web Desktop `0.1.0-alpha.10` 是面向 **Apple Silicon（arm64）、macOS 14 或更高版本** 的第十个
@@ -113,7 +123,7 @@ signatures, does not confirm the official source, and does not compare installer
 ## 更新检查与自动更新的边界（本版无变化）
 
 本版**没有改动**更新检查的域名、频率、开关与自动更新的前置条件，也没有新增任何安装路径：
-`Sources/UpdateChecker.swift` 的两个主机常量（`api.github.com`、`registry.npmjs.org`）未变，两条
+`Sources/Updates/UpdateChecker.swift` 的两个主机常量（`api.github.com`、`registry.npmjs.org`）未变，两条
 自动更新开关仍然默认关闭。上一次改动这条边界的是 alpha.9（失败措辞与门闩提示），完整边界（会做/
 不会做、域名与关闭方式、三种更新路径的命令与超时行为）以
 [alpha.5 Release 说明](release-notes-v0.1.0-alpha.5.md) 的

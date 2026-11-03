@@ -1,5 +1,15 @@
 # alpha.1 独立安全与发布审查报告（GitHub #14）
 
+<!-- 路径说明（#143） -->
+> **路径说明（#143 之后）**：本文写于 `03e06f5 refactor(sources): Sources 按领域分目录、大文件按职责拆分` 之前。
+> 能唯一对应的路径已就地改成当前路径（`Sources/*.swift` → `Sources/{App,Services,Diagnostics,Updates}/`，
+> `PiWebDesktopTests/*AdapterTests.swift` → `*UpdateFlowTests.swift`），但**行号仍是当时的**，不保证与今天的文件对齐。
+> 下列文件已按职责拆成多个文件（同名类型都还在），本文中它们的路径与行号只对应**当时**的位置：
+> `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+> `Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、`Sources/ProcessInspector.swift`。
+> 另外 `Sources/RecentWorkspace.swift`、`Sources/KeychainStore.swift`、`Sources/SystemProxyWarning.swift` 及其测试
+> 已在 #233 / #195 删除。
+
 - **审查对象**：`0.1.0-alpha.1`（`Configuration/AppIdentity.xcconfig` 的 `MARKETING_VERSION`），提交 `8e00bf73d9ad6e139abe1d9e4e04a50a75d71e29`。
 - **审查方式**：只读。未修改 `Sources/`、`Scripts/`、`.github/`、`PiWebDesktop.xcodeproj/`、`PiWebDesktopTests/`；本 PR 只新增/修改 `docs/` 下的文档。未 push、未创建 PR、未 merge、未使用 `sudo`、未上传数据、未结束任何真实进程、未访问真实 Keychain。
 - **执行环境**：macOS 27.0（build 26A428），arm64，`swiftc` Apple Swift 6.4；`xcode-select -p` = `/Library/Developer/CommandLineTools`（**无完整 Xcode**，因此本地不能运行 `xcodebuild test`，见文末“未能验证的部分”）。
@@ -32,7 +42,7 @@ spctl -a -vv build/Pi-Web-Desktop.app                                    # 退�
 unzip -l /tmp/secrev/dist/Pi-Web-Desktop-0.1.0-alpha.1.zip               # 23 个条目，逐条核对
 ```
 
-另外执行了三组“仓库文本 + 历史”只读扫描，以及两个一次性探针程序：脱敏规则矩阵探针（编译 `Sources/LogRedactor.swift`）与 `LogWriter` 就地脱敏探针（编译 `Sources/LogRedactor.swift` + `Sources/LogWriter.swift`）。两个探针只在 `$TMPDIR` 下写文件，不触碰真实 `~/Library`。
+另外执行了三组“仓库文本 + 历史”只读扫描，以及两个一次性探针程序：脱敏规则矩阵探针（编译 `Sources/Diagnostics/LogRedactor.swift`）与 `LogWriter` 就地脱敏探针（编译 `Sources/Diagnostics/LogRedactor.swift` + `Sources/Diagnostics/LogWriter.swift`）。两个探针只在 `$TMPDIR` 下写文件，不触碰真实 `~/Library`。
 
 ---
 
@@ -44,7 +54,7 @@ unzip -l /tmp/secrev/dist/Pi-Web-Desktop-0.1.0-alpha.1.zip               # 23 �
 
 | 证据 | 来源与文件:行号 | 强度 | 绕过可能 |
 | --- | --- | --- | --- |
-| `instanceID`（每次运行随机 UUID） | `Sources/ServiceManager.swift:498`，写入 `ServiceOwnership.swift:36`，校验 `ServiceOwnership.swift:194` | **强**（跨运行不可继承） | 需要与当前实例内存中的 UUID 相同，无法离线伪造 |
+| `instanceID`（每次运行随机 UUID） | `Sources/Services/ServiceManager.swift:498`，写入 `ServiceOwnership.swift:36`，校验 `ServiceOwnership.swift:194` | **强**（跨运行不可继承） | 需要与当前实例内存中的 UUID 相同，无法离线伪造 |
 | `processGroupID == pid`（组长不变量） | 写入前置检查 `ServiceManager.swift:962-964`，校验 `ServiceOwnership.swift:183-185`、`202` | **强**（`POSIX_SPAWN_SETPGROUP` + `pgroup=0` 由内核保证 `pgid == pid`，`ServiceManager.swift:239-246`） | 无 |
 | 实时 `ps -o args=` 摘要（SHA-256） | 计算 `ServiceOwnership.swift:63-72`，比对 `ServiceOwnership.swift:206-210` | **强**（对“进程被换掉/参数变化”有效） | 空白折叠后同文本、但引号写法不同的两次启动无法区分（文档已记录） |
 | 实时 `pgid` | `ProcessInspector.swift:152-154`，比对 `ServiceOwnership.swift:202` | 强 | 无 |
@@ -60,15 +70,15 @@ unzip -l /tmp/secrev/dist/Pi-Web-Desktop-0.1.0-alpha.1.zip               # 23 �
 
 ```sh
 $ git grep -n "kill(" -- Sources
-Sources/ProcessInspector.swift:64:        pid > 1 && kill(pid, 0) == 0
-Sources/ServiceOwnership.swift:280:        _ = kill(-processGroupID, signal)
-Sources/ServiceOwnership.swift:285:        return kill(-processGroupID, 0) == 0
+Sources/Services/ProcessInspector.swift:64:        pid > 1 && kill(pid, 0) == 0
+Sources/Services/ServiceOwnership.swift:280:        _ = kill(-processGroupID, signal)
+Sources/Services/ServiceOwnership.swift:285:        return kill(-processGroupID, 0) == 0
 
 $ git grep -n "sendGroupSignal\|isProcessGroupAlive" -- Sources
-Sources/ServiceManager.swift:1080:        signaler.sendGroupSignal(SIGTERM, toProcessGroup: processGroupID)
-Sources/ServiceManager.swift:1082:            guard signaler.isProcessGroupAlive(processGroupID) else { return }
-Sources/ServiceManager.swift:1085:        if signaler.isProcessGroupAlive(processGroupID) {
-Sources/ServiceManager.swift:1086:            signaler.sendGroupSignal(SIGKILL, toProcessGroup: processGroupID)
+Sources/Services/ServiceManager.swift:1080:        signaler.sendGroupSignal(SIGTERM, toProcessGroup: processGroupID)
+Sources/Services/ServiceManager.swift:1082:            guard signaler.isProcessGroupAlive(processGroupID) else { return }
+Sources/Services/ServiceManager.swift:1085:        if signaler.isProcessGroupAlive(processGroupID) {
+Sources/Services/ServiceManager.swift:1086:            signaler.sendGroupSignal(SIGKILL, toProcessGroup: processGroupID)
 ```
 
 - 全仓库只有 **2 处**发送信号的调用（`ServiceManager.swift:1080/1086`），都在 `terminate(processGroupID:)`（`ServiceManager.swift:1078-1088`）内，且 `guard processGroupID > 1`；`POSIXServiceSignaler.sendGroupSignal` 再次 `guard processGroupID > 1`（`ServiceOwnership.swift:278-281`）。`ServiceSignaling` 协议**没有单 PID 发送方法**（`ServiceOwnership.swift:269-275`），因此“只对组、不退化到 `kill(0,...)`/`kill(-1,...)`”是类型层面的约束，而不是约定。
@@ -105,7 +115,7 @@ $ git grep -nE 'contains\("pi-web"\)|contains\("piweb"\)' -- Sources
 ### 2.2 密码是否可能进入 UserDefaults / 命令行 / 日志 / 诊断 / 错误消息：**否**（已用 `git grep` 核验）
 
 ```sh
-$ git grep -nE 'UserDefaults|setValue|set\(' -- Sources/KeychainStore.swift Sources/PreferencesWindowController.swift Sources/AppConfiguration.swift \
+$ git grep -nE 'UserDefaults|setValue|set\(' -- Sources/KeychainStore.swift Sources/App/PreferencesWindowController.swift Sources/App/AppConfiguration.swift \
     | grep -iE 'password|secret|token|credential'
 (无输出，退出 1)
 ```
@@ -130,7 +140,7 @@ $ git grep -nE 'UserDefaults|setValue|set\(' -- Sources/KeychainStore.swift Sour
 
 ### 3.1 实测方法
 
-编译仓库自身的 `Sources/LogRedactor.swift`（以及与 `LogWriter` 的组合），在 `$TMPDIR` 下对固定样例集跑矩阵。样例值统一为 16 位字母（实测为 16 个 `A`）。
+编译仓库自身的 `Sources/Diagnostics/LogRedactor.swift`（以及与 `LogWriter` 的组合），在 `$TMPDIR` 下对固定样例集跑矩阵。样例值统一为 16 位字母（实测为 16 个 `A`）。
 
 ### 3.2 覆盖良好的形态（实测通过）
 
@@ -164,13 +174,13 @@ $ git grep -nE 'UserDefaults|setValue|set\(' -- Sources/KeychainStore.swift Sour
 | 值在下一行（YAML 形态） | `password:` 换行后缩进 `<16 位字母>` | 原样输出 | **未脱敏** |
 | 无引号但含空格的值 | `password=AA BB CC DD` | `password=<redacted> BB CC DD` | **仅第一段脱敏，其余泄漏** |
 
-原因（`Sources/LogRedactor.swift:104-146`）：键值规则的值分支是 `[^\s,;&"']+`，遇到空格或引号即停止；引号形态只对**被引号包裹的键**（规则表第 6 条）生效，因此“不带引号的键 + 带引号的值”不在覆盖范围；跨行的值不在逐行处理范围内。
+原因（`Sources/Diagnostics/LogRedactor.swift:104-146`）：键值规则的值分支是 `[^\s,;&"']+`，遇到空格或引号即停止；引号形态只对**被引号包裹的键**（规则表第 6 条）生效，因此“不带引号的键 + 带引号的值”不在覆盖范围；跨行的值不在逐行处理范围内。
 
 **为什么仍是非阻断**：(a) 应用自身从不以上述形态打印密码——密码只进子进程环境（§2.2），诊断只有“已设置/未设置”；(b) 受影响的主要是子进程 stdout/stderr，那部分由 `posix_spawn` 直接重定向到日志文件（`ServiceManager.swift:246-262`），应用**不控制也不解析**其格式；(c) 文档已写明“脱敏不替代自查”。修正要求：把上表如实写进规则文档（本 PR 已做），并开后续 Issue 扩展规则。
 
 ### 3.4 幂等性声明与实际不符 — R-1
 
-`docs/logging-and-diagnostics.md:52` 与 `Sources/LogRedactor.swift:46-47` 都声明“对已经脱敏的文本再运行一次结果不变”。实测**不成立**：
+`docs/logging-and-diagnostics.md:52` 与 `Sources/Diagnostics/LogRedactor.swift:46-47` 都声明“对已经脱敏的文本再运行一次结果不变”。实测**不成立**：
 
 ```text
 用真实代码路径（LogWriter.append + 两次 scrubExistingLog，后者在每次启动服务时执行，LogWriter.swift:135-166/211-223）：
@@ -188,7 +198,7 @@ after 2nd scrubExisting : {"token": <redacted> trailing-context
 - 应用侧写入的每一行都经同一个 `LogRedactor` 实例（`LogWriter.appendLocked`，`LogWriter.swift:175-208`）；错误消息在进入状态机前先脱敏（`ServiceManager.swift:1239-1247`）。
 - 打开子进程日志句柄前先对已存在日志就地脱敏（`LogWriter.swift:135-166`、`:211-223`）。
 - 轮转：默认 10 MB / 保留 5 份（`LogWriter.swift:8-9`），达到阈值按 `.1`…`.5` 后移、超出份数删除（`:225-253`）。
-- `DiagnosticsCollector.text(for:redactor:)` 最后统一整段脱敏（`Sources/DiagnosticsCollector.swift:84-116`），字段顺序固定、多行值用带序号的唯一标签续写。
+- `DiagnosticsCollector.text(for:redactor:)` 最后统一整段脱敏（`Sources/Diagnostics/DiagnosticsCollector.swift:84-116`），字段顺序固定、多行值用带序号的唯一标签续写。
 
 ---
 
@@ -198,7 +208,7 @@ after 2nd scrubExisting : {"token": <redacted> trailing-context
 
 | 检查项 | 结论 | 证据（文件:行号 / 命令输出） |
 | --- | --- | --- |
-| 默认 loopback | 通过 | `ServiceConfiguration.defaultHostname = "127.0.0.1"`（`Sources/ServiceConfiguration.swift:31`），`defaultNoProxy = "localhost,127.0.0.1,::1"`（:35）；`./Scripts/check-identity.sh` 输出 `ok   service default hostname is 127.0.0.1` |
+| 默认 loopback | 通过 | `ServiceConfiguration.defaultHostname = "127.0.0.1"`（`Sources/App/ServiceConfiguration.swift:31`），`defaultNoProxy = "localhost,127.0.0.1,::1"`（:35）；`./Scripts/check-identity.sh` 输出 `ok   service default hostname is 127.0.0.1` |
 | 非 loopback 必须有非空密码 | 通过 | `allowsRemoteListening`（`KeychainStore.swift:286-288`）；启动门控 `ServiceManager.swift:601-603`、`:791-793`、`:911-913`（缺密码 → `.missingRemotePassword` / 可读失败，不启动） |
 | `0.0.0.0` / `::` / `[::]` / `*` 不可默认、所有入口都不可用 | 通过（所有入口） | 唯一判定 `RemoteAccessPolicy.addressVerdict(hostname:)`（`KeychainStore.swift:295-361`，拒绝集合 `:230`）被保存路径（`hostnameValidationMessage` `:420-422`、`RemoteAccessSetup.apply` `:471-473`）、`ServiceConfiguration.load`（`ServiceConfiguration.swift:72-74`、`:76`）与 `ServiceManager.startDecision(credentials:)`（`ServiceManager.swift:783-788`，启动门控 `:601-609`）共用（Issue #39 修复 R-3） |
 | 通配地址的等价写法 | 通过 | `isWildcardIPv6Literal`（`KeychainStore.swift:376-384`）拒绝全零与 IPv4-mapped 全零 IPv6（`0:0:0:0:0:0:0:0`、`::ffff:0.0.0.0`），`isAmbiguousNumericHostname`（`:390-405`）拒绝会被 `getaddrinfo` 按 inet_aton 语义解析的纯数值写法（`0`、`0x0`、`000.000.000.000`）与空标签（`0.0.0.0.`）；macOS 实测这些写法都绑定所有接口 |
@@ -260,7 +270,7 @@ $ ./Scripts/check-release-version.sh v9.9.9 ; echo exit=$?      # 负向验证
 error: tag 'v9.9.9' does not match Configuration/AppIdentity.xcconfig ...; exit=1
 ```
 
-应用侧的唯一命令注入面同样已闭合（附带核实）：`DependencyChecker.resolveExecutable` 把名字插进 `command -v <name>` 交给 `/bin/zsh -lc`（`Sources/DependencyChecker.swift:515`），但 3 个调用点全部传编译期字面量 `"node"`/`"pi"`/`"pi-web"`（`:629`、`:700`、`:733`）；`ServiceManager.resolvePiWebPath` 的 shell 调用是固定字符串（`ServiceManager.swift:740`）。
+应用侧的唯一命令注入面同样已闭合（附带核实）：`DependencyChecker.resolveExecutable` 把名字插进 `command -v <name>` 交给 `/bin/zsh -lc`（`Sources/Services/DependencyChecker.swift:515`），但 3 个调用点全部传编译期字面量 `"node"`/`"pi"`/`"pi-web"`（`:629`、`:700`、`:733`）；`ServiceManager.resolvePiWebPath` 的 shell 调用是固定字符串（`ServiceManager.swift:740`）。
 
 ### 5.4 ZIP 内容清单（实际生成并逐条核对）
 

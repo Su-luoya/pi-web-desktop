@@ -84,13 +84,13 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 
 ## Xcode 工程构建与测试
 
-标准 Xcode 工程使用 Apple Silicon、macOS 26 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让测试在没有 host app 的情况下仍可编译，target 会把被测源码直接加入测试源（当前 `Sources/` 共 89 个 Swift 文件，其中 **74 个**直接进测试 target，15 个只进 app target）；因此测试文件直接使用该 target 内编译的这些类型，不通过 `@testable import PiWebDesktop` 引入 app target。
+标准 Xcode 工程使用 Apple Silicon、macOS 26 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让测试在没有 host app 的情况下仍可编译，target 会把被测源码直接加入测试源（当前 `Sources/` 共 99 个 Swift 文件，其中 **82 个**直接进测试 target，17 个只进 app target）；因此测试文件直接使用该 target 内编译的这些类型，不通过 `@testable import PiWebDesktop` 引入 app target。
 
-只进 app target 的 15 个文件全部依赖 AppKit/WebKit、需要真实窗口，或是 `AppDelegate` 的扩展与入口：
+只进 app target 的 17 个文件全部依赖 AppKit/WebKit、需要真实窗口，或是 `AppDelegate` 的扩展与入口：
 
 ```text
 Sources/App/AppDelegate.swift + AppDelegate+{CLIUpdate,Diagnostics,Menus,PackageUpdates,
-  PreLaunchUpdates,Quit,Service,UpdateChecks,Window}.swift
+  PreLaunchUpdates,Quit,RemoteAccess,Service,UpdateChecks,UpdateProgress,Window}.swift
 Sources/App/main.swift
 Sources/App/WebViewController.swift
 Sources/App/PreferencesWindowController.swift

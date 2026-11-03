@@ -1,5 +1,15 @@
 # Pi Web Desktop `0.1.0-alpha.11` 安全评审（delta）
 
+<!-- 路径说明（#143） -->
+> **路径说明（#143 之后）**：本文写于 `03e06f5 refactor(sources): Sources 按领域分目录、大文件按职责拆分` 之前。
+> 能唯一对应的路径已就地改成当前路径（`Sources/*.swift` → `Sources/{App,Services,Diagnostics,Updates}/`，
+> `PiWebDesktopTests/*AdapterTests.swift` → `*UpdateFlowTests.swift`），但**行号仍是当时的**，不保证与今天的文件对齐。
+> 下列文件已按职责拆成多个文件（同名类型都还在），本文中它们的路径与行号只对应**当时**的位置：
+> `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+> `Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、`Sources/ProcessInspector.swift`。
+> 另外 `Sources/RecentWorkspace.swift`、`Sources/KeychainStore.swift`、`Sources/SystemProxyWarning.swift` 及其测试
+> 已在 #233 / #195 删除。
+
 评审对象：PR #143（已合并为 `main` 上的 `03e06f5`；关闭 [#142](https://github.com/Su-luoya/pi-web-desktop/issues/142)）的实际改动
 ——`Sources/` 从 36 个扁平文件重排为 5 个领域目录下的 83 个文件，并把大文件按职责拆分。基线
 `main` = `5bd520e`。评审日期与工具环境见[发布说明](release-notes-v0.1.0-alpha.11.md#本机实测环境与版本可追溯)。
@@ -57,8 +67,8 @@
 
 | `main` 位置 | 本版位置 | 角色 |
 | --- | --- | --- |
-| `Sources/ProcessInspector.swift:119` | `Sources/Services/CommandRunning.swift:122` | `ProcessProbeProcess`：依赖探测、版本查询等只读探针的共享执行器 |
-| `Sources/DiagnosticsCollector.swift:178` | `Sources/Diagnostics/DiagnosticsCollector.swift:181` | 诊断导出里的 `lsof` / `ps` 只读调用 |
+| `Sources/Services/ProcessInspector.swift:119` | `Sources/Services/CommandRunning.swift:122` | `ProcessProbeProcess`：依赖探测、版本查询等只读探针的共享执行器 |
+| `Sources/Diagnostics/DiagnosticsCollector.swift:178` | `Sources/Diagnostics/DiagnosticsCollector.swift:181` | 诊断导出里的 `lsof` / `ps` 只读调用 |
 | `Sources/PiCLIUpdateAdapter.swift:684` | `Sources/Updates/PiCLIUpdateCommand.swift:275` | Pi CLI 更新命令（参数数组 `update --self`） |
 | `Sources/PiPackageUpdateAdapter.swift:1235` | `Sources/Updates/PiPackageUpdateCommand.swift:251` | 扩展包更新命令（参数数组 `update npm:<包名>`） |
 
@@ -140,7 +150,7 @@
   [#135](https://github.com/Su-luoya/pi-web-desktop/issues/135) 一起收紧：把状态转换收进一个
   `private` 方法）。
 - **`R2`（本版引入的命名不一致，非安全项）**：生产类型已改名为 `*Coordinator`，但
-  `PiWebDesktopTests/PiCLIUpdateAdapterTests.swift`、`PiWebUpdateAdapterTests.swift`、
+  `PiWebDesktopTests/PiCLIUpdateFlowTests.swift`、`PiWebUpdateAdapterTests.swift`、
   `PiPackageUpdateAdapterTests.swift` 三个测试**文件名与类名保持旧名**，多个活文档也仍以旧名引用这些
   测试文件。这是本轮有意保留的（改测试文件名会让 `-only-testing` 过滤器与历史记录里的引用失效）；
   三处源码注释里残留的旧类型名已在本版一并改成新名（`Sources/App/AppDelegate.swift`、

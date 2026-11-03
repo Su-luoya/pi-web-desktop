@@ -63,6 +63,7 @@
 - 高级用法：偏好窗口“工作目录”可以选择其他目录（`NSOpenPanel`，只允许目录）；留空表示跟随默认目录。选择的目录必须已存在且可写，校验不通过时设置不会保存，界面给出可读错误。
 - 生效路径由 `AppConfiguration.workspaceDirectory(for:)` 解析：`service.workspacePath` 非空时用它，否则用默认目录。该值进入 `ServiceConfiguration.runtimeSignature`，修改后保存设置会让托管服务用新目录重启。
 - pi-web 会在工作目录写入运行文件，因此目录必须可写。
+- 改工作目录只有「设置… → 服务 → 工作目录」一个入口。拖放文件夹与 Finder「打开方式」在 GitHub #233 移除，应用也不再声明 `CFBundleDocumentTypes`（原先为拖放声明的 `public.folder`/`Editor`），所以 Finder 不会再把本应用列为文件夹的打开方式。
 
 ### 目录不存在或不可写
 
@@ -79,19 +80,6 @@
 - 启动/停止/重启菜单项由 `ServiceControlState(gate:workspaceIsReady:)` 统一置灰；`DiagnosticsRouting` 的报告里会出现 `.unusableWorkspace` 原因，WebView 显示诊断状态页（含依赖报告与工作目录修复提示），诊断窗口中也会显示同一提示。
 - 已经运行的托管服务不会被这个门控停止：门控只阻止启动入口；停止与退出行为仍然只对通过所有权校验的进程组动作。
 - 目录修好后点击“重新检测”即可重新校验并打开门控，无需重启应用。
-
-## 最近工作目录与快速切换
-
-菜单「服务 → 最近工作目录」列出最近用过的目录（完整绝对路径，当前目录带勾选标记），空列表显示一条禁用的「无最近工作目录」，末尾是「清除历史记录」。
-
-- 记录与上限：`RecentWorkspaceStore`（`Sources/App/RecentWorkspace.swift`）在 UserDefaults 的 `workspace.recentPaths` 里按最近使用顺序保存最多 10 条路径（`maximumCount`），按标准化后的字符串去重；启动时记录当前工作目录，切换成功或配置未变化时也会记录。
-- 路径标准化只做两端空白/换行裁剪加 `standardizedFileURL`，不做其它重写；保存的是绝对路径，所以菜单项与确认框展示的是用户自己的目录名（隐私影响见 [隐私说明](privacy.md)）。
-- 切换入口：子菜单选择、把文件夹拖到应用图标或窗口、`open -a "Pi Web Desktop" <目录>`、Finder 的「打开方式」。拖放没有单独的剪贴板代码：Finder 的拖放由 Launch Services 转成 open 事件，`application(_:open:)` 只取第一个 URL。
-- 校验：`WorkspaceSwitchDecision.decide(requestedPath:currentPath:probe:)` 要求绝对路径（相对路径与 `~` 都不展开，一律拒绝），再用 `WorkspaceDirectory.validate` 要求“存在、是目录、可写”。任一不通过都不写任何状态，只给可读提示。
-- 确认与重启语义：切到与当前不同的目录时先确认（`NSAlert`），当前目录不弹。服务由应用托管且正在运行时，文案写明“确认后将重启服务。”、按钮为「切换并重启」；服务是外部进程时按钮只是「切换」，应用不会停止或重启它，因此新目录要等用户自己重启服务后才生效。
-- 生效路径：新目录写入 `service.workspacePath`，因此进入 `ServiceConfiguration.runtimeSignature`，托管服务按新目录重启。
-- 子菜单另有「在 Finder 中打开当前工作目录」（`NSWorkspace.shared.open`）；当前目录不可用时改用与切换失败相同的可读提示。
-- 代价：应用因此声明 `CFBundleDocumentTypes`（`public.folder`，role `Editor`），Finder 的「打开方式」会为任意文件夹列出本应用。
 
 ## 复制手机访问链接
 
@@ -147,33 +135,6 @@
 - `.adopt(record)`：只有全部校验通过的记录才能被重新认领，应用继续把它当作托管服务。
 - `.external(mismatch)`：任何失败（包括 `instanceID` 不同，即上一次运行留下的记录）都只当作外部服务：不发信号、不改状态。可判定的不匹配记录会被删除；`ps` 事实暂时不可读时保留记录、留待下次再验证。
 
-## 系统代理与 VPN 网段（GitHub #157）
-
-服务监听地址切到 Tailscale 地址（CGNAT 段 `100.x.y.z`）后，应用窗口的页面请求会走系统代理。
-如果系统代理的例外列表（「绕过这些主机与域名」）不含该网段，代理会先返回自己的错误页
-（实机实测 502 Bad Gateway），看起来像服务断开，实际服务本身正常。应用做两件事，
-都不会修改用户的系统代理设置：
-
-- **健康探测始终直连**：`Sources/Services/ServiceScheduling.swift` 的 `URLSessionServiceProbe`
-  把会话配置的 `connectionProxyDictionary` 显式置空，代理的应答（502/407/缓存页）不再参与
-  「服务是否就绪」的判定；超时、`(200..<500)` 判定与 `ephemeral` 缓存策略都保持原样。
-- **只读检测 + 提示**：`Sources/Services/SystemProxyWarning.swift` 用 `SCDynamicStoreCopyProxies`
-  读取系统代理；只对 CGNAT 段（`100.x.y.z`）内的服务地址、且该 scheme 确实启用代理（或 SOCKS/PAC
-  生效）、且该地址不被 `ExceptionsList` 命中时提示（提示文案里的具体网段写法来自
-  `SystemProxyWarningEvaluator.vpnSubnetDescription`，按仓库约定不在仓库文本里写点分字面值）。提示是「服务」菜单里的一条告警项
-  （可展开完整文本、可「清除警告」），并在日志里各记一行触发/清除；同一条件在一次运行内
-  只提示一次，切回 loopback 或用户加上例外后自动清除。
-
-取舍（与单测一起固定）：
-
-- **loopback 与普通局域网地址（`192.168.*`、`10.*`、`172.16-31.*`）不提示**：这些网段几乎总在
-  代理软件的默认例外里，逐个绑定地址提示会把噪声拉满；本次确认的现象专属于 CGNAT 段
-  （Tailscale 的 CGNAT 段，常见默认例外列表恰好不含它）。
-- **主机名不提示**：MagicDNS 名无法与网段可靠对应，只能靠用户自查；提示文案里给出了自查/修复入口。
-- **无法解析的例外条目按「已排除」处理**：宁可漏报一次，也不误报「代理没排除」，避免把
-  已经配置好的用户再拉进一次无效折腾。
-- 应用不写系统代理、不改 WebView 导航白名单，也不新增第三方依赖。
-
 ## 测试覆盖
 
 unhosted 测试（注入临时目录、假探针与假网络地址提供者，不触碰真实用户目录、进程或网络）：
@@ -182,18 +143,16 @@ unhosted 测试（注入临时目录、假探针与假网络地址提供者，�
 - `PiWebDesktopTests/AppConfigurationTests.swift`：三处存储位置、默认设置序列化后不含个人代理与远程 hostname、设置在重新读取后保留、smoke 使用临时目录、日志目录不存在时打开日志会先创建目录与文件（幂等、失败返回可读错误）。
 - `PiWebDesktopTests/ServiceConfigurationTests.swift`：默认退出行为与默认工作目录、既有键名、无法识别的退出行为回落为“询问”、工作目录进入运行时签名；直接写入 UserDefaults 的通配地址、空值、带空白/非法字符的值加载后被标记为不可用且不被静默替换，合法地址与 `[::1]` 规范化后仍可用。
 - `PiWebDesktopTests/ServiceAddressesTests.swift`（GitHub #150）：地址分类边界（Tailscale 网段两端与网段外、私有网段的边界与网段外、loopback、link-local、非法输入）、探测结果的过滤/去重/排序（与输入顺序无关）与菜单标题生成（含无候选时的单条禁用说明项）、`ServiceAddressDecision.decide` 的三个分支、链接构造只按地址与端口拼装而不改窗口打开的地址；全部使用注入的假 provider。
-- `PiWebDesktopTests/SystemProxyWarningTests.swift`（GitHub #157）：loopback（`127.*`、`localhost`、`::1`）不提示；`100.x` 无启用代理不提示；`100.x` + 代理且无例外 → 提示（HTTP/HTTPS 各自 scheme、SOCKS、PAC 均覆盖）；例外命中（`100.x.*` 通配、精确地址、CGNAT 段 CIDR、逗号串起来的整串条目）→ 不提示；不命中与畸形条目（`/99`、非 IP、`<local>`、IPv6 条目）的取舍；网段边界（`100.63.x` / `100.128.x`）与局域网/主机名不提示；代理字典缺失、键类型畸形、空字典一律不提示；一次运行内只提示一次、切回 loopback 自动清除、手动「清除警告」只抑制本次运行、日志与文案不含用户真实地址。
 - `PiWebDesktopTests/AppWindowRegistryTests.swift`（GitHub #168）：多窗口登记表契约（新建后可查找、关闭后移除、主窗口随最近使用变化、多窗口并存互不影响、移除未知窗口是空操作）用泛型占位类型断言，不需要真实窗口或服务。
 - `PiWebDesktopTests/WorkspaceDirectoryTests.swift`：默认目录首次使用时创建、自选目录不被静默重建、不存在/不是目录/不可写三种原因的校验与可读修复提示、状态页文本、设置窗口选择（相对路径、缺失、不可写被拒绝且配置不变，留空回到默认目录）。
-- `PiWebDesktopTests/RecentWorkspaceTests.swift`：去重与置顶、10 条上限与路径标准化、跨 store 实例的持久化与清除、注入 defaults 的配置读取、`WorkspaceSwitchDecision.decide` 的各分支（当前目录 `.unchanged`、相对路径与不存在的目录 `.reject(.missing)`、文件 `.reject(.notDirectory)`、可用目录 `.confirm`），以及任何分支都不创建目录。
 - `PiWebDesktopTests/QuitPolicyTests.swift`：三种退出行为与三种确认选择的决策表、取消不停止服务、只有显式“退出并停止服务”才请求停止托管服务、任何行为都不停止外部服务。
 - `PiWebDesktopTests/QuitCoordinatorTests.swift`（GitHub #72）：三条退出路径（询问后保持运行 / 询问后停服务 / 设置直接退出）、显式菜单项不受设置影响、取消后回到 idle 且可再次正常退出、等待与停止期间的重复触发不叠加、迟到的按钮/停止回调被忽略、超时前继续等待与超时后保持服务并退出（超时可注入，默认 5 分钟）、服务未运行与外部服务不产生停止副作用、AppKit 终止请求只得到 `terminateNow` / `cancelPendingDecision` 且 `terminateNow` 不带退出副作用。
 - `PiWebDesktopTests/ServiceManagerTests.swift`：工作目录不可用时所有启动入口零启动零加载并给出可读提示、恢复后门控重新打开、启动前重新校验（自选目录被删后不重建且阻止启动；存在且可写的自选目录不被创建；默认目录缺失时仍创建；健康监控期间自选目录消失时受托管重启被拒绝）、三种退出行为（保持运行零信号、停止只对已验证进程组、外部服务零信号且状态不变）、关闭期间无后台轮询、校验失败的记录不被认领也不被发信号；非法监听地址（通配、空值、空白、非法字符）在所有启动入口零进程零探测并给出可读诊断，loopback 与具体地址仍可启动，`0.0.0.0` 写入 UserDefaults 后无法进入启动流程。
 - `PiWebDesktopTests/UpdateSettingsTests.swift`（GitHub #18）：四类策略的允许集合与默认值、菜单快捷开关映射、迁移（缺键 / 旧布尔键 / 未知与非法值 / 开关非布尔）、UserDefaults 往返只写策略、开关、警告与忽略版本且值里无路径或凭据、忽略版本只存版本与时间戳（非法版本丢弃、非法时间戳保留版本）、策略 → 间隔映射（`off` → nil）、每类状态快照与文案、通知判定（忽略 / 去重 / 关闭分类 / 非可更新状态）、提示文案与说明文本不含路径或凭据；以及 `AppConfiguration` 用注入 defaults 的设置往返。
 - `PiWebDesktopTests/UpdateCheckerTests.swift`（GitHub #17 / #18）：在上面列出的注入式检查器测试之外，新增逐类关闭后请求数为 0 且无该类计时器、每日 / 每周 / 扩展包 7 天用假时钟推进后的请求次数、迁移后的旧布尔键直接决定调度、`stop()` 后假时钟推进 30 天零请求、忽略当前版本后不再提示且上游更高版本重新提示、每类状态快照带下次检查时间、启动前自动更新开关打开与关闭时请求 / 结果 / 调度完全一致。
-- `PiWebDesktopTests/PiWebUpdateAdapterTests.swift`（GitHub #20）：插件式替身 + `$TMPDIR` 假安装器脚本覆盖设置关闭、来源/可信度不符、参数数组与命令策略、成功组合、安装器失败四态、版本未变、健康检查失败、服务运行中与脱敏断言；不联网、不执行真实 npm/pi-web、不写真实 Home 或 UserDefaults。
+- `PiWebDesktopTests/PiWebUpdateFlowTests.swift`（GitHub #20）：插件式替身 + `$TMPDIR` 假安装器脚本覆盖设置关闭、来源/可信度不符、参数数组与命令策略、成功组合、安装器失败四态、版本未变、健康检查失败、服务运行中与脱敏断言；不联网、不执行真实 npm/pi-web、不写真实 Home 或 UserDefaults。
 - `PiWebDesktopTests/PiProcessInspectorTests.swift`（GitHub #21）：假进程表（`PiProcessProbing.fixture`）+ 内存磁盘探针覆盖三态判定（无进程 / 运行中 / 不确定）、精确名称比较（`pi-web`/`pip`/`pi-helper`/大小写不同的 Pi 都不命中）、数据参数与编辑器参数不误报、进程标题与可执行/符号链接脚本路径命中、不可执行同名脚本与不可读 argv/身份归入 `unknown`、枚举失败与 PID 竞态、重复 PID、脱敏（Home → `~`、`token=`/`password=`/粘连形态/URL 查询串 → 占位符、环境片段丢弃、摘要上限）、状态文案，以及源码负向断言（两个新文件里没有 kill/killpg/signal/SIGTERM/SIGKILL/terminate/interrupt、没有 shell 路径与 sudo 调用，命令只用参数数组）；不枚举真实进程、不发送任何信号。
-- `PiWebDesktopTests/PiCLIUpdateAdapterTests.swift`（GitHub #21）：设置默认值与键名、设置关闭零执行、前置条件（缺失/未解析/非包管理器来源/目标版本缺失或未验证或不可比较或不更高）、`noProcesses` 才自动、运行中进程与四种 `unknown` 一律推迟且不执行命令、执行前复查（新进程出现/状态变成 unknown）、一次运行只执行一次、参数数组固定为 `update --self`、环境白名单与 PATH 前置、四种失败（非零退出/超时/放弃/启动失败）与版本未变/不可解析的失败记录、成功与超过目标版本、警告持久化往返（含非法版本丢弃）与清除、手动路径（无进程门控、只要求可执行文件与版本）、不安全路径与非法版本拒绝、状态与确认文案，以及真执行器用例（`$TMPDIR` 假 `pi` 脚本：退出码与输出尾部记录、超时与 `abandon()` 后子进程仍继续运行 → 没有发送信号）；不联网、不执行真实 `pi`。
-- `PiWebDesktopTests/PiPackageUpdateAdapterTests.swift`（GitHub #22）：三种策略（`off` 连检查都不做、`checkAndNotify` 只通知且零执行、`askBeforeUpdate` 在确认前零执行且确认一次只执行一次）、来源约束（pnpm/Homebrew/nvm/mise/git/本地路径/未知来源只给命令文本，且文本就是官方 `pi update --extensions`）、进程保护（规划时有进程或状态不确定一律没有执行入口，执行前复查发现进程或状态变化则拒绝且不调用执行器、整批立即停止）、失败四态（非零退出 / 超时 / 放弃等待 / 启动失败）与“退出码 0 但版本未变”都记为失败且不重试、成功与超过目标版本、参数数组固定为 `["update", "npm:<包名>"]`（无 shell 元字符、无 `sudo`、可执行文件名必须是 `pi`）、日志与确认文案脱敏、持久告警往返与清除、输入映射，以及真执行器用例（`$TMPDIR` 假 `pi` 脚本：退出码与输出尾部、超时、`abandon()` 后子进程继续运行并用标记文件证明没有收到信号）与源码负向断言（没有 kill/signal/SIGTERM/sudo/shell 调用）；不联网、不执行真实 `pi`/npm、不写真实 Home 或 UserDefaults。
+- `PiWebDesktopTests/PiCLIUpdateFlowTests.swift`（GitHub #21）：设置默认值与键名、设置关闭零执行、前置条件（缺失/未解析/非包管理器来源/目标版本缺失或未验证或不可比较或不更高）、`noProcesses` 才自动、运行中进程与四种 `unknown` 一律推迟且不执行命令、执行前复查（新进程出现/状态变成 unknown）、一次运行只执行一次、参数数组固定为 `update --self`、环境白名单与 PATH 前置、四种失败（非零退出/超时/放弃/启动失败）与版本未变/不可解析的失败记录、成功与超过目标版本、警告持久化往返（含非法版本丢弃）与清除、手动路径（无进程门控、只要求可执行文件与版本）、不安全路径与非法版本拒绝、状态与确认文案，以及真执行器用例（`$TMPDIR` 假 `pi` 脚本：退出码与输出尾部记录、超时与 `abandon()` 后子进程仍继续运行 → 没有发送信号）；不联网、不执行真实 `pi`。
+- `PiWebDesktopTests/PiPackageUpdateFlowTests.swift`（GitHub #22）：三种策略（`off` 连检查都不做、`checkAndNotify` 只通知且零执行、`askBeforeUpdate` 在确认前零执行且确认一次只执行一次）、来源约束（pnpm/Homebrew/nvm/mise/git/本地路径/未知来源只给命令文本，且文本就是官方 `pi update --extensions`）、进程保护（规划时有进程或状态不确定一律没有执行入口，执行前复查发现进程或状态变化则拒绝且不调用执行器、整批立即停止）、失败四态（非零退出 / 超时 / 放弃等待 / 启动失败）与“退出码 0 但版本未变”都记为失败且不重试、成功与超过目标版本、参数数组固定为 `["update", "npm:<包名>"]`（无 shell 元字符、无 `sudo`、可执行文件名必须是 `pi`）、日志与确认文案脱敏、持久告警往返与清除、输入映射，以及真执行器用例（`$TMPDIR` 假 `pi` 脚本：退出码与输出尾部、超时、`abandon()` 后子进程继续运行并用标记文件证明没有收到信号）与源码负向断言（没有 kill/signal/SIGTERM/sudo/shell 调用）；不联网、不执行真实 `pi`/npm、不写真实 Home 或 UserDefaults。
 - `PiWebDesktopTests/UpdateAbandonedAttemptTests.swift`（GitHub #62）：记录字段与持久化（`finishedAt` 恒为空、展示文本含“结束时间未知”、跨“重新启动”读同一份存储仍在）、三个组件互相独立与逐个/全部清除、不可信记录一律丢弃（有结束时间、超时值越界、桌面应用、非法包名、Pi CLI/扩展包声称发过信号、空摘要）与摘要脱敏（Home → `~`、凭据 → 占位符，落盘 JSON 里也找不到）、规划与编排的硬前置（有记录时自动判定被挡住、安装/命令调用 0 次、设置位不绕过、其它组件不受影响、无记录时恢复正常）、手动入口（仍然可用、确认框先展示记录、确认后才执行一次、成功后清除该组件记录、失败不清除）、进程组启动属性（`POSIX_SPAWN_SETPGROUP` + `pgroup = 0`，降级属性不含该标志）与替身启动器的“超时/取消只终止一次自己的子进程组、降级句柄一次信号都不发”断言，以及源码负向断言（Pi CLI / 扩展包 / 记录文件里没有 kill/signal/SIGTERM/posix_spawn，Pi Web 适配器里恰好一处 `killpg` 且没有按 pid 的 `kill(`）；不执行真实 npm/pi、不联网、不向任何 Pi 进程发信号。
 - `PiWebDesktopTests/ServiceOwnershipTests.swift`：重启认领判定表（只有 `.managed` 可认领，`instanceID` 不同、PID 复用、端口变化、`ps` 不可读等都停留在外部服务）。

@@ -1,5 +1,9 @@
 # Pi Web Desktop 0.1.0-alpha.19（build 19）— Apple Silicon alpha（未公证）
 
+<!-- 路径说明 -->
+> **路径说明**：下文提到的 `Sources/RecentWorkspace.swift`（#233）、`Sources/KeychainStore.swift`（#195）、
+> `Sources/SystemProxyWarning.swift`（#233）及其测试文件在对应版本之后已删除，记录保留为历史。
+
 ## 摘要
 
 Pi Web Desktop `0.1.0-alpha.19` 面向 Apple Silicon（arm64）与 **macOS 26 或更高版本**。应用包使用 ad-hoc 签名，未经过 Apple 公证；首次手动安装仍需按 macOS 提示放行。

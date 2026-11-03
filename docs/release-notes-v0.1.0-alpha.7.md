@@ -1,5 +1,15 @@
 # Pi Web Desktop 0.1.0-alpha.7（build 7）— Apple Silicon alpha（未公证）
 
+<!-- 路径说明（#143） -->
+> **路径说明（#143 之后）**：本文写于 `03e06f5 refactor(sources): Sources 按领域分目录、大文件按职责拆分` 之前。
+> 能唯一对应的路径已就地改成当前路径（`Sources/*.swift` → `Sources/{App,Services,Diagnostics,Updates}/`，
+> `PiWebDesktopTests/*AdapterTests.swift` → `*UpdateFlowTests.swift`），但**行号仍是当时的**，不保证与今天的文件对齐。
+> 下列文件已按职责拆成多个文件（同名类型都还在），本文中它们的路径与行号只对应**当时**的位置：
+> `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+> `Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、`Sources/ProcessInspector.swift`。
+> 另外 `Sources/RecentWorkspace.swift`、`Sources/KeychainStore.swift`、`Sources/SystemProxyWarning.swift` 及其测试
+> 已在 #233 / #195 删除。
+
 ## 摘要 / Summary
 Pi Web Desktop `0.1.0-alpha.7` 是面向 **Apple Silicon（arm64）、macOS 14 或更高版本** 的第七个
 alpha 预览。它启动、监控并显示本机已安装的 Pi Web 服务，默认只监听 loopback。相对
@@ -153,7 +163,7 @@ W2B 的 `B-1` … `B-13`，W2A 的 `F5` / `F6` / `F7`，以及 alpha.6 delta 安
 ## 更新检查与自动更新的边界（本版无变化）
 
 本版**没有改动**更新检查的域名、频率、开关与自动更新的前置条件，也没有新增任何安装路径：
-`Sources/UpdateChecker.swift` 的两个主机常量（`api.github.com`、`registry.npmjs.org`）未变，两条
+`Sources/Updates/UpdateChecker.swift` 的两个主机常量（`api.github.com`、`registry.npmjs.org`）未变，两条
 自动更新开关仍然默认关闭。完整边界（会做/不会做、域名与关闭方式、三种更新路径的命令与超时行为）
 以 [alpha.5 Release 说明](release-notes-v0.1.0-alpha.5.md) 的
 “更新检查访问的域名、频率与关闭方式”“自动更新的准确边界”两节为准；本版只改了**失败时的文案**与
@@ -286,7 +296,7 @@ workflow 产物为准。
 - **命令失败与放弃等待的日志行仍写「旧版本保持不变」**（alpha.6 评审 `L-1`）：
   `Sources/PiCLIUpdateAdapter.swift:1282`、`Sources/PiWebUpdateAdapter.swift:1636`、
   `Sources/PiPackageUpdateAdapter.swift:1558`。弹窗与 `reason` 文案已在 `B-6` 与 #106 里改成
-  「没有执行任何回滚动作」，日志与它们不一致；`PiWebDesktopTests/PiWebUpdateAdapterTests.swift:649`
+  「没有执行任何回滚动作」，日志与它们不一致；`PiWebDesktopTests/PiWebUpdateFlowTests.swift:649`
   还把旧文案写成了断言（`XCTAssertTrue(world.log.text.contains("旧版本保持不变"), …)`）。
 - **`detectedVersion == nil` 时验证失败句内不自洽**（alpha.6 评审 `L-2`）：
   `Sources/PiCLIUpdateAdapter.swift:1061`、`Sources/PiWebUpdateAdapter.swift:1432`、
@@ -295,11 +305,11 @@ workflow 产物为准。
 - **CLI 的「更新进行中」拒绝文案缺「重启应用即可恢复」**（alpha.6 评审 `L-3`）：
   `Sources/PiCLIUpdateAdapter.swift:83-84` 只写「请稍后再试」，而菜单标题
   （`Sources/PiWebUpdateAdapter.swift:102`）与 Pi Web / 扩展包的拒绝文案都有恢复提示。
-- **验证器的对抗用例没有独立测试文件**（W2B `T-3`）：`Sources/UpdateVerifier.swift` 的用例散在
+- **验证器的对抗用例没有独立测试文件**（W2B `T-3`）：`Sources/Updates/UpdateVerifier.swift` 的用例散在
   `PiWebDesktopTests/UpdateTransactionTests.swift`；超大 `package.json` / 锁文件、同名多条目、
   `node_modules/.package-lock.json` 与上层无关锁文件等边界没有对抗测试。
 - **协调器测试用假执行器替换了真实执行器**（W2B `T-1`）：
-  `PiWebDesktopTests/PiPackageUpdateAdapterTests.swift:176-177` 的 `World.runner = RecordingRunner()`
+  `PiWebDesktopTests/PiPackageUpdateFlowTests.swift:176-177` 的 `World.runner = RecordingRunner()`
   让只存在于 `ProcessPiPackageUpdateCommand` 里的缺陷在测试里不可见；真实执行器的用例又每个都新建
   实例，跨批次复用同样测不到。
 - **失败与降级的事实性文案缺少对偶断言**（W2B `T-2`）：现有断言主要看状态与文案，很少断言历史里

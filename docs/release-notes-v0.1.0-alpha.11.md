@@ -1,5 +1,15 @@
 # Pi Web Desktop 0.1.0-alpha.11（build 11）— Apple Silicon alpha（未公证）
 
+<!-- 路径说明（#143） -->
+> **路径说明（#143 之后）**：本文写于 `03e06f5 refactor(sources): Sources 按领域分目录、大文件按职责拆分` 之前。
+> 能唯一对应的路径已就地改成当前路径（`Sources/*.swift` → `Sources/{App,Services,Diagnostics,Updates}/`，
+> `PiWebDesktopTests/*AdapterTests.swift` → `*UpdateFlowTests.swift`），但**行号仍是当时的**，不保证与今天的文件对齐。
+> 下列文件已按职责拆成多个文件（同名类型都还在），本文中它们的路径与行号只对应**当时**的位置：
+> `Sources/PiWebUpdateAdapter.swift`、`Sources/PiCLIUpdateAdapter.swift`、`Sources/PiPackageUpdateAdapter.swift`、
+> `Sources/UpdateTransaction.swift`、`Sources/PiWebApp.swift`、`Sources/ProcessInspector.swift`。
+> 另外 `Sources/RecentWorkspace.swift`、`Sources/KeychainStore.swift`、`Sources/SystemProxyWarning.swift` 及其测试
+> 已在 #233 / #195 删除。
+
 ## 摘要 / Summary
 
 Pi Web Desktop `0.1.0-alpha.11` 是面向 **Apple Silicon（arm64）、macOS 14 或更高版本** 的第十一个
@@ -80,7 +90,7 @@ signatures, does not confirm the official source, and does not compare installer
 
 ### 2. 大文件按职责拆分
 
-- 最大的两个文件是原 `Sources/PiWebApp.swift`（6803 行）与 `Sources/ServiceManager.swift`
+- 最大的两个文件是原 `Sources/PiWebApp.swift`（6803 行）与 `Sources/Services/ServiceManager.swift`
   （3157 行），本版把它们按职责切开：`AppDelegate` 的九个功能面各占一个文件，`ServiceManager` 拆成
   生命周期/配置/依赖/诊断/进程等文件，更新相关的三条路径按 `Model → Planner → Command → Coordinator
   → Status` 分层。

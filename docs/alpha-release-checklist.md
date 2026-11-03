@@ -2336,3 +2336,40 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
     遗留入口收干净，未做端到端验证。
   - 安全门槛 S1–S8 在 `ab86ea2` 上重跑并记入 Issue #241；本版没有开新的一轮独立安全审查，
     `Sources/Diagnostics/` 仍未覆盖（post-alpha.16 审查已把它列为下一轮对象）。
+
+## 本次发布执行记录（v0.1.0-alpha.29）
+
+- 内容：自 alpha.28 之后的两个已合并 PR —— PR #245（子进程输出管道的数据竞争与两处状态机
+  时序缺陷、三份同构的 `*UpdateWarningStore` 合并、`ServiceManager.startService()` 收敛）、
+  PR #247（删掉 `project.pbxproj` 里残留的 `CFBundleDocumentTypes`，Finder 不再把本应用列为
+  文件夹的「打开方式」；17 份历史文档 217 处失效路径、`docs/development.md` 统计数字、已移除
+  功能描述）。本版无新功能。
+- 版本号提交 PR #248 → `2345c02`；tag `v0.1.0-alpha.29`，release workflow 的 build 与 publish
+  两个 job 均通过，已发布为 prerelease。
+- 全量测试 1021 项 0 失败（**本版没有新增用例**：改动是可观察行为等价的重构与一处删除，
+  原有 1021 条全绿即为验收依据）；`-enableThreadSanitizer YES` 1021 项 0 失败、0 处告警、
+  0 次测试重启（修复前同一份全量 TSan 日志有 4 处告警与 4 次重启）；`-enableAddressSanitizer
+  YES` 1021 项 0 失败、0 处 ASan 报告。`check-identity.sh` `PASSED (45 checks)`；
+  `check-release-version.sh` `PASSED`；`scan-secrets.sh` `PASS`（`suppressed 17 lines`，
+  无 `rejected`）；`smoke.sh` 两种模式 exit 0（`items=6 blockers=3`）。
+- 发布前硬门禁 `<待填写` 与 `{{...}}` 计数均为 0；prerelease 标记保持；发布后
+  `gh release download` + `shasum -a 256 -c` 复验 `OK`。
+- appcast workflow 把 `appcast` 分支的 `appcast.json` 更新到本版，sha256 与 Release 资产一致。
+- 发布资产的 checksum `efa0665fa6df5552060399e29b7d40bb9eae23270c73eab9691dfb7145208631`，
+  体积 1741878 字节（CI 重新构建；本地 `package-release.sh --tag v0.1.0-alpha.29` 的结果是
+  `0a31b4970bd7a9a4fedca88931d2c8bbf3125ba9df2017b7ec43948a05799346` / 1699881 字节，
+  只用于发版前自检）。
+- 发布记录：Release Issue #249。
+- 真机环境：Mac16,10 / Apple M4，macOS 27.2（26B123），Node v26.13.0，Pi 1.5.0，
+  `@agegr/pi-web` 0.13.0（Homebrew 全局安装）。
+- 本版特有的判定：
+  - 本版是第一个「零新增测试」的 alpha：改动全是可观察行为等价的重构（告警存取合并、
+    `startService()` 转发）与一处删除（`CFBundleDocumentTypes`）。这与 alpha.27/28 每版
+    新增用例的做法不同，已在 Issue #249 与发布说明里写明，避免被读成漏写测试。
+  - Finder「打开方式」的移除未做真机点验：只验证了 `project.pbxproj` 无该键、构建产物
+    `Info.plist` 不含 `CFBundleDocumentTypes`、`Sources/` 内无 `application(_:open:)`。
+    LaunchServices 缓存是否会在升级后短暂仍列出本应用，未验证。
+  - `Sources/App` 的菜单/窗口/退出时序仍无人工点验记录；本版 `ServiceManager.startService()`
+    的转发改动只有单元测试覆盖。
+  - 安全门槛 S1–S8 在 `2345c02` 上重跑并记入 Issue #249；本版没有开新的一轮独立安全审查，
+    `Sources/Diagnostics/` 仍未覆盖（post-alpha.16 审查已把它列为下一轮对象）。

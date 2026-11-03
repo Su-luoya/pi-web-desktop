@@ -46,6 +46,8 @@ alpha.12 为支持「拖放文件夹切换工作目录」声明了 `CFBundleDocu
 - `xcodebuild test -enableAddressSanitizer YES`：1021 项 0 失败、0 处 ASan 报告。
 - `./Scripts/check-identity.sh`：`PASSED (45 checks)`；`./Scripts/check-release-version.sh v0.1.0-alpha.29`：`PASSED`；`./Scripts/scan-secrets.sh --self-test` 与 `./Scripts/scan-secrets.sh`：`PASS`；`sh -n Scripts/*.sh` 与 `git diff --check` 干净。
 - `./Scripts/build.sh`：成功；`./Scripts/smoke.sh`：两种模式均 exit 0；`./Scripts/package-release.sh --tag v0.1.0-alpha.29`：`OK`。
+- 本机演练产物（不是发布资产，CI 会重新构建）：SHA-256 `0a31b4970bd7a9a4fedca88931d2c8bbf3125ba9df2017b7ec43948a05799346`，1699881 字节。
+- 发布 workflow（tag `v0.1.0-alpha.29`）：build 与 publish 两个 job 通过；发布前 `<待填写` 与 `{{...}}` 计数均为 0；发布后 `gh release download` + `shasum -a 256 -c` 复验 `OK`；appcast 已更新到本版，sha256 与 Release 资产一致。
 - PR #245、#247 的 `build` workflow 在 macos-26 runner 上均为绿（含上述全部脚本）。
 
 ## 已知限制
@@ -65,7 +67,8 @@ alpha.12 为支持「拖放文件夹切换工作目录」声明了 `CFBundleDocu
 | 资产 | 值 |
 | --- | --- |
 | ZIP | `Pi-Web-Desktop-0.1.0-alpha.29+build.29.zip` |
-| SHA-256 | 见 Release 页面同名资产（CI 重新构建，发布后回填到本节） |
+| SHA-256 | `efa0665fa6df5552060399e29b7d40bb9eae23270c73eab9691dfb7145208631` |
+| 体积 | 1741878 字节 |
 | 签名 | ad-hoc（`TeamIdentifier=not set`），未公证 |
 | 最低系统 | macOS 26.0 |
 | 架构 | arm64（Apple Silicon） |

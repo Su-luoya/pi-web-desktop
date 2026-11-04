@@ -50,7 +50,8 @@ extension AppDelegate {
             }
             // 进度窗口（GitHub #219）：从这里开始才有真正要等的工作。
             self.beginDesktopAppUpdateProgress(version: target.version)
-            self.downloadAndInstallDesktopApp(version: target.version, releaseTag: target.releaseTag)        }
+            self.downloadAndInstallDesktopApp(version: target.version, releaseTag: target.releaseTag)
+        }
     }
 
     /// 从「等待确认」推进到「重新核对发布页」：只允许推进自己那一轮（同一 tag），
@@ -131,11 +132,7 @@ extension AppDelegate {
             return
         }
 
-        var request = URLRequest(url: releaseURL)
-        request.httpMethod = "GET"
-        request.timeoutInterval = UpdateChecker.requestTimeout
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue(UpdateCheckIdentity.current.userAgent, forHTTPHeaderField: "User-Agent")
+        let request = Self.updateRequest(url: releaseURL, accept: "application/json")
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             let http = response as? HTTPURLResponse
             let status = http?.statusCode
@@ -185,19 +182,17 @@ extension AppDelegate {
                 return
             }
 
-            var checksumRequest = URLRequest(url: checksumAsset.url)
+            let checksumRequest = Self.updateRequest(url: checksumAsset.url, accept: "text/plain")
             // 进度窗口（GitHub #219）：发布页与资产列表都核对完了，进入下载阶段。
             DispatchQueue.main.async { [weak self] in
                 self?.setDesktopAppUpdateProgressStep(0, .succeeded, detail: "已核对发布页与资产列表")
                 self?.setDesktopAppUpdateProgressStep(1, .running, detail: "正在下载更新包与校验和…")
             }
-            checksumRequest.httpMethod = "GET"
-            checksumRequest.timeoutInterval = UpdateChecker.requestTimeout
-            checksumRequest.setValue("text/plain", forHTTPHeaderField: "Accept")
-            checksumRequest.setValue(UpdateCheckIdentity.current.userAgent, forHTTPHeaderField: "User-Agent")
             let checksumSession = URLSession(
                 configuration: .ephemeral,
-                delegate: ChecksumRedirectDelegate(),
+                delegate: AllowlistRedirectDelegate(
+                    allows: DesktopAppReleaseAssetSelector.allowsChecksumRedirect
+                ),
                 delegateQueue: nil
             )
             checksumSession.dataTask(with: checksumRequest) { [weak self] checksumData, checksumResponse, checksumError in
@@ -244,14 +239,12 @@ extension AppDelegate {
             completion(nil)
             return
         }
-        var request = URLRequest(url: feedURL)
-        request.httpMethod = "GET"
-        request.timeoutInterval = UpdateChecker.requestTimeout
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue(UpdateCheckIdentity.current.userAgent, forHTTPHeaderField: "User-Agent")
+        let request = Self.updateRequest(url: feedURL, accept: "application/json")
         let session = URLSession(
             configuration: .ephemeral,
-            delegate: AppcastRedirectDelegate(),
+            delegate: AllowlistRedirectDelegate(
+                allows: { $0.map { AppcastFeed.allows(finalURL: $0) } ?? false }
+            ),
             delegateQueue: nil
         )
         session.dataTask(with: request) { data, response, error in
@@ -273,6 +266,19 @@ extension AppDelegate {
             }
             completion(asset)
         }.resume()
+    }
+
+    /// 更新路径的统一请求构造：固定方法、超时、UA 与 Accept。
+    ///
+    /// 三条通道（GitHub API、校验和、appcast）以前各自写一份，漏一处就会让某条
+    /// 通道带着不同的请求头/超时出去；收在一处后 `User-Agent` 与超时只有一份来源。
+    private static func updateRequest(url: URL, accept: String) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = UpdateChecker.requestTimeout
+        request.setValue(accept, forHTTPHeaderField: "Accept")
+        request.setValue(UpdateCheckIdentity.current.userAgent, forHTTPHeaderField: "User-Agent")
+        return request
     }
 
     /// 两条通道的共同出口：资产与校验值都到手后，创建安装器接管下载与替换。
@@ -842,24 +848,18 @@ extension AppDelegate {
 
 /// Checksummed assets use a dedicated session so the redirect policy cannot be toggled
 /// while an unrelated archive download is in flight.
-/// appcast 重定向闸控：只跟随到 feed 主机（与校验和下载同一策略）。
-private final class AppcastRedirectDelegate: NSObject, URLSessionTaskDelegate {
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping (URLRequest?) -> Void
-    ) {
-        guard let url = request.url, AppcastFeed.allows(finalURL: url) else {
-            completionHandler(nil)
-            return
-        }
-        completionHandler(request)
-    }
-}
+///
+/// 重定向闸控：只有目标 URL 通过调用方给的判定才跟随。校验和下载与 appcast 用的
+/// 是同一条策略实现（差别只在判定函数），因此不会出现两份几乎相同的委托各自漂移。
+private final class AllowlistRedirectDelegate: NSObject, URLSessionTaskDelegate {
+    /// 判定目标 URL 是否允许跟随；`URL?` 入参是因为 `URLRequest.url` 本身可空，
+    /// 拿不到 URL 时必须拒绝而不是放行。
+    private let allows: (URL?) -> Bool
 
-private final class ChecksumRedirectDelegate: NSObject, URLSessionTaskDelegate {
+    init(allows: @escaping (URL?) -> Bool) {
+        self.allows = allows
+    }
+
     func urlSession(
         _ session: URLSession,
         task: URLSessionTask,
@@ -867,8 +867,6 @@ private final class ChecksumRedirectDelegate: NSObject, URLSessionTaskDelegate {
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
-        completionHandler(
-            DesktopAppReleaseAssetSelector.allowsChecksumRedirect(request.url) ? request : nil
-        )
+        completionHandler(allows(request.url) ? request : nil)
     }
 }

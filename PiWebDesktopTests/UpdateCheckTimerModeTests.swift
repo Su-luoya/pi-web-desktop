@@ -87,6 +87,27 @@ final class UpdateCheckTimerModeTests: XCTestCase {
         )
     }
 
+    /// 服务健康监控的重复计时器（同一缺陷类的第二处）。
+    ///
+    /// `ServiceManager` 的健康检查（4 秒一次、连续 3 次失败才重启）也走
+    /// `ServiceScheduling.repeating`，而它原先同样用 `Timer.scheduledTimer`。
+    /// 后果：用户打开菜单、拖动窗口或停在 sheet 上时健康检查整段时间不触发，
+    /// 挂掉的服务在那段时间既不被发现也不会被重启（菜单一直显示“正在运行”）。
+    /// 这条断言把同一结论锁到服务侧，避免“只修了更新检查那一处”。
+    func testServiceSchedulerAlsoAddsTimerToCommonModes() throws {
+        let source = SourceScan.codeText(of: try SourceScan.text(named: "ServiceScheduling.swift"))
+
+        XCTAssertTrue(
+            source.contains("RunLoop.main.add(timer, forMode: .common)"),
+            "服务健康监控的重复计时器必须挂在 .common 模式上，否则菜单跟踪 / sheet / "
+                + "runModal() 期间健康检查不触发，挂掉的服务不会被发现。"
+        )
+        XCTAssertFalse(
+            source.contains("Timer.scheduledTimer"),
+            "不能用 Timer.scheduledTimer：它只把计时器加入 RunLoop.Mode.default。"
+        )
+    }
+
     // MARK: - 辅助
 
     /// 去掉 `//` 与 `///` 行内注释，避免文档里提到的 API 名造成自证失败。

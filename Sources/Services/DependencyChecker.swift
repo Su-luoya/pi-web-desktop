@@ -290,24 +290,30 @@ struct DependencyChecker {
         // 查找走登录 shell（与用户 shell 的 PATH 一致），并带上合并后的工具
         // 环境：`command -v` 本身是 shell 内建，不需要 node，但让同一次查找的
         // 子进程环境与后续 `--version` 探测一致，避免“找得到却跑不起来”。
-        let shellResult = trimmed(
-            commandRunner.run(Self.shellLookupArguments(named: name), environment: environment)
-        )
+        guard let arguments = Self.shellLookupArguments(named: name) else { return nil }
+        let shellResult = trimmed(commandRunner.run(arguments, environment: environment))
         guard let path = shellResult, fileSystem.isExecutableFile(atPath: path) else { return nil }
         return path
     }
 
     /// 登录 shell 的 `command -v` 探测参数。`resolveExecutable` 与超时归因共用
     /// 同一个形状，两处因此不会漂移。
-    private static func shellLookupArguments(named name: String) -> [String] {
-        [shellPath, "-lc", "command -v \(name) 2>/dev/null"]
+    ///
+    /// 硬化（与 `ComponentInstallationDetector.probeExecutable` 的白名单一致）：
+    /// `name` 会被拼进 shell 字符串。当前所有调用点都是编译期字面量，但一旦未来
+    /// 接入外部输入（偏好设置 / package.json）就可能变成命令注入。不满足白名单的
+    /// 名字直接返回 nil，调用方按“找不到”处理，不进入 shell。
+    private static func shellLookupArguments(named name: String) -> [String]? {
+        guard name.range(of: "^[A-Za-z0-9._-]+$", options: .regularExpression) != nil else { return nil }
+        return [shellPath, "-lc", "command -v \(name) 2>/dev/null"]
     }
 
     /// 解析该组件时用到的探针里是否有超时的：登录 shell 的 `command -v <name>`、
     /// 候选路径自己的 `--version`，以及 node 特有的“按进程 PATH 回退”探测
     /// （`process.execPath`）。
     private func didTimeOut(named name: String, paths: [String?], includesNodePathProbe: Bool = false) -> Bool {
-        if commandRunner.didTimeOut(arguments: Self.shellLookupArguments(named: name)) { return true }
+        if let arguments = Self.shellLookupArguments(named: name),
+           commandRunner.didTimeOut(arguments: arguments) { return true }
         if includesNodePathProbe, commandRunner.didTimeOut(argument: "process.execPath") { return true }
         return paths.compactMap { $0 }.contains { commandRunner.didTimeOut(arguments: [$0, "--version"]) }
     }

@@ -41,7 +41,7 @@ enum DesktopAppUpdateFailure: String, Error, Equatable {
     /// 分开：限流等一会儿就能好，网络故障不能（GitHub #225）。
     case rateLimited
     case invalidArchive, checksumUnavailable, checksumMismatch, invalidBundle
-    case notWritable, replacementFailed, relaunchFailed
+    case notWritable, replacementFailed
     /// 更新包自述的最低系统高于本机：装进去只会得到一个打不开的应用。
     case requiresNewerSystem
     /// 菜单入口拿到的结论不满足 `DesktopAppUpdateInstallPolicy` 的准入条件。
@@ -69,7 +69,6 @@ enum DesktopAppUpdateFailure: String, Error, Equatable {
         case .requiresNewerSystem: return "更新包要求更高的 macOS 版本，已停止安装；当前应用保留不变。"
         case .notWritable: return "当前应用目录不可写，无法自动更新。"
         case .replacementFailed: return "替换桌面应用失败，原应用未被删除。"
-        case .relaunchFailed: return "应用已更新，但重新启动失败，请从 /Applications 手动打开。"
         }
     }
 }

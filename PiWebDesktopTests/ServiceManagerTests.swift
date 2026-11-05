@@ -2256,6 +2256,13 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertTrue(log.contains("健康检查探测失败：连续失败 1 次"), log)
         XCTAssertTrue(log.contains("健康检查判定服务已断开（连续失败 2 次）"), log)
         XCTAssertTrue(log.contains("健康检查触发受托管重启（连续失败 3 次）"), log)
+        // 计数只在一次连续失败的开始记一行：服务被有意停掉或从未启动时监控仍在
+        // 每 4 秒探测，逐次记一行会让日志无限增长（上面跑了四次探测）。
+        XCTAssertEqual(
+            log.components(separatedBy: "健康检查探测失败").count - 1,
+            1,
+            "连续失败只在第一次记日志：\(log)"
+        )
         let healthLines = log.split(separator: "\n").filter { $0.contains("健康检查") }
         XCTAssertFalse(healthLines.isEmpty)
         for line in healthLines {

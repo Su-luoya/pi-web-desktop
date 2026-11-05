@@ -1226,9 +1226,14 @@ final class ServiceManager {
                     } else {
                         self.consecutiveProbeFailures += 1
                         let failures = self.consecutiveProbeFailures
-                        // 每次失败记一行，便于区分瞬时抖动与真正断开；不打印探测 URL
-                        // （可能含凭据），只记计数（GitHub #147）。
-                        self.logWriter.record("健康检查探测失败：连续失败 \(failures) 次")
+                        // 只在一次连续失败的开始记一行：服务被有意停掉（或本来就
+                        // 没启动）时监控仍在每 4 秒探测，逐次记一行会让日志无限
+                        // 增长——`.failed` 下 258 行/17 分钟的先例见
+                        // `reportStartupFailure`。断开判定与重启各自另有一行，
+                        // 计数不会丢。不打印探测 URL（可能含凭据）。
+                        if failures == 1 {
+                            self.logWriter.record("健康检查探测失败：连续失败 \(failures) 次")
+                        }
                         // 单次失败不改状态、不提示：只有连续失败达到阈值才判定断开，
                         // 且仍然只对“原本显示运行中”的服务下这个结论。
                         if case .running = self.currentState, failures >= Self.healthDisconnectThreshold {

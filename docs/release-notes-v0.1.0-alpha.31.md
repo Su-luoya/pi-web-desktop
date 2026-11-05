@@ -54,7 +54,7 @@ Pi Web 的版本查询只有一个端点工厂 `UpdateEndpoint.piWebAppUpdate(se
 | 资产 | 值 |
 | --- | --- |
 | ZIP | `Pi-Web-Desktop-0.1.0-alpha.31+build.31.zip` |
-| SHA-256 | 见 Release 附件中的 `.zip.sha256` |
+| SHA-256 | `e7ab15570f5b6b54f3d99475996f2af38283bfd5f58c2ff3c61fea4a171d53cc`（1775437 字节，取自 tag 上 workflow 产出的资产） |
 | 签名 | ad-hoc（`TeamIdentifier=not set`），未公证 |
 | 最低系统 | macOS 26.0 |
 | 架构 | arm64（Apple Silicon） |

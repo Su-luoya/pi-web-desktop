@@ -87,7 +87,7 @@ final class StartupFailureDiagnosisTests: XCTestCase {
     func testTruncatedMultiByteTailDoesNotCrash() throws {
         let padding = String(repeating: "日", count: 4096)
         let url = try writeLog(padding)
-        _ = StartupFailureDiagnosis.readTail(of: url, maxBytes: 1001)
-        _ = StartupFailureDiagnosis.message(logURL: url)
+        _ = XCTAssertNoThrow(StartupFailureDiagnosis.readTail(of: url, maxBytes: 1001))
+        _ = XCTAssertNoThrow(StartupFailureDiagnosis.message(logURL: url))
     }
 }

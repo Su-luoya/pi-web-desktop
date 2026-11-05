@@ -23,53 +23,6 @@ private final class FirstLaunchFakeRunner: CommandRunning {
 }
 
 /// 显式登记的假文件系统：只认识测试加进去的可执行文件、文本文件与目录。
-private final class FirstLaunchFakeFileSystem: DependencyFileSystemProbing {
-    /// 固定假 Home；诊断文本里不能出现它，只能出现 `~`。
-    let home = "/tmp/pi-web-desktop-tests-home"
-    var executables: Set<String> = []
-    var symlinks: [String: String] = [:]
-    var resolvedPaths: [String: String] = [:]
-    var files: [String: String] = [:]
-    /// 存在的目录（例如假 Pi 配置目录）。
-    var directories: Set<String> = []
-    /// 存在但不可读的目录。
-    var unreadableDirectories: Set<String> = []
-    /// `readText` 真正读过的路径；用于断言配置目录内容从未被读取。
-    private(set) var readPaths: [String] = []
-
-    func isExecutableFile(atPath path: String) -> Bool {
-        executables.contains(path)
-    }
-
-    func symlinkDestination(atPath path: String) -> String? {
-        symlinks[path]
-    }
-
-    func resolvedPath(atPath path: String) -> String? {
-        if let resolved = resolvedPaths[path] { return resolved }
-        guard executables.contains(path) || files[path] != nil || symlinks[path] != nil else { return nil }
-        return path
-    }
-
-    func readText(atPath path: String) -> String? {
-        readPaths.append(path)
-        return files[path]
-    }
-
-    func homeDirectoryPath() -> String {
-        home
-    }
-
-    func directoryExists(atPath path: String) -> Bool? {
-        directories.contains(path) || unreadableDirectories.contains(path)
-    }
-
-    func isReadableDirectory(atPath path: String) -> Bool? {
-        guard directoryExists(atPath: path) == true else { return nil }
-        return !unreadableDirectories.contains(path)
-    }
-}
-
 /// 固定结果的假端口探针：不绑定任何真实端口。
 private struct FirstLaunchFakePortProbe: DependencyPortProbing {
     var result: Bool?
@@ -81,7 +34,7 @@ private struct FirstLaunchFakePortProbe: DependencyPortProbing {
 
 private struct FirstLaunchHarness {
     let runner = FirstLaunchFakeRunner()
-    let fileSystem = FirstLaunchFakeFileSystem()
+    let fileSystem = FakeDependencyFileSystem()
     var portResult: Bool? = true
 
     func checker(configuredPiWebPath: String = "") -> DependencyChecker {
@@ -100,26 +53,6 @@ private struct FirstLaunchHarness {
 
 private let firstLaunchPiWebResolvedPath = "/opt/homebrew/lib/node_modules/@agegr/pi-web/dist/cli.js"
 private let firstLaunchPiWebPackageJSONPath = "/opt/homebrew/lib/node_modules/@agegr/pi-web/package.json"
-
-/// 直接构造诊断项，用来验证“报告缺少必需条目”的边界情况。
-private func firstLaunchFinding(
-    _ kind: DependencyFinding.Kind,
-    _ status: DependencyFinding.Status
-) -> DependencyFinding {
-    DependencyFinding(
-        kind: kind,
-        status: status,
-        path: nil,
-        resolvedPath: nil,
-        symlinkTarget: nil,
-        version: nil,
-        installSource: .unknown,
-        confidence: .unknown,
-        remediationID: nil,
-        packageName: nil,
-        packageVersion: nil
-    )
-}
 
 /// Node.js 与 Pi CLI 总是存在；pi-web 可以只通过配置路径可见。
 /// Pi 配置目录默认存在且可读。
@@ -359,8 +292,8 @@ final class FirstLaunchDiagnosticsTests: XCTestCase {
         )
 
         let missingPiWeb = DependencyReport(findings: [
-            firstLaunchFinding(.node, .ok),
-            firstLaunchFinding(.piCLI, .ok)
+            dependencyFinding(.node, .ok),
+            dependencyFinding(.piCLI, .ok)
         ])
         XCTAssertTrue(missingPiWeb.blockingFindings.isEmpty)
         XCTAssertEqual(missingPiWeb.unsatisfiedPrerequisiteKinds, [.piWeb])
@@ -374,10 +307,10 @@ final class FirstLaunchDiagnosticsTests: XCTestCase {
     /// 报告里有条目但版本无法解析（unknown）时也不得放行，路由必须停在诊断页。
     func testUnknownVersionsNeverReleaseTheGateOrReachTheMainWindow() {
         let report = DependencyReport(findings: [
-            firstLaunchFinding(.system, .ok),
-            firstLaunchFinding(.node, .ok),
-            firstLaunchFinding(.piCLI, .ok),
-            firstLaunchFinding(.piWeb, .unknown)
+            dependencyFinding(.system, .ok),
+            dependencyFinding(.node, .ok),
+            dependencyFinding(.piCLI, .ok),
+            dependencyFinding(.piWeb, .unknown)
         ])
         XCTAssertEqual(report.blockingFindings.map(\.kind), [.piWeb])
         XCTAssertFalse(report.canStartService)

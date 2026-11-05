@@ -24,12 +24,6 @@ final class PiPackageUpdateFlowTests: XCTestCase {
 
     // MARK: - 替身
 
-    private final class LogSink {
-        private(set) var messages: [String] = []
-        func append(_ message: String) { messages.append(message) }
-        var text: String { messages.joined(separator: "\n") }
-    }
-
     private final class RecordingRunner: PiPackageUpdateRunning {
         private(set) var plans: [PiPackageUpdatePlan] = []
         private(set) var timeouts: [TimeInterval] = []
@@ -1243,39 +1237,6 @@ final class PiPackageUpdateFlowTests: XCTestCase {
 
     // MARK: - 8. 真执行器（只执行临时目录里的假脚本）
 
-    private final class Locked<T> {
-        private let lock = NSLock()
-        private var storage: T?
-        var value: T? {
-            get { lock.lock(); defer { lock.unlock() }; return storage }
-            set { lock.lock(); storage = newValue; lock.unlock() }
-        }
-    }
-
-    private func waitForValue<T>(_ box: Locked<T>, timeout: TimeInterval) -> T? {
-        let deadline = Date().addingTimeInterval(timeout)
-        while box.value == nil, Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
-        }
-        return box.value
-    }
-
-    private func waitForFile(_ path: String, timeout: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while !FileManager.default.fileExists(atPath: path), Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
-        }
-        return FileManager.default.fileExists(atPath: path)
-    }
-
-    /// 可执行的假 `pi` 脚本：只写内容，不执行真实 `pi`。
-    private func makeFakePi(in directory: URL, body: String) throws -> String {
-        let url = directory.appendingPathComponent("pi")
-        try ("#!/bin/sh\n" + body + "\n").write(to: url, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
-        return url.path
-    }
-
     private func plan(forScript script: String) throws -> PiPackageUpdatePlan {
         try XCTUnwrap(plan(path: script))
     }
@@ -1283,7 +1244,7 @@ final class PiPackageUpdateFlowTests: XCTestCase {
     /// 真执行器：参数数组执行（脚本回显 `$@`）、退出码、stdout/stderr 尾部与耗时。
     func testRealExecutorRecordsExitCodeAndOutputTails() throws {
         let directory = try tempDirectory()
-        let script = try makeFakePi(in: directory, body: "echo \"args:$@\"\necho \"to-stderr\" >&2\nexit 0")
+        let script = try makeExecutableScript(in: directory, body: "echo \"args:$@\"\necho \"to-stderr\" >&2\nexit 0")
         let command = ProcessPiPackageUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
         let box = Locked<PiPackageUpdateCommandResult>()
         command.run(try plan(forScript: script), timeout: 30) { box.value = $0 }
@@ -1299,7 +1260,7 @@ final class PiPackageUpdateFlowTests: XCTestCase {
     func testRealExecutorTimeoutOnlyAbandonsWaiting() throws {
         let directory = try tempDirectory()
         let marker = directory.appendingPathComponent("late-marker")
-        let script = try makeFakePi(
+        let script = try makeExecutableScript(
             in: directory,
             body: "sleep 1\necho done > \"\(marker.path)\"\nsleep 1\nexit 0"
         )
@@ -1318,7 +1279,7 @@ final class PiPackageUpdateFlowTests: XCTestCase {
     func testRealExecutorAbandonDoesNotSignalTheChild() throws {
         let directory = try tempDirectory()
         let marker = directory.appendingPathComponent("abandon-marker")
-        let script = try makeFakePi(
+        let script = try makeExecutableScript(
             in: directory,
             body: "sleep 1\necho done > \"\(marker.path)\"\nexit 0"
         )
@@ -1335,7 +1296,7 @@ final class PiPackageUpdateFlowTests: XCTestCase {
     /// 记录已写入；异步投递在 `applicationWillTerminate` 返回后可能永远不执行。
     func testRealExecutorAbandonWritesAbandonedRecordSynchronously() throws {
         let directory = try tempDirectory()
-        let script = try makeFakePi(in: directory, body: "sleep 30")
+        let script = try makeExecutableScript(in: directory, body: "sleep 30")
         var abandoned: [UpdateAbandonedAttempt] = []
         let command = ProcessPiPackageUpdateCommand(
             baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome],
@@ -1363,7 +1324,7 @@ final class PiPackageUpdateFlowTests: XCTestCase {
     /// 否则一个慢回调就能拖住 UI 与退出流程。
     func testRealExecutorDeliversResultOffTheStateQueue() throws {
         let directory = try tempDirectory()
-        let script = try makeFakePi(in: directory, body: "sleep 0.2\nexit 0")
+        let script = try makeExecutableScript(in: directory, body: "sleep 0.2\nexit 0")
         let command = ProcessPiPackageUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
         let entered = expectation(description: "completion 已被回调")
         let release = DispatchSemaphore(value: 0)
@@ -1390,7 +1351,7 @@ final class PiPackageUpdateFlowTests: XCTestCase {
         let directory = try tempDirectory()
         // 逐字节写“☃”（E2 98 83），中间 sleep 让可读性回调分两次拿到不完整的序列；
         // 旧实现把两块都当非法 UTF-8 丢弃，尾部是空字符串。
-        let script = try makeFakePi(
+        let script = try makeExecutableScript(
             in: directory,
             body: "printf '\\342'\nsleep 0.3\nprintf '\\230\\203'\nsleep 0.3\nexit 0"
         )
@@ -1406,7 +1367,7 @@ final class PiPackageUpdateFlowTests: XCTestCase {
     /// `finished` 当实例级一次性标记，第二次 run 会被静默丢弃。
     func testRealExecutorSecondRunOnSameInstanceCallsBack() throws {
         let directory = try tempDirectory()
-        let script = try makeFakePi(in: directory, body: "echo ok\nexit 0")
+        let script = try makeExecutableScript(in: directory, body: "echo ok\nexit 0")
         let command = ProcessPiPackageUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
         for index in 1...2 {
             let box = Locked<PiPackageUpdateCommandResult>()
@@ -1422,7 +1383,7 @@ final class PiPackageUpdateFlowTests: XCTestCase {
     /// 不得静默 return（否则调用方永远等不到 completion）。
     func testRealExecutorBusyRunCallsBackAsNotAttempted() throws {
         let directory = try tempDirectory()
-        let script = try makeFakePi(in: directory, body: "sleep 3\nexit 0")
+        let script = try makeExecutableScript(in: directory, body: "sleep 3\nexit 0")
         let command = ProcessPiPackageUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
         let updatePlan = try plan(forScript: script)
         let first = Locked<PiPackageUpdateCommandResult>()
@@ -1453,7 +1414,7 @@ final class PiPackageUpdateFlowTests: XCTestCase {
         // 先退出，因此「拒绝/结清」两段的先后顺序不依赖任何亚秒级时序。
         // 每个子进程启动时写一行 start、退出时写一行 exited，用行数判断到底启动了
         // 几个子进程（而不是只看回调）。
-        let script = try makeFakePi(
+        let script = try makeExecutableScript(
             in: directory,
             body: "echo start >> \"\(spawns.path)\"\n"
                 + "while [ ! -f \"\(gate.path)\" ]; do sleep 0.1; done\n"
@@ -1525,8 +1486,8 @@ final class PiPackageUpdateFlowTests: XCTestCase {
     func testRealExecutorTimeoutStillFiresOnRunAfterNormalCompletion() throws {
         let quickDirectory = try tempDirectory()
         let slowDirectory = try tempDirectory()
-        let quick = try makeFakePi(in: quickDirectory, body: "exit 0")
-        let slow = try makeFakePi(in: slowDirectory, body: "sleep 5\nexit 0")
+        let quick = try makeExecutableScript(in: quickDirectory, body: "exit 0")
+        let slow = try makeExecutableScript(in: slowDirectory, body: "sleep 5\nexit 0")
         let command = ProcessPiPackageUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
         let first = Locked<PiPackageUpdateCommandResult>()
         command.run(try plan(forScript: quick), timeout: 30) { first.value = $0 }
@@ -1547,7 +1508,7 @@ final class PiPackageUpdateFlowTests: XCTestCase {
         let directory = try tempDirectory()
         // 后台子进程持有 stdout 写端：父脚本退出后管道不会立刻 EOF，
         // 结束流程会走「等排水宽限」这条路径。
-        let script = try makeFakePi(in: directory, body: "sleep 5 &\nexit 0")
+        let script = try makeExecutableScript(in: directory, body: "sleep 5 &\nexit 0")
         let abandonedCount = Locked<Int>()
         // 宽限窗口（3s）远大于超时（1s）：超时必定落在「进程已退出、管道还没读到
         // EOF」的窗口内——确定性地覆盖 B-2 的竞态，不依赖机器快慢。
@@ -1573,7 +1534,7 @@ final class PiPackageUpdateFlowTests: XCTestCase {
     func testRealExecutorDrainGraceExpiryFlushesPendingDecoderBytes() throws {
         let directory = try tempDirectory()
         // 半个「☃」（E2 98 83）：只写第一个字节，剩下两字节从未到达。
-        let script = try makeFakePi(in: directory, body: "printf '\\342'\nsleep 5 &\nexit 0")
+        let script = try makeExecutableScript(in: directory, body: "printf '\\342'\nsleep 5 &\nexit 0")
         let box = Locked<PiPackageUpdateCommandResult>()
         let command = ProcessPiPackageUpdateCommand(
             baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome],
@@ -1598,7 +1559,7 @@ final class PiPackageUpdateFlowTests: XCTestCase {
         let marker = directory.appendingPathComponent("parent-exited")
         // 后台子进程持有 stdout 写端：父脚本退出后管道不会立刻 EOF，结束流程会停在
         // 「等排水宽限」这条路径上。宽限（5s）远大于断言耗时，abandon() 必定落在窗口内。
-        let script = try makeFakePi(
+        let script = try makeExecutableScript(
             in: directory,
             body: "sleep 5 &\necho done > \"\(marker.path)\"\nexit 0"
         )
@@ -1683,7 +1644,7 @@ final class PiPackageUpdateFlowTests: XCTestCase {
     /// B-1：协调器连续两批更新都必须回调（旧实现里第二批会被静默丢弃）。
     func testRealExecutorServesTwoConsecutiveCoordinatorBatches() throws {
         let directory = try tempDirectory()
-        let script = try makeFakePi(in: directory, body: "echo run\nexit 0")
+        let script = try makeExecutableScript(in: directory, body: "echo run\nexit 0")
         let command = ProcessPiPackageUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
         let log = LogSink()
         let coordinator = PiPackageUpdateCoordinator(environment: PiPackageUpdateCoordinator.Environment(
@@ -1869,7 +1830,7 @@ final class PiPackageUpdateFlowTests: XCTestCase {
     func testExecutorReadStateFeedsTheMenuEntryState() throws {
         let directory = try tempDirectory()
         let gate = directory.appendingPathComponent("menu-gate")
-        let script = try makeFakePi(
+        let script = try makeExecutableScript(
             in: directory,
             body: "while [ ! -f \"\(gate.path)\" ]; do sleep 0.1; done\nexit 0"
         )

@@ -55,12 +55,6 @@ final class UpdateTransactionTests: XCTestCase {
         func record(_ entry: UpdateHistoryEntry) { entries.append(entry) }
     }
 
-    private final class LogSink {
-        private(set) var messages: [String] = []
-        func append(_ message: String) { messages.append(message) }
-        var text: String { messages.joined(separator: "\n") }
-    }
-
     private final class RecordingInstaller: PiWebUpdateInstalling {
         private(set) var plans: [PiWebUpdateInstallPlan] = []
         var isRunning = false

@@ -241,7 +241,7 @@ final class UpdateProgressTests: XCTestCase {
             recordHistory: { _ in },
             applyDegradation: { _ in }
         )
-        environment.reportPhase(.piWeb, phase(.preflight, .succeeded))
+        _ = XCTAssertNoThrow(environment.reportPhase(.piWeb, phase(.preflight, .succeeded)))
     }
 
     // MARK: - 窗口渲染

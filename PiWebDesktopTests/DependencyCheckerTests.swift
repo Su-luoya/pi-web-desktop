@@ -32,56 +32,9 @@ private final class DependencyFakeRunner: CommandRunning {
 }
 
 /// 显式登记的假文件系统：只认识测试加进去的可执行文件、符号链接和文本文件。
-private final class DependencyFakeFileSystem: DependencyFileSystemProbing {
-    /// 固定假 Home；诊断文本里不能出现它，只能出现 `~`。
-    let home = "/tmp/pi-web-desktop-tests-home"
-    var executables: Set<String> = []
-    var symlinks: [String: String] = [:]
-    var resolvedPaths: [String: String] = [:]
-    var files: [String: String] = [:]
-    /// 存在的目录（例如假 Pi 配置目录）。
-    var directories: Set<String> = []
-    /// 存在但不可读的目录。
-    var unreadableDirectories: Set<String> = []
-    /// `readText` 实际读过的路径，供“从未读取认证内容”的断言使用。
-    private(set) var readPaths: [String] = []
-
-    func isExecutableFile(atPath path: String) -> Bool {
-        executables.contains(path)
-    }
-
-    func symlinkDestination(atPath path: String) -> String? {
-        symlinks[path]
-    }
-
-    func resolvedPath(atPath path: String) -> String? {
-        if let resolved = resolvedPaths[path] { return resolved }
-        guard executables.contains(path) || files[path] != nil || symlinks[path] != nil else { return nil }
-        return path
-    }
-
-    func readText(atPath path: String) -> String? {
-        readPaths.append(path)
-        return files[path]
-    }
-
-    func homeDirectoryPath() -> String {
-        home
-    }
-
-    func directoryExists(atPath path: String) -> Bool? {
-        directories.contains(path) || unreadableDirectories.contains(path)
-    }
-
-    func isReadableDirectory(atPath path: String) -> Bool? {
-        guard directoryExists(atPath: path) == true else { return nil }
-        return !unreadableDirectories.contains(path)
-    }
-}
-
 private struct DependencyHarness {
     let runner = DependencyFakeRunner()
-    let fileSystem = DependencyFakeFileSystem()
+    let fileSystem = FakeDependencyFileSystem()
     var architecture = "arm64"
     var osVersion = OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0)
     var configuredPiWebPath = ""
@@ -260,22 +213,6 @@ private func makeHarness(
     return harness
 }
 
-private func finding(_ kind: DependencyFinding.Kind, _ status: DependencyFinding.Status) -> DependencyFinding {
-    DependencyFinding(
-        kind: kind,
-        status: status,
-        path: nil,
-        resolvedPath: nil,
-        symlinkTarget: nil,
-        version: nil,
-        installSource: .unknown,
-        confidence: .unknown,
-        remediationID: nil,
-        packageName: nil,
-        packageVersion: nil
-    )
-}
-
 /// 启动门控缓存的假文件接缝（GitHub #169）：只存字节，不碰真实文件系统。
 private final class DependencyGateFakeCacheFileIO: DependencyGateCacheFileIO {
     var data: Data?
@@ -405,70 +342,70 @@ final class DependencyCheckerTests: XCTestCase {
     func testGateMatrix() {
         XCTAssertFalse(DependencyReport(findings: []).canStartService)
         XCTAssertFalse(
-            DependencyReport(findings: [finding(.node, .ok), finding(.piCLI, .ok)]).canStartService,
+            DependencyReport(findings: [dependencyFinding(.node, .ok), dependencyFinding(.piCLI, .ok)]).canStartService,
             "缺少 pi-web 条目时门控必须关闭"
         )
         XCTAssertTrue(
             DependencyReport(findings: [
-                finding(.system, .missing),
-                finding(.node, .ok),
-                finding(.piCLI, .ok),
-                finding(.piWeb, .ok)
+                dependencyFinding(.system, .missing),
+                dependencyFinding(.node, .ok),
+                dependencyFinding(.piCLI, .ok),
+                dependencyFinding(.piWeb, .ok)
             ]).canStartService,
             "系统项只做提示，不阻塞启动"
         )
         XCTAssertFalse(
             DependencyReport(findings: [
-                finding(.node, .ok),
-                finding(.piCLI, .unknown),
-                finding(.piWeb, .unknown)
+                dependencyFinding(.node, .ok),
+                dependencyFinding(.piCLI, .unknown),
+                dependencyFinding(.piWeb, .unknown)
             ]).canStartService,
             "pi/pi-web 版本无法解析（unknown）不得放行启动"
         )
         XCTAssertFalse(
             DependencyReport(findings: [
-                finding(.node, .ok),
-                finding(.piCLI, .ok),
-                finding(.piWeb, .unknown)
+                dependencyFinding(.node, .ok),
+                dependencyFinding(.piCLI, .ok),
+                dependencyFinding(.piWeb, .unknown)
             ]).canStartService,
             "pi-web 版本无法解析时无法确认身份，必须关闭门控"
         )
         XCTAssertFalse(
             DependencyReport(findings: [
-                finding(.node, .outdated),
-                finding(.piCLI, .ok),
-                finding(.piWeb, .ok)
+                dependencyFinding(.node, .outdated),
+                dependencyFinding(.piCLI, .ok),
+                dependencyFinding(.piWeb, .ok)
             ]).canStartService
         )
         XCTAssertFalse(
             DependencyReport(findings: [
-                finding(.node, .unknown),
-                finding(.piCLI, .ok),
-                finding(.piWeb, .ok)
+                dependencyFinding(.node, .unknown),
+                dependencyFinding(.piCLI, .ok),
+                dependencyFinding(.piWeb, .ok)
             ]).canStartService
         )
         XCTAssertFalse(
             DependencyReport(findings: [
-                finding(.node, .ok),
-                finding(.piCLI, .missing),
-                finding(.piWeb, .ok)
+                dependencyFinding(.node, .ok),
+                dependencyFinding(.piCLI, .missing),
+                dependencyFinding(.piWeb, .ok)
             ]).canStartService
         )
         XCTAssertFalse(
             DependencyReport(findings: [
-                finding(.node, .ok),
-                finding(.piCLI, .ok),
-                finding(.piWeb, .missing)
+                dependencyFinding(.node, .ok),
+                dependencyFinding(.piCLI, .ok),
+                dependencyFinding(.piWeb, .missing)
             ]).canStartService
         )
     }
 
     func testBlockingFindingsListOnlyTheBlockers() {
         let report = DependencyReport(findings: [
-            finding(.system, .outdated),
-            finding(.node, .outdated),
-            finding(.piCLI, .missing),
-            finding(.piWeb, .ok)
+            dependencyFinding(.system, .outdated),
+            dependencyFinding(.node, .outdated),
+            dependencyFinding(.piCLI, .missing),
+            dependencyFinding(.piWeb, .ok)
         ])
         XCTAssertEqual(report.blockingFindings.map(\.kind), [.node, .piCLI])
     }
@@ -845,10 +782,10 @@ final class DependencyCheckerTests: XCTestCase {
 
     func testUnsupportedSystemDoesNotBlockServiceStart() {
         let report = DependencyReport(findings: [
-            finding(.system, .outdated),
-            finding(.node, .ok),
-            finding(.piCLI, .ok),
-            finding(.piWeb, .ok)
+            dependencyFinding(.system, .outdated),
+            dependencyFinding(.node, .ok),
+            dependencyFinding(.piCLI, .ok),
+            dependencyFinding(.piWeb, .ok)
         ])
         XCTAssertTrue(report.blockingFindings.isEmpty)
         XCTAssertTrue(report.canStartService)
@@ -1145,17 +1082,17 @@ final class DependencyCheckerTests: XCTestCase {
     /// 缓存里的样例报告：三条硬性前置都 `ok`，带一个 pi-web 组件与一条不阻塞的
     /// 端口提示（端口占用只提示、不影响 `canStartService`）。
     private func makeCacheReport() -> DependencyReport {
-        var piWeb = finding(.piWeb, .ok)
+        var piWeb = dependencyFinding(.piWeb, .ok)
         piWeb.path = "~/tools/bin/pi-web"
         piWeb.version = "1.2.3"
         piWeb.installSource = .npmGlobal
         piWeb.confidence = .verified
         piWeb.packageName = "@agegr/pi-web"
         piWeb.packageVersion = "1.2.3"
-        var port = finding(.port, .occupied)
+        var port = dependencyFinding(.port, .occupied)
         port.detail = "端口已被占用，将复用已有服务"
         return DependencyReport(
-            findings: [finding(.node, .ok), finding(.piCLI, .ok), piWeb, port],
+            findings: [dependencyFinding(.node, .ok), dependencyFinding(.piCLI, .ok), piWeb, port],
             components: [
                 ComponentInstallation(
                     kind: .piWeb,
@@ -1365,7 +1302,7 @@ final class DependencyCheckerTests: XCTestCase {
     func testDependencyGateCacheRejectsReportThatCouldNotStartService() {
         var report = makeCacheReport()
         report.findings = report.findings.map { item in
-            item.kind == .piWeb ? finding(.piWeb, .missing) : item
+            item.kind == .piWeb ? dependencyFinding(.piWeb, .missing) : item
         }
         let cache = DependencyGateCache(
             report: report,
@@ -1393,7 +1330,7 @@ final class DependencyCheckerTests: XCTestCase {
             writtenAt: Date(timeIntervalSince1970: 1_700_000_000)
         )
         XCTAssertTrue(cache.canStartService)
-        cache.findings = [finding(.node, .ok), finding(.piWeb, .missing)]
+        cache.findings = [dependencyFinding(.node, .ok), dependencyFinding(.piWeb, .missing)]
         XCTAssertEqual(
             DependencyGateFastPath.decide(
                 cache: cache,

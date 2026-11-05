@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 
 /// 源码级断言的共享入口。

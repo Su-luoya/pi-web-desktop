@@ -23,10 +23,6 @@ final class ServiceManager {
     var onPageMessage: ((String) -> Void)?
     var onStartupFailure: ((String) -> Void)?
 
-    /// 远程监听在无认证时提醒一次（不阻止启动）。远程访问已经不再由本应用管理
-    /// 密码，但“谁都能连上这个 agent”这件事必须在界面上说出来。
-    var onRemoteAccessWarning: ((String) -> Void)?
-
     /// 配置的监听地址在本机不存在、本次启动临时改用回环地址时的通知。
     /// 只在真正发生回落时回调一次；配置本身不变，下次启动重新检测。
     var onListeningAddressFallback: ((ListeningAddressFallback) -> Void)?

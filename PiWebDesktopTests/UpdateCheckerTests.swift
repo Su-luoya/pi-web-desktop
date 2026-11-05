@@ -38,14 +38,6 @@ final class UpdateCheckerTests: XCTestCase {
         var clock: UpdateClock { UpdateClock { self.now } }
     }
 
-    private final class LogSink {
-        private(set) var messages: [String] = []
-
-        func append(_ message: String) {
-            messages.append(message)
-        }
-    }
-
     /// 线程安全的收集器：并发回归里从多个队列记录观察结果。
     private final class SynchronizedList<Element> {
         private var lock = NSLock()

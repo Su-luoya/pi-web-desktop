@@ -100,7 +100,7 @@ Sources/Diagnostics/DiagnosticsClipboard.swift
 
 这条边界决定了几条设计约束：需要测试的纯逻辑必须放进能被 unhosted target 编译的文件里，例如依赖诊断的纯文本呈现（`DependencyReportPresenter`）在 `DependencyChecker.swift`、首次启动路由在 `FirstLaunchDiagnostics.swift`、菜单与设置窗口的判定在 `PreferencesRefreshPolicy.swift`。`AppDelegate` 的扩展不进测试 target，所以涉及菜单绑定、设置窗口追平这类只在 app target 里成立的约束，测试用**源码级断言**（`AppMenuHygieneTests.swift`、`SourceScanSupport.swift`）而不是运行时断言；这类测试只证明代码写成什么样，不证明运行时观感，观感仍需人工验证。
 
-这些测试使用假的 `ps`/`lsof` 输出、注入的存活判定、假的进程启动器、即时执行的调度器、假依赖探针、假网络地址提供者和临时目录，不访问真实进程、网络、Keychain、真实端口或 `~/.pi`。
+这些测试使用假的 `ps`/`lsof` 输出、注入的存活判定、假的进程启动器、即时执行的调度器、假依赖探针、假网络地址提供者和临时目录，不访问真实进程、网络、Keychain、真实端口或 `~/.pi`。多条路径共用的替身与等待原语（`Locked`、`waitForValue`、`makeExecutableScript`、`LogSink`、`FakeDependencyFileSystem`、`dependencyFinding`）放在 `PiWebDesktopTests/TestFixtures.swift`；只服务一条路径的替身（`RecordingRunner`、`World`、`HistoryRecorder`）留在对应用例文件里，不要复制第二份。
 
 ```bash
 DERIVED_DATA_PATH="$(mktemp -d /tmp/PiWebDesktopDerivedData.XXXXXX)"

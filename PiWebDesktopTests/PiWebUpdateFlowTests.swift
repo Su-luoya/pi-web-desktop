@@ -20,16 +20,6 @@ final class PiWebUpdateFlowTests: XCTestCase {
 
     // MARK: - 替身
 
-    private final class LogSink {
-        private(set) var messages: [String] = []
-
-        func append(_ message: String) {
-            messages.append(message)
-        }
-
-        var text: String { messages.joined(separator: "\n") }
-    }
-
     private final class RecordingInstaller: PiWebUpdateInstalling {
         private(set) var plans: [PiWebUpdateInstallPlan] = []
         private(set) var timeouts: [TimeInterval] = []

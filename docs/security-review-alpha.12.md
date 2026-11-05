@@ -22,7 +22,7 @@
 | `git grep -c -F <pattern> <rev> -- Sources` | 安全相关模式的基线 / 本版计数对比（下表） |
 | `git grep -n -E 'kill\(|sendGroupSignal|SIGTERM|SIGKILL' -- Sources` | 信号面调用点清点（S1） |
 | `git grep -n 'RemoteAccessPassword.load\|keychain.save(' -- Sources` | 凭据读写入口清点（S2） |
-| `./Scripts/build.sh`、`./Scripts/check-identity.sh`、`./Scripts/scan-secrets.sh`、`./Scripts/smoke.sh` | 本版门槛实测（结果见 §5、§8 与 [alpha-release-checklist.md](alpha-release-checklist.md#release-v010-alpha12-执行记录)） |
+| `./Scripts/build.sh`、`./Scripts/check-identity.sh`、`./Scripts/scan-secrets.sh`、`./Scripts/smoke.sh` | 本版门槛实测（结果见 §5、§8 与 [alpha-release-checklist.md](release-records/execution-log.md#release-v010-alpha12-执行记录)） |
 | 逐行阅读 | `Sources/App/WebViewNavigationPolicy.swift`、`Sources/App/WebViewController.swift`、`Sources/App/ServiceAddresses.swift`、`Sources/App/AppDelegate+Menus.swift`、`Sources/Services/ServiceManager.swift` 的本版改动与上下文 |
 
 本版 delta 的代码面（`Sources/`）共 8 个文件、`+507` / `-36`：`Sources/App/{AppDelegate,AppDelegate+Menus,
@@ -173,7 +173,7 @@ AppDelegate+Service,AppDelegate+Window,ServiceAddresses,WebViewController,WebVie
   `./Scripts/check-identity.sh` → `PASSED (45 checks)`；`./Scripts/scan-secrets.sh` → `suppressed 15 lines`
   与 `PASS`；`./Scripts/smoke.sh` → 两种模式 `smoke: ready` / `smoke: diagnostics ready`，整体
   `smoke: OK` [A]。完整执行记录见
-  [alpha-release-checklist.md](alpha-release-checklist.md#release-v010-alpha12-执行记录)。
+  [alpha-release-checklist.md](release-records/execution-log.md#release-v010-alpha12-执行记录)。
 - ZIP 打包与 checksum 路径：`Scripts/package-release.sh` 未改，白名单与“拒绝路径”逻辑沿用 alpha.11 的
   结论；本版发布产物的 checksum 由 `release.yml` 在 tag 上生成，发布后回填 [B]（本机未打包）。
 
@@ -280,6 +280,6 @@ AppDelegate+Service,AppDelegate+Window,ServiceAddresses,WebViewController,WebVie
   `./Scripts/check-release-version.sh`、`./Scripts/build.sh`、`./Scripts/check-identity.sh`
   （`PASSED (45 checks)`）、`./Scripts/scan-secrets.sh`（`suppressed 15 lines` + `PASS`）、
   `./Scripts/smoke.sh`（两种模式退出 0）全部通过；main CI run `35596701327` 为绿。完整输出见
-  [alpha-release-checklist.md](alpha-release-checklist.md#release-v010-alpha12-执行记录)。
+  [alpha-release-checklist.md](release-records/execution-log.md#release-v010-alpha12-执行记录)。
 - 发布后仍需回填：真机 smoke 表五项、发布资产大小与 SHA-256、prerelease 正文的未公证说明、回退路径
   可用性（`v0.1.0-alpha.11` 资产仍在 Releases）。

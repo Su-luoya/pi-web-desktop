@@ -84,6 +84,121 @@ final class RemoteAccessControllerTests: XCTestCase {
         XCTAssertEqual(controller.activePort, 443)
         XCTAssertEqual(controller.state.url?.absoluteString, "https://mini.example-tailnet/")
     }
+
+    // MARK: - 自定义隧道地址
+
+    /// 自定义地址只是默认里的一行字符串，关闭时不该去跑任何 CLI，也不该因
+    /// Tailscale 不可用而失败。
+    func testDisableForgetsCustomAddressWithoutCallingTailscale() {
+        defaults.removeObject(forKey: RemoteAccessController.DefaultsKey.port)
+        defaults.set("https://tunnel.example-cloud.test:12345", forKey: RemoteAccessController.DefaultsKey.customURL)
+
+        let finished = expectation(description: "disabled")
+        controller.disable { success in
+            XCTAssertTrue(success)
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 5)
+        XCTAssertNil(controller.customAddress)
+        XCTAssertEqual(controller.state, .off)
+    }
+
+    /// 二选一：记住的地址优先，上次切换中途退出留下的 serve 条目顺手撤销。
+    func testRefreshPrefersCustomAddressAndRevokesLeftoverServeEntry() {
+        runner.succeeds = true
+        defaults.set("https://tunnel.example-cloud.test:12345", forKey: RemoteAccessController.DefaultsKey.customURL)
+
+        let state = expectation(description: "state restored")
+        controller.onChange = { _ in state.fulfill() }
+        controller.refresh(configuration: .default)
+        wait(for: [state], timeout: 5)
+        XCTAssertEqual(controller.state.url?.absoluteString, "https://tunnel.example-cloud.test:12345")
+
+        let deadline = Date().addingTimeInterval(5)
+        while controller.activePort != nil, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertNil(controller.activePort)
+    }
+
+    /// 主机名已经在允许列表里就不该重启服务（会话不能因为“重复添加”而断）。
+    func testCustomAddressSkipsRestartWhenHostIsAlreadyAllowed() {
+        defaults.removeObject(forKey: RemoteAccessController.DefaultsKey.port)
+        var configuration = ServiceConfiguration.default
+        configuration.allowedHosts = "localhost,Tunnel.Example-Cloud.test"
+        let url = CustomTunnelAddress.url(from: "https://tunnel.example-cloud.test:12345")!
+
+        var applied: ServiceConfiguration?
+        let finished = expectation(description: "stored")
+        controller.useCustomAddress(
+            url,
+            host: "tunnel.example-cloud.test",
+            configuration: configuration,
+            applyConfiguration: { updated, completion in
+                applied = updated
+                completion()
+            },
+            completion: { _ in finished.fulfill() }
+        )
+        wait(for: [finished], timeout: 5)
+        XCTAssertNil(applied)
+        XCTAssertEqual(controller.state, .on(url))
+        XCTAssertEqual(controller.customAddress, url)
+    }
+
+    /// 主机名不在允许列表里：先写配置等重启，成功后才记地址。
+    func testCustomAddressAddsHostBeforeStoring() {
+        defaults.removeObject(forKey: RemoteAccessController.DefaultsKey.port)
+        var configuration = ServiceConfiguration.default
+        configuration.allowedHosts = "localhost"
+        let url = CustomTunnelAddress.url(from: "https://tunnel.example-cloud.test:12345")!
+
+        var applied: ServiceConfiguration?
+        let finished = expectation(description: "stored")
+        controller.useCustomAddress(
+            url,
+            host: "tunnel.example-cloud.test",
+            configuration: configuration,
+            applyConfiguration: { updated, completion in
+                applied = updated
+                completion()
+            },
+            completion: { _ in finished.fulfill() }
+        )
+        wait(for: [finished], timeout: 5)
+        XCTAssertEqual(applied?.allowedHosts, "localhost,tunnel.example-cloud.test")
+        XCTAssertEqual(controller.state, .on(url))
+    }
+}
+
+/// 自填隧道地址的解析：只接受 http/https 带主机名，端口与路径保留但不是主机名。
+final class CustomTunnelAddressTests: XCTestCase {
+    func testAcceptsHTTPSAndHTTPWithPort() {
+        XCTAssertEqual(
+            CustomTunnelAddress.url(from: "https://tunnel.example-cloud.test:12345")?.absoluteString,
+            "https://tunnel.example-cloud.test:12345"
+        )
+        XCTAssertEqual(
+            CustomTunnelAddress.url(from: " http://tunnel.example-cloud.test:8080/ui ")?.absoluteString,
+            "http://tunnel.example-cloud.test:8080/ui"
+        )
+    }
+
+    func testRejectsWhatCannotBeOpenedDirectly() {
+        // 缺 scheme：URLComponents 会把域名当 scheme，必须自己拒。
+        XCTAssertNil(CustomTunnelAddress.url(from: "tunnel.example-cloud.test:12345"))
+        XCTAssertNil(CustomTunnelAddress.url(from: "ftp://tunnel.example-cloud.test"))
+        XCTAssertNil(CustomTunnelAddress.url(from: "https://"))
+        XCTAssertNil(CustomTunnelAddress.url(from: "   "))
+        // 带凭据的地址不保存：它会连同密码一起进剪贴板与二维码。
+        XCTAssertNil(CustomTunnelAddress.url(from: "https://user:pass@tunnel.example-cloud.test"))
+    }
+
+    /// 写进允许列表的是主机名：pi-web 按主机名（不含端口）逐条精确比对。
+    func testAllowedHostDropsPortAndLowercases() {
+        let url = CustomTunnelAddress.url(from: "https://Tunnel.Example-Cloud.test:12345/deep/path")!
+        XCTAssertEqual(CustomTunnelAddress.allowedHost(for: url), "tunnel.example-cloud.test")
+    }
 }
 
 /// Tailscale serve 编排层的纯逻辑测试：状态解析、端口选择、命令参数、

@@ -7,7 +7,8 @@ import Foundation
 /// 组件安装识别器（GitHub #16）。
 ///
 /// 只做只读探测：命令只执行 `--version`、`npm root -g`、`npm prefix -g`、
-/// `pnpm root -g`、`pi list` 和 `command -v <编译期字面量>`；磁盘只经
+/// `pnpm root -g`、`pi list`、与包路径同前缀的 `<prefix>/bin/npm root -g` 和
+/// `command -v <编译期字面量>`；磁盘只经
 /// `DependencyFileSystemProbing`（#6 的同一组探针）读取。它不安装、不升级、
 /// 不联网、不写文件、不调用 `sudo`，也不读取 Pi 认证内容。
 struct ComponentInstallationDetector {
@@ -152,6 +153,14 @@ struct ComponentInstallationDetector {
             evidence.append("`.git`：\(gitEvidencePath)")
         }
 
+        // 3.5 与包路径同前缀的 npm 的全局 root：`PATH` 里的 npm 可能属于另一个
+        // Node 发行版，它的 root 覆盖不到这个包。
+        let npmRoot = packageScopedNPMRoot(
+            resolvedPath: analysisPath,
+            reportedRoot: roots.npmRoot,
+            evidence: &evidence
+        ) ?? roots.npmRoot
+
         // 4. 来源判定（纯规则，输入是上面收集到的证据组合）。
         let verdict = ComponentSourceResolver.resolve(ComponentSourceEvidence(
             kind: request.kind,
@@ -161,7 +170,7 @@ struct ComponentInstallationDetector {
             symlinkChainTruncated: probe.symlinkChainTruncated,
             packageDirectory: metadata?.directory,
             gitEvidencePath: gitEvidencePath,
-            npmRoot: roots.npmRoot,
+            npmRoot: npmRoot,
             npmRootEvidence: roots.npmRootEvidence,
             pnpmRoot: roots.pnpmRoot,
             pnpmRootEvidence: roots.pnpmRootEvidence,
@@ -677,6 +686,10 @@ struct ComponentInstallationDetector {
 
     /// 从包目录开始向上（最多 `packageSearchDepth` 层）找 `.git`：目录或
     /// worktree 的 `.git` 文件都算。返回最近的证据路径。
+    ///
+    /// 向上查找不越过 `node_modules` 边界：`node_modules` 之上的 `.git` 属于宿主目录
+    /// （例如 Homebrew 自己的 `/opt/homebrew/.git`），不是这个包的 checkout，越界会把
+    /// npm 全局安装误判成 git checkout。
     private func gitEvidence(startingDirectory startDirectory: String?) -> String? {
         guard var directory = startDirectory, !directory.isEmpty else { return nil }
         var depth = 0
@@ -685,10 +698,44 @@ struct ComponentInstallationDetector {
             if fileSystem.directoryExists(atPath: candidate) == true || fileSystem.readText(atPath: candidate) != nil {
                 return candidate
             }
+            if (directory as NSString).lastPathComponent == "node_modules" { return nil }
             directory = (directory as NSString).deletingLastPathComponent
             depth += 1
         }
         return nil
+    }
+
+    /// 包路径同前缀 npm 的全局 root（只读命令，参数固定）。
+    ///
+    /// `npm root -g` 用的是 `PATH` 里的 npm，可能属于另一个 Node 发行版（版本管理器、
+    /// 多套 node），它报告的 root 覆盖不到这个包。包路径形如
+    /// `<prefix>/lib/node_modules/…` 且同一前缀的 `<prefix>/bin/npm` 通过绝对路径与
+    /// 可执行位校验时，用这个 npm 再问一次 `npm root -g`；只有它报告的 root 确实包含
+    /// 包路径才采纳，否则返回 nil（沿用调用方给的 `PATH` 证据）。
+    private func packageScopedNPMRoot(
+        resolvedPath: String?,
+        reportedRoot: String?,
+        evidence: inout [String]
+    ) -> String? {
+        guard let resolvedPath, resolvedPath.contains("/lib/node_modules/") else { return nil }
+        if let reportedRoot, Self.isInside(resolvedPath, root: reportedRoot) { return nil }
+        guard let npmPath = PiWebUpdateNPMResolver.prefixDerivedNPMPaths(from: resolvedPath)
+            .first(where: { PiCLIUpdatePlan.isSafeExecutablePath($0) && fileSystem.isExecutableFile(atPath: $0) })
+        else { return nil }
+        guard let output = trimmed(commandRunner.run([npmPath, "root", "-g"], environment: commandEnvironment)) else {
+            return nil
+        }
+        let root = Self.normalizedDirectory(output)
+        guard root.hasPrefix("/"), Self.isInside(resolvedPath, root: root) else { return nil }
+        evidence.append("npm 全局 root：与包路径同前缀的 \(npmPath) 报告 \(root)（`PATH` 里的 npm 覆盖不到该包）")
+        return root
+    }
+
+    /// `path` 是否等于 `root` 或位于其下。
+    private static func isInside(_ path: String, root: String) -> Bool {
+        let base = normalizedDirectory(root)
+        guard !base.isEmpty else { return false }
+        return path == base || path.hasPrefix(base.hasSuffix("/") ? base : base + "/")
     }
 
     // MARK: - `pi list` 解析

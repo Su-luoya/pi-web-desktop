@@ -68,8 +68,13 @@ final class RemoteAccessController {
 
     // MARK: - 状态
 
-    /// 启动时对账：记录还在、Tailscale 里那条也还在，就恢复成「已开启」；
-    /// 否则清掉记录（上次异常退出留下的残迹由这里收尾）。
+    /// 启动时对账：记录还在、Tailscale 里那条也还在且指向回环，就恢复成「已开启」。
+    ///
+    /// 其余情况一律清掉记录并回到「未开启」：上次异常退出留下的残迹、旧版本把代理
+    /// 目标写成 `http://<本机 tailnet 地址>:<端口>` 的情况（tailscaled 代理到自己的
+    /// tailnet 地址会一直挂着，那条入口扫码打不开），以及监听地址被改成非回环之后
+    /// 目标不再可达的情况。这样的条目先尽力撤销（只动记录里的那个端口，不认别人的
+    /// 条目），再忘掉记录，让「启用」重新装一条干净的。
     func refresh(configuration: ServiceConfiguration) {
         let serve = self.serve
         let recordedPort = activePort
@@ -84,52 +89,73 @@ final class RemoteAccessController {
             }
             return
         }
-        CommandProbeDispatch.runOffMain(work: {
-            (serve.detect(), serve.snapshot())
-        }) { [weak self] result in
-            let (detection, snapshot) = result
-            guard let self else { return }
-            guard let port = recordedPort else {
-                self.update(.off)
-                return
-            }
-            switch detection {
+        guard let port = recordedPort,
+              let target = TailscaleServe.loopbackTarget(port: configuration.port) else {
+            update(.off)
+            return
+        }
+        let listensOnLoopback = RemoteAccessPolicy.isLoopbackHostname(configuration.hostname)
+        CommandProbeDispatch.runOffMain(work: { () -> RefreshOutcome in
+            switch serve.detect() {
             case .notInstalled:
-                self.update(.unavailable(Failure.notInstalled.message))
+                return .unavailable(Failure.notInstalled.message)
             case .notRunning:
-                self.update(.unavailable(Failure.notRunning.message))
+                return .unavailable(Failure.notRunning.message)
             case let .ready(dnsName):
-                guard let snapshot else {
-                    self.update(.unavailable(Failure.commandFailed.message))
-                    return
+                guard let snapshot = serve.snapshot() else {
+                    return .unavailable(Failure.commandFailed.message)
                 }
-                let target = configuration.serviceURL.absoluteString
-                guard snapshot.proxy(for: port) != nil, !snapshot.isOccupied(port, by: target),
-                      let url = TailscaleServe.publicURL(dnsName: dnsName, port: port) else {
-                    // 配置变了（监听地址/端口）或那条 serve 已经不在了：记录作废。
-                    self.forget()
-                    self.update(.off)
-                    return
+                if snapshot.proxy(for: port) != nil,
+                   listensOnLoopback,
+                   !snapshot.isOccupied(port, by: target.absoluteString),
+                   let url = TailscaleServe.publicURL(dnsName: dnsName, port: port) {
+                    return .on(url)
                 }
+                serve.disable(port: port)
+                return .stale
+            }
+        }) { [weak self] outcome in
+            guard let self else { return }
+            switch outcome {
+            case let .on(url):
                 self.update(.on(url))
+            case let .unavailable(message):
+                self.update(.unavailable(message))
+            case .stale:
+                self.forget()
+                self.update(.off)
             }
         }
     }
 
+    /// 启动对账的一次结果：CLI 全部在后台队列跑完，主线程只落地状态。
+    private enum RefreshOutcome {
+        case on(URL)
+        /// Tailscale 不可用：记录留着，菜单给重试入口。
+        case unavailable(String)
+        /// 那条入口不指向回环或已经不在：已尽力撤销，记录作废。
+        case stale
+    }
+
     // MARK: - 启用
 
-    /// 启用远程访问。
+    /// 启用手机访问（Tailscale serve）。
     ///
     /// - `applyConfiguration` 是「保存配置并等重启走完」的统一入口
-    ///   （`applyPreferencesConfiguration`），只在需要把主机名补进允许列表时调用一次；
-    ///   它会中断当前会话，因此确认框在调用方、这里只管执行。
+    ///   （`applyPreferencesConfiguration`），在需要把监听地址收回回环、或把主机名
+    ///   补进允许列表时调用一次；它会中断当前会话，因此确认框在调用方、这里只管执行。
     func enable(
         configuration: ServiceConfiguration,
         applyConfiguration: @escaping (ServiceConfiguration, @escaping () -> Void) -> Void,
         completion: @escaping (Result<URL, Failure>) -> Void
     ) {
         let serve = self.serve
-        let target = configuration.serviceURL
+        // 代理目标只能是回环（见 `TailscaleServe.loopbackTarget`），监听地址也必须
+        // 是回环：服务绑在 tailnet 地址上时旧版本会造出一条扫码打不开的入口。
+        guard let target = TailscaleServe.loopbackTarget(port: configuration.port) else {
+            completion(.failure(.commandFailed))
+            return
+        }
         CommandProbeDispatch.runOffMain(work: {
             (serve.detect(), serve.snapshot())
         }) { [weak self] result in
@@ -168,12 +194,22 @@ final class RemoteAccessController {
             let install: () -> Void = { [weak self] in
                 self?.install(plan: plan, dnsName: dnsName, completion: completion)
             }
-            guard let updatedAllowedHosts = plan.updatedAllowedHosts else {
+            // 监听地址不是回环时一并改回来：serve 的目标固定是 127.0.0.1，服务不在
+            // 那里就白装一条。合并成一次 applyConfiguration，只重启一次。
+            var updated = configuration
+            var changed = false
+            if !RemoteAccessPolicy.isLoopbackHostname(updated.hostname) {
+                updated.hostname = ServiceConfiguration.defaultHostname
+                changed = true
+            }
+            if let updatedAllowedHosts = plan.updatedAllowedHosts {
+                updated.allowedHosts = updatedAllowedHosts
+                changed = true
+            }
+            guard changed else {
                 install()
                 return
             }
-            var updated = configuration
-            updated.allowedHosts = updatedAllowedHosts
             applyConfiguration(updated, install)
         }
     }

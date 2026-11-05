@@ -550,6 +550,23 @@ struct TailscaleServe {
         return components.url
     }
 
+    /// serve 的代理目标：只能是回环。
+    ///
+    /// tailscaled 代理到**本机自己的 tailnet 地址**会一直挂着不返回（实测：同一个
+    /// serve 端口指 127.0.0.1 与 LAN 地址都正常，指 100.x 则浏览器无限转圈）。服务
+    /// 绑在 tailnet 地址上时 `configuration.serviceURL` 恰好就是那个形状，直接拿它
+    /// 当目标就会造出一条「菜单显示已开启、扫码打不开」的入口，所以目标固定为回环，
+    /// 由「启用」把监听地址一并收回回环。
+    static func loopbackTarget(port: Int) -> URL? {
+        guard (1...65535).contains(port) else { return nil }
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = ServiceConfiguration.defaultHostname
+        components.port = port
+        components.path = "/"
+        return components.url
+    }
+
     /// 从候选里挑第一个空闲端口；全部占用时返回 nil。
     static func freePort(in ports: [Int], occupied: (Int) -> Bool) -> Int? {
         ports.first { !occupied($0) }

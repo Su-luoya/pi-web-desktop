@@ -11,7 +11,6 @@ extension AppDelegate {
     private func resetCachedMenuReferences() {
         // 服务控件与手机访问子菜单
         serviceControlMenuItems.removeAll()
-        phoneAccessMenus.removeAll()
         remoteAccessMenus.removeAll()
         statusMenuItem = nil
         // 更新检查：状态行、设置子菜单、四类快捷开关与各组件菜单项
@@ -103,12 +102,7 @@ extension AppDelegate {
         serviceMenu.addItem(.separator())
         serviceMenu.addItem(withTitle: "在浏览器中打开", action: #selector(openInBrowser(_:)), keyEquivalent: "")
         serviceMenu.addItem(withTitle: "复制服务地址", action: #selector(copyLocalAddress(_:)), keyEquivalent: "")
-        let servicePhoneAccessItem = NSMenuItem(title: "手机访问链接", action: nil, keyEquivalent: "")
-        servicePhoneAccessItem.submenu = makePhoneAccessMenu()
-        serviceMenu.addItem(servicePhoneAccessItem)
-        // 与「手机访问链接」同一个问题（手机怎么连上来）的完整答案：不靠局域网
-        // 地址，而是挂一条 tailnet 的 HTTPS 入口。
-        let serviceRemoteAccessItem = NSMenuItem(title: "远程访问", action: nil, keyEquivalent: "")
+        let serviceRemoteAccessItem = NSMenuItem(title: "手机访问", action: nil, keyEquivalent: "")
         serviceRemoteAccessItem.submenu = makeRemoteAccessMenu()
         serviceMenu.addItem(serviceRemoteAccessItem)
         serviceMenu.addItem(.separator())
@@ -295,107 +289,6 @@ extension AppDelegate {
     @objc private func openInBrowser(_ sender: Any?) { NSWorkspace.shared.open(startURL) }
     @objc private func copyLocalAddress(_ sender: Any?) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(startURL.absoluteString, forType: .string) }
 
-    // MARK: - 复制手机访问链接（GitHub #150）
-
-    /// 「复制手机访问链接」候选子菜单：与更新菜单同一写法（delegate + 打开时重建）。
-    /// 候选地址只出现在菜单项里，不写日志与诊断导出。
-    private func makePhoneAccessMenu() -> NSMenu {
-        let menu = NSMenu(title: "复制手机访问链接")
-        menu.delegate = self
-        phoneAccessMenus.append(menu)
-        return menu
-    }
-
-    /// 菜单打开时按当前网络地址重建候选项；无可用地址时只留一条禁用的说明项。
-    func rebuildPhoneAccessMenu(_ menu: NSMenu) {
-        menu.removeAllItems()
-        for entry in PhoneAccessMenuBuilder.entries(for: networkAddressProvider.ipv4Addresses()) {
-            let item = NSMenuItem(
-                title: entry.title,
-                action: entry.address == nil ? nil : #selector(copyPhoneAccessLink(_:)),
-                keyEquivalent: ""
-            )
-            item.representedObject = entry.address.map { ServiceAddressBox($0) }
-            item.isEnabled = entry.isEnabled
-            menu.addItem(item)
-        }
-    }
-
-    /// 候选动作：判定是纯函数（`ServiceAddressDecision`），交互层只做呈现。
-    ///
-    /// - 已经是当前监听地址：直接复制链接，不改配置；
-    /// - 其他情况：先确认（会切换监听地址并重启，当前会话中断），确认后按
-    ///   设置窗口同一保存语义保存配置并重启，成功后才复制链接。
-    @objc private func copyPhoneAccessLink(_ sender: NSMenuItem) {
-        guard let address = (sender.representedObject as? ServiceAddressBox)?.address else { return }
-        let configuration = serviceManager.configuration
-        switch ServiceAddressDecision.decide(
-            currentHostname: configuration.hostname,
-            selected: address
-        ) {
-        case .copyOnly:
-            copyPhoneAccessLink(for: address, port: serviceManager.effectiveListeningPort)
-        case .needsConfirmation:
-            confirmPhoneAccessSwitch(to: address)
-        }
-    }
-
-    /// 复制链接：用选中地址与当前端口新构造 URL，不改 `startURL` 语义。
-    private func copyPhoneAccessLink(for address: ServiceAddress, port: Int) {
-        guard let url = ServiceAddressLink.url(forIPv4: address.ipv4, port: port) else {
-            presentPhoneAccessFailure("无法生成访问链接：地址 \(address.ipv4) 或端口 \(port) 无效。")
-            return
-        }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(url.absoluteString, forType: .string)
-    }
-
-    /// 切换监听地址前的确认：说明会重启服务、当前会话中断。
-    private func confirmPhoneAccessSwitch(to address: ServiceAddress) {
-        let configuration = serviceManager.configuration
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "切换到 \(address.title)？"
-        alert.informativeText = "复制链接会把服务监听地址从 \(configuration.hostname) 切换到 \(address.ipv4)，并重启服务；当前会话会中断。"
-        alert.addButton(withTitle: "切换并复制链接")
-        alert.addButton(withTitle: "取消")
-        presentPhoneAccessAlert(alert) { [weak self] response in
-            guard response == .alertFirstButtonReturn else { return }
-            self?.switchPhoneAccessListening(to: address)
-        }
-    }
-
-    /// 确认后的切换：与设置窗口同一条保存路径（监听地址经统一判定）；配置未
-    /// 保存时不复制链接，也不启动远程监听。配置生效且重启路径结束
-    /// （`applyPreferencesConfiguration` 的 completion）后才复制链接。
-    private func switchPhoneAccessListening(to address: ServiceAddress) {
-        var requested = serviceManager.configuration
-        requested.hostname = address.ipv4
-        if let message = RemoteAccessPolicy.hostnameValidationMessage(address.ipv4) {
-            presentPhoneAccessFailure(message)
-            return
-        }
-        applyPreferencesConfiguration(requested) { [weak self] in
-            self?.copyPhoneAccessLink(for: address, port: requested.port)
-        }
-    }
-
-    private func presentPhoneAccessFailure(_ message: String) {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "无法复制手机访问链接"
-        alert.informativeText = message
-        alert.addButton(withTitle: "好")
-        presentPhoneAccessAlert(alert) { _ in }
-    }
-
-    private func presentPhoneAccessAlert(_ alert: NSAlert, completion: @escaping (NSApplication.ModalResponse) -> Void) {
-        if let window, window.isVisible {
-            alert.beginSheetModal(for: window, completionHandler: completion)
-        } else {
-            completion(alert.runModal())
-        }
-    }
     @objc func openLog(_ sender: Any?) {
         // 日志父目录可能还不存在（从未启动过服务，或关闭了自动启动）：先补齐目录，
         // 失败时给出可读提示，不静默失败也不崩溃（GitHub #9 复审）。

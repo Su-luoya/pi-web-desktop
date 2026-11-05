@@ -54,13 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     var shouldPresentDiagnostics = false
     /// 工作目录校验结果（GitHub #9）。不可用时门控关闭、路由进入诊断页。
     var workspaceValidation: WorkspaceDirectoryValidation = .usable(path: "")
-    /// “复制手机访问链接”候选子菜单（应用菜单与服务菜单各一个）；菜单每次打开时
-    /// 按当前网络地址重建（GitHub #150）。
-    var phoneAccessMenus: [NSMenu] = []
-    /// 网络地址探测：默认枚举本机接口；测试注入替身，不访问真实网络。
-    let networkAddressProvider: NetworkAddressProviding = SystemNetworkAddressProvider()
-
-    /// 「远程访问」子菜单（服务菜单下）：菜单打开时按控制器缓存的状态重建，
+    /// 「手机访问」子菜单（服务菜单下）：菜单打开时按控制器缓存的状态重建，
     /// 不在打开菜单时跑 CLI。
     var remoteAccessMenus: [NSMenu] = []
     /// 远程访问（Tailscale serve）的状态与「本应用占的那一条入口」的记录。

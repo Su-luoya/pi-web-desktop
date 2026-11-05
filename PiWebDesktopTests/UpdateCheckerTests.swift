@@ -338,15 +338,27 @@ final class UpdateCheckerTests: XCTestCase {
         }
     }
 
+    /// Pi Web 的回落请求：本机服务不可用时桌面端自己查 npm 上的 `@agegr/pi-web`。
+    private func isNpmPiWebRequest(_ request: UpdateHTTPRequest) -> Bool {
+        guard request.url.host == UpdateCheckUpstream.npmRegistryHost else { return false }
+        let encoded = UpdateEndpoint.encodedPackageName(UpdateCheckUpstream.piWebPackageName)
+            ?? UpdateCheckUpstream.piWebPackageName
+        return request.url.absoluteString.contains(encoded)
+    }
+
     /// 桌面应用的主端点是更新通道，回落端点才是 GitHub API：两条都算“它的请求”。
     private func isDesktopRequest(_ request: UpdateHTTPRequest) -> Bool {
         request.url.host == AppcastFeed.host || request.url.host == UpdateCheckUpstream.githubHost
     }
 
     private func requestMatches(_ request: UpdateHTTPRequest, target: UpdateCheckTarget) -> Bool {
-        let hostMatches = target.category == .desktopApp
-            ? isDesktopRequest(request)
-            : request.url.host == expectedHost(for: target.category)
+        // Pi Web 有两个合法端点（本机服务、服务不可用时的 npm 回落），主机名在分支里判定。
+        let hostMatches: Bool
+        switch target.category {
+        case .desktopApp: hostMatches = isDesktopRequest(request)
+        case .piWeb: hostMatches = true
+        default: hostMatches = request.url.host == expectedHost(for: target.category)
+        }
         guard hostMatches else { return false }
         switch target.category {
         case .desktopApp:
@@ -354,7 +366,7 @@ final class UpdateCheckerTests: XCTestCase {
         case .piCLI:
             return request.url.absoluteString.contains("pi-coding-agent")
         case .piWeb:
-            return request.url.path == "/api/app-update"
+            return request.url.path == "/api/app-update" || isNpmPiWebRequest(request)
         case .piPackages:
             guard let packageName = target.packageName else { return false }
             let encoded = UpdateEndpoint.encodedPackageName(packageName) ?? packageName
@@ -375,7 +387,7 @@ final class UpdateCheckerTests: XCTestCase {
         case .piCLI:
             return request.url.absoluteString.contains("pi-coding-agent")
         case .piWeb:
-            return request.url.path == "/api/app-update"
+            return request.url.path == "/api/app-update" || isNpmPiWebRequest(request)
         case .piPackages:
             return request.url.absoluteString.contains("pi-extension-demo")
         }
@@ -1688,15 +1700,34 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertEqual(result?.failure, .serverError)
     }
 
-    func testPiWebCheckIsSkippedWhenTheServiceIsNotRunning() {
+    func testPiWebFallsBackToNpmWhenTheServiceIsNotRunning() {
         let world = makeWorld(piWebServiceURL: nil, responder: automaticResponder())
 
         world.checker.start(inventory: fullInventory())
 
-        // 服务没起来时 /api/app-update 不存在：不发请求、不报失败、不写缓存。
-        XCTAssertEqual(requestCount(world, category: .piWeb), 0)
-        XCTAssertNil(world.checker.summary.results.first { $0.target.category == .piWeb })
+        // 服务没起来时 /api/app-update 不存在：直接查 npm，否则启动前永远拿不到目标版本。
+        XCTAssertEqual(world.client.requests.filter { isNpmPiWebRequest($0) }.count, 1)
+        let result = world.checker.summary.results.first { $0.target.category == .piWeb }
+        XCTAssertEqual(result?.latestVersion, "2.0.0")
+        XCTAssertEqual(result?.status, .updateAvailable)
+        XCTAssertNil(result?.failure)
         XCTAssertTrue(world.checker.summary.results.contains { $0.target.category == .desktopApp })
+    }
+
+    func testPiWebFallsBackToNpmWhenTheServiceIsBoundToANonLoopbackAddress() {
+        let world = makeWorld(
+            piWebServiceURL: URL(string: "http://192.168.1.10:30141/")!,
+            responder: automaticResponder()
+        )
+
+        world.checker.start(inventory: fullInventory())
+
+        XCTAssertEqual(world.client.requests.filter { $0.url.path == "/api/app-update" }.count, 0)
+        XCTAssertEqual(world.client.requests.filter { isNpmPiWebRequest($0) }.count, 1)
+        XCTAssertEqual(
+            world.checker.summary.results.first { $0.target.category == .piWeb }?.latestVersion,
+            "2.0.0"
+        )
     }
 
     func testPiWebAppUpdateParserRejectsMissingOrInvalidVersion() {

@@ -2,15 +2,14 @@
   "schema": 1,
   "releases": [
     {
-      "tag": "v0.1.0-alpha.30",
-      "version": "0.1.0-alpha.30",
-      "publishedAt": "2026-11-05T02:20:49Z",
+      "tag": "v0.1.0-alpha.31",
+      "version": "0.1.0-alpha.31",
+      "publishedAt": "2026-11-05T04:25:38Z",
       "zip": {
-        "name": "Pi-Web-Desktop-0.1.0-alpha.30+build.30.zip",
-        "url": "https://github.com/Su-luoya/pi-web-desktop/releases/download/v0.1.0-alpha.30/Pi-Web-Desktop-0.1.0-alpha.30+build.30.zip",
-        "sha256": "361db90ae7184ab76fdf68419d52f6b2a3dfbf8d0c87b7c9a2abbd275572a3f0"
-      },
-      "notes": "https://github.com/Su-luoya/pi-web-desktop/blob/main/docs/release-notes-v0.1.0-alpha.30.md"
+        "name": "Pi-Web-Desktop-0.1.0-alpha.31+build.31.zip",
+        "url": "https://github.com/Su-luoya/pi-web-desktop/releases/download/v0.1.0-alpha.31/Pi-Web-Desktop-0.1.0-alpha.31+build.31.zip",
+        "sha256": "e7ab15570f5b6b54f3d99475996f2af38283bfd5f58c2ff3c61fea4a171d53cc"
+      }
     }
   ]
 }

@@ -2373,3 +2373,38 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
     的转发改动只有单元测试覆盖。
   - 安全门槛 S1–S8 在 `2345c02` 上重跑并记入 Issue #249；本版没有开新的一轮独立安全审查，
     `Sources/Diagnostics/` 仍未覆盖（post-alpha.16 审查已把它列为下一轮对象）。
+
+## 本次发布执行记录（v0.1.0-alpha.30）
+
+- 内容：八个提交，涵盖两处远程访问新功能（延迟测量、自填内网穿透地址）、四处修复
+  （npm 全局安装被宿主 `.git` 误判为 git checkout、健康检查计时器改挂 `.common`、
+  `command -v` 查名参数白名单）、一处重构（三个更新通道的请求头与两份重定向 delegate 收敛）
+  与一个构建脚本（`Scripts/test.sh`）。
+- 版本号提交 `4aab882`；PR #251（八个提交）→ squash 合并为 `483cebf`。本仓库的
+  rebase merge 与 merge commit 都在仓库设置里被关闭（`gh pr merge` 两种方式均返回
+  `not allowed on this repository`），因此 main 上只有一条 squash 提交，逐个提交的说明保留在
+  PR #251 的 commits 页。
+- tag `v0.1.0-alpha.30` 指向 `483cebf`；release workflow 的 build（3m52s）与 publish 两个 job
+  均通过，草稿已按 prerelease 发布。
+- 全量测试 1039 项 0 失败（`./Scripts/test.sh`）；`check-identity.sh` `PASSED (45 checks)`；
+  `check-release-version.sh v0.1.0-alpha.30` `PASSED`；`package-release.sh --self-test` `PASS`；
+  `package-release.sh --tag v0.1.0-alpha.30` `OK`；`smoke.sh` 两种模式 exit 0
+  （`items=6 blockers=3` 来自 `DiagnosticsSmokeFixture` 的确定性样例，不是本机依赖缺失）；
+  `scan-secrets.sh` `PASS`（`suppressed 17 lines`，无 `rejected`）；`sh -n Scripts/*.sh` 与
+  `git diff --check` 干净。
+- 发布前硬门禁 `<待填写` 与 `{{...}}` 计数均为 0；发布后 `gh release download` +
+  `shasum -a 256 -c` 复验 `OK`。
+- 发布资产 SHA-256 `361db90ae7184ab76fdf68419d52f6b2a3dfbf8d0c87b7c9a2abbd275572a3f0`，
+  体积 1780000 字节（CI 重新构建；本地 `package-release.sh --tag v0.1.0-alpha.30` 的结果是
+  `01d19a3502980287b9f31efe98503ddbe6e253de18c03c46d813d06eea345a6b` / 1741321 字节，
+  只用于发版前自检）。
+- 真机环境：Apple M4，macOS 27.2（26B123），Node v26.13.0，Pi 1.5.0，
+  `@agegr/pi-web` 0.13.0（Homebrew 全局安装）。
+- 本版特有的判定：
+  - 本版未单独开 Release Issue：发布记录写在本文件与 `docs/release-notes-v0.1.0-alpha.30.md`，
+    PR #251 的检查结果为对应 run 链接。
+  - 更新来源判定的修复用真实路径直接调用 `ComponentInstallationDetector` 确认结论为
+    npm 全局（已验证）+ `npm install -g @agegr/pi-web`，但**没有**在真机 UI 上点
+    「立即更新」验证新路径；应用自更新的真实换包仍只有单元测试覆盖。
+  - 两处远程访问新功能只有单元测试与启动/诊断冒烟，没有人工点验记录；
+    「重试关闭远程访问」仍未在真机 tailnet 上跑通。

@@ -57,6 +57,7 @@ Pi Web Desktop `0.1.0-alpha.30` 面向 Apple Silicon（arm64）与 **macOS 26 �
 - `./Scripts/smoke.sh`：启动与诊断两种模式均 exit 0；诊断模式打印的 `items=6 blockers=3` 来自 `DiagnosticsSmokeFixture` 的确定性样例（用它证明诊断页能渲染出阻断项），不是本机依赖缺失。
 - `./Scripts/scan-secrets.sh`：`PASS`（`suppressed 17 lines`，无 `rejected`）；`sh -n Scripts/*.sh` 与 `git diff --check` 干净。
 - 本机演练产物（不是发布资产，CI 会重新构建）：SHA-256 `01d19a3502980287b9f31efe98503ddbe6e253de18c03c46d813d06eea345a6b`，1741321 字节。
+- 发布 workflow（tag `v0.1.0-alpha.30`）：build 与 publish 两个 job 均通过；草稿 prerelease 的三个资产已下载复验，`shasum -a 256 -c` → `OK`，资产 SHA-256 `361db90ae7184ab76fdf68419d52f6b2a3dfbf8d0c87b7c9a2abbd275572a3f0`（1780000 字节）。
 
 ## 已知限制
 
@@ -74,8 +75,8 @@ Pi Web Desktop `0.1.0-alpha.30` 面向 Apple Silicon（arm64）与 **macOS 26 �
 | 资产 | 值 |
 | --- | --- |
 | ZIP | `Pi-Web-Desktop-0.1.0-alpha.30+build.30.zip` |
-| SHA-256 | 见 release workflow 摘要与草稿资产（本地演练值不作为发布值） |
-| 体积 | 见草稿资产 |
+| SHA-256 | `361db90ae7184ab76fdf68419d52f6b2a3dfbf8d0c87b7c9a2abbd275572a3f0` |
+| 体积 | 1780000 字节 |
 | 签名 | ad-hoc（`TeamIdentifier=not set`），未公证 |
 | 最低系统 | macOS 26.0 |
 | 架构 | arm64（Apple Silicon） |

@@ -74,6 +74,8 @@
 见 [alpha 发布门槛清单](alpha-release-checklist.md)。简述：`main` CI 为绿；安全审查无阻断项；
 tag 与 bundle 版本一致；真机 smoke 记录写入 Release Issue；checksum 与 Release 说明一致；
 Release 标记 prerelease；说明中写明未公证与安装限制；上一版资产仍可下载。
+本版实际执行过的门槛输出与发布后核对追加到 [逐版本执行记录](release-records/execution-log.md)，
+不要写回门槛清单。
 
 ## 本地演练（不需要完整 Xcode，不 push tag）
 

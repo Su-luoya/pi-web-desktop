@@ -7,8 +7,8 @@
 范围是六份只读审计报告列出的 `outA`–`outE` 条目中判定为真实缺陷的部分。
 
 **这份改动已随 `v0.1.0-alpha.17` 发布**（发布说明见
-[release-notes-v0.1.0-alpha.17.md](release-notes-v0.1.0-alpha.17.md)，安全评审见
-[security-review-alpha.17.md](security-review-alpha.17.md)）。
+[release-notes-v0.1.0-alpha.17.md](../release-notes-v0.1.0-alpha.17.md)，安全评审见
+[security-review-alpha.17.md](../security-review-alpha.17.md)）。
 `docs/release-notes-v0.1.0-alpha.16.md` 与 `docs/alpha-release-checklist.md`
 里的 alpha.16 执行记录仍是发布当时的快照，描述的是 `761f783` 上的状态，本轮的改动不属于那一版，
 因此**没有回改**它们（包括其中的「859 个测试」——那是发布提交上的准确计数）。

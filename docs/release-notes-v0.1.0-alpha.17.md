@@ -28,7 +28,7 @@ Pi Web Desktop `0.1.0-alpha.17` 面向 Apple Silicon（arm64）与 macOS 14 或�
 - Keychain 读取三态化，凭据缺失时优先收回 loopback 监听；
 - 文档与注释里曾被 `check-identity.sh` 抓到的示例假值（CGNAT 地址、绝对 home 路径）已修正。
 
-完整的逐项清单与验证记录见 [第二阶段缺陷修复汇总](bugfix-round-2.md)。
+完整的逐项清单与验证记录见 [第二阶段缺陷修复汇总](history/bugfix-round-2.md)。
 
 ## 目标平台与安装
 

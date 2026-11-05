@@ -92,7 +92,7 @@
 `761f783..10f9244` 在信号面**没有新增调用点**。`ServiceManager.swift:1027-1046` 的两处
 `signaler.sendGroupSignal(SIGTERM/SIGKILL, toProcessGroup:)` 就是 alpha.16 已有的那两个位置，
 本版只把返回值显式忽略（`_ =`）并补注释说明「不看返回值：`ESRCH` / `EPERM` 只说明不到，不代表已退出」。
-原因见 [bugfix-round-2.md](bugfix-round-2.md) 的服务生命周期一节。
+原因见 [bugfix-round-2.md](history/bugfix-round-2.md) 的服务生命周期一节。
 
 - 服务所有权判定（`ServiceOwnership`）未改语义：仍以「PID + 启动时间 + 命令指纹」为依据，不按进程名匹配。
 - `Process()` 与 `.arguments =` 计数不变（7 / 8）：本版没有新增子进程调用点。

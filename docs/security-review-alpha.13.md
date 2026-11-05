@@ -26,7 +26,7 @@
 | `git grep -c -F <pattern> <rev> -- Sources` | 安全相关模式的基线 / 本版计数对比（各节） |
 | `git grep -n -E 'kill\(\|sendGroupSignal' 506f5d6 -- Sources` | 信号面调用点清点（S1） |
 | `git diff 730128d..506f5d6 -- Sources \| grep -E '^\+import\|^-import'` | 依赖 / 框架面变化（S7：`SystemProxyWarning.swift` 新增 `Darwin` / `Foundation` / `SystemConfiguration` 三个系统框架导入） |
-| `./Scripts/check-release-version.sh`、`./Scripts/build.sh`、`./Scripts/check-identity.sh`、`./Scripts/scan-secrets.sh`、`./Scripts/smoke.sh` | 本版门槛实测（结果见 §5、§8、§12 与 [alpha-release-checklist.md](alpha-release-checklist.md#release-v010-alpha13-执行记录)） |
+| `./Scripts/check-release-version.sh`、`./Scripts/build.sh`、`./Scripts/check-identity.sh`、`./Scripts/scan-secrets.sh`、`./Scripts/smoke.sh` | 本版门槛实测（结果见 §5、§8、§12 与 [alpha-release-checklist.md](release-records/execution-log.md#release-v010-alpha13-执行记录)） |
 | 逐行阅读 | 本版 delta 的 10 个 `Sources/` 文件改动与上下文 |
 
 本版 delta 的代码面（`Sources/`）10 个文件、`+746` / `-18`：
@@ -219,7 +219,7 @@ VPN 网段」一节）、`docs/alpha-release-checklist.md`（`+10/-2`）。
 | `for f in Scripts/*.sh; do sh -n "$f" \|\| exit 1; done` | 无输出 | 0 |
 | `git diff --check` / `git diff --cached --check` | 无输出 | 0 |
 
-  完整执行记录见 [alpha-release-checklist.md](alpha-release-checklist.md#release-v010-alpha13-执行记录) [A]。
+  完整执行记录见 [alpha-release-checklist.md](release-records/execution-log.md#release-v010-alpha13-执行记录) [A]。
 - ZIP 打包与 checksum 路径：`Scripts/package-release.sh` 不在 delta 内，白名单与“拒绝路径”逻辑沿用
   alpha.11 / alpha.12 的结论；本版发布产物的 checksum 由 `release.yml` 在 tag 上生成，发布后回填 [B]
   （本机未打包）。
@@ -367,6 +367,6 @@ VPN 网段」一节）、`docs/alpha-release-checklist.md`（`+10/-2`）。
   `./Scripts/build.sh`；`./Scripts/check-identity.sh` → `PASSED (45 checks)`；
   `./Scripts/scan-secrets.sh` → `suppressed 15 lines` + `PASS`；`./Scripts/smoke.sh` → 两种模式退出 0。
   main CI run `35620781999`（提交 `506f5d6`）为 `success`。完整输出见
-  [alpha-release-checklist.md](alpha-release-checklist.md#release-v010-alpha13-执行记录)。
+  [alpha-release-checklist.md](release-records/execution-log.md#release-v010-alpha13-执行记录)。
 - 发布后仍需回填：真机 smoke 表八项、发布资产大小与 SHA-256、prerelease 正文的未公证说明、回退路径
   可用性（`v0.1.0-alpha.11` 资产仍在 Releases；`v0.1.0-alpha.12` 只有草稿，不作为回退来源）。

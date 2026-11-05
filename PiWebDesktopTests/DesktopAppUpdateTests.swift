@@ -187,7 +187,7 @@ final class DesktopAppUpdateTests: XCTestCase {
 
     /// 校验值比对的真实行为：下载到的字节与 GitHub 公布的 SHA-256 不一致时必须判不等，
     /// 相等时必须判相等。alpha.18 的发布验证里试过用改 Release 资产的方式在真机上
-    /// 构造这个失败，结果被 CDN 缓存挡住（详见 Docs/alpha-release-checklist.md），
+    /// 构造这个失败，结果被 CDN 缓存挡住（详见 docs/release-records/execution-log.md），
     /// 所以这条路径的保证只能落在测试上。
     func testSha256DetectsMismatchedDownloadBytes() throws {
         let fileManager = FileManager.default

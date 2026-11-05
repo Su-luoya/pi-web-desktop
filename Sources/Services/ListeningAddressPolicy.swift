@@ -54,14 +54,6 @@ enum RemoteAccessPolicy {
     /// 也不应该被一次误输入打开，所以和协议前缀、路径一起被拒绝。
     static let allInterfacesHostnames: Set<String> = ["0.0.0.0", "::", "[::]", "*"]
 
-    /// 远程监听（非 loopback）在明文 HTTP 上没有任何认证时的固定提示文案：
-    /// 设置窗口、启动失败提示与诊断导出共用同一条。
-    static let unauthenticatedRemoteWarning =
-        "监听地址不是本机回环地址：pi-web 会在这个地址上提供对 agent 的完全访问，"
-        + "而本应用不提供访问密码，因此这条连接没有任何认证。"
-        + "只在可信网络里这样使用；需要跨不可信网络访问时，请自行套上 HTTPS 反向代理"
-        + "或加密隧道（例如 WireGuard、SSH 端口转发），并在 pi-web 一侧设置访问密码。"
-
     /// 规范化 hostname：去掉两端空白，并把 IPv6 字面量的方括号去掉。
     ///
     /// 存储和子进程参数都用不带方括号的形式（`::1`，与 `--hostname` 的约定

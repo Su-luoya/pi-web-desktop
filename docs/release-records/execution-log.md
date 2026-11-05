@@ -2226,3 +2226,34 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
     「立即更新」验证新路径；应用自更新的真实换包仍只有单元测试覆盖。
   - 两处远程访问新功能只有单元测试与启动/诊断冒烟，没有人工点验记录；
     「重试关闭远程访问」仍未在真机 tailnet 上跑通。
+
+## 本次发布执行记录（v0.1.0-alpha.32）
+
+- 内容：一个已合并 PR —— PR #261（删掉「服务 → 手机访问」里的「在浏览器中打开」，Closes #260）。
+  本版没有新功能，只有一个菜单项删除与对应文档修改。
+- 版本号提交 PR #262 → `5ab538e`；tag `v0.1.0-alpha.32` 指向该提交（lightweight tag，与
+  alpha.29 / alpha.31 相同）；release workflow 的 build 与 publish 两个 job 均通过
+  （run 42012683626），草稿已按 prerelease 发布。
+- appcast workflow 由 `release: published` 自动触发（run 42013399545），`appcast` 分支的
+  `appcast.json` 已收录本版，sha256 与 Release 资产一致。
+- 全量测试 1032 项 0 失败（`./Scripts/test.sh`，跑在删除菜单项的 `4581573` 上，本版只改版本号
+  与文档）；`check-identity.sh` `PASSED (45 checks)`；`check-release-version.sh v0.1.0-alpha.32`
+  `PASSED`；`package-release.sh --self-test` `PASS`；`package-release.sh --tag v0.1.0-alpha.32`
+  `OK`；`smoke.sh` 两种模式 exit 0（`items=6 blockers=3` 来自 `DiagnosticsSmokeFixture` 的确定性
+  样例，不是本机依赖缺失）；`scan-secrets.sh` `PASS`（`suppressed 17 lines`，无 `rejected`）；
+  `sh -n Scripts/*.sh` 与 `git diff --check` 干净。
+- 发布前硬门禁 `<待填写` 与 `{{...}}` 计数均为 0；发布后 `gh release download` +
+  `shasum -a 256 -c` 复验 `OK`。
+- 发布资产 SHA-256 `a09f7f358cdacb118aba894d8b1a72d2e025479f627ab10e9f3cb04986546090`，
+  体积 1775122 字节（CI 重新构建；本地 `package-release.sh --tag v0.1.0-alpha.32` 的结果是
+  `d82f2a12d65e717c478f559e5ac6bad99224fa8cac7fd4a7291d8e5e16561008` / 1735977 字节，
+  只用于发版前自检）。
+- 真机环境：Mac16,10 / Apple M4，macOS 27.2（26B123），Node v26.13.0，Pi 1.5.0，
+  `@agegr/pi-web` 0.15.0（Homebrew 全局安装）。
+- 本版特有的判定：
+  - 本版未单独开 Release Issue：发布记录写在本文件与 `docs/release-notes-v0.1.0-alpha.32.md`，
+    PR #261 / #262 的检查结果为对应 run 链接（沿用 alpha.30 的先例）。
+  - 「手机访问 → 在浏览器中打开」的根因（系统代理绕过列表缺 MagicDNS 域名）只有命令行证据：
+    直连 tailnet 域名 200 / 19 ms，走系统代理 `SSL_ERROR_SYSCALL`；**没有**在浏览器里做人工
+    点验。删项后的 GUI 菜单也未逐项点验，覆盖它的是菜单构建路径与启动/诊断冒烟。
+  - 本文件缺 alpha.31 一节（alpha.31 未在此登记），本次不补历史。

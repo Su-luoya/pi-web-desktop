@@ -45,7 +45,7 @@ Pi Web Desktop `0.1.0-alpha.32` 面向 Apple Silicon（arm64）与 **macOS 26 �
 | 资产 | 值 |
 | --- | --- |
 | ZIP | `Pi-Web-Desktop-0.1.0-alpha.32+build.32.zip` |
-| SHA-256 | 见 Release 附件中的 `.zip.sha256` |
+| SHA-256 | `a09f7f358cdacb118aba894d8b1a72d2e025479f627ab10e9f3cb04986546090`（1775122 字节，取自 tag 上 workflow 产出的资产） |
 | 签名 | ad-hoc（`TeamIdentifier=not set`），未公证 |
 | 最低系统 | macOS 26.0 |
 | 架构 | arm64（Apple Silicon） |

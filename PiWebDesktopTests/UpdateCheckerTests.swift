@@ -2474,19 +2474,23 @@ final class UpdateCheckerTests: XCTestCase {
             preferences: preferences,
             piWebServiceURL: { testPiWebServiceURL }
         )
-        var completed = false
+        // 完成回调必须恰好一次：`stop()` 自己取走并清空 `activeCompletions`（不走
+        // `finishStoppedCheck`），迟到的响应再进 `guard !stopped` 分支时只能拿到空集合。
+        // 用计数而不是布尔：被投递两次时 `= true` 依然通过。
+        var completions = 0
         checker.checkNow(triggeredBy: .launch, inventory: UpdateCheckInventory(piPackages: [first, second])) {
-            completed = true
+            completions += 1
         }
         scheduler.runNext()
         XCTAssertEqual(client.requests.count, 1)
-        XCTAssertFalse(completed)
+        XCTAssertEqual(completions, 0)
         checker.stop()
         scheduler.runNext()
-        XCTAssertTrue(completed)
+        XCTAssertEqual(completions, 1)
         client.completeNext(with: Self.npmHTTPResponse(version: "1.0.1"))
         scheduler.runNext()
         XCTAssertEqual(client.requests.count, 1)
+        XCTAssertEqual(completions, 1, "迟到的响应不得再次投递完成回调")
     }
 
     func testInventoryUpdateDuringCheckSchedulesFollowUpWithNewInventory() {

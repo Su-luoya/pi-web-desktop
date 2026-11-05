@@ -40,7 +40,6 @@ extension AppDelegate {
             menu.addItem(.separator())
             menu.addItem(remoteAccessItem(title: "显示地址与二维码…", action: #selector(showRemoteAccessCode(_:))))
             menu.addItem(remoteAccessItem(title: "复制地址", action: #selector(copyRemoteAccessAddress(_:))))
-            menu.addItem(remoteAccessItem(title: "在浏览器中打开", action: #selector(openRemoteAccessAddress(_:))))
             // 延迟测量测的是 tailnet 链路，与自填隧道无关，不该出现在那里。
             if remoteAccessController.customAddress == nil {
                 menu.addItem(.separator())
@@ -114,11 +113,6 @@ extension AppDelegate {
     @objc func copyRemoteAccessAddress(_ sender: Any?) {
         guard let url = remoteAccessController.state.url else { return }
         copyRemoteAccessURL(url)
-    }
-
-    @objc func openRemoteAccessAddress(_ sender: Any?) {
-        guard let url = remoteAccessController.state.url else { return }
-        NSWorkspace.shared.open(url)
     }
 
     /// 关闭失败保留本机记录与重试入口，并如实告诉用户「那条入口可能还在」。

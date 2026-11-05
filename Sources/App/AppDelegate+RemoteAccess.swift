@@ -33,6 +33,8 @@ extension AppDelegate {
             menu.addItem(remoteAccessItem(title: "复制远程地址", action: #selector(copyRemoteAccessAddress(_:))))
             menu.addItem(remoteAccessItem(title: "在浏览器中打开远程地址", action: #selector(openRemoteAccessAddress(_:))))
             menu.addItem(.separator())
+            menu.addItem(remoteAccessItem(title: "测试访问延迟…", action: #selector(measureRemoteAccessLatency(_:))))
+            menu.addItem(.separator())
             menu.addItem(remoteAccessItem(title: "关闭远程访问", action: #selector(disableRemoteAccess(_:))))
         }
     }
@@ -103,6 +105,110 @@ extension AppDelegate {
                 message: "Tailscale 拒绝或没能执行撤销命令，那条入口可能仍然存在。可以再试一次，或在终端里手动关闭该端口。"
             )
         }
+    }
+
+    // MARK: - 延迟测量
+
+    /// 先拿设备列表再问“测哪台”：两者都经后台队列，菜单打开时不跑 CLI。
+    @objc func measureRemoteAccessLatency(_ sender: Any?) {
+        remoteAccessController.peers { [weak self] peers in
+            guard let self else { return }
+            guard let peers, !peers.isEmpty else {
+                self.presentRemoteAccessFailure(
+                    "没有可测试的设备",
+                    message: "Tailscale 里没有其他设备，或者状态读不出来（未登录、后端未运行）。"
+                )
+                return
+            }
+            self.presentPeerPicker(peers)
+        }
+    }
+
+    /// 下拉选一台。设备数不限，且仍然是一张常规模态框，不需要自建面板。
+    private func presentPeerPicker(_ peers: [TailscalePeer]) {
+        let popUp = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 420, height: 25), pullsDown: false)
+        popUp.addItems(withTitles: peers.map(\.pickerTitle))
+        // 列表已按“在线在前”排序，第一项就是最可能的目标。
+        popUp.selectItem(at: 0)
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "测试哪台设备的访问延迟？"
+        alert.informativeText = "会向选中的设备发 3 个 Tailscale 层探测包，顺便测本机到各中转节点的延迟，约 5 秒。"
+        alert.accessoryView = popUp
+        alert.addButton(withTitle: "开始测试")
+        alert.addButton(withTitle: "取消")
+        presentRemoteAccessAlert(alert) { [weak self] response in
+            let index = popUp.indexOfSelectedItem
+            guard response == .alertFirstButtonReturn, peers.indices.contains(index) else { return }
+            self?.startLatencyMeasurement(peer: peers[index])
+        }
+    }
+
+    private func startLatencyMeasurement(peer: TailscalePeer) {
+        remoteAccessController.sample(peer: peer) { [weak self] report in
+            self?.presentLatencyReport(report)
+        }
+    }
+
+    /// 结果窗口：只读文本 + 复制。内容多（采样逐条 + DERP 延迟表），所以不用弹框。
+    private func presentLatencyReport(_ report: TailscaleLatencyReport) {
+        let contentSize = NSSize(width: 480, height: 380)
+        let content = NSView(frame: NSRect(origin: .zero, size: contentSize))
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 44, width: contentSize.width, height: contentSize.height - 44))
+        scroll.autoresizingMask = [.width, .height]
+        scroll.hasVerticalScroller = true
+        let textView = NSTextView(frame: scroll.bounds)
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.textContainerInset = NSSize(width: 8, height: 8)
+        textView.autoresizingMask = [.width]
+        textView.isVerticallyResizable = true
+        // 不换行就会被窗口右边缘切掉：DERP 延迟表一行能到 700+ pt。
+        textView.isHorizontallyResizable = false
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: scroll.contentSize.width, height: .greatestFiniteMagnitude)
+        textView.string = report.text
+        scroll.documentView = textView
+        content.addSubview(scroll)
+
+        let copyButton = NSButton(title: "复制结果", target: self, action: #selector(copyLatencyReport(_:)))
+        copyButton.frame = NSRect(x: contentSize.width - 200, y: 8, width: 96, height: 28)
+        copyButton.autoresizingMask = [.minXMargin]
+        content.addSubview(copyButton)
+        let closeButton = NSButton(title: "关闭", target: nil, action: #selector(NSWindow.performClose(_:)))
+        closeButton.frame = NSRect(x: contentSize.width - 100, y: 8, width: 92, height: 28)
+        closeButton.autoresizingMask = [.minXMargin]
+        content.addSubview(closeButton)
+
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: contentSize),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "访问延迟：\(report.peer.hostName)"
+        window.contentView = content
+        window.isReleasedWhenClosed = false
+        window.center()
+
+        // 上一次的窗口若已关闭就丢掉引用；同时防止同一窗口被释放。
+        latencyReportWindowControllers.removeAll { $0.window?.isVisible != true }
+        let controller = NSWindowController(window: window)
+        latencyReportWindowControllers.append(controller)
+        controller.showWindow(nil)
+    }
+
+    /// 复制按钮从所在窗口里取文本：不在 extension 里为一个按钮另存状态。
+    @objc func copyLatencyReport(_ sender: Any?) {
+        guard let window = (sender as? NSView)?.window,
+              let scroll = window.contentView?.subviews.compactMap({ $0 as? NSScrollView }).first,
+              let textView = scroll.documentView as? NSTextView
+        else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(textView.string, forType: .string)
     }
 
     // MARK: - 呈现

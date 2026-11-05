@@ -65,6 +65,19 @@ final class SystemCommandRunner: CommandRunning {
     }
 
     func run(_ arguments: [String], environment explicitEnvironment: [String: String]?, timeout: TimeInterval) -> CommandRunResult {
+        execute(arguments, environment: explicitEnvironment, timeout: timeout, requireZeroExit: true)
+    }
+
+    func runAllowingFailure(_ arguments: [String], timeout: TimeInterval) -> CommandRunResult {
+        execute(arguments, environment: environment, timeout: timeout, requireZeroExit: false)
+    }
+
+    private func execute(
+        _ arguments: [String],
+        environment explicitEnvironment: [String: String]?,
+        timeout: TimeInterval,
+        requireZeroExit: Bool
+    ) -> CommandRunResult {
         let process: ProbeProcess
         do {
             process = try spawn(arguments, explicitEnvironment)
@@ -100,7 +113,7 @@ final class SystemCommandRunner: CommandRunning {
             }
             return CommandRunResult(output: nil, timedOut: true)
         }
-        guard process.terminationStatus == 0 else { return CommandRunResult(output: nil) }
+        if requireZeroExit, process.terminationStatus != 0 { return CommandRunResult(output: nil) }
         return CommandRunResult(output: String(data: process.readStandardOutput(), encoding: .utf8))
     }
 

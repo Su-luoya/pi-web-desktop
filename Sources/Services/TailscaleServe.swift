@@ -51,6 +51,187 @@ struct TailscaleServeSnapshot: Equatable {
     }
 }
 
+/// 同一 tailnet 里的一台设备：菜单里选「测哪一台」用它。
+struct TailscalePeer: Equatable {
+    let hostName: String
+    let os: String
+    /// 第一个 IPv4 地址；ping 与显示都用它。
+    let ipv4: String
+    let online: Bool
+    /// 当前的直连地址（`host:port`）；nil 表示现在只能走 DERP 中转。
+    let directAddress: String?
+    /// 中转所用的 DERP 区域代码（`tok`）。
+    let relay: String?
+
+    /// 弹出菜单里的一行：同名设备很常见（多台设备都叫 localhost），靠 IP 区分。
+    var pickerTitle: String {
+        "\(hostName)（\(os)）· \(pathText) · \(ipv4)"
+    }
+
+    var pathText: String {
+        guard online else { return "离线" }
+        if let directAddress { return "直连 \(directAddress)" }
+        if let relay { return "中转 \(relay)" }
+        return "未连接"
+    }
+}
+
+/// 一次 `ping` 里单个 pong 的路径与往返时间。
+struct TailscalePingSample: Equatable {
+    let milliseconds: Int
+    /// nil 表示直连。
+    let relay: String?
+    let directAddress: String?
+}
+
+struct TailscalePingReport: Equatable {
+    var samples: [TailscalePingSample] = []
+
+    var milliseconds: [Int] { samples.map(\.milliseconds) }
+    var minimum: Int? { milliseconds.min() }
+    var maximum: Int? { milliseconds.max() }
+
+    /// 中位数：采样数很少时比平均值更能代表“平时大概多快”。
+    var median: Int? {
+        let sorted = milliseconds.sorted()
+        guard !sorted.isEmpty else { return nil }
+        return sorted[sorted.count / 2]
+    }
+}
+
+/// 一个 DERP 区域到本机的往返延迟。
+struct TailscaleDERPLatency: Equatable {
+    let code: String
+    let region: String
+    let milliseconds: Int
+}
+
+/// `netcheck` 人类可读报告里我们关心的几行（JSON 只有区域编号、没有名字，
+/// 因此这里解析文本而不是 `--format=json`）。
+struct TailscaleNetcheckReport: Equatable {
+    var udp: Bool?
+    var ipv4: String?
+    var mappingVariesByDestIP: Bool?
+    var portMapping: String?
+    var nearestDERP: String?
+    /// 只收有延迟的区域：连不上的区域在报告里没有数字。
+    var derpLatencies: [TailscaleDERPLatency] = []
+
+    func region(for code: String) -> String? {
+        derpLatencies.first { $0.code == code }.map(\.region)
+    }
+
+    func milliseconds(forDERP code: String) -> Int? {
+        derpLatencies.first { $0.code == code }.map(\.milliseconds)
+    }
+
+    /// 按区域名找代码与延迟：`nearestDERP` 是名字（`Hong Kong`），不是代码（`hkg`）。
+    var nearestLatency: (code: String, milliseconds: Int)? {
+        guard let nearestDERP else { return nil }
+        return derpLatencies.first { $0.region == nearestDERP }.map { ($0.code, $0.milliseconds) }
+    }
+}
+
+/// 一次测量的完整结果；文本渲染由下面的 `text` 负责。
+struct TailscaleLatencyReport: Equatable {
+    let peer: TailscalePeer
+    /// nil 表示命令跑不起来（不是“没有回应”，后者是空采样）。
+    let ping: TailscalePingReport?
+    let netcheck: TailscaleNetcheckReport?
+}
+
+extension TailscaleLatencyReport {
+    /// 结果窗口里的整段文本，也是「复制结果」复制的内容。
+    ///
+    /// 纯字符串拼装，所有字段都可注入，因此“全程中转 / 中途转直连 / 没有回应”
+    /// 这几个文案分支能在不跑命令的测试里断言。
+    var text: String {
+        var lines = ["目标：\(peer.hostName)（\(peer.os)） · \(peer.ipv4)", "Tailscale 记录：\(peer.pathText)", ""]
+        lines.append(contentsOf: pingLines)
+        lines.append("")
+        lines.append(contentsOf: netcheckLines)
+        lines.append("")
+        lines.append("结论：\(verdict)")
+        return lines.joined(separator: "\n")
+    }
+
+    /// 一句话结论：用户真正想知道的就是“走没走中转”。
+    var verdict: String {
+        guard let ping else { return "测不出往返时间，Tailscale 命令没有返回结果。" }
+        guard let first = ping.samples.first else {
+            return "没有收到回应，设备可能离线或网络挡掉了探测包。"
+        }
+        let samples = ping.samples
+        let relays = samples.compactMap(\.relay)
+        let roundTrip = ping.median ?? first.milliseconds
+        guard !relays.isEmpty else {
+            let address = first.directAddress.map { "（\($0)）" } ?? ""
+            return "全程直连\(address)，往返 \(roundTrip) ms。"
+        }
+        let place = derpDescription(code: relays[0])
+        if relays.count == samples.count {
+            return "全程经中转 \(place)，往返 \(roundTrip) ms。"
+        }
+        return "开头经中转 \(place)，之后建立直连，往返 \(roundTrip) ms。"
+    }
+
+    private func derpDescription(code: String) -> String {
+        let region = netcheck?.region(for: code) ?? ""
+        return region.isEmpty ? code : "\(code)（\(region)）"
+    }
+
+    private var pingLines: [String] {
+        guard let ping else { return ["往返时间：没有结果（命令未返回）。"] }
+        guard ping.samples.first != nil, let minimum = ping.minimum,
+              let median = ping.median, let maximum = ping.maximum
+        else { return ["往返时间：没有收到回应。"] }
+        var lines = [
+            "往返时间（\(ping.samples.count) 个探测包）：",
+            "  最小 \(minimum) ms · 中位 \(median) ms · 最大 \(maximum) ms"
+        ]
+        for (index, sample) in ping.samples.enumerated() {
+            let path = sample.relay.map { "中转 \($0)" } ?? "直连 \(sample.directAddress ?? "")"
+            lines.append("  第 \(index + 1) 次：\(sample.milliseconds) ms（\(path)）")
+        }
+        // status 里的路径是快照，可能跟这几秒内采到的路径不一致（忽直连忽中转），
+        // 两边都写出来，不替用户下没把握的结论。
+        var paths: [String] = []
+        let directCount = ping.samples.filter { $0.relay == nil }.count
+        if directCount > 0 { paths.append("直连 ×\(directCount)") }
+        let relays = Dictionary(grouping: ping.samples.compactMap(\.relay), by: { $0 })
+            .sorted { $0.key < $1.key }
+            .map { "中转 \($0.key) ×\($0.value.count)" }
+        paths.append(contentsOf: relays)
+        lines.append("  采样路径：" + paths.joined(separator: " / "))
+        return lines
+    }
+
+    private var netcheckLines: [String] {
+        guard let netcheck else { return ["本机网络：没有取到（netcheck 未返回）。"] }
+        var fields: [String] = []
+        if let udp = netcheck.udp { fields.append("UDP \(udp ? "可用" : "不可用")") }
+        if let ipv4 = netcheck.ipv4 { fields.append("IPv4 \(ipv4)") }
+        if let portMapping = netcheck.portMapping { fields.append("端口映射 \(portMapping)") }
+        if netcheck.mappingVariesByDestIP == true { fields.append("NAT 映射随目标变化（可能忽直连忽中转）") }
+        var lines = ["本机网络：", fields.isEmpty ? "  没有字段可读。" : "  " + fields.joined(separator: " · ")]
+        if let nearest = netcheck.nearestDERP {
+            var summary = nearest
+            if let known = netcheck.nearestLatency {
+                summary = "\(known.code)（\(nearest)），\(known.milliseconds) ms"
+            }
+            lines.append("  最近的 DERP 区域：\(summary)")
+        }
+        if !netcheck.derpLatencies.isEmpty {
+            // 几十个区域全列出来会把窗口撑满；窗口只看最快的几个。
+            let sorted = netcheck.derpLatencies.sorted { $0.milliseconds < $1.milliseconds }
+            var table = sorted.prefix(6).map { "\($0.code) \($0.milliseconds) ms" }.joined(separator: " · ")
+            if sorted.count > 6 { table += " · …共 \(sorted.count) 个区域" }
+            lines.append("  DERP 区域延迟：\(table)")
+        }
+        return lines
+    }
+}
+
 enum TailscaleServeError: Error, Equatable {
     case notInstalled
     /// 后端不可用的可读原因。
@@ -147,7 +328,145 @@ struct TailscaleServe {
         return runner.run([binary, "serve", "--https=\(port)", "off"]) != nil
     }
 
+    // MARK: - 延迟测量
+
+    /// `status --json` 里的 peer 列表。nil 表示命令失败或输出不可解析。
+    func peers() -> [TailscalePeer]? {
+        guard let binary = binaryPath,
+              let output = runner.run([binary, "status", "--json"]) else { return nil }
+        return Self.peers(fromStatusJSON: output)
+    }
+
+    /// 向一台设备发 `count` 个 Tailscale 层探测包，记录每一跳的路径与往返时间。
+    ///
+    /// `--until-direct=false` 是刻意的：默认会在建立直连后立刻停，只留下一条样本；
+    /// 这里要的是“刚开始是不是在绕中转”，所以固定采满。全程中转时命令以非零退出码
+    /// 结束，但输出仍在标准输出里，因此走 `runAllowingFailure`。
+    func ping(ipv4: String, count: Int = 3) -> TailscalePingReport? {
+        guard let binary = binaryPath else { return nil }
+        let result = runner.runAllowingFailure(
+            [binary, "ping", "--c", "\(count)", "--until-direct=false", "--timeout=2s", ipv4],
+            timeout: 20
+        )
+        guard let output = result.output else { return nil }
+        return Self.pingReport(fromOutput: output)
+    }
+
+    /// 本机网络条件与各 DERP 区域的延迟（实测约 3 秒：它在等 UDP 探测回来）。
+    func netcheck() -> TailscaleNetcheckReport? {
+        guard let binary = binaryPath else { return nil }
+        guard let output = runner.run([binary, "netcheck"], timeout: 20).output else { return nil }
+        return Self.netcheckReport(fromOutput: output)
+    }
+
     // MARK: - 纯解析
+
+    /// `status --json` → peer 列表。在线的排在前面，其次按名字排（菜单顺序不随机）。
+    static func peers(fromStatusJSON json: String) -> [TailscalePeer]? {
+        guard let root = jsonObject(json) else { return nil }
+        guard let raw = root["Peer"] as? [String: Any] else { return [] }
+        var peers: [TailscalePeer] = []
+        for value in raw.values {
+            guard let node = value as? [String: Any],
+                  let hostName = node["HostName"] as? String, !hostName.isEmpty,
+                  let addresses = node["TailscaleIPs"] as? [String],
+                  let ipv4 = addresses.first(where: { !$0.contains(":") })
+            else { continue }
+            let direct = node["CurAddr"] as? String
+            let relay = node["Relay"] as? String
+            peers.append(TailscalePeer(
+                hostName: hostName,
+                os: node["OS"] as? String ?? "未知系统",
+                ipv4: ipv4,
+                online: node["Online"] as? Bool ?? false,
+                directAddress: (direct?.isEmpty ?? true) ? nil : direct,
+                relay: (relay?.isEmpty ?? true) ? nil : relay
+            ))
+        }
+        return peers.sorted { lhs, rhs in
+            if lhs.online != rhs.online { return lhs.online }
+            return lhs.hostName.localizedStandardCompare(rhs.hostName) == .orderedAscending
+        }
+    }
+
+    /// `pong from <名字> (<IP>) via <路径> in <毫秒>ms`；其余行（提示、报错）忽略。
+    static func pingReport(fromOutput output: String) -> TailscalePingReport {
+        var report = TailscalePingReport()
+        for raw in output.split(separator: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("pong from "),
+                  let via = line.range(of: " via "),
+                  let inRange = line.range(of: " in ", range: via.upperBound..<line.endIndex)
+            else { continue }
+            let path = line[via.upperBound..<inRange.lowerBound]
+            let tail = line[inRange.upperBound...].trimmingCharacters(in: .whitespaces)
+            guard tail.hasSuffix("ms"),
+                  let milliseconds = Int(tail.dropLast(2).trimmingCharacters(in: .whitespaces))
+            else { continue }
+            if path.hasPrefix("DERP(") && path.hasSuffix(")") {
+                let code = String(path.dropFirst("DERP(".count).dropLast())
+                report.samples.append(TailscalePingSample(
+                    milliseconds: milliseconds, relay: code, directAddress: nil
+                ))
+            } else {
+                report.samples.append(TailscalePingSample(
+                    milliseconds: milliseconds, relay: nil, directAddress: String(path)
+                ))
+            }
+        }
+        return report
+    }
+
+    /// `netcheck` 文本报告：`* Key: value` 行 + `- <区域>: <毫秒>ms (<名字>)` 行。
+    static func netcheckReport(fromOutput output: String) -> TailscaleNetcheckReport {
+        var report = TailscaleNetcheckReport()
+        for raw in output.split(separator: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("* ") {
+                let body = line.dropFirst(2)
+                guard let separator = body.firstIndex(of: ":") else { continue }
+                let key = body[..<separator].trimmingCharacters(in: .whitespaces)
+                let value = body[body.index(after: separator)...].trimmingCharacters(in: .whitespaces)
+                switch key {
+                case "UDP":
+                    report.udp = value == "true"
+                case "IPv4":
+                    // `yes, <地址>` / `no`；无地址时留 nil。
+                    report.ipv4 = value.hasPrefix("yes")
+                        ? value.dropFirst("yes".count).trimmingCharacters(in: CharacterSet(charactersIn: ", "))
+                        : nil
+                case "MappingVariesByDestIP":
+                    report.mappingVariesByDestIP = value == "true"
+                case "PortMapping":
+                    report.portMapping = value.isEmpty ? nil : value
+                case "Nearest DERP":
+                    report.nearestDERP = value.isEmpty ? nil : value
+                default:
+                    continue
+                }
+            } else if line.hasPrefix("- "),
+                      let latency = derpLatency(fromDERPLine: String(line.dropFirst(2))) {
+                report.derpLatencies.append(latency)
+            }
+        }
+        return report
+    }
+
+    /// `sin: 94.3ms  (Singapore)` → 代码、名字与毫秒（四舍五入到整数）。
+    /// 连不上的区域是 `hnl:         (Honolulu)`：冒号后面没有 `ms`，返回 nil。
+    static func derpLatency(fromDERPLine body: String) -> TailscaleDERPLatency? {
+        guard let separator = body.firstIndex(of: ":") else { return nil }
+        let code = body[..<separator].trimmingCharacters(in: .whitespaces)
+        let rest = body[body.index(after: separator)...]
+        guard !code.isEmpty, let unit = rest.range(of: "ms") else { return nil }
+        let number = rest[..<unit.lowerBound].trimmingCharacters(in: .whitespaces)
+        guard let value = Double(number) else { return nil }
+        var region = ""
+        if let open = rest.firstIndex(of: "("), let close = rest.lastIndex(of: ")"), open < close {
+            region = rest[rest.index(after: open)..<close].trimmingCharacters(in: .whitespaces)
+        }
+        return TailscaleDERPLatency(code: code, region: region, milliseconds: Int(value.rounded()))
+    }
 
     /// `status --json` → 可用性。缺字段、后端未运行都归到 `notRunning`。
     static func availability(fromStatusJSON json: String) -> TailscaleAvailability {

@@ -65,6 +65,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     var remoteAccessMenus: [NSMenu] = []
     /// 远程访问（Tailscale serve）的状态与「本应用占的那一条入口」的记录。
     lazy var remoteAccessController = RemoteAccessController(runner: commandRunner)
+    /// 「测试访问延迟」打开的结果窗口：持有控制器，否则窗口会被释放。
+    var latencyReportWindowControllers: [NSWindowController] = []
 
     // MARK: - 更新检查（GitHub #17）
 

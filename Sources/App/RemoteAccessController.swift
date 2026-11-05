@@ -181,6 +181,25 @@ final class RemoteAccessController {
         }
     }
 
+    // MARK: - 延迟测量
+
+    /// 菜单要列出的 peer。nil 表示 Tailscale 不配合（没装 / 没登录）。
+    func peers(completion: @escaping ([TailscalePeer]?) -> Void) {
+        let serve = self.serve
+        CommandProbeDispatch.runOffMain(work: {
+            serve.peers()
+        }, completion: completion)
+    }
+
+    /// 测一台设备：先 ping 看链路（直连还是中转、多少毫秒），再 netcheck 拿本机的
+    /// DERP 延迟做参照。两个命令都可能失败，报告本身仍会交付，由文案说明原因。
+    func sample(peer: TailscalePeer, completion: @escaping (TailscaleLatencyReport) -> Void) {
+        let serve = self.serve
+        CommandProbeDispatch.runOffMain(work: {
+            TailscaleLatencyReport(peer: peer, ping: serve.ping(ipv4: peer.ipv4), netcheck: serve.netcheck())
+        }, completion: completion)
+    }
+
     // MARK: - 关闭
 
     /// 撤销成功才清掉记录；失败时保留端口与状态，以便重试或下次启动对账。

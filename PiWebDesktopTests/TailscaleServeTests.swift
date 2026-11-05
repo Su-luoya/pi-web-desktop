@@ -421,4 +421,159 @@ final class TailscaleServeTests: XCTestCase {
             XCTAssertEqual(error as? TailscaleServeError, .noFreePort)
         }
     }
+
+    // MARK: - 延迟测量
+
+    /// 全程中转时 `ping` 以非零退出码结束，输出仍在标准输出：不能当成“没测到”。
+    private final class FailingExitRunner: CommandRunning {
+        var output: String?
+
+        func run(_ arguments: [String]) -> String? { nil }
+
+        func runAllowingFailure(_ arguments: [String], timeout: TimeInterval) -> CommandRunResult {
+            CommandRunResult(output: output)
+        }
+    }
+
+    private func peersJSON() -> String {
+        """
+        {"Peer": {
+          "a": {"HostName": "pixel", "OS": "android", "TailscaleIPs": ["192.0.2.9", "fd7a::9"],
+                "Online": true, "CurAddr": "", "Relay": "tok"},
+          "b": {"HostName": "mini", "OS": "macOS", "TailscaleIPs": ["192.0.2.3"],
+                "Online": true, "CurAddr": "192.168.1.5:41641", "Relay": "tok"},
+          "c": {"HostName": "old-pc", "OS": "windows", "TailscaleIPs": ["192.0.2.7"],
+                "Online": false, "CurAddr": ""}
+        }}
+        """
+    }
+
+    func testPeersParseRelayedAndDirectPaths() throws {
+        let peers = try XCTUnwrap(TailscaleServe.peers(fromStatusJSON: peersJSON()))
+        XCTAssertEqual(peers.map(\.hostName), ["mini", "pixel", "old-pc"], "在线的排前面")
+        let pix = try XCTUnwrap(peers.first { $0.hostName == "pixel" })
+        XCTAssertEqual(pix.ipv4, "192.0.2.9", "IPv6 地址不能拿来 ping")
+        XCTAssertNil(pix.directAddress)
+        XCTAssertEqual(pix.pathText, "中转 tok")
+        XCTAssertTrue(pix.pickerTitle.contains("中转 tok"))
+        let mini = try XCTUnwrap(peers.first { $0.hostName == "mini" })
+        XCTAssertEqual(mini.pathText, "直连 192.168.1.5:41641")
+        let offline = try XCTUnwrap(peers.first { $0.hostName == "old-pc" })
+        XCTAssertEqual(offline.pathText, "离线")
+    }
+
+    func testPeersRejectsMalformedJSON() {
+        XCTAssertNil(TailscaleServe.peers(fromStatusJSON: "not json"))
+        XCTAssertEqual(TailscaleServe.peers(fromStatusJSON: "{}"), [])
+    }
+
+    func testPingParsesRelayAndDirectSamples() {
+        let output = """
+        pong from pixel (192.0.2.9) via DERP(tok) in 178ms
+        pong from pixel (192.0.2.9) via 192.168.1.5:41641 in 4ms
+        direct connection not established
+        """
+        let report = TailscaleServe.pingReport(fromOutput: output)
+        XCTAssertEqual(report.samples, [
+            TailscalePingSample(milliseconds: 178, relay: "tok", directAddress: nil),
+            TailscalePingSample(milliseconds: 4, relay: nil, directAddress: "192.168.1.5:41641")
+        ])
+        XCTAssertEqual(report.minimum, 4)
+        XCTAssertEqual(report.maximum, 178)
+        // 采样数为偶数时取中间偏大的那个：[4, 178] 的中位就是 178。
+        XCTAssertEqual(report.median, 178)
+    }
+
+    func testPingKeepsOutputWhenTheCommandExitsNonZero() throws {
+        let silent = RecordingRunner()
+        let serve = TailscaleServe(runner: silent, candidates: [binary], isExecutable: { _ in true })
+        XCTAssertNil(serve.ping(ipv4: "192.0.2.9"), "命令无输出时应为 nil，而不是空报告")
+
+        let relayed = FailingExitRunner()
+        relayed.output = "pong from pixel (192.0.2.9) via DERP(tok) in 281ms\n"
+        let report = try XCTUnwrap(TailscaleServe(runner: relayed, candidates: [binary], isExecutable: { _ in true })
+            .ping(ipv4: "192.0.2.9"))
+        XCTAssertEqual(report.samples.first?.relay, "tok")
+    }
+
+    func testNetcheckParsesLatenciesAndSkipsUnreachableRegions() {
+        let output = """
+        Report:
+        	* UDP: true
+        	* IPv4: yes, 1.2.3.4:41641
+        	* MappingVariesByDestIP: false
+        	* PortMapping: UPnP
+        	* Nearest DERP: Tokyo
+        	* DERP latency:
+        		- sin: 94.3ms  (Singapore)
+        		- tok: 178.6ms  (Tokyo)
+        		- hnl:         (Honolulu)
+        """
+        let report = TailscaleServe.netcheckReport(fromOutput: output)
+        XCTAssertEqual(report.udp, true)
+        XCTAssertEqual(report.ipv4, "1.2.3.4:41641")
+        XCTAssertEqual(report.mappingVariesByDestIP, false)
+        XCTAssertEqual(report.portMapping, "UPnP")
+        XCTAssertEqual(report.nearestDERP, "Tokyo")
+        XCTAssertEqual(report.derpLatencies, [
+            TailscaleDERPLatency(code: "sin", region: "Singapore", milliseconds: 94),
+            TailscaleDERPLatency(code: "tok", region: "Tokyo", milliseconds: 179)
+        ])
+        XCTAssertEqual(report.region(for: "tok"), "Tokyo")
+    }
+
+    func testReportTextStatesThatThePathIsRelayed() {
+        let peer = TailscalePeer(
+            hostName: "pixel", os: "android", ipv4: "192.0.2.9",
+            online: true, directAddress: nil, relay: "tok"
+        )
+        let report = TailscaleLatencyReport(
+            peer: peer,
+            ping: TailscalePingReport(samples: [
+                TailscalePingSample(milliseconds: 178, relay: "tok", directAddress: nil),
+                TailscalePingSample(milliseconds: 181, relay: "tok", directAddress: nil)
+            ]),
+            netcheck: TailscaleNetcheckReport(
+                udp: true, ipv4: "1.2.3.4:41641", mappingVariesByDestIP: false,
+                portMapping: "UPnP", nearestDERP: "tok",
+                derpLatencies: [TailscaleDERPLatency(code: "tok", region: "Tokyo", milliseconds: 178)]
+            )
+        )
+        XCTAssertEqual(report.verdict, "全程经中转 tok（Tokyo），往返 181 ms。")
+        XCTAssertTrue(report.text.contains("最小 178 ms · 中位 181 ms · 最大 181 ms"))
+        XCTAssertTrue(report.text.contains("UDP 可用"))
+        XCTAssertTrue(report.text.contains("Tailscale 记录：中转 tok"))
+        XCTAssertTrue(report.text.contains("采样路径：中转 tok ×2"))
+    }
+
+    func testReportSeparatesStatusSnapshotFromMeasuredPaths() {
+        // 真实案例：status 说是中转，三包全是直连。一行“当前路径：中转”会被误读成
+        // “现在就在绕中转”，所以快照和实测分开写。
+        let peer = TailscalePeer(
+            hostName: "li-server-2060", os: "linux", ipv4: "192.0.2.4",
+            online: true, directAddress: nil, relay: "tok"
+        )
+        let report = TailscaleLatencyReport(
+            peer: peer,
+            ping: TailscalePingReport(samples: [
+                TailscalePingSample(milliseconds: 195, relay: nil, directAddress: "198.51.100.5:41641"),
+                TailscalePingSample(milliseconds: 143, relay: nil, directAddress: "198.51.100.5:41641"),
+                TailscalePingSample(milliseconds: 21, relay: nil, directAddress: "198.51.100.5:41641")
+            ]),
+            netcheck: nil
+        )
+        XCTAssertTrue(report.text.contains("Tailscale 记录：中转 tok"))
+        XCTAssertTrue(report.text.contains("采样路径：直连 ×3"))
+        XCTAssertEqual(report.verdict, "全程直连（198.51.100.5:41641），往返 143 ms。")
+    }
+
+    func testReportTextExplainsSilenceWithoutPretendingItIsSlow() {
+        let peer = TailscalePeer(
+            hostName: "old-pc", os: "windows", ipv4: "192.0.2.7",
+            online: false, directAddress: nil, relay: nil
+        )
+        let report = TailscaleLatencyReport(peer: peer, ping: TailscalePingReport(), netcheck: nil)
+        XCTAssertTrue(report.verdict.contains("没有收到回应"))
+        XCTAssertTrue(report.text.contains("本机网络：没有取到"))
+    }
 }

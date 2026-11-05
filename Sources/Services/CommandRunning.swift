@@ -37,6 +37,11 @@ protocol CommandRunning {
     func run(_ arguments: [String], environment: [String: String]?) -> String?
     /// 环境与超时同时给出的探测（依赖诊断的常规入口）。
     func run(_ arguments: [String], environment: [String: String]?, timeout: TimeInterval) -> CommandRunResult
+    /// 退出码非零时也返回标准输出。给「用退出码表达结论」的探针用：
+    /// `Tailscale ping` 在没能建立直连时正是「有输出、退出码非零」，按 `run(_:)`
+    /// 的语义会把唯一有用的那几行丢掉。默认实现退回 `run(_:timeout:)`，因此只
+    /// 关心参数的测试替身不必实现它。
+    func runAllowingFailure(_ arguments: [String], timeout: TimeInterval) -> CommandRunResult
     /// 取消正在进行的探测（若还有）：只终止**本次启动的**子进程，不阻塞等待。
     func cancelRunningProbe()
 }
@@ -48,6 +53,10 @@ extension CommandRunning {
 
     func run(_ arguments: [String], environment: [String: String]?) -> String? {
         run(arguments)
+    }
+
+    func runAllowingFailure(_ arguments: [String], timeout: TimeInterval) -> CommandRunResult {
+        run(arguments, timeout: timeout)
     }
 
     func run(_ arguments: [String], environment: [String: String]?, timeout: TimeInterval) -> CommandRunResult {

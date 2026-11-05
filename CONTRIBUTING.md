@@ -42,8 +42,17 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 - `Scripts/check-identity.sh` 退出 0 才表示身份与版本一致；它同时用固定模式集扫描仓库文本里的私人默认值，并在扫描前检查未跟踪文件：落在扫描范围内的未跟踪文件判失败（先 `git add` 或删除），被扫描 pathspec 排除的 `*.icns` 只输出 info 行。用法见 [开发说明](docs/development.md#personal-data-与-secret-扫描能力)。
 - `Scripts/scan-secrets.sh --self-test` 先用临时目录里的样本证明每条凭据规则都会命中、误报边界的样本（占位符、示例 URL、camelCase 标识符值）不会被报告、`scan-secrets: allow(reason=…)` 只跳过带标记的那一行且裸标记/空理由/过短理由不抑制并计数，再在临时 Git 仓库里证明未跟踪文件门禁（默认退出 3、加 `--include-untracked` 能扫到未跟踪文件里的样例凭据、没有未跟踪文件时行为不变；该自测因此需要 `git`）；`Scripts/scan-secrets.sh` 再扫描所有已跟踪文件，工作区没有未跟踪文件时必须退出 0，有未跟踪文件时如实退出 3（先 `git add` 或删除，本地排查时可显式加 `--include-untracked`）。提交前可以用 `./Scripts/scan-secrets.sh <file>` 只扫一个文件（未跟踪的文件也可以直接指定）。
 - `Scripts/smoke.sh` 在临时 support 目录里验证主窗口与诊断页启动路径，不写真实 UserDefaults、Application Support 与 Logs，也不启动真实 pi-web。
+- `Scripts/test.sh` 跑 XCTest（退出码 0 通过 / 1 测试或构建失败 / 2 找不到完整 Xcode），语义与下面的 `xcodebuild test` 相同，只是代管了 `DEVELOPER_DIR` 与 DerivedData 位置。
 
-如果改动了 Swift 代码，还要运行工程构建和 XCTest（需要完整 Xcode，只有 Command Line Tools 时会失败）：
+如果改动了 Swift 代码，还要运行工程构建和 XCTest。一条命令跑完整 XCTest：
+
+```bash
+./Scripts/test.sh
+```
+
+`xcode-select -p` 仍指向 Command Line Tools 时它会只为本进程设置 `DEVELOPER_DIR`（默认 `/Applications/Xcode.app`，`$XCODE_APP` 可覆盖），所以不需要 `sudo xcode-select -s`；DerivedData 落在 git-ignored 的 `.build/DerivedData`（`$DERIVED_DATA_PATH` 可覆盖）；找不到完整 Xcode 时退出 2 并打印补救命令。当前基线是 `Executed 1022 tests, with 0 failures`。
+
+需要拆开跑（构建 + XCTest + 身份检查）时用下面的序列：
 
 ```bash
 DERIVED_DATA_PATH="$(mktemp -d "${TMPDIR:-/tmp}/PiWebDesktopDerivedData.XXXXXX")"

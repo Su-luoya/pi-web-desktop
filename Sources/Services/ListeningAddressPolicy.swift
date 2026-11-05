@@ -240,3 +240,30 @@ enum RemoteAccessPolicy {
         addressVerdict(hostname: hostname).diagnosisMessage
     }
 }
+
+/// 用户自填的隧道地址（内网穿透工具给出的那个公网 URL）的纯解析逻辑。
+///
+/// 只接受 http/https 且必须有主机名：这个地址要直接交给浏览器、剪贴板和二维码，
+/// 宽一点就会把 `xxx.natfrp.cloud:12345` 这种缺 scheme 的输入当成相对路径。
+/// 端口与路径原样保留，但写进 pi-web 允许列表的只有主机名——
+/// `PI_WEB_ALLOWED_HOSTS` 是按主机名（不含端口）逐条精确比对的。
+enum CustomTunnelAddress {
+    /// 解析用户输入；nil 表示“看不懂，需要他改”。
+    static func url(from raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let components = URLComponents(string: trimmed) else { return nil }
+        let scheme = components.scheme?.lowercased()
+        guard scheme == "https" || scheme == "http" else { return nil }
+        guard let host = components.host, !host.isEmpty else { return nil }
+        // 带凭据的地址不保存：它会连同密码一起进剪贴板与二维码。
+        guard components.user == nil, components.password == nil else { return nil }
+        return components.url
+    }
+
+    /// 要补进允许列表的主机名：小写、去端口、去方括号。
+    static func allowedHost(for url: URL) -> String? {
+        let host = url.host?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let host, !host.isEmpty else { return nil }
+        return host
+    }
+}

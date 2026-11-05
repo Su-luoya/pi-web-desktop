@@ -265,7 +265,7 @@ smoke 变量只影响那一次启动：
 - 建立窗口/诊断页后向 stdout 打印标记并以 0 退出；临时目录创建失败、主窗口未建立或诊断夹具不再进入诊断页时向 stderr 报错并以 1 退出，不打印标记。
 - 不隔离 WebKit 数据：启动模式仍会创建默认数据存储的 `WKWebView`（`Sources/App/WebViewController.swift:40` 的 `.default()`，`Sources/` 里没有任何 `WKWebsiteDataStore` 删除调用）。实测跑一次 `./Scripts/smoke.sh` 会更新 `~/Library/WebKit/<bundle id>/WebsiteData/` 下已有文件的 mtime/size，所以临时目录只隔离应用自己的 support 目录、日志与 UserDefaults，**不**隔离 WebKit 的持久化网站数据；位置与删除方式见 [隐私说明](privacy.md#本地数据一览与删除)。
 
-变量未设置时行为完全不变。smoke 只验证窗口、诊断页与退出路径，不验证服务功能，也不替代 `xcodebuild` 的构建和 `xcodebuild test` 的单元测试：本机只有 Command Line Tools 时无法运行 XCTest，smoke 不声称覆盖测试用例。
+变量未设置时行为完全不变。smoke 只验证窗口、诊断页与退出路径，不验证服务功能，也不替代 `xcodebuild` 的构建和 `xcodebuild test` 的单元测试：本机没装 Xcode 时无法运行 XCTest（装了 Xcode 但 `xcode-select` 指向 Command Line Tools 时用 `./Scripts/test.sh`，它会为本进程设置 `DEVELOPER_DIR`），smoke 不声称覆盖测试用例。
 
 ## 验证
 
@@ -278,9 +278,10 @@ git diff --check
 codesign --verify --deep --strict build/Pi-Web-Desktop.app
 ./Scripts/check-identity.sh
 ./Scripts/smoke.sh
+./Scripts/test.sh
 ```
 
-`./Scripts/check-identity.sh` 退出 0 表示身份、版本与服务默认值一致，仓库文本扫描通过，且工作区没有落在扫描范围内的未跟踪文件。`./Scripts/scan-secrets.sh --self-test` 必须证明每条凭据规则都有一个会命中的样本、误报边界的样本（占位符与模板值、示例 URL、camelCase 标识符值）不会被报告、`scan-secrets: allow(reason=…)` 的理由门槛（裸标记、空理由和过短理由都不抑制、该行照常上报且计入 rejected、被抑制的行仍打印并计数），以及未跟踪文件门禁（默认退出 3、加 `--include-untracked` 能扫到未跟踪文件里的样例凭据、没有未跟踪文件时行为不变）；`./Scripts/scan-secrets.sh` 必须退出 0（没有已跟踪文件命中，且工作区没有未跟踪文件：有未跟踪文件时它如实退出 3，先 `git add` 或删除后再重跑）。`xcodebuild build` / `xcodebuild test` 需要完整 Xcode：`xcode-select -p` 指向 Command Line Tools 时这两条命令会失败，此时以上面的脚本链替代（脚本链不运行 XCTest），并在 PR 中说明 XCTest 由 CI 的 `macos-26` job 覆盖。
+`./Scripts/check-identity.sh` 退出 0 表示身份、版本与服务默认值一致，仓库文本扫描通过，且工作区没有落在扫描范围内的未跟踪文件。`./Scripts/scan-secrets.sh --self-test` 必须证明每条凭据规则都有一个会命中的样本、误报边界的样本（占位符与模板值、示例 URL、camelCase 标识符值）不会被报告、`scan-secrets: allow(reason=…)` 的理由门槛（裸标记、空理由和过短理由都不抑制、该行照常上报且计入 rejected、被抑制的行仍打印并计数），以及未跟踪文件门禁（默认退出 3、加 `--include-untracked` 能扫到未跟踪文件里的样例凭据、没有未跟踪文件时行为不变）；`./Scripts/scan-secrets.sh` 必须退出 0（没有已跟踪文件命中，且工作区没有未跟踪文件：有未跟踪文件时它如实退出 3，先 `git add` 或删除后再重跑）。`xcodebuild build` / `xcodebuild test` 需要完整 Xcode。`xcode-select -p` 指向 Command Line Tools 时裸命令直接失败（`xcode-select: error: tool 'xcodebuild' requires Xcode…`），但这不需要 sudo 改全局设置：`./Scripts/test.sh` 只对本次调用导出 `DEVELOPER_DIR`（`$XCODE_APP` 默认 `/Applications/Xcode.app`），DerivedData 默认落在 git-ignored 的 `.build/DerivedData`（`$DERIVED_DATA_PATH` 可覆盖），退出码 0 通过 / 1 测试或构建失败 / 2 找不到完整 Xcode。本机完全没有 Xcode 时才以上面的脚本链替代（脚本链不运行 XCTest），并在 PR 中说明 XCTest 由 CI 的 `macos-26` job 覆盖。
 
 ### personal-data 与 secret 扫描能力
 

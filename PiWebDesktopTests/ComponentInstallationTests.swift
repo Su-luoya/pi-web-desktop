@@ -366,6 +366,70 @@ final class ComponentInstallationTests: XCTestCase {
         XCTAssertTrue(installation.evidence.contains { $0.contains(gitFile) })
     }
 
+    /// 向上找 `.git` 不越过 `node_modules` 边界：宿主的 `.git`（Homebrew 自己的
+    /// `/opt/homebrew/.git`）不是包的 checkout。
+    func testGitEvidenceDoesNotCrossNodeModulesBoundary() {
+        let fixture = ComponentFixture()
+        defer { fixture.cleanUp() }
+
+        fixture.makeDirectory("homebrew/.git")
+        fixture.makeExecutable("homebrew/lib/node_modules/@agegr/pi-web/dist/cli.js")
+        let link = fixture.makeSymlink("homebrew/bin/pi-web", to: "../lib/node_modules/@agegr/pi-web/dist/cli.js")
+
+        let runner = ComponentFakeRunner()
+        runner.handler = { arguments in
+            arguments == [link, "--version"] ? "0.13.0\n" : nil
+        }
+
+        let installation = makeDetector(fixture: fixture, runner: runner)
+            .detect(request(names: ["pi-web"], candidates: [link]))
+
+        XCTAssertEqual(installation.source, .npmGlobal, installation.evidence.joined(separator: "\n"))
+        XCTAssertEqual(installation.confidence, .inferred)
+        XCTAssertNil(installation.suggestedCommand)
+        XCTAssertFalse(installation.evidence.contains { $0.contains(".git") })
+    }
+
+    /// 回归（用户机器上的真误判）：包在 `<prefix>/lib/node_modules/…`，`<prefix>` 自身
+    /// 是 git 仓库（Homebrew），而 `PATH` 里的 npm 属于另一套 Node 发行版。此时应当是
+    /// npm 全局（verified），证据来自与包路径同前缀的 `<prefix>/bin/npm root -g`。
+    func testNPMPackageUnderHostBrewPrefixIsNotMisreadAsGitCheckout() {
+        let fixture = ComponentFixture()
+        defer { fixture.cleanUp() }
+
+        fixture.makeDirectory("homebrew/.git")
+        let npmRoot = fixture.makeDirectory("homebrew/lib/node_modules")
+        let target = fixture.makeExecutable("homebrew/lib/node_modules/@agegr/pi-web/dist/cli.js")
+        let link = fixture.makeSymlink("homebrew/bin/pi-web", to: "../lib/node_modules/@agegr/pi-web/dist/cli.js")
+        let prefixNPM = fixture.makeExecutable("homebrew/bin/npm")
+        // `PATH` 里的 npm 属于另一套 Node（例如 vite-plus / nvm），root 覆盖不到该包。
+        let foreignRoot = fixture.makeDirectory("home/node-other/lib/node_modules")
+
+        let runner = ComponentFakeRunner()
+        runner.handler = { arguments in
+            switch arguments {
+            case ["/usr/bin/env", "npm", "root", "-g"]: return foreignRoot + "\n"
+            case ["/usr/bin/env", "pnpm", "root", "-g"]: return nil
+            case [prefixNPM, "root", "-g"]: return npmRoot + "\n"
+            case [link, "--version"]: return "0.13.0\n"
+            default: return nil
+            }
+        }
+
+        let installation = makeDetector(fixture: fixture, runner: runner)
+            .detect(request(packageName: "@agegr/pi-web", names: ["pi-web"], candidates: [link]))
+
+        XCTAssertEqual(installation.resolvedPath, target)
+        XCTAssertEqual(installation.source, .npmGlobal)
+        XCTAssertEqual(installation.confidence, .verified)
+        XCTAssertEqual(installation.suggestedCommand, "npm install -g @agegr/pi-web")
+        XCTAssertFalse(installation.evidence.contains { $0.contains("git checkout") })
+        XCTAssertTrue(
+            installation.evidence.contains { $0.contains(prefixNPM) },
+            installation.evidence.joined(separator: "\n")
+        )
+    }
+
     // MARK: Homebrew
 
     func testHomebrewCellarAndOptStructuresAreVerified() {

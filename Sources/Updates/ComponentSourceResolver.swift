@@ -93,8 +93,9 @@ struct ComponentSourceVerdict: Equatable {
 /// 3. mise：`installs/<工具>/<版本>` 路径段 + `mise` 目录或 `MISE_*` 环境标记。
 /// 4. pnpm 全局：真实路径在 `pnpm root -g` 报告的 root 之下。
 /// 5. npm 全局：真实路径在 `npm root -g`（或 `npm prefix -g` +
-///    `lib/node_modules`）报告的 root 之下。
-/// 6. git checkout：包目录（或向上）里存在 `.git`。
+///    `lib/node_modules`，或与包路径同前缀的 `<prefix>/bin/npm root -g`）
+///    报告的 root 之下。
+/// 6. git checkout：包目录（或向上，遇到 `node_modules` 边界即停）里存在 `.git`。
 /// 7. 官方安装器（仅 `desktopApp`）：`.app` 包且位于 Applications 目录。
 /// 8. 弱证据：`~/.npm-global`、`/lib/node_modules`、`/pnpm/global/` 路径段 →
 ///    包管理器来源但只能算 `inferred`。

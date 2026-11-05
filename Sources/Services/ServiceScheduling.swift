@@ -67,8 +67,20 @@ final class DispatchServiceScheduler: ServiceScheduling {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
+    /// 重复计时器必须挂在 `.common` 模式上，不能只用 `Timer.scheduledTimer`。
+    ///
+    /// 服务健康监控用的就是这条计时器（`ServiceManager` 的 4 秒健康检查）。
+    /// `scheduledTimer` 只把计时器加入 `RunLoop.Mode.default`；菜单跟踪、拖动
+    /// 窗口、sheet 与 `runModal()` 期间主运行循环跑在 `eventTracking` /
+    /// `modalPanel` 等模式，默认模式上的计时器在那段时间完全不触发。表现为
+    /// “服务已经挂掉，菜单一打开就一直显示正在运行”，要等到关掉菜单才补一次
+    /// 检查（健康检查连着失败 3 次才重启，实际间隔会变得更长）。
+    /// `DispatchUpdateCheckScheduler.startRepeating` 与退出超时计时器有同样的
+    /// 处理。
     func repeating(interval: TimeInterval, _ work: @escaping () -> Void) -> RepeatingTimerToken {
-        TimerRepeatingToken(timer: Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in work() })
+        let timer = Timer(timeInterval: interval, repeats: true) { _ in work() }
+        RunLoop.main.add(timer, forMode: .common)
+        return TimerRepeatingToken(timer: timer)
     }
 
     func sleep(seconds: TimeInterval) {

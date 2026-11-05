@@ -1,7 +1,7 @@
 import Cocoa
 import CoreImage
 
-/// 「服务 → 远程访问」子菜单：把本机服务通过 Tailscale serve 挂到 tailnet 上。
+/// 「服务 → 手机访问」子菜单：把本机服务通过 Tailscale serve 挂到 tailnet 上。
 ///
 /// 刻意不做访问密码：唯一的边界是 tailnet 身份，因此**只做 serve、不做 funnel**
 /// （funnel 会把它暴露到公网）。菜单项按控制器缓存的状态重建，不在菜单打开时
@@ -9,7 +9,7 @@ import CoreImage
 extension AppDelegate {
     /// 建子菜单：只挂 delegate，内容在打开时重建。
     func makeRemoteAccessMenu() -> NSMenu {
-        let menu = NSMenu(title: "远程访问")
+        let menu = NSMenu(title: "手机访问")
         menu.delegate = self
         remoteAccessMenus.append(menu)
         return menu
@@ -24,25 +24,30 @@ extension AppDelegate {
             item.isEnabled = false
             menu.addItem(item)
             if remoteAccessController.activePort != nil {
-                menu.addItem(remoteAccessItem(title: "重试关闭远程访问", action: #selector(disableRemoteAccess(_:))))
+                menu.addItem(remoteAccessItem(title: "重试关闭手机访问", action: #selector(disableRemoteAccess(_:))))
             }
             // Tailscale 坏了不影响自填隧道——它不靠这套 CLI。
             menu.addItem(.separator())
             menu.addItem(remoteAccessItem(title: "使用自定义隧道地址…", action: #selector(useCustomTunnelAddress(_:))))
         case .off:
-            menu.addItem(remoteAccessItem(title: "启用远程访问…", action: #selector(enableRemoteAccess(_:))))
+            menu.addItem(remoteAccessItem(title: "启用手机访问（Tailscale HTTPS）…", action: #selector(enableRemoteAccess(_:))))
             menu.addItem(remoteAccessItem(title: "使用自定义隧道地址…", action: #selector(useCustomTunnelAddress(_:))))
-        case .on:
+        case let .on(url):
+            // 地址直接摆在菜单里：不用先开对话框才知道手机上要输什么。
+            let addressItem = NSMenuItem(title: url.absoluteString, action: nil, keyEquivalent: "")
+            addressItem.isEnabled = false
+            menu.addItem(addressItem)
+            menu.addItem(.separator())
             menu.addItem(remoteAccessItem(title: "显示地址与二维码…", action: #selector(showRemoteAccessCode(_:))))
-            menu.addItem(remoteAccessItem(title: "复制远程地址", action: #selector(copyRemoteAccessAddress(_:))))
-            menu.addItem(remoteAccessItem(title: "在浏览器中打开远程地址", action: #selector(openRemoteAccessAddress(_:))))
+            menu.addItem(remoteAccessItem(title: "复制地址", action: #selector(copyRemoteAccessAddress(_:))))
+            menu.addItem(remoteAccessItem(title: "在浏览器中打开", action: #selector(openRemoteAccessAddress(_:))))
             // 延迟测量测的是 tailnet 链路，与自填隧道无关，不该出现在那里。
             if remoteAccessController.customAddress == nil {
                 menu.addItem(.separator())
                 menu.addItem(remoteAccessItem(title: "测试访问延迟…", action: #selector(measureRemoteAccessLatency(_:))))
             }
             menu.addItem(.separator())
-            menu.addItem(remoteAccessItem(title: "关闭远程访问", action: #selector(disableRemoteAccess(_:))))
+            menu.addItem(remoteAccessItem(title: "关闭手机访问", action: #selector(disableRemoteAccess(_:))))
         }
     }
 
@@ -58,14 +63,27 @@ extension AppDelegate {
     /// 拼手机上的地址。
     @objc func enableRemoteAccess(_ sender: Any?) {
         let configuration = serviceManager.configuration
+        let switchingAddress = !RemoteAccessPolicy.isLoopbackHostname(configuration.hostname)
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "通过 Tailscale 提供远程访问？"
-        alert.informativeText = """
+        alert.messageText = "通过 Tailscale 提供手机访问？"
+        var notes = """
         本机服务会被挂到 https://<你的机器名> 这一条入口上，只有你自己的 tailnet 能访问，不会暴露到公网。
 
-        这一功能不设访问密码：能进入你 tailnet 的设备就能完全控制 pi-web。如果主机名还没在「允许的主机名」里，保存它需要重启服务，当前会话会中断。
+        这一功能不设访问密码：能进入你 tailnet 的设备就能完全控制 pi-web。
         """
+        if switchingAddress {
+            notes += """
+
+            当前监听地址是“\(configuration.hostname)”。Tailscale 只会把请求转给本机回环地址，所以启用时会把监听地址改成 \(ServiceConfiguration.defaultHostname)，服务会重启、当前会话会中断。
+            """
+        } else {
+            notes += """
+
+            如果机器名还没在「允许的主机名」里，保存它需要重启服务，当前会话会中断。
+            """
+        }
+        alert.informativeText = notes
         alert.addButton(withTitle: "启用")
         alert.addButton(withTitle: "取消")
         presentRemoteAccessAlert(alert) { [weak self] response in
@@ -81,7 +99,7 @@ extension AppDelegate {
                     case let .success(url):
                         self.presentRemoteAccessCode(url)
                     case let .failure(failure):
-                        self.presentRemoteAccessFailure("无法启用远程访问", message: failure.message)
+                        self.presentRemoteAccessFailure("无法启用手机访问", message: failure.message)
                     }
                 }
             )
@@ -108,7 +126,7 @@ extension AppDelegate {
         remoteAccessController.disable { [weak self] succeeded in
             guard let self, !succeeded else { return }
             self.presentRemoteAccessFailure(
-                "远程访问可能没有完全关闭",
+                "手机访问可能没有完全关闭",
                 message: "Tailscale 拒绝或没能执行撤销命令，那条入口可能仍然存在。可以再试一次，或在终端里手动关闭该端口。"
             )
         }
@@ -234,7 +252,7 @@ extension AppDelegate {
                 guard succeeded else {
                     self.presentRemoteAccessFailure(
                         "没能保存自定义地址",
-                        message: "Tailscale 里那条入口没能撤销，或者服务重启没走完。可以再试一次；如果一直这样，先手动关闭 Tailscale 远程访问再保存。"
+                        message: "Tailscale 里那条入口没能撤销，或者服务重启没走完。可以再试一次；如果一直这样，先手动关闭 Tailscale 管理面板里那条入口再保存。"
                     )
                     return
                 }

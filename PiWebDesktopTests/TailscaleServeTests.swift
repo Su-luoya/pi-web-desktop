@@ -85,6 +85,42 @@ final class RemoteAccessControllerTests: XCTestCase {
         XCTAssertEqual(controller.state.url?.absoluteString, "https://mini.example-tailnet/")
     }
 
+    /// 旧版本把代理目标写成「本机 tailnet 地址」：Tailscale 守护进程代理到自己的
+    /// tailnet 地址会一直挂着，那条入口扫码打不开。对账时必须撤销它、作废记录。
+    func testRefreshDropsServeEntryProxyingToOwnTailnetAddress() {
+        runner.snapshot = """
+        {"Web": {"mini.example-tailnet:443": {"Handlers": {"/": {"Proxy": "http://192.168.1.7:30141"}}}}}
+        """
+        let finished = expectation(description: "refresh completed")
+        controller.onChange = { _ in finished.fulfill() }
+        controller.refresh(configuration: .default)
+        wait(for: [finished], timeout: 5)
+        XCTAssertNil(controller.activePort)
+        XCTAssertEqual(controller.state, .off)
+    }
+
+    /// 服务不再监听回环时，回环目标那条 serve 也进不了服务：同样作废。
+    func testRefreshDropsEntryWhenServiceListensElsewhere() {
+        runner.snapshot = """
+        {"Web": {"mini.example-tailnet:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:30141"}}}}}
+        """
+        var configuration = ServiceConfiguration.default
+        configuration.hostname = "192.168.1.7"
+        let finished = expectation(description: "refresh completed")
+        controller.onChange = { _ in finished.fulfill() }
+        controller.refresh(configuration: configuration)
+        wait(for: [finished], timeout: 5)
+        XCTAssertNil(controller.activePort)
+        XCTAssertEqual(controller.state, .off)
+    }
+
+    /// 代理目标只能是回环：Tailscale 守护进程不接受指向自己 tailnet 地址的目标。
+    func testLoopbackTargetIsTheLoopbackAddress() {
+        XCTAssertEqual(TailscaleServe.loopbackTarget(port: 30141)?.absoluteString, "http://127.0.0.1:30141/")
+        XCTAssertNil(TailscaleServe.loopbackTarget(port: 0))
+        XCTAssertNil(TailscaleServe.loopbackTarget(port: 65536))
+    }
+
     // MARK: - 自定义隧道地址
 
     /// 自定义地址只是默认里的一行字符串，关闭时不该去跑任何 CLI，也不该因

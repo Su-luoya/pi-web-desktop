@@ -265,8 +265,10 @@ final class UpdateProgressTests: XCTestCase {
 
         XCTAssertEqual(controller.titleLabelText, "Pi Web 更新到 1.2.3")
         XCTAssertEqual(controller.stepRowCount, 2)
+        XCTAssertEqual(controller.stepTexts.first, "✓|准备|已记录指纹")
         XCTAssertEqual(controller.logText, "开始更新")
         XCTAssertEqual(controller.statusLabelText, "更新失败：npm 安装失败")
+        XCTAssertEqual(controller.progressBarFraction, 0.5)
         XCTAssertTrue(controller.elapsedLabelText.hasPrefix("已用 00:10"))
         XCTAssertTrue(controller.elapsedLabelText.contains("更新失败：npm 安装失败"))
     }
@@ -279,5 +281,41 @@ final class UpdateProgressTests: XCTestCase {
         XCTAssertEqual(controller.logText, "")
         XCTAssertEqual(controller.titleLabelText, "更新进度")
         XCTAssertEqual(controller.statusLabelText, "当前没有进行中的更新。")
+        XCTAssertEqual(controller.progressBarFraction, 0)
+    }
+
+    /// 进度条只按已完成的阶段取值；成功收尾补满，不给成功会话留一截缺口。
+    func testProgressBarTracksCompletedSteps() {
+        let center = UpdateProgressCenter()
+        center.begin(
+            title: "更新",
+            steps: [
+                UpdateProgressStep(title: "一", state: .succeeded),
+                UpdateProgressStep(title: "二", state: .running),
+                UpdateProgressStep(title: "三", state: .pending),
+                UpdateProgressStep(title: "四", state: .pending)
+            ],
+            now: referenceDate
+        )
+        let controller = UpdateProgressWindowController()
+        controller.render(center.session)
+        XCTAssertEqual(controller.progressBarFraction, 0.25)
+
+        center.finish(.succeeded(version: "1.2.3"), now: referenceDate)
+        controller.render(center.session)
+        XCTAssertEqual(controller.progressBarFraction, 1)
+    }
+
+    /// 说明文字保留完整原因（供悬停提示），不被阶段行裁掉。
+    func testStepRowKeepsFullDetailText() {
+        let center = UpdateProgressCenter()
+        center.begin(
+            title: "更新",
+            steps: [UpdateProgressStep(title: "执行安装", detail: "npm 安装失败", state: .failed)],
+            now: referenceDate
+        )
+        let controller = UpdateProgressWindowController()
+        controller.render(center.session)
+        XCTAssertEqual(controller.stepTexts, ["✗|执行安装|npm 安装失败"])
     }
 }

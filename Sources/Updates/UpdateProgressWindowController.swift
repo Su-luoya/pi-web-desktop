@@ -8,35 +8,14 @@ import Cocoa
 ///
 /// 窗口本身只做三件自己的事：把快照画出来、走一个 1 秒的计时器刷新“已用时长”、
 /// 以及把「复制诊断」「关闭」两个按钮转给 `AppDelegate`。
+///
+/// 版式：标题 + 状态 → 进度条 → 阶段列表 → 日志面板 → 底栏。
+/// 阶段列表是普通的行视图（不再用 `NSTableView`）：它的列宽会把说明文字裁掉，
+/// 而且 4 行内容还要套一层滚动条。多出来的竖直空间全部给日志面板，窗口里不留白。
 
 /// Update progress window controller.
 
-final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate,
-    NSTableViewDataSource, NSTableViewDelegate {
-    private enum Column: String, CaseIterable {
-        case symbol
-        case stage
-        case detail
-
-        var title: String {
-            switch self {
-            case .symbol: return ""
-            case .stage: return "阶段"
-            case .detail: return "说明"
-            }
-        }
-
-        var width: CGFloat {
-            switch self {
-            case .symbol: return 26
-            case .stage: return 96
-            case .detail: return 380
-            }
-        }
-
-        var identifier: NSUserInterfaceItemIdentifier { NSUserInterfaceItemIdentifier(rawValue) }
-    }
-
+final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate {
     /// 由 `AppDelegate` 注入：复用现有脱敏诊断导出。窗口不采集任何内容。
     var onCopyDiagnostics: (() -> Void)?
     /// 窗口关闭（自动关闭或用户点关闭）后回调，让 `AppDelegate` 释放引用。
@@ -44,8 +23,9 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
 
     private let titleLabel = NSTextField(labelWithString: "更新进度")
     private let statusLabel = NSTextField(labelWithString: "")
-    private let tableView = NSTableView()
-    private let stepsScrollView = NSScrollView()
+    private let progressBar = NSProgressIndicator()
+    private let stepsStack = NSStackView()
+    private let logCaption = NSTextField(labelWithString: "过程日志（已脱敏）")
     private let logTextView = NSTextView()
     private let logScrollView = NSScrollView()
     private let elapsedLabel = NSTextField(labelWithString: "")
@@ -56,15 +36,20 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
     /// 1 秒计时器：只在有未结束的会话时存在，窗口关闭或会话结束时必须停掉。
     private var elapsedTimer: Timer?
 
+    /// 阶段行的固定度量。标题列定宽，说明文字才能对齐；说明用尾部截断，绝不裁半。
+    private static let stepRowSpacing: CGFloat = 2
+    private static let stepSymbolWidth: CGFloat = 18
+    private static let stepTitleWidth: CGFloat = 88
+
     init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 440),
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "更新进度"
-        window.minSize = NSSize(width: 520, height: 420)
+        window.minSize = NSSize(width: 500, height: 380)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
@@ -86,7 +71,8 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
         guard let session else {
             titleLabel.stringValue = "更新进度"
             statusLabel.stringValue = "当前没有进行中的更新。"
-            tableView.reloadData()
+            renderSteps([])
+            progressBar.doubleValue = 0
             logTextView.string = ""
             elapsedLabel.stringValue = ""
             stopTimer()
@@ -94,7 +80,8 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
         }
         titleLabel.stringValue = session.title
         statusLabel.stringValue = Self.statusText(for: session)
-        tableView.reloadData()
+        renderSteps(session.steps)
+        progressBar.doubleValue = Self.progressFraction(for: session)
         renderLog(session)
         elapsedLabel.stringValue = session.statusLine(at: Date())
         if session.isFinished {
@@ -126,50 +113,59 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
 
     private func buildContent() {
         guard let contentView = window?.contentView else { return }
-        contentView.translatesAutoresizingMaskIntoConstraints = false
 
         titleLabel.font = NSFont.systemFont(ofSize: 16, weight: .semibold)
         titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         statusLabel.font = NSFont.systemFont(ofSize: 12)
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.maximumNumberOfLines = 2
         statusLabel.lineBreakMode = .byWordWrapping
+        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        for kind in Column.allCases {
-            let column = NSTableColumn(identifier: kind.identifier)
-            column.title = kind.title
-            column.width = kind.width
-            column.minWidth = kind == .detail ? 200 : kind.width
-            tableView.addTableColumn(column)
-        }
-        tableView.headerView = nil
-        tableView.rowHeight = 22
-        tableView.allowsMultipleSelection = false
-        tableView.allowsEmptySelection = true
-        tableView.dataSource = self
-        tableView.delegate = self
-        tableView.usesAlternatingRowBackgroundColors = false
-        tableView.style = .inset
-        stepsScrollView.documentView = tableView
-        stepsScrollView.hasVerticalScroller = true
-        stepsScrollView.borderType = .bezelBorder
-        stepsScrollView.translatesAutoresizingMaskIntoConstraints = false
+        progressBar.style = .bar
+        progressBar.isIndeterminate = false
+        progressBar.minValue = 0
+        progressBar.maxValue = 1
+        progressBar.doubleValue = 0
+        progressBar.controlSize = .small
+        progressBar.translatesAutoresizingMaskIntoConstraints = false
+
+        stepsStack.orientation = .vertical
+        stepsStack.alignment = .leading
+        stepsStack.spacing = Self.stepRowSpacing
+        stepsStack.translatesAutoresizingMaskIntoConstraints = false
+        // 只有 4–5 行，不需要滚动：内容多时窗口自己够高，别套第二层滚动条。
+        stepsStack.setContentHuggingPriority(.defaultHigh, for: .vertical)
+
+        logCaption.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        logCaption.textColor = .secondaryLabelColor
+        logCaption.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         logTextView.isEditable = false
         logTextView.isSelectable = true
         logTextView.drawsBackground = false
         logTextView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         logTextView.textColor = .labelColor
-        logTextView.textContainerInset = NSSize(width: 6, height: 6)
+        logTextView.textContainerInset = NSSize(width: 8, height: 8)
         logTextView.autoresizingMask = [.width]
         logTextView.isVerticallyResizable = true
         logTextView.isHorizontallyResizable = false
         logTextView.textContainer?.widthTracksTextView = true
+
         logScrollView.documentView = logTextView
         logScrollView.hasVerticalScroller = true
-        logScrollView.borderType = .bezelBorder
+        logScrollView.borderType = .noBorder
+        logScrollView.drawsBackground = true
+        logScrollView.backgroundColor = .textBackgroundColor
+        logScrollView.wantsLayer = true
+        logScrollView.layer?.cornerRadius = 6
+        logScrollView.layer?.masksToBounds = true
         logScrollView.translatesAutoresizingMaskIntoConstraints = false
+        // 竖直方向让日志面板吸收所有多余空间：窗口拉高时变长的是日志，不是留白。
+        logScrollView.setContentHuggingPriority(.defaultLow, for: .vertical)
+        logScrollView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
 
         elapsedLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         elapsedLabel.textColor = .secondaryLabelColor
@@ -182,9 +178,9 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
         closeButton.bezelStyle = .rounded
         closeButton.keyEquivalent = "\r"
 
-        let logCaption = NSTextField(labelWithString: "过程日志（已脱敏）")
-        logCaption.font = NSFont.systemFont(ofSize: 11, weight: .medium)
-        logCaption.textColor = .secondaryLabelColor
+        let separator = NSBox()
+        separator.boxType = .separator
+        separator.translatesAutoresizingMaskIntoConstraints = false
 
         let footer = NSStackView(views: [elapsedLabel, NSView(), copyButton, closeButton])
         footer.orientation = .horizontal
@@ -192,35 +188,100 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
         footer.alignment = .centerY
         footer.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = NSStackView(views: [titleLabel, statusLabel, stepsScrollView, logCaption, logScrollView, footer])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(stack)
+        for view in [titleLabel, statusLabel, progressBar, stepsStack, logCaption, logScrollView, separator, footer] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            contentView.addSubview(view)
+        }
 
+        // 竖直方向手动排：多余的空白全给日志面板，不能被均匀分到各个间距里
+        // （NSStackView 的 .fill 会把伸缩量摊到多个可伸缩视图上，窗口就散开了）。
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 16),
-            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16),
-            stepsScrollView.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
-            stepsScrollView.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
-            stepsScrollView.heightAnchor.constraint(equalToConstant: 132),
-            logScrollView.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
-            logScrollView.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
-            logScrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 160),
-            footer.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
-            footer.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
-            statusLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            logCaption.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor)
+            titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+            titleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 16),
+
+            statusLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            statusLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+            statusLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+
+            progressBar.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            progressBar.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+            progressBar.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 12),
+
+            stepsStack.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            stepsStack.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+            stepsStack.topAnchor.constraint(equalTo: progressBar.bottomAnchor, constant: 14),
+
+            logCaption.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            logCaption.topAnchor.constraint(equalTo: stepsStack.bottomAnchor, constant: 16),
+
+            logScrollView.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            logScrollView.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+            logScrollView.topAnchor.constraint(equalTo: logCaption.bottomAnchor, constant: 6),
+            logScrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 120),
+
+            separator.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+            separator.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -10),
+            logScrollView.bottomAnchor.constraint(equalTo: separator.topAnchor, constant: -12),
+
+            footer.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            footer.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+            footer.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16)
         ])
+    }
+
+    /// 重建阶段行。行数最多 5，重建比复用视图更简单，也不会残留上一份快照的文案。
+    private func renderSteps(_ steps: [UpdateProgressStep]) {
+        for view in stepsStack.arrangedSubviews {
+            stepsStack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        for step in steps {
+            let row = makeStepRow(step)
+            stepsStack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: stepsStack.widthAnchor).isActive = true
+        }
+    }
+
+    private func makeStepRow(_ step: UpdateProgressStep) -> NSView {
+        let symbol = NSTextField(labelWithString: step.state.symbol)
+        symbol.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
+        symbol.textColor = Self.color(for: step.state)
+        symbol.alignment = .center
+        symbol.translatesAutoresizingMaskIntoConstraints = false
+        symbol.widthAnchor.constraint(equalToConstant: Self.stepSymbolWidth).isActive = true
+
+        let title = NSTextField(labelWithString: step.title)
+        title.font = NSFont.systemFont(ofSize: 12, weight: step.state == .running ? .semibold : .regular)
+        title.textColor = step.state == .pending ? .tertiaryLabelColor : .labelColor
+        title.lineBreakMode = .byTruncatingTail
+        title.translatesAutoresizingMaskIntoConstraints = false
+        title.widthAnchor.constraint(equalToConstant: Self.stepTitleWidth).isActive = true
+
+        let detail = NSTextField(labelWithString: step.detail)
+        detail.font = NSFont.systemFont(ofSize: 11)
+        detail.textColor = step.state == .pending ? .tertiaryLabelColor : .secondaryLabelColor
+        detail.lineBreakMode = .byTruncatingTail
+        // 说明常常是一整句长原因：截断显示，完整文本靠悬停提示。
+        detail.toolTip = step.detail.isEmpty ? nil : step.detail
+        detail.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let row = NSStackView(views: [symbol, title, detail])
+        row.orientation = .horizontal
+        row.spacing = 8
+        row.alignment = .firstBaseline
+        row.distribution = .fill
+        return row
     }
 
     private func renderLog(_ session: UpdateProgressSession) {
         let text = session.logLines.isEmpty ? "等待过程日志…" : session.logLines.joined(separator: "\n")
         guard logTextView.string != text else { return }
         logTextView.string = text
+        // 占位行用次要色：空面板上的一行提示不该看着像一条真日志。
+        logTextView.textColor = session.logLines.isEmpty ? .tertiaryLabelColor : .labelColor
         logTextView.scrollToEndOfDocument(nil)
     }
 
@@ -233,6 +294,14 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
             return "正在\(running)…"
         }
         return "准备中…"
+    }
+
+    /// 进度条的取值：成功的阶段占比；成功的会话收尾时补满（末尾的“跳过”行不是失败）。
+    private static func progressFraction(for session: UpdateProgressSession) -> Double {
+        if session.outcome?.isSuccess == true { return 1 }
+        guard !session.steps.isEmpty else { return 0 }
+        let done = session.steps.filter { $0.state == .succeeded }.count
+        return Double(done) / Double(session.steps.count)
     }
 
     // MARK: - 计时器
@@ -277,54 +346,6 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
         onClose?()
     }
 
-    // MARK: - NSTableViewDataSource / Delegate
-
-    func numberOfRows(in tableView: NSTableView) -> Int {
-        session?.steps.count ?? 0
-    }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard let tableColumn,
-              let column = Column(rawValue: tableColumn.identifier.rawValue),
-              let step = session?.steps[safe: row] else { return nil }
-        let identifier = tableColumn.identifier
-        let cell: NSTableCellView
-        if let reused = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView,
-           let field = reused.textField {
-            cell = reused
-            field.stringValue = ""
-        } else {
-            cell = NSTableCellView()
-            cell.identifier = identifier
-            let field = NSTextField(labelWithString: "")
-            field.translatesAutoresizingMaskIntoConstraints = false
-            field.lineBreakMode = .byTruncatingTail
-            cell.addSubview(field)
-            cell.textField = field
-            NSLayoutConstraint.activate([
-                field.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
-                field.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
-                field.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
-            ])
-        }
-        guard let field = cell.textField else { return cell }
-        switch column {
-        case .symbol:
-            field.stringValue = step.state.symbol
-            field.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
-            field.textColor = Self.color(for: step.state)
-        case .stage:
-            field.stringValue = step.title
-            field.font = NSFont.systemFont(ofSize: 12, weight: step.state == .running ? .semibold : .regular)
-            field.textColor = step.state == .pending ? .tertiaryLabelColor : .labelColor
-        case .detail:
-            field.stringValue = step.detail.isEmpty ? step.state.displayName : step.detail
-            field.font = NSFont.systemFont(ofSize: 11)
-            field.textColor = step.state == .pending ? .tertiaryLabelColor : .secondaryLabelColor
-        }
-        return cell
-    }
-
     private static func color(for state: UpdateProgressStepState) -> NSColor {
         switch state {
         case .succeeded: return .systemGreen
@@ -343,6 +364,13 @@ extension UpdateProgressWindowController {
     var titleLabelText: String { titleLabel.stringValue }
     var statusLabelText: String { statusLabel.stringValue }
     var elapsedLabelText: String { elapsedLabel.stringValue }
-    var stepRowCount: Int { tableView.numberOfRows }
+    var stepRowCount: Int { stepsStack.arrangedSubviews.count }
+    var stepTexts: [String] {
+        stepsStack.arrangedSubviews.compactMap { row in
+            (row as? NSStackView)?.arrangedSubviews.compactMap { ($0 as? NSTextField)?.stringValue }
+                .joined(separator: "|")
+        }
+    }
+    var progressBarFraction: Double { progressBar.doubleValue }
     var logText: String { logTextView.string }
 }

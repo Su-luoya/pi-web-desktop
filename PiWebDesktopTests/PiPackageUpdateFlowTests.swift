@@ -758,6 +758,13 @@ final class PiPackageUpdateFlowTests: XCTestCase {
         }
     }
 
+    /// 两套 argv 形状白名单是同一张表的两个副本（pi-web 包与 pi 包各一条更新路径）。
+    /// 它们按设计各自独立声明，这条断言只负责“别在只改一处时静默漂移”。
+    func testArgumentPoliciesShareTheSameWhitelist() {
+        XCTAssertEqual(PiPackageUpdateArgumentPolicy.forbiddenTokens, PiWebUpdateArgumentPolicy.forbiddenTokens)
+        XCTAssertEqual(PiPackageUpdateArgumentPolicy.allowedCharacters, PiWebUpdateArgumentPolicy.allowedCharacters)
+    }
+
     func testUnsafePathsNamesSourcesAndVersionsAreRejected() {
         let unsafePaths = [
             "pi",

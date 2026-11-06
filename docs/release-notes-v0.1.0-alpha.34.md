@@ -123,7 +123,7 @@ Tailscale 那条 serve 条目需要撤销（上次异常退出留下的残迹、
 | 资产 | 值 |
 | --- | --- |
 | ZIP | `Pi-Web-Desktop-0.1.0-alpha.34+build.34.zip` |
-| SHA-256 | 见发布说明的「校验」段（CI 重新构建，发布后回填本文件） |
+| SHA-256 | `79f4b9f411b19046a9ab0a3f4cac23f180ee807c4cd484fad7331491e3af3532` |
 | 签名 | ad-hoc（`TeamIdentifier=not set`），未公证 |
 | 最低系统 | macOS 26.0 |
 | 架构 | arm64（Apple Silicon） |

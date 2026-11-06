@@ -2283,3 +2283,7 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
   - 手机访问的两条失败路径（撤销失败、启用失败）只有单元测试覆盖：本机没有失败注入手段，没有在真机 tailnet 上实际演练；`refresh` / `disable` 的常规成功路径也没有逐项点验菜单。
   - 更新检查的 `304` 修复没有在真机上等到 GitHub 未认证配额耗尽复现；「只发一次请求」是 `testNotModifiedKeepsFreshnessButMarksCacheOrigin` 里的断言。
   - 更新包缓存的路径收紧只覆盖缓存读写两条路径，应用内安装仍然只替换 `/Applications/Pi-Web-Desktop.app`，行为不变。
+- PR #267 → squash `04b4c35` → lightweight tag `v0.1.0-alpha.34` → release workflow `42234851306`（build + publish 均通过）自动生成草稿（正文无 `{{…}}`、无 `<待填写`）→ 人工确认后发布为 prerelease。发布记录见 Release Issue #268。
+- CI 产物：SHA-256 `79f4b9f411b19046a9ab0a3f4cac23f180ee807c4cd484fad7331491e3af3532`，1776012 字节；发布后 `gh release download` + `shasum -a 256 -c` 复验 `OK`，与 Release 正文的校验值一致。
+- appcast：`release: published` 自动触发 run `42235543927` 成功，`appcast` 分支的 `appcast.json` 已收录本版，`sha256` 与 Release 资产一致。
+- 回退：本版无 schema 或数据迁移；保留 alpha.33 的 ZIP 与 checksum，解压替换应用包即可，`appcast.json` 里删掉本版条目就停止推送这次更新。

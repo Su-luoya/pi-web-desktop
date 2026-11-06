@@ -4,8 +4,10 @@ final class RemoteAccessControllerTests: XCTestCase {
     private final class RecordingRunner: CommandRunning {
         var snapshot: String? = "{}"
         var succeeds = false
+        private(set) var commands: [[String]] = []
 
         func run(_ arguments: [String]) -> String? {
+            commands.append(arguments)
             if arguments == ["/fake/tail-cli", "status", "--json"] {
                 return "{\"BackendState\": \"Running\", \"Self\": {\"DNSName\": \"mini.example-tailnet\"}}"
             }
@@ -88,6 +90,7 @@ final class RemoteAccessControllerTests: XCTestCase {
     /// 旧版本把代理目标写成「本机 tailnet 地址」：Tailscale 守护进程代理到自己的
     /// tailnet 地址会一直挂着，那条入口扫码打不开。对账时必须撤销它、作废记录。
     func testRefreshDropsServeEntryProxyingToOwnTailnetAddress() {
+        runner.succeeds = true
         runner.snapshot = """
         {"Web": {"mini.example-tailnet:443": {"Handlers": {"/": {"Proxy": "http://192.168.1.7:30141"}}}}}
         """
@@ -101,6 +104,7 @@ final class RemoteAccessControllerTests: XCTestCase {
 
     /// 服务不再监听回环时，回环目标那条 serve 也进不了服务：同样作废。
     func testRefreshDropsEntryWhenServiceListensElsewhere() {
+        runner.succeeds = true
         runner.snapshot = """
         {"Web": {"mini.example-tailnet:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:30141"}}}}}
         """
@@ -112,6 +116,30 @@ final class RemoteAccessControllerTests: XCTestCase {
         wait(for: [finished], timeout: 5)
         XCTAssertNil(controller.activePort)
         XCTAssertEqual(controller.state, .off)
+    }
+
+    func testRefreshKeepsPortWhenStaleEntryCannotBeRevoked() {
+        runner.snapshot = """
+        {"Web": {"mini.example-tailnet:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:30141"}}}}}
+        """
+        var configuration = ServiceConfiguration.default
+        configuration.hostname = "192.168.1.7"
+        let finished = expectation(description: "refresh failed")
+        controller.onChange = { _ in finished.fulfill() }
+        controller.refresh(configuration: configuration)
+        wait(for: [finished], timeout: 5)
+        XCTAssertEqual(controller.activePort, 443)
+        XCTAssertEqual(controller.state, .unavailable(RemoteAccessController.Failure.commandFailed.message))
+    }
+
+    func testRefreshForgetsMissingEntryWithoutRevokingThePort() {
+        let finished = expectation(description: "missing entry")
+        controller.onChange = { _ in finished.fulfill() }
+        controller.refresh(configuration: .default)
+        wait(for: [finished], timeout: 5)
+        XCTAssertNil(controller.activePort)
+        XCTAssertEqual(controller.state, .off)
+        XCTAssertFalse(runner.commands.contains { $0.contains("off") })
     }
 
     /// 代理目标只能是回环：Tailscale 守护进程不接受指向自己 tailnet 地址的目标。
@@ -137,6 +165,39 @@ final class RemoteAccessControllerTests: XCTestCase {
         wait(for: [finished], timeout: 5)
         XCTAssertNil(controller.customAddress)
         XCTAssertEqual(controller.state, .off)
+    }
+
+    func testSuccessfulDisableClearsBothAddressRecords() {
+        runner.succeeds = true
+        defaults.set("https://tunnel.example-cloud.test", forKey: RemoteAccessController.DefaultsKey.customURL)
+        let finished = expectation(description: "both records cleared")
+        controller.disable { success in
+            XCTAssertTrue(success)
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 5)
+        XCTAssertNil(controller.activePort)
+        XCTAssertNil(controller.customAddress)
+        controller.refresh(configuration: .default)
+        XCTAssertEqual(controller.state, .off)
+    }
+
+    func testFailedEnablePreservesCustomAddress() {
+        defaults.removeObject(forKey: RemoteAccessController.DefaultsKey.port)
+        let url = URL(string: "https://tunnel.example-cloud.test")!
+        defaults.set(url.absoluteString, forKey: RemoteAccessController.DefaultsKey.customURL)
+        controller.refresh(configuration: .default)
+        let finished = expectation(description: "enable failed")
+        controller.enable(configuration: .default, applyConfiguration: { _, completion in
+            completion()
+        }) { result in
+            XCTAssertEqual(result, .failure(.commandFailed))
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 5)
+        XCTAssertEqual(controller.customAddress, url)
+        XCTAssertEqual(controller.state, .on(url))
+        XCTAssertNil(controller.activePort)
     }
 
     /// 二选一：记住的地址优先，上次切换中途退出留下的 serve 条目顺手撤销。

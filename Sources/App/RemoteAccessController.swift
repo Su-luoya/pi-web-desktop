@@ -70,11 +70,11 @@ final class RemoteAccessController {
 
     /// 启动时对账：记录还在、Tailscale 里那条也还在且指向回环，就恢复成「已开启」。
     ///
-    /// 其余情况一律清掉记录并回到「未开启」：上次异常退出留下的残迹、旧版本把代理
+    /// 过期条目需要撤销：上次异常退出留下的残迹、旧版本把代理
     /// 目标写成 `http://<本机 tailnet 地址>:<端口>` 的情况（Tailscale 守护进程代理到自己的
     /// tailnet 地址会一直挂着，那条入口扫码打不开），以及监听地址被改成非回环之后
-    /// 目标不再可达的情况。这样的条目先尽力撤销（只动记录里的那个端口，不认别人的
-    /// 条目），再忘掉记录，让「启用」重新装一条干净的。
+    /// 目标不再可达的情况。条目已不存在或撤销成功才忘掉记录；撤销失败则保留端口，
+    /// 让菜单能重试关闭，退出时也仍有记录可供收尾。
     func refresh(configuration: ServiceConfiguration) {
         let serve = self.serve
         let recordedPort = activePort
@@ -105,14 +105,15 @@ final class RemoteAccessController {
                 guard let snapshot = serve.snapshot() else {
                     return .unavailable(Failure.commandFailed.message)
                 }
-                if snapshot.proxy(for: port) != nil,
-                   listensOnLoopback,
+                guard snapshot.proxy(for: port) != nil else { return .stale }
+                if listensOnLoopback,
                    !snapshot.isOccupied(port, by: target.absoluteString),
                    let url = TailscaleServe.publicURL(dnsName: dnsName, port: port) {
                     return .on(url)
                 }
-                serve.disable(port: port)
-                return .stale
+                return serve.disable(port: port)
+                    ? .stale
+                    : .unavailable(Failure.commandFailed.message)
             }
         }) { [weak self] outcome in
             guard let self else { return }
@@ -133,7 +134,7 @@ final class RemoteAccessController {
         case on(URL)
         /// Tailscale 不可用：记录留着，菜单给重试入口。
         case unavailable(String)
-        /// 那条入口不指向回环或已经不在：已尽力撤销，记录作废。
+        /// 那条入口已经不在或已成功撤销：记录作废。
         case stale
     }
 
@@ -221,8 +222,6 @@ final class RemoteAccessController {
         completion: @escaping (Result<URL, Failure>) -> Void
     ) {
         let serve = self.serve
-        // 二选一：Tailscale 这条装上后，自定义地址的记录就该让位。
-        defaults.removeObject(forKey: DefaultsKey.customURL)
         CommandProbeDispatch.runOffMain(work: {
             do {
                 try serve.enable(port: plan.port, target: plan.target)
@@ -236,6 +235,7 @@ final class RemoteAccessController {
                 completion(.failure(.commandFailed))
                 return
             }
+            self.forgetCustomAddress()
             self.defaults.set(plan.port, forKey: DefaultsKey.port)
             self.update(.on(url))
             completion(.success(url))
@@ -322,6 +322,7 @@ final class RemoteAccessController {
             guard let self else { return }
             if succeeded {
                 self.forget()
+                self.forgetCustomAddress()
                 self.update(.off)
             }
             completion(succeeded)

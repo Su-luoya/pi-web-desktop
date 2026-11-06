@@ -2257,3 +2257,14 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
     直连 tailnet 域名 200 / 19 ms，走系统代理 `SSL_ERROR_SYSCALL`；**没有**在浏览器里做人工
     点验。删项后的 GUI 菜单也未逐项点验，覆盖它的是菜单构建路径与启动/诊断冒烟。
   - 本文件缺 alpha.31 一节（alpha.31 未在此登记），本次不补历史。
+
+## 本次发布执行记录（v0.1.0-alpha.33）
+
+- 内容：两个修复，没有新功能 —— `f5a0d8c`（Tailscale CLI 调用补上 `TAILSCALE_BE_CLI=1`，菜单「手机访问」不再误报「Tailscale 没有打开」）与 `1af7f6f`（启动不再等更新检查，安装改到下一次启动；同一构建 Ready +2.91s → +1.08s）。版本号提交在 `release/0.1.0-alpha.33` 分支上，经 PR 合并后打 tag。
+- 全量测试 1034 项 0 失败（`./Scripts/test.sh`）；`check-identity.sh` `PASSED (45 checks)`；`check-release-version.sh v0.1.0-alpha.33` `PASSED`；`package-release.sh --self-test` `PASS`；`package-release.sh --tag v0.1.0-alpha.33` `OK`；`smoke.sh` 两种模式 exit 0（`items=6 blockers=3` 来自 `DiagnosticsSmokeFixture` 的确定性样例，不是本机依赖缺失）；`scan-secrets.sh` `PASS`（`suppressed 17 lines`，无 `rejected`）；`sh -n Scripts/*.sh` 与 `git diff --check` 干净。
+- 本地 self-check 产物 SHA-256 `8ebc05934514cabeb7fbd6e3ec23fc5d44b2fedc23594fbcb1afae6c2d023119`，体积 1735707 字节（只用于发版前自检，CI 会重新构建）。
+- 真机环境：Mac16,10 / Apple M4，macOS 27.2（26B123），Node v26.13.0，Pi 1.5.0，`@agegr/pi-web` 0.15.0（Homebrew 全局安装）。
+- 本版特有的判定：
+  - 沿用 alpha.30 / alpha.32 的先例，本版未单独开 Release Issue，记录写在本文件与 `docs/release-notes-v0.1.0-alpha.33.md`。
+  - Tailscale 修复的验证：用生产 `SystemCommandRunner` 直接调用真实的 `Tailscale status --json`，`detect()` 返回 `ready`（备机名与 5 个 peer），并在装到 `/Applications` 的新构建上由用户点开菜单确认恢复；没有做 tailnet 上的手机端访问回归。
+  - 「下次启动安装」路径只有单元测试覆盖：本机 Pi Web 当前没有可用更新，没有端到端跑过真实安装。

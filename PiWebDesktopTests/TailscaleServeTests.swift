@@ -257,7 +257,57 @@ final class TailscaleServeTests: XCTestCase {
 
     private let binary = "/fake/tail-cli"
 
-    private func makeServe(runner: RecordingRunner, executable: Bool = true) -> TailscaleServe {
+    /// 记录每次调用带上的环境变量：macOS 独立版的 GUI/CLI 共用一个可执行文件，
+    /// 缺 `TAILSCALE_BE_CLI` 就会走「拉起 GUI」的路径，输出不是 JSON（见
+    /// `TailscaleServe.cliModeVariable`）。
+    private final class EnvironmentRecordingRunner: CommandRunning {
+        var output: String?
+        private(set) var environments: [[String: String]] = []
+
+        func run(_ arguments: [String]) -> String? { nil }
+
+        func run(_ arguments: [String], environment: [String: String]?) -> String? {
+            environments.append(environment ?? [:])
+            return output
+        }
+
+        func run(
+            _ arguments: [String],
+            environment: [String: String]?,
+            timeout: TimeInterval
+        ) -> CommandRunResult {
+            environments.append(environment ?? [:])
+            return CommandRunResult(output: output)
+        }
+
+        func runAllowingFailure(
+            _ arguments: [String],
+            environment: [String: String]?,
+            timeout: TimeInterval
+        ) -> CommandRunResult {
+            environments.append(environment ?? [:])
+            return CommandRunResult(output: output)
+        }
+    }
+
+    func testEveryCLICallAsksForCLIMode() {
+        let runner = EnvironmentRecordingRunner()
+        runner.output = statusJSON(backendState: "Running", dnsName: "mini.example-tailnet")
+        let serve = makeServe(runner: runner)
+        _ = serve.detect()
+        _ = serve.snapshot()
+        _ = serve.peers()
+        _ = serve.ping(ipv4: "192.0.2.9")
+        _ = serve.netcheck()
+        _ = serve.disable(port: 443)
+        XCTAssertEqual(runner.environments.count, 6)
+        for environment in runner.environments {
+            XCTAssertEqual(environment[TailscaleServe.cliModeVariable], "1")
+            XCTAssertEqual(environment["HOME"], ProcessInfo.processInfo.environment["HOME"], "继承的环境不能丢")
+        }
+    }
+
+    private func makeServe(runner: CommandRunning, executable: Bool = true) -> TailscaleServe {
         TailscaleServe(
             runner: runner,
             candidates: [binary],

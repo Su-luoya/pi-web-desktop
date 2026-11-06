@@ -184,6 +184,21 @@ struct AppConfiguration {
         PiWebUpdateWarningStore.save(warning, to: defaults)
     }
 
+    /// 「下次启动安装」标记：上一次运行发现 Pi Web 有可用更新、但被运行中的服务
+    /// 挡住（见 `PiWebUpdatePlanner` 的 `.serviceRunning`）。只有为真时下一次启动
+    /// 才按原路径等一次检查并安装。
+    func piWebUpdateDeferredPending() -> Bool {
+        defaults.bool(forKey: UpdateSettingKeys.piWebDeferredInstallPending)
+    }
+
+    func setPiWebUpdateDeferredPending(_ pending: Bool) {
+        if pending {
+            defaults.set(true, forKey: UpdateSettingKeys.piWebDeferredInstallPending)
+        } else {
+            defaults.removeObject(forKey: UpdateSettingKeys.piWebDeferredInstallPending)
+        }
+    }
+
     /// 最近一次失败的 Pi CLI 更新的持久警告（GitHub #21）。字段与 #20 的警告
     /// 同构：只含类别、旧/新/目标版本、固定原因文案与时间戳。
     func piCLIUpdateWarning() -> PiCLIUpdateWarning? {

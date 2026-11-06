@@ -118,6 +118,24 @@ final class AppConfigurationTests: XCTestCase {
         XCTAssertEqual(reloaded.workspacePath, "/tmp/PiWebDesktopTests/custom-workspace")
     }
 
+    /// 「下次启动安装」标记只存一位布尔值，清除时把键删干净（不留空壳，否则
+    /// “没有额外键”的断言会失败）。
+    func testPiWebDeferredInstallMarkerRoundTripsAsASingleFlag() {
+        let (defaults, name) = makeEmptyDefaults()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let configuration = makeConfiguration(defaults)
+
+        XCTAssertFalse(configuration.piWebUpdateDeferredPending())
+
+        configuration.setPiWebUpdateDeferredPending(true)
+        XCTAssertTrue(makeConfiguration(defaults).piWebUpdateDeferredPending())
+        XCTAssertEqual(defaults.object(forKey: UpdateSettingKeys.piWebDeferredInstallPending) as? Bool, true)
+
+        configuration.setPiWebUpdateDeferredPending(false)
+        XCTAssertFalse(configuration.piWebUpdateDeferredPending())
+        XCTAssertNil(defaults.object(forKey: UpdateSettingKeys.piWebDeferredInstallPending))
+    }
+
     func testWorkspaceDirectoryFollowsTheConfiguredOverride() {
         let (defaults, name) = makeEmptyDefaults()
         defer { defaults.removePersistentDomain(forName: name) }

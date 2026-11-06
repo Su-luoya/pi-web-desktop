@@ -5,7 +5,11 @@ import Cocoa
 extension AppDelegate {
     // MARK: - 启动前受限自动更新（GitHub #20）
 
-    /// 主窗口路由的启动尾部：先处理待更新，再启动服务。
+    /// 主窗口路由的启动尾部：启动服务（更新检查不再挡在启动路径上）。
+    ///
+    /// 默认**不等**网络：检查在服务起来之后跑完，结果只用于提示，并在发现可用
+    /// 更新时记下「下次启动安装」。只有上一次运行留下那个标记时，这一次启动才按
+    /// 原路径等一次检查并安装 Pi Web（`piWebUpdateDeferredPending`）。
     ///
     /// 任何更新失败路径都不会让应用无法启动：WebView 停在带持久告警的诊断状态
     /// 页、诊断窗口保留、服务不启动；也不会静默继续或声称回滚成功。
@@ -43,20 +47,27 @@ extension AppDelegate {
             return
         }
         let installation = report.components.first { $0.kind == .piWeb }
-        guard !preLaunchUpdateAttemptedInThisRun,
-              PiWebUpdatePlanner.needsTargetVersionBeforeLaunch(
+        let eligible = PiWebUpdatePlanner.needsTargetVersionBeforeLaunch(
             preferences: updateChecker.preferences,
             installation: installation
-        ) else {
-            // 设置关闭或来源不满足：记录一次决策行（为何不走启动前自动更新），
-            // 然后照常启动服务。
+        )
+        guard eligible,
+              !preLaunchUpdateAttemptedInThisRun,
+              appConfiguration.piWebUpdateDeferredPending() else {
+            // 这一次启动不等网络：先启动服务，检查在后台跑完（应用自己的启动检查和
+            // 依赖检测完成后的复查已经覆盖 Pi Web，结果只用于提示与记录「下次启动
+            // 安装」）。设置关闭或来源变了就顺手清掉可能过期的标记，免得之后某次启动
+            // 白等一轮。
+            if !eligible {
+                appConfiguration.setPiWebUpdateDeferredPending(false)
+            }
             logPiWebUpdateDecision(PiWebUpdatePlanner.decide(piWebUpdatePlanningInput(report: report)))
             proceed()
             return
         }
-        // 先等一次覆盖 Pi Web 的检查结果（仍然尊重每一类的开关），再根据
-        // “是否有已验证的可用版本”决定是否安装；检查失败也只会跳过自动更新，
-        // 不影响服务启动。
+        // 上一次运行发现了可用更新：这一次启动按原路径等一次覆盖 Pi Web 的检查结果
+        // 再决定是否安装（唯一会等网络的启动）；检查失败也只会跳过自动更新，不影响
+        // 服务启动。
         preLaunchUpdateInProgress = true
         updateChecker.checkNow(
             triggeredBy: .launch,
@@ -69,6 +80,8 @@ extension AppDelegate {
 
     /// 根据已完成的检查结果执行或跳过启动前自动更新。
     private func attemptPreLaunchPiWebUpdate(report: DependencyReport, proceed: @escaping () -> Void) {
+        // 这次启动就是来兑现标记的：先清掉，失败时由持久告警接替（不会每次启动重试）。
+        appConfiguration.setPiWebUpdateDeferredPending(false)
         let input = piWebUpdatePlanningInput(report: report)
         let decision = PiWebUpdatePlanner.decide(input)
         logPiWebUpdateDecision(decision)

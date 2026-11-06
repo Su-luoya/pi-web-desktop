@@ -793,11 +793,14 @@ extension AppDelegate {
             notifiedVersions[entry.target] = entry.latestVersion
         }
         // 运行期间发现 Pi Web 更新时，如果启动前自动更新已开启，只会安排到下次
-        // 启动安装（本次运行不安装）。
+        // 启动安装（本次运行不安装）。这个安排要落一位：服务在运行时
+        // `PiWebUpdatePlanner` 恒为 `.serviceRunning`，只有下次启动才可能拿到
+        // 「服务未运行」的判定并把这次更新装上。
         var deferred: Set<UpdateCheckCategory> = []
         if updateChecker.preferences.autoUpdatePiWebBeforeLaunch,
            entries.contains(where: { $0.category == .piWeb }) {
             deferred.insert(.piWeb)
+            appConfiguration.setPiWebUpdateDeferredPending(true)
         }
         presentUpdateNotifications(entries, autoInstallDeferredToNextLaunch: deferred)
     }

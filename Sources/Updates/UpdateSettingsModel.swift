@@ -151,6 +151,12 @@ enum UpdateSettingKeys {
     static let piCLIAbandonedAttempt = "updateChecks.pi.abandonedAttempt"
     static let piPackageAbandonedAttempts = "updateChecks.piPackages.abandonedAttempts"
 
+    /// 「下次启动安装」标记（GitHub #20）：运行中的服务挡住了 Pi Web 自动安装时记
+    /// 一位，只用来决定**下一次启动**是否按原路径检查并安装。值只有布尔位，不含
+    /// 版本号：目标版本只能来自本次运行刚取得的网络响应（alpha.3 安全审查 A-1，
+    /// 见 `PiWebUpdatePlanner.decide` 的 `.targetNotFromNetwork`）。
+    static let piWebDeferredInstallPending = "updateChecks.piWeb.deferredInstallPending"
+
     static var allAbandonedAttemptKeys: [String] {
         [piWebAbandonedAttempt, piCLIAbandonedAttempt, piPackageAbandonedAttempts]
     }
@@ -195,6 +201,7 @@ enum UpdateSettingKeys {
     static var allKeys: [String] {
         allPreferencesKeys + allIgnoredVersionKeys + allPiWebUpdateWarningKeys + allPiCLIUpdateWarningKeys
             + allPiPackageUpdateWarningKeys + [updateHistory] + allAbandonedAttemptKeys
+            + [piWebDeferredInstallPending]
     }
 }
 

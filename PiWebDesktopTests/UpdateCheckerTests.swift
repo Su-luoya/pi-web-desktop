@@ -906,8 +906,9 @@ final class UpdateCheckerTests: XCTestCase {
             lastSuccessAt: lastSuccess,
             etag: "\"v1\""
         ))
-        let world = makeWorld(cached: cached, responder: { _ in
-            Self.appcastHTTPResponse(tags: [], statusCode: 304, etag: "\"v1\"")
+        let world = makeWorld(cached: cached, responder: { request in
+            guard request.url.host == AppcastFeed.host else { return .failure(.transport) }
+            return Self.appcastHTTPResponse(tags: [], statusCode: 304, etag: "\"v1\"")
         })
 
         world.checker.checkNow(
@@ -927,6 +928,7 @@ final class UpdateCheckerTests: XCTestCase {
         let entry = world.store.file.entry(for: UpdateCheckTarget(category: .desktopApp).id)
         XCTAssertEqual(entry?.lastSuccessAt, referenceDate)
         XCTAssertEqual(entry?.etag, "\"v1\"")
+        XCTAssertEqual(world.client.requests.count, 1, "304 must not trigger a GitHub API fallback")
     }
 
     func testInstalledVersionUnknownSkipsRequest() {

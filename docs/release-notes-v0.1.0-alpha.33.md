@@ -77,7 +77,7 @@ Tailscale 已在菜单栏正常运行，本机也能连上 tailnet，但应用�
 | 资产 | 值 |
 | --- | --- |
 | ZIP | `Pi-Web-Desktop-0.1.0-alpha.33+build.33.zip` |
-| SHA-256 | 以 Release 正文的校验值为准（由 workflow 从本次构建产物写入） |
+| SHA-256 | `568a7b6a2eefa499e7e842e6c7ae52e0172ddc7da82f3c39122f5ec07d1c2cf3` |
 | 签名 | ad-hoc（`TeamIdentifier=not set`），未公证 |
 | 最低系统 | macOS 26.0 |
 | 架构 | arm64（Apple Silicon） |

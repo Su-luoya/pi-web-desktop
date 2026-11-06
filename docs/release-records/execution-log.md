@@ -2268,3 +2268,6 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
   - 沿用 alpha.30 / alpha.32 的先例，本版未单独开 Release Issue，记录写在本文件与 `docs/release-notes-v0.1.0-alpha.33.md`。
   - Tailscale 修复的验证：用生产 `SystemCommandRunner` 直接调用真实的 `Tailscale status --json`，`detect()` 返回 `ready`（备机名与 5 个 peer），并在装到 `/Applications` 的新构建上由用户点开菜单确认恢复；没有做 tailnet 上的手机端访问回归。
   - 「下次启动安装」路径只有单元测试覆盖：本机 Pi Web 当前没有可用更新，没有端到端跑过真实安装。
+- CI 产物（workflow `release`，run 42154062932）：SHA-256 `568a7b6a2eefa499e7e842e6c7ae52e0172ddc7da82f3c39122f5ec07d1c2cf3`，Release 正文里的校验值与下载回来的 ZIP 一致（`shasum -a 256 -c` → OK）。PR #264 → squash `4a01136` → tag `v0.1.0-alpha.33` → 草稿自动生成（正文无 `{{…}}`、无 `<待填写`）→ 人工确认后发布为 prerelease。
+- appcast 事故与修复：发布后 `appcast` workflow 三次（release 事件、`workflow_dispatch`、`gh run rerun`）全部在 1 秒内 `cancelled`，job 的 `runner_id=0`、`runner_name` 为空、`steps` 为空——从没分配到 runner。原因是 `appcast.yml` 还写着 `runs-on: macos-14`，alpha.18 只把 `build.yml` 与 `release.yml` 迁到了 `macos-26`。PR #265（squash `36e7cd7`）改一行后补跑 `workflow_dispatch -f tag=v0.1.0-alpha.33` 成功，`appcast` 分支的 `appcast.json` 已写入本版与同一个 SHA-256。
+- 回退：本版无 schema 或数据迁移；保留 alpha.32 的 ZIP 与 checksum，解压替换应用包即可，`appcast.json` 里删掉本版条目就停止推送这次更新。

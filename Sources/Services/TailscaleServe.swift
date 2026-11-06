@@ -262,9 +262,27 @@ struct TailscaleServe {
     /// 默认端口候选：443 是唯一不用在手机上带端口号的地址，其余用来避开占用。
     static let defaultPorts: [Int] = [443, 8444, 9443]
 
+    /// 让 CLI 以命令行方式运行的开关。
+    ///
+    /// macOS 的独立安装版把 GUI 与 CLI 放在同一个可执行文件里（
+    /// `Contents/MacOS/Tailscale`）。它按「标准输出是不是终端」选路径：终端里当 CLI 用，
+    /// 否则（应用内的管道）拉起 GUI；`TAILSCALE_BE_CLI=1` 则无条件当 CLI 用。应用没有
+    /// 终端也没有这个变量，于是 `status --json` 走 GUI 路径：标准输出只有
+    /// `The Tailscale GUI failed to start: … (Tailscale.CLIError error 3.)`，退出码仍是 0，
+    /// JSON 解析失败，界面把正在运行的 Tailscale 显示成「没有运行」。所以每次调用都
+    /// 显式补上这个变量（其余变量沿用继承，CLI 需要 HOME 等）。
+    static let cliModeVariable = "TAILSCALE_BE_CLI"
+
     let runner: CommandRunning
     let candidates: [String]
     private let isExecutable: (String) -> Bool
+
+    /// 子进程环境：继承应用自己的，再打开 CLI 模式（见 `cliModeVariable`）。
+    private func environment() -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        environment[Self.cliModeVariable] = "1"
+        return environment
+    }
 
     init(
         runner: CommandRunning,
@@ -286,7 +304,8 @@ struct TailscaleServe {
     /// 读后端状态：没装与「装了但没登录」是两种不同的界面文案。
     func detect() -> TailscaleAvailability {
         guard let binary = binaryPath else { return .notInstalled }
-        guard let output = runner.run([binary, "status", "--json"]), !output.isEmpty else {
+        guard let output = runner.run([binary, "status", "--json"], environment: environment()),
+              !output.isEmpty else {
             return .notRunning(backendState: nil)
         }
         return Self.availability(fromStatusJSON: output)
@@ -295,7 +314,9 @@ struct TailscaleServe {
     /// nil 表示配置不可读，不能据此认定端口空闲。
     func snapshot() -> TailscaleServeSnapshot? {
         guard let binary = binaryPath,
-              let output = runner.run([binary, "serve", "status", "--json"]) else { return nil }
+              let output = runner.run([binary, "serve", "status", "--json"], environment: environment()) else {
+            return nil
+        }
         return Self.snapshot(fromServeStatusJSON: output)
     }
 
@@ -313,7 +334,7 @@ struct TailscaleServe {
             throw TailscaleServeError.noFreePort
         }
         let arguments = [binary, "serve", "--bg", "--https=\(port)", target.absoluteString]
-        guard runner.run(arguments) != nil else {
+        guard runner.run(arguments, environment: environment()) != nil else {
             throw TailscaleServeError.commandFailed(arguments: Array(arguments.dropFirst()))
         }
     }
@@ -325,7 +346,7 @@ struct TailscaleServe {
     @discardableResult
     func disable(port: Int) -> Bool {
         guard let binary = binaryPath else { return false }
-        return runner.run([binary, "serve", "--https=\(port)", "off"]) != nil
+        return runner.run([binary, "serve", "--https=\(port)", "off"], environment: environment()) != nil
     }
 
     // MARK: - 延迟测量
@@ -333,7 +354,7 @@ struct TailscaleServe {
     /// `status --json` 里的 peer 列表。nil 表示命令失败或输出不可解析。
     func peers() -> [TailscalePeer]? {
         guard let binary = binaryPath,
-              let output = runner.run([binary, "status", "--json"]) else { return nil }
+              let output = runner.run([binary, "status", "--json"], environment: environment()) else { return nil }
         return Self.peers(fromStatusJSON: output)
     }
 
@@ -346,6 +367,7 @@ struct TailscaleServe {
         guard let binary = binaryPath else { return nil }
         let result = runner.runAllowingFailure(
             [binary, "ping", "--c", "\(count)", "--until-direct=false", "--timeout=2s", ipv4],
+            environment: environment(),
             timeout: 20
         )
         guard let output = result.output else { return nil }
@@ -355,7 +377,9 @@ struct TailscaleServe {
     /// 本机网络条件与各 DERP 区域的延迟（实测约 3 秒：它在等 UDP 探测回来）。
     func netcheck() -> TailscaleNetcheckReport? {
         guard let binary = binaryPath else { return nil }
-        guard let output = runner.run([binary, "netcheck"], timeout: 20).output else { return nil }
+        guard let output = runner.run([binary, "netcheck"], environment: environment(), timeout: 20).output else {
+            return nil
+        }
         return Self.netcheckReport(fromOutput: output)
     }
 

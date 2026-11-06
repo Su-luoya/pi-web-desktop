@@ -72,6 +72,14 @@ final class SystemCommandRunner: CommandRunning {
         execute(arguments, environment: environment, timeout: timeout, requireZeroExit: false)
     }
 
+    func runAllowingFailure(
+        _ arguments: [String],
+        environment explicitEnvironment: [String: String]?,
+        timeout: TimeInterval
+    ) -> CommandRunResult {
+        execute(arguments, environment: explicitEnvironment, timeout: timeout, requireZeroExit: false)
+    }
+
     private func execute(
         _ arguments: [String],
         environment explicitEnvironment: [String: String]?,

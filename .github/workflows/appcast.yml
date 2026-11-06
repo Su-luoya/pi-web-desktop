@@ -31,7 +31,7 @@ concurrency:
 jobs:
   update:
     name: Add the published release to the update feed
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

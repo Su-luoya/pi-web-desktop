@@ -630,7 +630,7 @@ final class UpdateChecker {
         guard item.target.category == .desktopApp,
               endpoint.kind == .appcast else { return nil }
         switch response {
-        case .success(let http) where (200..<300).contains(http.statusCode):
+        case .success(let http) where (200..<300).contains(http.statusCode) || http.statusCode == 304:
             return nil
         case .failure(.offline), .failure(.cancelled):
             return nil

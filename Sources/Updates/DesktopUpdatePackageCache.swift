@@ -54,9 +54,10 @@ final class DesktopUpdatePackageCache {
     func package(matching version: String, releaseTag: String) -> DesktopUpdatePackage? {
         guard let metadata = storedMetadata(),
               metadata.version == version,
-              metadata.releaseTag == releaseTag else { return nil }
-        let archiveURL = directory.appendingPathComponent(metadata.archiveName)
-        guard fileManager.fileExists(atPath: archiveURL.path) else { return nil }
+              metadata.releaseTag == releaseTag,
+              let archiveURL = archiveURL(named: metadata.archiveName, version: version),
+              let attributes = try? fileManager.attributesOfItem(atPath: archiveURL.path),
+              attributes[.type] as? FileAttributeType == .typeRegular else { return nil }
         return DesktopUpdatePackage(
             version: metadata.version,
             releaseTag: metadata.releaseTag,
@@ -72,12 +73,12 @@ final class DesktopUpdatePackageCache {
     func store(archiveAt url: URL, asset: DesktopAppReleaseAsset) throws -> DesktopUpdatePackage {
         guard let releaseTag = asset.releaseTag,
               let archiveName = asset.assetName,
+              let destination = archiveURL(named: archiveName, version: asset.version),
               let sha256 = DesktopAppReleaseAssetSelector.normalizedChecksum(asset.sha256) else {
             throw CocoaError(.fileWriteInvalidFileName)
         }
         let version = asset.version
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        let destination = directory.appendingPathComponent(archiveName)
         // 先清掉上一个版本：缓存只留一个，避免每次发版都在用户盘上留 1.6MB。
         if fileManager.fileExists(atPath: directory.appendingPathComponent(metadataName).path) {
             try? fileManager.removeItem(at: directory.appendingPathComponent(metadataName))
@@ -114,6 +115,13 @@ final class DesktopUpdatePackageCache {
 
     func removeAll() {
         try? fileManager.removeItem(at: directory)
+    }
+
+    /// 缓存元数据不是可信路径：读写都只允许目录内的发布包文件名。
+    private func archiveURL(named name: String, version: String) -> URL? {
+        guard !name.contains("/"),
+              DesktopAppReleaseAssetSelector.isArchiveName(name, version: version) else { return nil }
+        return directory.appendingPathComponent(name)
     }
 
     private func storedMetadata() -> Metadata? {

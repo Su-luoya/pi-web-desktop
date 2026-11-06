@@ -98,6 +98,47 @@ final class DesktopUpdatePackageCacheTests: XCTestCase {
         )
     }
 
+    func testRejectsMetadataPointingOutsideCache() throws {
+        let cache = cache()
+        let stored = try cache.store(archiveAt: try downloadedFile(), asset: asset())
+        let outside = root.appendingPathComponent(stored.archiveName)
+        try fileManager.moveItem(at: stored.archiveURL, to: outside)
+        let metadata = DesktopUpdatePackageCache.Metadata(
+            version: stored.version, releaseTag: stored.releaseTag,
+            archiveName: "../" + stored.archiveName, sha256: stored.sha256,
+            downloadedAt: stored.downloadedAt
+        )
+        try JSONEncoder().encode(metadata).write(to: root.appendingPathComponent("cache/package.json"))
+
+        XCTAssertNil(cache.package(matching: stored.version, releaseTag: stored.releaseTag))
+        XCTAssertTrue(fileManager.fileExists(atPath: outside.path))
+    }
+
+    func testRejectsArchiveSymlinkAndDirectory() throws {
+        let cache = cache()
+        let stored = try cache.store(archiveAt: try downloadedFile(), asset: asset())
+        let outside = root.appendingPathComponent(stored.archiveName)
+        try fileManager.moveItem(at: stored.archiveURL, to: outside)
+        try fileManager.createSymbolicLink(at: stored.archiveURL, withDestinationURL: outside)
+        XCTAssertNil(cache.package(matching: stored.version, releaseTag: stored.releaseTag))
+
+        try fileManager.removeItem(at: stored.archiveURL)
+        try fileManager.createDirectory(at: stored.archiveURL, withIntermediateDirectories: false)
+        XCTAssertNil(cache.package(matching: stored.version, releaseTag: stored.releaseTag))
+    }
+
+    func testRejectsUnsafeArchiveNameBeforeChangingFiles() throws {
+        let cache = cache()
+        let stored = try cache.store(archiveAt: try downloadedFile(contents: "old"), asset: asset())
+        let outside = root.appendingPathComponent(stored.archiveName)
+        try Data("keep".utf8).write(to: outside)
+        let download = try downloadedFile()
+        XCTAssertThrowsError(try cache.store(archiveAt: download, asset: asset(name: "../" + stored.archiveName)))
+        XCTAssertEqual(try String(contentsOf: outside, encoding: .utf8), "keep")
+        XCTAssertTrue(fileManager.fileExists(atPath: download.path))
+        XCTAssertNotNil(cache.package(matching: stored.version, releaseTag: stored.releaseTag))
+    }
+
     /// 缓存目录是用户可写的：写进去之后再被改掉，安装时必须重新下载而不是装坏包。
     func testCachedArchiveIsRejectedWhenBytesNoLongerMatch() throws {
         let cache = cache()

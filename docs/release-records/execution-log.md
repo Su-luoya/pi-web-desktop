@@ -2271,3 +2271,15 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
 - CI 产物（workflow `release`，run 42154062932）：SHA-256 `568a7b6a2eefa499e7e842e6c7ae52e0172ddc7da82f3c39122f5ec07d1c2cf3`，Release 正文里的校验值与下载回来的 ZIP 一致（`shasum -a 256 -c` → OK）。PR #264 → squash `4a01136` → tag `v0.1.0-alpha.33` → 草稿自动生成（正文无 `{{…}}`、无 `<待填写`）→ 人工确认后发布为 prerelease。
 - appcast 事故与修复：发布后 `appcast` workflow 三次（release 事件、`workflow_dispatch`、`gh run rerun`）全部在 1 秒内 `cancelled`，job 的 `runner_id=0`、`runner_name` 为空、`steps` 为空——从没分配到 runner。原因是 `appcast.yml` 还写着 `runs-on: macos-14`，alpha.18 只把 `build.yml` 与 `release.yml` 迁到了 `macos-26`。PR #265（squash `36e7cd7`）改一行后补跑 `workflow_dispatch -f tag=v0.1.0-alpha.33` 成功，`appcast` 分支的 `appcast.json` 已写入本版与同一个 SHA-256。
 - 回退：本版无 schema 或数据迁移；保留 alpha.32 的 ZIP 与 checksum，解压替换应用包即可，`appcast.json` 里删掉本版条目就停止推送这次更新。
+
+## 本次发布执行记录（v0.1.0-alpha.34）
+
+- 内容：四个修复，没有新功能 —— `78a9147`（appcast 条件请求命中 `304` 时不再回落到 GitHub API，避免配额耗尽的 `403` 把「没有更新」变成「未知」）、`b382fb1`（更新包缓存读写共用一条文件名校验，读只认目录内普通文件，拒绝 `../`、符号链接与目录）、`a4bdcab`（手机访问：撤销失败保留端口记录；启用成功后才清自定义地址，关闭成功时两类记录一起清）。版本号提交在 `release/0.1.0-alpha.34` 分支上，经 PR 合并后打 tag。
+- 全量测试 1041 项 0 失败（`./Scripts/test.sh`，77.5s）；`check-identity.sh` `PASSED (45 checks)`；`check-release-version.sh v0.1.0-alpha.34` `PASSED`；`package-release.sh --self-test` `PASS`；`package-release.sh --tag v0.1.0-alpha.34` `OK`；`smoke.sh` 两种模式 exit 0（`items=6 blockers=3` 来自 `DiagnosticsSmokeFixture` 的确定性样例，不是本机依赖缺失）；`scan-secrets.sh` 与 `--self-test` 均 `PASS`（`suppressed 17 lines`，无 `rejected`）；`sh -n Scripts/*.sh` 与 `git diff --check` 干净。
+- 本地 self-check 产物 SHA-256 `7dc75bceb2b7c4ba0c95f504e28aafd393e37879c134437e3fa006fec550b89e`，体积 1736443 字节（只用于发版前自检，CI 会重新构建）。
+- 真机环境：Mac16,10 / Apple M4，macOS 27.2（26B123），Node v26.13.0，Pi 1.5.0，`@agegr/pi-web` 0.15.0（`/opt/homebrew/bin/pi-web` → `/opt/homebrew/lib/node_modules/@agegr/pi-web`，Homebrew 前缀下的全局安装）。
+- 本版特有的判定：
+  - 四个修复都来自一次全仓库 code review，各带针对性的回归用例（新增 7 项，alpha.33 是 1034、本版 1041，另强化 1 项既有用例）。修复提交本身先跑过一次 1041 项全量测试，本条目记录的第二次运行在版本号提交之后。
+  - 手机访问的两条失败路径（撤销失败、启用失败）只有单元测试覆盖：本机没有失败注入手段，没有在真机 tailnet 上实际演练；`refresh` / `disable` 的常规成功路径也没有逐项点验菜单。
+  - 更新检查的 `304` 修复没有在真机上等到 GitHub 未认证配额耗尽复现；「只发一次请求」是 `testNotModifiedKeepsFreshnessButMarksCacheOrigin` 里的断言。
+  - 更新包缓存的路径收紧只覆盖缓存读写两条路径，应用内安装仍然只替换 `/Applications/Pi-Web-Desktop.app`，行为不变。

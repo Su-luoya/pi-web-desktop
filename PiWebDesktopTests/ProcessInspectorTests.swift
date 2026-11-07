@@ -99,18 +99,13 @@ final class ProcessInspectorTests: XCTestCase {
         let inspector = makeInspector(runner: runner)
 
         XCTAssertEqual(inspector.listenerPID(port: 30141), 4321)
-        XCTAssertEqual(inspector.listenerPIDDescription(port: 30141), "4321")
         XCTAssertEqual(
             runner.invocations.last,
             ["/usr/sbin/lsof", "-nP", "-t", "-iTCP:30141", "-sTCP:LISTEN"]
         )
 
-        XCTAssertEqual(inspector.listenerProcessDescription(port: 30141), "node /opt/homebrew/bin/pi-web")
-
         runner.handler = { _ in "" }
         XCTAssertNil(inspector.listenerPID(port: 30141))
-        XCTAssertEqual(inspector.listenerPIDDescription(port: 30141), "无")
-        XCTAssertEqual(inspector.listenerProcessDescription(port: 30141), "无")
     }
 
     func testProcessDescriptionReadsTheCommandLine() {

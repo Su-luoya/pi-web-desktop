@@ -411,14 +411,6 @@ enum UpdateAbandonedAttemptGate {
     ) -> UpdateAbandonedAttempt? {
         attempts.first { $0.component == component }
     }
-
-    /// 是否允许该组件自动执行（手动入口不受这里约束）。
-    static func allowsAutomaticExecution(
-        for component: UpdateTransactionComponent,
-        in attempts: [UpdateAbandonedAttempt]
-    ) -> Bool {
-        blockingAttempt(for: component, in: attempts) == nil
-    }
 }
 
 // MARK: - 展示

@@ -116,19 +116,6 @@ enum PiCLIUpdatePlanner {
             return .deferred(plan: plan, reason: .processStateUnknown(reason))
         }
     }
-
-    /// 重新检测的版本是否确认更新成功。
-    ///
-    /// 有目标版本时要求“达到或超过目标版本”；没有目标版本（手动路径）时只要
-    /// 版本发生变化就算成功；版本不可解析一律算失败。
-    static func updateVerified(detected: String?, old: String, target: String?) -> Bool {
-        UpdateVerifier.versionReached(detected: detected, old: old, target: target)
-    }
-
-    /// 兼容旧调用名：重新检测的版本是否达到目标版本。
-    static func versionReached(detected: String?, target: String) -> Bool {
-        updateVerified(detected: detected, old: target, target: target)
-    }
 }
 
 /// 子进程环境变量白名单：与 #20 的 npm 路径使用同一组允许键与兜底 PATH。

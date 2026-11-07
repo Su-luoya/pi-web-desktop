@@ -450,12 +450,4 @@ enum PiPackageUpdatePlanner {
     static func cancellationRecords(for plans: [PiPackageUpdatePlan]) -> [PiPackageUpdateRefusalRecord] {
         plans.map { PiPackageUpdateRefusalRecord(packageName: $0.packageName, reason: .userCancelled) }
     }
-
-    /// 重新检测的版本是否确认更新成功。
-    ///
-    /// 有目标版本时要求“达到或超过目标版本”；没有目标版本时只要版本发生变化
-    /// 就算成功；版本不可解析一律算失败。
-    static func updateVerified(detected: String?, old: String, target: String?) -> Bool {
-        UpdateVerifier.versionReached(detected: detected, old: old, target: target)
-    }
 }

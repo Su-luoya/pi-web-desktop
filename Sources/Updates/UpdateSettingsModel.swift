@@ -214,9 +214,6 @@ enum UpdateSettingKeys {
 /// 全局安装生效）。该结构只包含策略与一个布尔值，
 /// 不包含版本、路径、来源或任何凭据。
 struct UpdateCheckPreferences: Equatable {
-    /// 设置位已生效（GitHub #20）：打开它只对“来源为已验证的 npm 全局安装”的
-    /// Pi Web 启用启动前受限自动安装；其它来源仍只显示命令，绝不自动安装。
-    static let autoUpdateBeforeLaunchIsEffective = true
     static let defaultAutoUpdatePiWebBeforeLaunch = false
     static let defaultAutoUpdatePiBeforeLaunch = false
 
@@ -224,7 +221,7 @@ struct UpdateCheckPreferences: Equatable {
     /// 不合法的组合在写入时被拒绝（`setPolicy`）。
     private(set) var policies: [UpdateCheckCategory: UpdateCheckPolicy]
 
-    /// alpha.3 预留：启动前自动更新（Pi Web 范围）。alpha.2 只保存值。
+    /// 启动前自动更新 Pi Web；仅对已验证的 npm 全局安装生效。
     var autoUpdatePiWebBeforeLaunch: Bool
 
     /// 启动前自动更新 Pi CLI（GitHub #18 预留、GitHub #21 生效）。

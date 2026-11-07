@@ -138,18 +138,6 @@ enum DependencyReportPresenter {
         }
     }
 
-    /// 命令探测失败原因块（GitHub #85 / #89）；每行都只来自
-    /// `DependencyFinding.detail`，只含静态文案与工具名，不含路径、凭据或 URL。
-    /// 没有原因时返回空串。
-    static func diagnosisText(for report: DependencyReport) -> String {
-        let lines = report.findings.compactMap { finding -> String? in
-            guard let detail = finding.detail, !detail.isEmpty else { return nil }
-            return "· \(title(for: finding.kind))：\(detail)"
-        }
-        guard !lines.isEmpty else { return "" }
-        return (["命令探测的原因（只读探测，不会安装任何东西）："] + lines).joined(separator: "\n")
-    }
-
     static func summaryText(for report: DependencyReport) -> String {
         var lines = [report.canStartService ? "结论：可以启动 Pi Web 服务。" : "结论：缺少硬性前置，服务启动已暂停。"]
         for finding in report.findings {

@@ -16,7 +16,7 @@ extension AppDelegate {
             // 任何服务启动/停止/重启路径。地址与端口用生效值：回落发生后子进程
             // 实际听的是回环地址/空闲端口，窗口不能再去连配置值。
             for controller in self.windowRegistry.controllers {
-                controller.updateService(url: self.serviceManager.effectiveServiceURL, port: self.serviceManager.effectiveListeningPort)
+                controller.updateService(url: self.serviceManager.effectiveServiceURL)
                 controller.loadServicePage()
             }
         }

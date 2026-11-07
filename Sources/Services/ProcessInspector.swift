@@ -196,15 +196,4 @@ struct ProcessInspector {
     func listenerPID(port: Int) -> pid_t? {
         Self.parseListenerPID(runner.run([Self.listenerCommand, "-nP", "-t", "-iTCP:\(port)", "-sTCP:LISTEN"]))
     }
-
-    /// Diagnostics form of `listenerPID(port:)`: "无" when no listener exists.
-    func listenerPIDDescription(port: Int) -> String {
-        listenerPID(port: port).map(String.init) ?? "无"
-    }
-
-    /// `ps` description of the current listener, or "无" when no listener exists.
-    func listenerProcessDescription(port: Int) -> String {
-        guard let pid = listenerPID(port: port) else { return "无" }
-        return processDescription(of: pid)
-    }
 }

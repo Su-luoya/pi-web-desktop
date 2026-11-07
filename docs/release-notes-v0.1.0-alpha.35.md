@@ -100,7 +100,7 @@
 | 资产 | 值 |
 | --- | --- |
 | ZIP | `Pi-Web-Desktop-0.1.0-alpha.35+build.35.zip` |
-| SHA-256 | 见发布说明的「校验」段（CI 重新构建，发布后回填本文件） |
+| SHA-256 | `2ca4501c4d398e53f5a026bf8e87509f2ef6fa954de790b61db657b1994d7bc1` |
 | 签名 | ad-hoc（`TeamIdentifier=not set`），未公证 |
 | 最低系统 | macOS 26.0 |
 | 架构 | arm64（Apple Silicon） |

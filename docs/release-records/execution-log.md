@@ -2287,3 +2287,19 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
 - CI 产物：SHA-256 `79f4b9f411b19046a9ab0a3f4cac23f180ee807c4cd484fad7331491e3af3532`，1776012 字节；发布后 `gh release download` + `shasum -a 256 -c` 复验 `OK`，与 Release 正文的校验值一致。
 - appcast：`release: published` 自动触发 run `42235543927` 成功，`appcast` 分支的 `appcast.json` 已收录本版，`sha256` 与 Release 资产一致。
 - 回退：本版无 schema 或数据迁移；保留 alpha.33 的 ZIP 与 checksum，解压替换应用包即可，`appcast.json` 里删掉本版条目就停止推送这次更新。
+
+## 本次发布执行记录（v0.1.0-alpha.35）
+
+- 内容：一次内部收敛 + 一轮原生 UI 对齐，没有功能扩张 —— PR #270 把 `PiCLIUpdatePlanner` / `PiPackageUpdatePlanner` / `PiWebUpdateCoordinator` 里的 `updateVerified`、`versionReached` 转发层删掉（判定只剩 `UpdateVerifier.versionReached`），把 `allowsAutomaticExecution` 改写为调用方 `blockingAttempt(...) == nil`，并删除不再被调用的 `diagnosisText`、`listenerPIDDescription`、`listenerProcessDescription`、`LoginShellResolver.shellPath`、`UpdateAutomationBoundary`、`autoUpdateBeforeLaunchIsEffective`；同一 PR 补齐「文件」菜单（新建窗口 ⌘N、关闭窗口 ⌘W），重排依赖与环境诊断窗口与更新检查/更新进度窗口的布局。版本号与发布说明在 PR #271。
+- 全量测试 1040 项 0 失败（`./Scripts/test.sh`，77.0s；比 alpha.34 的 1041 少 3 项删除用例、多 2 项新增用例）；`check-identity.sh` `PASSED (45 checks)`；`check-release-version.sh v0.1.0-alpha.35` `PASSED`；`package-release.sh --self-test` `PASS`；`package-release.sh --tag v0.1.0-alpha.35` `OK`；`smoke.sh` 两种模式 exit 0（`items=6 blockers=3` 来自 `DiagnosticsSmokeFixture` 的确定性样例，不是本机依赖缺失）；`scan-secrets.sh` 与 `--self-test` 均 `PASS`（`suppressed 17 lines`，无 `rejected`）；`sh -n Scripts/*.sh` 与 `git diff --check` 干净。
+- 本地 self-check 产物 SHA-256 `9e46d6b8429aa8c682f4cae17eb21afe47b99b4a6d700e6e3439fe356fc31e55`，体积 1739994 字节（只用于发版前自检，CI 会重新构建）。
+- 真机环境：Mac16,10 / Apple M4，macOS 27.2（26B123），Node v26.13.0，Pi 1.5.0，`@agegr/pi-web` 0.15.0（`/opt/homebrew/bin/pi-web` → `/opt/homebrew/lib/node_modules/@agegr/pi-web`，Homebrew 前缀下的全局安装）。
+- 本版特有的判定：
+  - UI 改动只有菜单契约有自动化测试（`AppMenuHygieneTests.testFileMenuOwnsNewAndCloseWindowShortcuts`：⌘N/⌘W 归属「文件」菜单、⌘N 全树只登记一次、「窗口」菜单不再有「新建窗口」）。诊断窗口、更新检查偏好、更新进度窗口的布局没有自动化测试：`DiagnosticsWindowController` 需要真实 `NSApplication`，不在测试 target 内。
+  - 新增的 VoiceOver 标签没有用屏幕阅读器逐项朗读验证。
+  - 内部收敛的等价性由既有更新流程测试间接覆盖，没有做 alpha.34 与 alpha.35 的差分对比；删除的 3 个用例分别对应被删的转发层与常量。
+  - 本版未单独开 Release Issue，记录写在本文件与 `docs/release-notes-v0.1.0-alpha.35.md`（沿用 alpha.30 / alpha.32 / alpha.33 的先例）。
+- PR #270 → squash `cfdef3a`（代码）、PR #271 → squash `ef29a24`（版本号 + 发布说明）→ lightweight tag `v0.1.0-alpha.35` 指向 `ef29a24` → release workflow `42338934913`（build + publish 两个 job 均通过）自动生成草稿（正文无 `{{…}}`、无 `<待填写`）→ 人工确认后发布为 prerelease。两个 PR 的 `build` 检查（`42337855811`、`42338403441`）与 main 上的 `build`（`42338295799`）均为 pass。
+- CI 产物：SHA-256 `2ca4501c4d398e53f5a026bf8e87509f2ef6fa954de790b61db657b1994d7bc1`，1778937 字节；发布后 `gh release download` + `shasum -a 256 -c` 复验 `OK`，与 Release 正文的校验值一致。
+- appcast：`release: published` 自动触发 run `42341155203` 成功，`appcast` 分支的 `appcast.json` 已收录本版（`schema: 1`、`releases[0].tag = v0.1.0-alpha.35`），`zip.sha256` 与 Release 资产一致。
+- 回退：本版无 schema 或数据迁移；保留 alpha.34 的 ZIP 与 checksum，解压替换应用包即可，`appcast.json` 里删掉本版条目就停止推送这次更新。

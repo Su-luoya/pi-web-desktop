@@ -44,11 +44,12 @@ extension AppDelegate {
         let appMenu = NSMenu(title: "Pi Web Desktop")
         appMenu.addItem(withTitle: "关于 Pi Web Desktop", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "设置…", action: #selector(showPreferences(_:)), keyEquivalent: ",")
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "隐藏 Pi Web Desktop", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthers = appMenu.addItem(withTitle: "隐藏其他应用", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
         hideOthers.keyEquivalentModifierMask = [.command, .option]
         appMenu.addItem(withTitle: "显示全部", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
-        appMenu.addItem(withTitle: "设置…", action: #selector(showPreferences(_:)), keyEquivalent: ",")
         // 应用菜单只留应用级动作：服务控件、浏览器与地址复制都归“服务”菜单，
         // 在应用菜单里再放一遍只会让 ⌘ 菜单变长而不增加能力。
         appMenu.addItem(.separator())
@@ -59,6 +60,13 @@ extension AppDelegate {
         let quitItem = appMenu.addItem(withTitle: "退出 Pi Web Desktop", action: #selector(quitWithConfiguredBehavior(_:)), keyEquivalent: "q")
         quitItem.keyEquivalentModifierMask = [.command]
         appMenuItem.submenu = appMenu
+
+        let fileMenuItem = NSMenuItem()
+        mainMenu.addItem(fileMenuItem)
+        let fileMenu = NSMenu(title: "文件")
+        fileMenu.addItem(withTitle: "新建窗口", action: #selector(newWindow(_:)), keyEquivalent: "n")
+        fileMenu.addItem(withTitle: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        fileMenuItem.submenu = fileMenu
 
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)
@@ -145,10 +153,6 @@ extension AppDelegate {
         let windowMenuItem = NSMenuItem()
         mainMenu.addItem(windowMenuItem)
         let windowMenu = NSMenu(title: "窗口")
-        // 多窗口（GitHub #168）：在现有「最小化/缩放/全屏幕/显示 Pi Web」之前加
-        // 「新建窗口」，新窗口用新的 WebViewController 加载同一个服务地址。
-        windowMenu.addItem(withTitle: "新建窗口", action: #selector(newWindow(_:)), keyEquivalent: "n")
-        windowMenu.addItem(.separator())
         windowMenu.addItem(withTitle: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "缩放", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
         let windowFullScreenItem = windowMenu.addItem(withTitle: "全屏幕", action: #selector(toggleFullScreen(_:)), keyEquivalent: "f")

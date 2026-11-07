@@ -2,7 +2,7 @@ import Cocoa
 
 /// 设置窗口。AppKit 控件手写布局，不用 XIB。
 ///
-/// 表单分四块：服务、网络、更新检查、行为。每块只放需要用户决定的字段，
+/// 表单分三块：服务、网络、行为。每块只放需要用户决定的字段，
 /// 说明文字压到一行；需要展开解释的内容放在诊断窗口，不堆在设置里。
 /// 表单与滚动/底部按钮的结构和更新检查偏好设置窗口一致（见 `SettingsFormViews`）。
 final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate {
@@ -59,6 +59,8 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
 
         let pathPicker = NSButton(title: "选择…", target: self, action: #selector(selectPiWebPath(_:)))
         let workspacePicker = NSButton(title: "选择…", target: self, action: #selector(selectWorkspaceDirectory(_:)))
+        pathPicker.setAccessibilityLabel("选择 pi-web 可执行文件")
+        workspacePicker.setAccessibilityLabel("选择工作目录")
         let workspaceDefaultButton = NSButton(title: "默认目录", target: self, action: #selector(useDefaultWorkspaceDirectory(_:)))
         let resetButton = NSButton(title: "恢复默认", target: self, action: #selector(resetDefaults(_:)))
         let cancelButton = NSButton(title: "取消", target: self, action: #selector(cancel(_:)))
@@ -111,9 +113,9 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         stack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(stack)
 
-        stack.widthAnchor.constraint(
-            greaterThanOrEqualToConstant: SettingsFormMetrics.minimumWidth
-        ).isActive = true
+        stack.setCustomSpacing(20, after: title)
+        stack.setCustomSpacing(20, after: portRow)
+        stack.setCustomSpacing(20, after: noProxyRow)
         for rowView in [
             pathRow, workspaceRow, portRow, hostnameRow, allowedHostsRow,
             httpProxyRow, httpsProxyRow, noProxyRow, quitRow
@@ -198,6 +200,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         let labelView = NSTextField(labelWithString: label)
         labelView.alignment = .right
         labelView.widthAnchor.constraint(equalToConstant: 100).isActive = true
+        field.setAccessibilityLabel(label)
         let row = NSStackView(views: trailing.map { [labelView, field, $0] } ?? [labelView, field])
         row.orientation = .horizontal
         row.alignment = .centerY

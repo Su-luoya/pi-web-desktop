@@ -321,21 +321,3 @@ enum UpdateNotificationText {
         return lines.joined(separator: "\n")
     }
 }
-
-// MARK: - 受限自动更新的边界
-
-/// “启动前自动更新 Pi Web”能力的边界说明（GitHub #20 起生效）。
-///
-/// `autoUpdatePiWebBeforeLaunch` 为 true 时也只对“来源为已验证的 npm 全局安装”
-/// 的 Pi Web 产生安装行为；`UpdateChecker` 与调度器都不读它（开关不改变请求与
-/// 调度，是否执行由 `PiWebUpdatePlanner` 的前置条件决定）。
-enum UpdateAutomationBoundary {
-    /// 设置位已生效（GitHub #20）；实际是否安装还要看来源与前置条件。
-    static var autoUpdateIsEffective: Bool { UpdateCheckPreferences.autoUpdateBeforeLaunchIsEffective }
-
-    /// 受限自动更新的边界说明（GitHub #20）：设置窗口与文档共用同一组事实。
-    static let restrictedExplanation = "只对来源为已验证的 npm 全局安装的 Pi Web 生效：启动时发现已验证的可用版本时，"
-        + "用参数数组执行 npm install -g <包名>@<版本>（不使用 shell、不调用 sudo、安装有超时），安装后重新检测版本并做健康检查。"
-        + "其它来源（pnpm、Homebrew、nvm/mise、git checkout、本地路径、未知）只显示命令，绝不自动安装；"
-        + "应用不承诺所有来源都能回滚。"
-}

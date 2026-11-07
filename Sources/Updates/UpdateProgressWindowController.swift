@@ -70,20 +70,26 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
         self.session = session
         guard let session else {
             titleLabel.stringValue = "更新进度"
+            titleLabel.toolTip = nil
             statusLabel.stringValue = "当前没有进行中的更新。"
+            statusLabel.toolTip = nil
             renderSteps([])
             progressBar.doubleValue = 0
             logTextView.string = ""
             elapsedLabel.stringValue = ""
+            elapsedLabel.toolTip = nil
             stopTimer()
             return
         }
         titleLabel.stringValue = session.title
+        titleLabel.toolTip = session.title
         statusLabel.stringValue = Self.statusText(for: session)
+        statusLabel.toolTip = statusLabel.stringValue
         renderSteps(session.steps)
         progressBar.doubleValue = Self.progressFraction(for: session)
         renderLog(session)
         elapsedLabel.stringValue = session.statusLine(at: Date())
+        elapsedLabel.toolTip = elapsedLabel.stringValue
         if session.isFinished {
             stopTimer()
         } else {
@@ -129,6 +135,7 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
         progressBar.minValue = 0
         progressBar.maxValue = 1
         progressBar.doubleValue = 0
+        progressBar.setAccessibilityLabel("更新进度")
         progressBar.controlSize = .small
         progressBar.translatesAutoresizingMaskIntoConstraints = false
 
@@ -146,7 +153,8 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
         logTextView.isEditable = false
         logTextView.isSelectable = true
         logTextView.drawsBackground = false
-        logTextView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        logTextView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        logTextView.setAccessibilityLabel("已脱敏的更新日志")
         logTextView.textColor = .labelColor
         logTextView.textContainerInset = NSSize(width: 8, height: 8)
         logTextView.autoresizingMask = [.width]
@@ -169,6 +177,9 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
 
         elapsedLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         elapsedLabel.textColor = .secondaryLabelColor
+        elapsedLabel.lineBreakMode = .byTruncatingTail
+        elapsedLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        elapsedLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         copyButton.target = self
         copyButton.action = #selector(copyDiagnostics(_:))
@@ -248,6 +259,7 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
         let symbol = NSTextField(labelWithString: step.state.symbol)
         symbol.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
         symbol.textColor = Self.color(for: step.state)
+        symbol.setAccessibilityLabel(step.state.displayName)
         symbol.alignment = .center
         symbol.translatesAutoresizingMaskIntoConstraints = false
         symbol.widthAnchor.constraint(equalToConstant: Self.stepSymbolWidth).isActive = true
@@ -324,6 +336,7 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
     private func refreshElapsed() {
         guard let session else { stopTimer(); return }
         elapsedLabel.stringValue = session.statusLine(at: Date())
+        elapsedLabel.toolTip = elapsedLabel.stringValue
         if session.isFinished {
             stopTimer()
         }

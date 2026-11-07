@@ -491,10 +491,10 @@ final class UpdateAbandonedAttemptTests: XCTestCase {
         XCTAssertEqual(UpdateAbandonedAttemptStore.load(from: defaults).count, 4)
 
         let gate = { (component: UpdateTransactionComponent) in
-            UpdateAbandonedAttemptGate.allowsAutomaticExecution(
+            UpdateAbandonedAttemptGate.blockingAttempt(
                 for: component,
                 in: UpdateAbandonedAttemptStore.load(from: defaults)
-            )
+            ) == nil
         }
         XCTAssertFalse(gate(.piWeb))
         XCTAssertFalse(gate(.piCLI))
@@ -796,14 +796,14 @@ final class UpdateAbandonedAttemptTests: XCTestCase {
     func testRecordsDoNotBlockOtherComponents() throws {
         // Pi Web 的记录只挡 Pi Web。
         let piWebRecord = makeAttempt()
-        XCTAssertTrue(
-            UpdateAbandonedAttemptGate.allowsAutomaticExecution(for: .piCLI, in: [piWebRecord])
+        XCTAssertNil(
+            UpdateAbandonedAttemptGate.blockingAttempt(for: .piCLI, in: [piWebRecord])
         )
-        XCTAssertTrue(
-            UpdateAbandonedAttemptGate.allowsAutomaticExecution(for: .piPackage(packageName), in: [piWebRecord])
+        XCTAssertNil(
+            UpdateAbandonedAttemptGate.blockingAttempt(for: .piPackage(packageName), in: [piWebRecord])
         )
-        XCTAssertTrue(
-            UpdateAbandonedAttemptGate.allowsAutomaticExecution(
+        XCTAssertNil(
+            UpdateAbandonedAttemptGate.blockingAttempt(
                 for: .piPackage(packageName),
                 in: [makeAttempt(kind: .piCLI, action: .waitedWithoutSignals)]
             )

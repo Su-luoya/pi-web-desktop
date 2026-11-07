@@ -225,11 +225,11 @@ final class ToolPathTests: XCTestCase {
             "摘要里要能看到原因：\(text)"
         )
         // Node.js 一条也有可读原因；两条都不含路径。
-        let diagnosisBlock = DependencyReportPresenter.diagnosisText(for: report)
-        XCTAssertTrue(diagnosisBlock.hasPrefix("命令探测的原因（只读探测，不会安装任何东西）：\n"))
-        XCTAssertTrue(diagnosisBlock.contains("· \(DependencyReportPresenter.title(for: .piCLI))：\(try XCTUnwrap(pi.detail))"))
-        XCTAssertTrue(diagnosisBlock.contains("· \(DependencyReportPresenter.title(for: .node))："))
-        XCTAssertFalse(diagnosisBlock.contains(fixture.rootURL.path), "诊断块里不得出现 fixture 路径")
+        let nodeDetail = try XCTUnwrap(report.finding(for: .node)?.detail)
+        XCTAssertFalse(nodeDetail.isEmpty)
+        XCTAssertTrue(text.contains("原因：\(nodeDetail)"))
+        XCTAssertFalse(nodeDetail.contains(fixture.rootURL.path))
+        XCTAssertFalse(try XCTUnwrap(pi.detail).contains(fixture.rootURL.path))
     }
 
     // MARK: - 2. PATH 合并的确定性

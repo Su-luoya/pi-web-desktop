@@ -608,17 +608,6 @@ final class PiCLIUpdateFlowTests: XCTestCase {
         XCTAssertTrue(world.log.text.contains("0.4.0 → 0.5.0"))
     }
 
-    func testUpdateVerifiedSemantics() {
-        XCTAssertTrue(PiCLIUpdatePlanner.updateVerified(detected: "0.4.2", old: "0.4.0", target: "0.4.2"))
-        XCTAssertTrue(PiCLIUpdatePlanner.updateVerified(detected: "0.4.3", old: "0.4.0", target: "0.4.2"))
-        XCTAssertFalse(PiCLIUpdatePlanner.updateVerified(detected: "0.4.1", old: "0.4.0", target: "0.4.2"))
-        XCTAssertFalse(PiCLIUpdatePlanner.updateVerified(detected: nil, old: "0.4.0", target: "0.4.2"))
-        XCTAssertFalse(PiCLIUpdatePlanner.updateVerified(detected: "latest", old: "0.4.0", target: "0.4.2"))
-        // 没有目标版本（手动路径）：只要版本发生变化就算成功。
-        XCTAssertTrue(PiCLIUpdatePlanner.updateVerified(detected: "0.4.1", old: "0.4.0", target: nil))
-        XCTAssertFalse(PiCLIUpdatePlanner.updateVerified(detected: "0.4.0", old: "0.4.0", target: nil))
-    }
-
     // MARK: - 4. 手动路径
 
     func testManualPlanOnlyNeedsResolvedExecutableAndVersion() {

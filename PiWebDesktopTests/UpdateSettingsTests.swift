@@ -95,9 +95,6 @@ final class UpdateSettingsTests: XCTestCase {
         XCTAssertEqual(UpdateCheckIntervals.standard.daily, 24 * 60 * 60)
         XCTAssertEqual(UpdateCheckIntervals.standard.weekly, 7 * 24 * 60 * 60)
         XCTAssertEqual(UpdateCheckIntervals.standard.packageCheck, 7 * 24 * 60 * 60)
-        // GitHub #20：设置位已生效，但只对来源为已验证的 npm 全局安装的 Pi Web 生效。
-        XCTAssertTrue(UpdateCheckPreferences.autoUpdateBeforeLaunchIsEffective)
-        XCTAssertTrue(UpdateAutomationBoundary.autoUpdateIsEffective)
     }
 
     func testPolicyTitlesAndAllowedSets() {

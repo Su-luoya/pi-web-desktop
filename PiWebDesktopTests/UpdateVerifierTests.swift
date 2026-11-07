@@ -11,6 +11,17 @@ final class UpdateVerifierTests: XCTestCase {
 
     private let packageName = "pi-extension-boundary-fixture"
 
+    func testVersionReachedWithAndWithoutTarget() {
+        XCTAssertTrue(UpdateVerifier.versionReached(detected: "2.0.0", old: "1.0.0", target: "2.0.0"))
+        XCTAssertTrue(UpdateVerifier.versionReached(detected: "2.0.1", old: "1.0.0", target: "2.0.0"))
+        XCTAssertFalse(UpdateVerifier.versionReached(detected: "1.5.0", old: "1.0.0", target: "2.0.0"))
+        XCTAssertFalse(UpdateVerifier.versionReached(detected: nil, old: "1.0.0", target: "2.0.0"))
+        XCTAssertFalse(UpdateVerifier.versionReached(detected: "latest", old: "1.0.0", target: "2.0.0"))
+        // 没有目标版本（手动路径）：只要版本发生变化就算成功。
+        XCTAssertTrue(UpdateVerifier.versionReached(detected: "1.0.1", old: "1.0.0", target: nil))
+        XCTAssertFalse(UpdateVerifier.versionReached(detected: "1.0.0", old: "1.0.0", target: nil))
+    }
+
     // MARK: - 夹具
 
     private func tempDirectory() throws -> URL {

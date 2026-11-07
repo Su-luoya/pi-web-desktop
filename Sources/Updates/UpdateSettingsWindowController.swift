@@ -33,17 +33,17 @@ final class UpdateSettingsWindowController: NSWindowController {
         target: nil,
         action: nil
     )
-    private let autoUpdateHintLabel = NSTextField(labelWithString:
+    private let autoUpdateHintLabel = WrappingLabel(labelWithString:
         "仅对已验证的 npm 全局安装生效；其它来源只提示，不安装。")
     private let autoUpdatePiCLIButton = NSButton(
         checkboxWithTitle: "启动前自动更新 Pi CLI",
         target: nil,
         action: nil
     )
-    private let autoUpdatePiCLIHintLabel = NSTextField(labelWithString:
+    private let autoUpdatePiCLIHintLabel = WrappingLabel(labelWithString:
         "有运行中的 Pi 进程时推迟，并在下次检查时重试。")
-    private let piCLIStatusLabel = NSTextField(labelWithString: "")
-    private let piPackageHintLabel = NSTextField(labelWithString:
+    private let piCLIStatusLabel = WrappingLabel(labelWithString: "")
+    private let piPackageHintLabel = WrappingLabel(labelWithString:
         "确认后只执行官方更新命令一次，不做无人值守更新。")
     /// internal：布局回归测试需要对照其他长文本 label 的约束（M11）。
     let piPackageStatusLabel = WrappingLabel(labelWithString: "")
@@ -116,7 +116,7 @@ final class UpdateSettingsWindowController: NSWindowController {
         let title = NSTextField(labelWithString: "更新检查偏好设置")
         title.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
 
-        let intro = NSTextField(labelWithString: "只查版本，不下载也不安装；关闭后不为该组件发请求。")
+        let intro = WrappingLabel(labelWithString: "版本检查不下载或安装。启动前自动更新由下方开关单独控制，修改立即生效。")
         SettingsFormMetrics.configureHint(intro)
 
         var rows: [NSView] = [title, intro]
@@ -134,10 +134,12 @@ final class UpdateSettingsWindowController: NSWindowController {
             // `NSControl` 没有 `representedObject`；用固定顺序的 tag 回查分类。
             popup.tag = index
             popup.widthAnchor.constraint(equalToConstant: 160).isActive = true
+            popup.setAccessibilityLabel("\(category.displayName)检查频率")
             policyPopups[category] = popup
 
             let ignoreButton = NSButton(title: "忽略此版本", target: self, action: #selector(ignoreCurrentVersion(_:)))
             ignoreButton.tag = index
+            ignoreButton.setAccessibilityLabel("忽略\(category.displayName)的当前版本")
             ignoreButtons[category] = ignoreButton
 
             let controls = NSStackView(views: [popup, ignoreButton, NSView()])
@@ -147,11 +149,9 @@ final class UpdateSettingsWindowController: NSWindowController {
 
             // 状态只留一句话：结论 + 最近检查。时间、忽略版本、缓存来源这些
             // 细节归诊断页，设置窗口里堆满它们只会让每行都读不完。
-            let statusLabel = NSTextField(labelWithString: "")
-            statusLabel.lineBreakMode = .byWordWrapping
-            statusLabel.maximumNumberOfLines = 0
-            statusLabel.font = NSFont.systemFont(ofSize: 11)
-            statusLabel.textColor = .secondaryLabelColor
+            let statusLabel = WrappingLabel(labelWithString: "")
+            SettingsFormMetrics.configureHint(statusLabel)
+            statusLabel.font = NSFont.systemFont(ofSize: 12)
             statusLabels[category] = statusLabel
 
             let row = NSStackView(views: [header, controls, statusLabel])
@@ -173,7 +173,7 @@ final class UpdateSettingsWindowController: NSWindowController {
             piPackageHintLabel, piPackageStatusLabel, abandonedStatusLabel
         ] {
             SettingsFormMetrics.configureHint(hint)
-            hint.font = NSFont.systemFont(ofSize: 11)
+            hint.font = NSFont.systemFont(ofSize: 12)
         }
 
         let reservedHeader = NSTextField(labelWithString: "启动前自动更新")
@@ -189,6 +189,11 @@ final class UpdateSettingsWindowController: NSWindowController {
         buttons.orientation = .horizontal
         buttons.spacing = 8
         buttons.alignment = .centerY
+        buttons.translatesAutoresizingMaskIntoConstraints = false
+
+        let separator = NSBox()
+        separator.boxType = .separator
+        separator.translatesAutoresizingMaskIntoConstraints = false
 
         rows.append(contentsOf: [
             reservedHeader,
@@ -200,8 +205,7 @@ final class UpdateSettingsWindowController: NSWindowController {
             piPackageHeader,
             piPackageHintLabel,
             piPackageStatusLabel,
-            abandonedStatusLabel,
-            buttons
+            abandonedStatusLabel
         ])
 
         let stack = NSStackView(views: rows)
@@ -211,16 +215,15 @@ final class UpdateSettingsWindowController: NSWindowController {
         stack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(stack)
 
-        stack.widthAnchor.constraint(
-            greaterThanOrEqualToConstant: SettingsFormMetrics.minimumWidth
-        ).isActive = true
+        stack.setCustomSpacing(20, after: intro)
+        for row in categoryRows { stack.setCustomSpacing(20, after: row) }
+        stack.setCustomSpacing(20, after: piCLIStatusLabel)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: SettingsFormMetrics.inset),
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -SettingsFormMetrics.inset),
             stack.topAnchor.constraint(equalTo: content.topAnchor, constant: SettingsFormMetrics.inset),
             stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -SettingsFormMetrics.inset),
-            title.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            buttons.widthAnchor.constraint(equalTo: stack.widthAnchor)
+            title.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
         // 说明与状态文本跟着窗口宽度重新折行：不再写死 620pt，窗口因此可以
         // 自由缩放，变宽时文字也跟着变宽（旧的固定宽度会让右边永远留白，并把
@@ -249,6 +252,8 @@ final class UpdateSettingsWindowController: NSWindowController {
 
         let container = NSView()
         container.addSubview(scrollView)
+        container.addSubview(separator)
+        container.addSubview(buttons)
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 568, height: 720),
@@ -269,7 +274,13 @@ final class UpdateSettingsWindowController: NSWindowController {
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: container.topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: separator.topAnchor, constant: -12),
+            separator.leadingAnchor.constraint(equalTo: buttons.leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: buttons.trailingAnchor),
+            separator.bottomAnchor.constraint(equalTo: buttons.topAnchor, constant: -12),
+            buttons.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: SettingsFormMetrics.inset),
+            buttons.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -SettingsFormMetrics.inset),
+            buttons.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -SettingsFormMetrics.inset),
             content.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
             content.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
             content.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor)

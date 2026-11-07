@@ -221,6 +221,38 @@ final class AppMenuHygieneTests: XCTestCase {
         XCTAssertTrue(source.contains("setFrameAutosaveName"), "调整过的尺寸应当记住")
     }
 
+    // MARK: - 文件菜单：新建/关闭窗口走标准快捷键
+
+    /// `⌘N` / `⌘W` 是 macOS 的通用约定：新建窗口属于“文件”菜单，`⌘W` 关闭窗口
+    /// 也必须有；两者各只能绑一次，重复绑定会让其中一个看起来失效。
+    func testFileMenuOwnsNewAndCloseWindowShortcuts() throws {
+        let menus = SourceScan.codeText(of: try SourceScan.text(named: "AppDelegate+Menus.swift"))
+
+        let fileStart = try XCTUnwrap(menus.range(of: "let fileMenu = NSMenu(title: \"文件\")"))
+        let fileEnd = try XCTUnwrap(menus.range(of: "fileMenuItem.submenu = fileMenu"))
+        let fileMenuBody = String(menus[fileStart.lowerBound..<fileEnd.upperBound])
+        XCTAssertTrue(
+            fileMenuBody.contains("newWindow(_:)), keyEquivalent: \"n\""),
+            "新建窗口应在文件菜单里并绑 ⌘N：\(fileMenuBody)"
+        )
+        XCTAssertTrue(
+            fileMenuBody.contains("NSWindow.performClose(_:)), keyEquivalent: \"w\""),
+            "文件菜单需要 ⌘W 关闭窗口"
+        )
+
+        // ⌘N 只允许出现在文件菜单：窗口菜单里再绑一次，系统只会让其中一个响应。
+        XCTAssertEqual(
+            menus.components(separatedBy: "keyEquivalent: \"n\"").count - 1,
+            1,
+            "⌘N 只能有一个绑定点"
+        )
+
+        let windowStart = try XCTUnwrap(menus.range(of: "let windowMenu = NSMenu(title: \"窗口\")"))
+        let windowEnd = try XCTUnwrap(menus.range(of: "windowMenuItem.submenu = windowMenu"))
+        let windowMenuBody = String(menus[windowStart.lowerBound..<windowEnd.upperBound])
+        XCTAssertFalse(windowMenuBody.contains("新建窗口"), "新建窗口属于文件菜单，不在窗口菜单里重复")
+    }
+
     // MARK: - outD-次要-5：健康探测复用同一个 URLSession
 
     func testServiceProbeReusesASingleSession() throws {

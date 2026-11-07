@@ -279,8 +279,6 @@ enum LoginShellResolver {
 /// “PATH 只配在 `~/.zshrc` 这类非登录 shell 的 rc 里”的情况。交互式 rc 可能有
 /// 副作用或很慢，因此只在登录查询失败后触发一次，并同样受超时约束。
 final class LoginShellPathQuery {
-    /// 兼容旧断言：默认退回的登录 shell。实际优先使用用户自己的登录 shell。
-    static let shellPath = LoginShellResolver.fallbackShellPath
     /// 输出标记：只有标记之后的内容才是 PATH，rc 自己的输出被忽略。
     static let marker = "__PI_WEB_TOOL_PATH__"
     static let command = "printf '__PI_WEB_TOOL_PATH__%s' \"$PATH\""

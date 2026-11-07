@@ -29,7 +29,7 @@
 | 公证 | 未公证。Gatekeeper 默认拒绝（`spctl --assess` 返回 rejected），需要用户在“系统设置 → 隐私与安全性”里手动批准 |
 | 发行状态 | 当前最新是早期 alpha（prerelease），没有正式发行版；更早的 alpha 资产仍然可以下载 |
 | 分发现状 | alpha 以 prerelease 形式发布在 [GitHub Releases](https://github.com/Su-luoya/pi-web-desktop/releases)：自 `v0.1.0-alpha.1` 起提供预编译 ZIP、`.sha256` 与签名/公证证据 Markdown；也可以按 [发布说明](releasing.md) 从源码构建。所有资产都是 **ad-hoc 签名、未公证** |
-| 应用内更新 | 桌面应用自身更新（PR #174）只由用户点击触发：菜单入口仅在本轮刚从 GitHub API 核实出更高版本时出现，确认框说明当前包未签名、未公证；确认后用独立临时 `URLSession` 取固定名字的 `<资产名>.zip` 与 `.sha256`（重定向只放行 `release-assets.githubusercontent.com`，并核对资产名后缀：GitHub 签名直链把文件名放在 `rscd` / `response-content-disposition` 查询参数里，也按后缀判定；zip 与 `.sha256` 不能互换），哈希不一致就不解包；安装只替换 `/Applications/Pi-Web-Desktop.app`（要求该包真实存在、路径形状正确、不跳符号链接、`/Applications` 可写探查通过），替换后应用退出并重启。缓存结论不触发安装，没有无人值守路径，也没有降级路径。四类检查可分别关闭 / 每日 / 每周（扩展包：关闭 / 检查并通知 / 询问后更新），可忽略某个具体版本。依赖更新自 GitHub #20–#23 起分成三条受限路径且**两个自动开关默认关闭**：Pi Web 启动前自动安装（仅限来源为已验证的 npm 全局安装）、Pi CLI 启动前自动更新（仅限已验证的 npm/pnpm 全局安装，且有运行中的 Pi 进程或状态不确定时一律推迟，不发送任何信号）、扩展包“询问后更新”（必须用户确认，**没有无人值守路径**）。更新后只验证能验证到的事实（可执行位、真实路径可读、版本重检测、`package.json` 名称、健康检查），**不做代码签名或内容哈希确认**；“回滚”最多是把服务/重检测指回应用保留且仍可用的更新前 npm 全局可执行文件，其它来源与证据缺失时一律写“无法自动回滚”。见 [隐私说明](privacy.md) 的“版本检查、提示与忽略版本”、[设置说明](settings-and-workspace.md) 与 [发布说明](releasing.md#版本门槛) |
+| 应用内更新 | 桌面应用自身更新的安装只由用户点击触发：菜单入口仅在本轮网络检查核实出更高版本时可用，确认框说明当前包未经过 Developer ID 签名、未公证；发布资产地址与 SHA-256 优先来自 appcast，不可用时回落到 GitHub API。应用可先预下载更新包，但只有确认后才安装；下载使用独立临时 `URLSession`（重定向只放行 `release-assets.githubusercontent.com`，并核对资产名后缀：GitHub 签名直链把文件名放在 `rscd` / `response-content-disposition` 查询参数里，也按后缀判定；zip 与 `.sha256` 不能互换），哈希不一致就不解包；安装只替换 `/Applications/Pi-Web-Desktop.app`（要求该包真实存在、路径形状正确、不跳符号链接、`/Applications` 可写探查通过），替换后应用退出并重启。缓存结论不触发安装，没有无人值守路径，也没有降级路径。四类检查可分别关闭 / 每日 / 每周（扩展包：关闭 / 检查并通知 / 询问后更新），可忽略某个具体版本。依赖更新自 GitHub #20–#23 起分成三条受限路径且**两个自动开关默认关闭**：Pi Web 启动前自动安装（仅限来源为已验证的 npm 全局安装）、Pi CLI 启动前自动更新（仅限已验证的 npm/pnpm 全局安装，且有运行中的 Pi 进程或状态不确定时一律推迟，不发送任何信号）、扩展包“询问后更新”（必须用户确认，**没有无人值守路径**）。更新后只验证能验证到的事实（可执行位、真实路径可读、版本重检测、`package.json` 名称、健康检查），**不做代码签名或内容哈希确认**；“回滚”最多是把服务/重检测指回应用保留且仍可用的更新前 npm 全局可执行文件，其它来源与证据缺失时一律写“无法自动回滚”。见 [隐私说明](privacy.md) 的“版本检查、提示与忽略版本”、[设置说明](settings-and-workspace.md) 与 [发布说明](releasing.md#版本门槛) |
 | 支持承诺 | 无 SLA，无响应或修复时限。Issue 和 PR 按维护者可用时间处理 |
 | 远程访问 | 默认只监听 loopback；应用不提供访问密码，改成非 loopback 地址等于对同网络完全开放，需自备加密隧道或 HTTPS 反向代理 |
 | 日志与诊断 | 日志写在 `~/Library/Logs/Pi Web Desktop/`，10 MB 轮转、保留 5 份；日志行、错误消息、环境变量/命令行展示与“复制诊断”导出共用同一个脱敏器。规则与字段见 [日志与诊断导出](logging-and-diagnostics.md) |
@@ -84,9 +84,9 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 
 ## Xcode 工程构建与测试
 
-标准 Xcode 工程使用 Apple Silicon、macOS 26 SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让测试在没有 host app 的情况下仍可编译，target 会把被测源码直接加入测试源（当前 `Sources/` 共 99 个 Swift 文件，其中 **82 个**直接进测试 target，17 个只进 app target）；因此测试文件直接使用该 target 内编译的这些类型，不通过 `@testable import PiWebDesktop` 引入 app target。
+标准 Xcode 工程面向 Apple Silicon，使用当前 Xcode 的 macOS SDK，并包含 `PiWebDesktopTests` XCTest target。该测试 target 是 **unhosted** 的独立测试 bundle：不设置 `TEST_HOST`，也不依赖或启动 `PiWebDesktop` app。为了让测试在没有 host app 的情况下仍可编译，target 会把被测源码直接加入测试源（具体文件清单以 `PiWebDesktop.xcodeproj/project.pbxproj` 的 Sources build phase 为准）；因此测试文件直接使用该 target 内编译的这些类型，不通过 `@testable import PiWebDesktop` 引入 app target。
 
-只进 app target 的 17 个文件全部依赖 AppKit/WebKit、需要真实窗口，或是 `AppDelegate` 的扩展与入口：
+只进 app target 的文件依赖 AppKit/WebKit、需要真实窗口，或是 `AppDelegate` 的扩展与入口：
 
 ```text
 Sources/App/AppDelegate.swift + AppDelegate+{CLIUpdate,Diagnostics,Menus,PackageUpdates,
@@ -98,7 +98,7 @@ Sources/Diagnostics/DiagnosticsWindowController.swift
 Sources/Diagnostics/DiagnosticsClipboard.swift
 ```
 
-这条边界决定了几条设计约束：需要测试的纯逻辑必须放进能被 unhosted target 编译的文件里，例如依赖诊断的纯文本呈现（`DependencyReportPresenter`）在 `DependencyChecker.swift`、首次启动路由在 `FirstLaunchDiagnostics.swift`、菜单与设置窗口的判定在 `PreferencesRefreshPolicy.swift`。`AppDelegate` 的扩展不进测试 target，所以涉及菜单绑定、设置窗口追平这类只在 app target 里成立的约束，测试用**源码级断言**（`AppMenuHygieneTests.swift`、`SourceScanSupport.swift`）而不是运行时断言；这类测试只证明代码写成什么样，不证明运行时观感，观感仍需人工验证。
+这条边界决定了几条设计约束：需要测试的纯逻辑必须放进能被 unhosted target 编译的文件里，例如依赖诊断的纯文本呈现在 `Sources/Services/DependencyReportPresenter.swift`、首次启动路由在 `Sources/Diagnostics/FirstLaunchDiagnostics.swift`、菜单与设置窗口的判定在 `Sources/App/PreferencesRefreshPolicy.swift`。`AppDelegate` 的扩展不进测试 target，所以涉及菜单绑定、设置窗口追平这类只在 app target 里成立的约束，测试用**源码级断言**（`AppMenuHygieneTests.swift`、`SourceScanSupport.swift`）而不是运行时断言；这类测试只证明代码写成什么样，不证明运行时观感，观感仍需人工验证。
 
 这些测试使用假的 `ps`/`lsof` 输出、注入的存活判定、假的进程启动器、即时执行的调度器、假依赖探针、假网络地址提供者和临时目录，不访问真实进程、网络、Keychain、真实端口或 `~/.pi`。多条路径共用的替身与等待原语（`Locked`、`waitForValue`、`makeExecutableScript`、`LogSink`、`FakeDependencyFileSystem`、`dependencyFinding`）放在 `PiWebDesktopTests/TestFixtures.swift`；只服务一条路径的替身（`RecordingRunner`、`World`、`HistoryRecorder`）留在对应用例文件里，不要复制第二份。
 

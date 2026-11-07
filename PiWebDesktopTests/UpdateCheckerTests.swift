@@ -2642,12 +2642,11 @@ final class UpdateCheckerTests: XCTestCase {
     /// `PiWebUpdatePlanner` 的前置条件与来源判定决定（GitHub #20），`UpdateChecker`
     /// 自己依旧没有任何安装/执行路径。
     func testAutoUpdateSettingDoesNotChangeCheckerRuntimeBehavior() {
-        var reserved = UpdateCheckPreferences.factoryDefaults
-        reserved.autoUpdatePiWebBeforeLaunch = true
-        XCTAssertTrue(UpdateCheckPreferences.autoUpdateBeforeLaunchIsEffective)
+        var preferences = UpdateCheckPreferences.factoryDefaults
+        preferences.autoUpdatePiWebBeforeLaunch = true
 
         let off = makeWorld(preferences: .factoryDefaults, responder: automaticResponder())
-        let on = makeWorld(preferences: reserved, responder: automaticResponder())
+        let on = makeWorld(preferences: preferences, responder: automaticResponder())
         off.checker.start(inventory: fullInventory())
         on.checker.start(inventory: fullInventory())
 
@@ -2659,7 +2658,6 @@ final class UpdateCheckerTests: XCTestCase {
         // 检查器只有 GET 请求这一种外部动作；设置位不会增加检查器的任何动作。
         XCTAssertTrue(on.client.requests.allSatisfy { $0.method == "GET" })
         XCTAssertEqual(on.client.requests.count, off.client.requests.count)
-        XCTAssertTrue(UpdateAutomationBoundary.restrictedExplanation.contains("npm 全局"))
     }
 
     // MARK: - 并发审计 S1 回归：preferences / ignoredVersions 跨线程同步

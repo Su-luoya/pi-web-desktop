@@ -364,11 +364,6 @@ final class PiWebUpdateCoordinator {
         logOutcome("更新历史：\(UpdateHistoryPresenter.lines(for: entry).joined(separator: " "))")
     }
 
-    /// 重新检测的版本是否达到目标版本（相等或更高都算达到）。
-    static func versionReached(detected: String?, target: String) -> Bool {
-        UpdateVerifier.versionReached(detected: detected, old: target, target: target)
-    }
-
     private func logOutcome(_ message: String) {
         environment.log(environment.redactor.redact(message))
     }

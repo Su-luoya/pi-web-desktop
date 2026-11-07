@@ -951,16 +951,6 @@ final class PiPackageUpdateFlowTests: XCTestCase {
         XCTAssertTrue(world.log.text.contains("1.0.0 → 2.5.0"))
     }
 
-    func testUpdateVerifiedSemantics() {
-        XCTAssertTrue(PiPackageUpdatePlanner.updateVerified(detected: "2.0.0", old: "1.0.0", target: "2.0.0"))
-        XCTAssertTrue(PiPackageUpdatePlanner.updateVerified(detected: "2.0.1", old: "1.0.0", target: "2.0.0"))
-        XCTAssertFalse(PiPackageUpdatePlanner.updateVerified(detected: "1.5.0", old: "1.0.0", target: "2.0.0"))
-        XCTAssertFalse(PiPackageUpdatePlanner.updateVerified(detected: nil, old: "1.0.0", target: "2.0.0"))
-        XCTAssertFalse(PiPackageUpdatePlanner.updateVerified(detected: "latest", old: "1.0.0", target: "2.0.0"))
-        XCTAssertTrue(PiPackageUpdatePlanner.updateVerified(detected: "1.0.1", old: "1.0.0", target: nil))
-        XCTAssertFalse(PiPackageUpdatePlanner.updateVerified(detected: "1.0.0", old: "1.0.0", target: nil))
-    }
-
     // MARK: - 6. 脱敏
 
     func testLogsAndConfirmationTextAreRedacted() throws {

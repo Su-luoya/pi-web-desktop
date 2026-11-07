@@ -1432,16 +1432,4 @@ final class PiWebUpdateFlowTests: XCTestCase {
         configuration.savePiWebUpdateWarning(nil)
         XCTAssertNil(configuration.piWebUpdateWarning())
     }
-
-    // MARK: - 设置位生效后的边界
-
-    func testAutomationBoundaryExplainsRestrictedScope() {
-        XCTAssertTrue(UpdateCheckPreferences.autoUpdateBeforeLaunchIsEffective)
-        XCTAssertTrue(UpdateAutomationBoundary.autoUpdateIsEffective)
-        let explanation = UpdateAutomationBoundary.restrictedExplanation
-        for fragment in ["npm 全局", "不调用 sudo", "只显示命令", "回滚"] {
-            XCTAssertTrue(explanation.contains(fragment), "边界说明应包含 \(fragment)")
-        }
-        XCTAssertFalse(explanation.contains("尚未生效"))
-    }
 }

@@ -28,9 +28,7 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKD
     private var findBar: NSView?
     private var findField: NSSearchField?
 
-    /// `servicePort` 保留既有调用点签名（`AppDelegate` 传的是同一份配置里的端口）；
-    /// 导航判定统一以 `serviceURL` 为依据，避免同一配置在 WebView 里出现两个来源。
-    init(serviceURL: URL, servicePort: Int, windowProvider: @escaping () -> NSWindow?) {
+    init(serviceURL: URL, windowProvider: @escaping () -> NSWindow?) {
         self.serviceURL = serviceURL
         self.windowProvider = windowProvider
 
@@ -48,8 +46,7 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKD
 
     // MARK: - Service endpoint
 
-    /// 同上：`port` 只为兼容既有调用点，导航判定只读 `url`。
-    func updateService(url: URL, port: Int) {
+    func updateService(url: URL) {
         serviceURL = url
     }
 

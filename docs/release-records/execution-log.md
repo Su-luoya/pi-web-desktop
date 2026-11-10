@@ -2303,3 +2303,16 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
 - CI 产物：SHA-256 `2ca4501c4d398e53f5a026bf8e87509f2ef6fa954de790b61db657b1994d7bc1`，1778937 字节；发布后 `gh release download` + `shasum -a 256 -c` 复验 `OK`，与 Release 正文的校验值一致。
 - appcast：`release: published` 自动触发 run `42341155203` 成功，`appcast` 分支的 `appcast.json` 已收录本版（`schema: 1`、`releases[0].tag = v0.1.0-alpha.35`），`zip.sha256` 与 Release 资产一致。
 - 回退：本版无 schema 或数据迁移；保留 alpha.34 的 ZIP 与 checksum，解压替换应用包即可，`appcast.json` 里删掉本版条目就停止推送这次更新。
+
+## 本次发布执行记录（v0.1.0-alpha.36）
+
+- 内容：修复 Pi CLI / Pi extensions 更新时 `~/` 展示路径无法构造计划的问题，新增官方安装器与当前 `pi list` 用户级 npm 安装目录的交叉核对；确认、执行和结果复用可滚动的更新进度窗口，扩展按整批汇总成功或部分失败，更新后版本复查同样还原 Home 路径。项目级、固定版本/范围、git 和本地包不纳入受管 npm 更新；不执行真实升级、不停止用户 Pi 会话。发布门槛另将 appcast 的 checkout 固定到当前 v4 对应完整 SHA，未升级 Actions 版本。
+- [Release Issue #273](https://github.com/Su-luoya/pi-web-desktop/issues/273) 记录本地门槛、S1–S8、历史风险逐项处置、真机环境与未验证范围；[PR #274](https://github.com/Su-luoya/pi-web-desktop/pull/274) squash 为 `e251ccaa594744b14256f609a612930f55bad505`，lightweight tag `v0.1.0-alpha.36` 指向同一 main 提交。
+- 本地、[PR build 42800698865](https://github.com/Su-luoya/pi-web-desktop/actions/runs/42800698865) 与 [main build 42801659156](https://github.com/Su-luoya/pi-web-desktop/actions/runs/42801659156) 均通过 **1059 tests, 0 failures**；发布构建使用 `-O -wmo`。身份检查 45 checks、版本/tag/build 检查、签名完整性、启动/诊断 smoke、shell 语法、diff、personal-data 固定模式扫描、secret scanner 与自测、版本与打包自测均通过。scanner `suppressed 17 lines`、无 rejected，既有夹具抑制无新增；扫描通过不等于没有秘密。
+- 本地脚本要求临时目录位于各自 ROOT 外，因此在 git-ignored `.scratch` 内导出暂存快照，使用字节相同的脚本运行 scanner/版本/打包自测；包含真实 bundle 完整打包。所有中间输出仍在项目内。本地自检 ZIP SHA-256 为 `866a6efc1f1afb49ae25f14a007df1927ad8317b4b7ca04503cff76ad0987c82`，只用于本地验证，不作为公开资产校验值。
+- [release workflow 42802636769](https://github.com/Su-luoya/pi-web-desktop/actions/runs/42802636769) 的 build/publish 均成功；自动生成的草稿正文无模板占位符或待填写字段，明确 ad-hoc、未公证与单应用放行步骤。核对后于 **2026-11-10T10:57:10Z** [公开发布](https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.36)，`isDraft=false`、`isPrerelease=true`。
+- CI ZIP `Pi-Web-Desktop-0.1.0-alpha.36+build.36.zip`：**1793037 bytes**，SHA-256 **`7845c7427297f9f514e7f6cb2e4997978ff2d0708c701d78d55faa65b9cc7a20`**。草稿三个资产的本地摘要均与 GitHub asset digest 一致；正文、checksum 与证据一致。发布后 `gh release download` 与匿名 `curl -fL` 各自重新下载并校验 OK，公开 ZIP 与草稿字节一致，未替换资产。
+- 下载的 CI bundle 在本机再次通过 arm64、签名完整性、45 项身份检查及启动/诊断 smoke；`Signature=adhoc`、`TeamIdentifier=not set`，CI `spctl` exit 3 / rejected，不代表 Developer ID 或 Apple 公证。真机环境为 Mac16,10 / Apple M4、macOS 27.2（26B123）、Node v26.13.0、Pi 1.5.1、`@agegr/pi-web` 0.15.0。诊断 smoke 的 `items=6 blockers=3` 是确定性 fixture，不是本机依赖缺失。
+- [appcast workflow 42803431043](https://github.com/Su-luoya/pi-web-desktop/actions/runs/42803431043) 由 `release: published` 自动触发并成功；分别读取 appcast 分支与 raw CDN，均为 schema 1、`releases[0].tag=v0.1.0-alpha.36`，下载 URL 与 `zip.sha256` 和公开资产一致。
+- 未验证：真实 CLI / 扩展安装端到端、VoiceOver 逐项朗读、另一台 Mac 首次 Gatekeeper 放行及本次 tailnet 访问；隔离 fixture 和 smoke 不证明任意本机安装都能升级。本次发布未替换 `/Applications` 中的应用，也未结束现有应用或 Pi 会话。
+- 回退：alpha.35 ZIP 与 checksum 已重新下载并校验 OK；本版无数据迁移，退出应用后替换上一版应用包即可。从 appcast 移除本版条目可停止推送，应用内安装器不提供自动降级。

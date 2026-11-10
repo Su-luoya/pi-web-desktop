@@ -49,7 +49,8 @@ enum PiCLIUpdatePlanner {
         guard let executablePath = installation.executablePath, !executablePath.isEmpty else {
             return .unavailable(reason: .executableUnresolved)
         }
-        guard installation.source.isPackageManagerManaged, installation.confidence == .verified else {
+        guard installation.source.isPackageManagerManaged || installation.source == .officialInstaller,
+              installation.confidence == .verified else {
             return .manualOnly(
                 commandText: commandText,
                 reason: .sourceNotVerifiedPackageManager(

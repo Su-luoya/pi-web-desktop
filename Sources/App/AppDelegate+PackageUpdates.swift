@@ -133,19 +133,8 @@ extension AppDelegate {
         for record in planSet.refusalRecords {
             lines.append("拒绝记录：\(record.logLine)")
         }
-        let alert = NSAlert()
-        alert.messageText = "Pi 扩展包可用更新"
-        alert.informativeText = lines.joined(separator: "\n")
-        alert.addButton(withTitle: "好")
-        let commands = planSet.notices.compactMap(\.manualCommandText)
-        if !commands.isEmpty {
-            alert.addButton(withTitle: "复制命令")
-        }
-        presentAlert(alert) { response in
-            guard response == .alertSecondButtonReturn, !commands.isEmpty else { return }
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(commands.joined(separator: "\n"), forType: .string)
-        }
+        let commands = planSet.notices.compactMap(\.manualCommandText).map { logRedactor.redact($0) }
+        presentUpdateReview(title: "Pi 扩展包可用更新", detail: lines.joined(separator: "\n"), commands: commands)
     }
 
     /// 询问后更新：有可执行计划（或需要先看「已放弃」记录的计划）时展示整批
@@ -165,19 +154,8 @@ extension AppDelegate {
             for record in planSet.refusalRecords {
                 lines.append("拒绝记录：\(record.logLine)")
             }
-            let alert = NSAlert()
-            alert.messageText = "Pi 扩展包更新"
-            alert.informativeText = lines.joined(separator: "\n")
-            alert.addButton(withTitle: "好")
-            let commands = planSet.notices.compactMap(\.manualCommandText)
-            if !commands.isEmpty {
-                alert.addButton(withTitle: "复制命令")
-            }
-            presentAlert(alert) { response in
-                guard response == .alertSecondButtonReturn, !commands.isEmpty else { return }
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(commands.joined(separator: "\n"), forType: .string)
-            }
+            let commands = planSet.notices.compactMap(\.manualCommandText).map { logRedactor.redact($0) }
+            presentUpdateReview(title: "Pi 扩展包更新", detail: lines.joined(separator: "\n"), commands: commands)
             return
         }
         let inspection = piProcessInspection ?? .unknown(.enumerationFailed)
@@ -192,37 +170,33 @@ extension AppDelegate {
                     + "确认框会先展示记录；确认后只执行一次。"
             )
         }
-        let alert = NSAlert()
-        alert.messageText = plans.count == 1
-            ? "确认更新 Pi 扩展包 \(plans[0].packageName)"
-            : "确认更新 \(plans.count) 个 Pi 扩展包"
-        alert.informativeText = PiPackageUpdateConfirmation.text(
-            plans: plans,
-            inspection: inspection,
-            abandonedAttempts: abandoned,
-            redactingWith: logRedactor
-        )
-        // 取消是第一个按钮 = 默认按钮：回车即取消，不执行、不改状态。
-        alert.addButton(withTitle: "取消")
-        alert.addButton(withTitle: "确认更新")
-        presentAlert(alert) { [weak self] response in
-            guard let self else { return }
-            guard response == .alertSecondButtonReturn else {
+        presentUpdateReview(
+            title: "确认更新 \(plans.count) 个 Pi 扩展包",
+            detail: PiPackageUpdateConfirmation.text(
+                plans: plans,
+                inspection: inspection,
+                abandonedAttempts: abandoned,
+                redactingWith: logRedactor
+            ),
+            confirm: { [weak self] in self?.performPiPackageUpdates(plans) },
+            cancel: { [weak self] in
+                guard let self else { return }
                 self.piPackageUpdateCoordinator?.recordCancellation(plans)
                 self.piPackageUpdatePlanSet = planSet
                 self.logPiPackageUpdate("Pi 扩展包更新：用户未确认（取消），未执行、未改动任何状态。")
                 self.refreshUpdateMenuState()
                 self.diagnosticsWindowController?.refreshUpdateStatus()
-                return
             }
-            self.performPiPackageUpdates(plans)
-        }
+        )
     }
 
     /// 用户确认后才执行：参数数组执行一次，记录退出码与耗时，并重新检测版本。
     private func performPiPackageUpdates(_ plans: [PiPackageUpdatePlan]) {
         guard let coordinator = piPackageUpdateCoordinator, !piPackageUpdateInProgress else { return }
         piPackageUpdateInProgress = true
+        updateProgressCenter.beginBatch(components: plans.map { .piPackage($0.packageName) })
+        updateProgressWindowController?.onCopyCommands = nil
+        refreshUpdateMenuState()
         logPiPackageUpdate("Pi 扩展包更新：用户已确认 \(plans.count) 个计划，命令为 \(plans.map { $0.arguments.joined(separator: " ") }.joined(separator: "、"))。")
         coordinator.runConfirmed(plans) { [weak self] batch in
             guard let self else { return }
@@ -242,19 +216,14 @@ extension AppDelegate {
                 return "\(plan.packageName)：\(plan.installedVersion) → \(newVersion)（退出码 "
                     + "\(record.exitCode.map(String.init) ?? "未知")，耗时 \(record.durationText)）"
             }
-            presentPiPackageInfo("Pi 扩展包更新完成", detail: details.joined(separator: "\n"))
+            for detail in details { logPiPackageUpdate(detail) }
         } else {
             recordPiPackageUpdateWarning(batch.latestWarning)
             let details = batch.outcomes.map { $0.logLine(redactingWith: logRedactor) }
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = "Pi 扩展包更新未完成"
-            alert.informativeText = (details + [batch.latestWarning?.text ?? "", latestUpdateDegradationText() ?? ""])
-                .filter { !$0.isEmpty }
-                .joined(separator: "\n")
-            alert.addButton(withTitle: "好")
-            presentAlert(alert)
+            logPiPackageUpdate((details + [batch.latestWarning?.text ?? "", latestUpdateDegradationText() ?? ""])
+                .filter { !$0.isEmpty }.joined(separator: "\n"))
         }
+        updateProgressCenter.finish(batch: batch)
         piPackageUpdatePlanSet = nil
         refreshUpdateMenuState()
         diagnosticsWindowController?.refreshUpdateStatus()
@@ -301,7 +270,9 @@ extension AppDelegate {
     }
 
     private func logPiPackageUpdate(_ message: String) {
-        _ = logWriter.append(logRedactor.redact(message))
+        let redacted = logRedactor.redact(message)
+        _ = logWriter.append(redacted)
+        updateProgressCenter.appendLog(redacted)
     }
 
     /// 诊断页/设置页的扩展包更新状态块（已脱敏）。smoke 启动返回空串：不为诊断

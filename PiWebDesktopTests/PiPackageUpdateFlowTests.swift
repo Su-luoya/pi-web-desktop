@@ -703,6 +703,23 @@ final class PiPackageUpdateFlowTests: XCTestCase {
 
     // MARK: - 4. 计划与参数数组
 
+    func testPiManagedPackagesUseConfirmationAndTheSameSafetyGuards() throws {
+        let managed = candidate(source: .piManaged)
+        let ready = PiPackageUpdatePlanner.decide(input(packages: [managed]))
+        let plan = try XCTUnwrap(ready.executablePlans.first)
+        XCTAssertEqual(plan.source, .piManaged)
+        XCTAssertEqual(plan.arguments, ["update", "npm:\(packageName)"])
+        XCTAssertTrue(plan.requiresUserConfirmation)
+        XCTAssertFalse(plan.isAutomaticallyExecutable)
+        XCTAssertTrue(PiPackageUpdatePlanner.decide(input(
+            packages: [managed], processes: .runningProcesses([processRecord()])
+        )).executablePlans.isEmpty)
+        XCTAssertTrue(PiPackageUpdatePlanner.decide(input(
+            packages: [managed], checks: [check(origin: .cachedFallback)]
+        )).executablePlans.isEmpty)
+        XCTAssertNil(self.plan(source: .piManaged, confidence: .inferred))
+    }
+
     func testPlanIsNeverAutomaticallyExecutableAndUsesOnlyTheOfficialCommand() throws {
         XCTAssertEqual(PiPackageUpdatePolicy.allCases.count, 3, "扩展包只允许三种策略")
         XCTAssertEqual(PiPackageUpdatePolicy.allCases.map(\.title), ["关闭", "检查并通知", "询问后更新"])
@@ -762,6 +779,10 @@ final class PiPackageUpdateFlowTests: XCTestCase {
     func testUnsafePathsNamesSourcesAndVersionsAreRejected() {
         let unsafePaths = [
             "pi",
+            "~other/bin/pi",
+            "~/../bin/pi",
+            "/usr/local/../bin/pi",
+            "/usr/local/./bin/pi",
             "/usr/local/bin/pi ",
             " /usr/local/bin/pi",
             "/usr/local/bin/pi;rm -rf /",

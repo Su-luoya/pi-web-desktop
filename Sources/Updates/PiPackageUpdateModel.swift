@@ -210,7 +210,7 @@ enum PiPackageUpdateRefusal: Equatable {
     case invalidPackageName
     /// 包名不在本次检测结果里（不允许凭用户输入构造命令）。
     case packageNotDetected(name: String)
-    /// 来源与可信度不可接受：只有“已验证的 npm 全局安装”提供执行入口。
+    /// 来源与可信度不可接受：只有已验证的 npm 全局或 Pi 用户级安装提供执行入口。
     case sourceNotExecutable(source: InstallSource, confidence: DetectionConfidence)
     /// 本机版本未知，无法判断更新是否有意义。
     case installedVersionUnknown
@@ -258,7 +258,7 @@ enum PiPackageUpdateRefusal: Equatable {
         case .packageNotDetected(let name):
             return "包名 \(name) 不在本次检测结果里：不接受检测结果之外的包名，也不凭用户输入构造命令"
         case .sourceNotExecutable(let source, let confidence):
-            return "来源是 \(source.displayName)（可信度 \(confidence.displayName)）：只有来源为已验证的 npm 全局安装才提供执行入口，"
+            return "来源是 \(source.displayName)（可信度 \(confidence.displayName)）：只有来源为已验证的 npm 全局或 Pi 用户级安装才提供执行入口，"
                 + "其它来源只展示官方命令文本"
         case .installedVersionUnknown:
             return "无法确定该包的本机版本"
@@ -412,7 +412,7 @@ struct PiPackageUpdatePlan: Equatable {
 
     /// 构造计划；任何一项不满足都返回 nil（调用方按 `.unsafeCommand` 等处理）。
     ///
-    /// 前置条件包含来源约束：只有 `npmGlobal` + `verified` 才有计划（= 执行入口）。
+    /// 前置条件包含来源约束：只有已验证的 npm 全局或 Pi 用户级安装才有执行入口。
     /// 其它来源连计划都没有，自然没有执行按钮。
     static func make(
         executablePath: String?,
@@ -422,7 +422,7 @@ struct PiPackageUpdatePlan: Equatable {
         source: InstallSource,
         confidence: DetectionConfidence
     ) -> PiPackageUpdatePlan? {
-        guard let executablePath, isSafeExecutablePath(executablePath) else { return nil }
+        guard let executablePath = PiCLIUpdatePlan.executablePathForExecution(executablePath) else { return nil }
         // 只允许 Pi CLI 自身的可执行文件：可执行文件名字必须是 pi（与 #16 的识别
         // 名称、#21 的 `pi update --self` 一致），因此不可能构造出 `sudo`/`env` 之类的 argv[0]。
         guard (executablePath as NSString).lastPathComponent == piExecutableName else { return nil }
@@ -434,7 +434,7 @@ struct PiPackageUpdatePlan: Equatable {
         if let targetVersion {
             guard let target = SemanticVersion(targetVersion), target.description == targetVersion else { return nil }
         }
-        guard source == .npmGlobal, confidence == .verified else { return nil }
+        guard PiPackageUpdatePlanner.isExecutableSource(source, confidence: confidence) else { return nil }
         let arguments = [commandName, packageSourceSpecPrefix + packageName]
         guard isExpectedArgumentArray(arguments, packageName: packageName) else { return nil }
         guard PiPackageUpdateArgumentPolicy.isSafe(arguments) else { return nil }
@@ -459,11 +459,7 @@ struct PiPackageUpdatePlan: Equatable {
 
     /// 绝对路径、无空白、无 shell 元字符、非空段。
     static func isSafeExecutablePath(_ path: String) -> Bool {
-        guard path.hasPrefix("/"), path.count > 1 else { return false }
-        guard path.unicodeScalars.allSatisfy({ executablePathAllowedCharacters.contains($0) }) else { return false }
-        guard !path.contains("//"), !path.hasSuffix("/") else { return false }
-        let base = (path as NSString).lastPathComponent
-        return !base.isEmpty && base != "." && base != ".."
+        PiCLIUpdatePlan.isSafeExecutablePath(path)
     }
 
     /// 展示用的命令文本；可执行文件路径由调用方用 `LogRedactor` 脱敏。

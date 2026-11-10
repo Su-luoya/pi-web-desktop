@@ -468,7 +468,7 @@ enum PiPackageUpdateRedetection {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: String? = nil
     ) -> [ComponentInstallation] {
-        guard let piPath, !piPath.isEmpty else { return [] }
+        guard let piPath = PiCLIUpdatePlan.executablePathForExecution(piPath) else { return [] }
         let detector = ComponentInstallationDetector(
             commandRunner: commandRunner,
             fileSystem: fileSystem,

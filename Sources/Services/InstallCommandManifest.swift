@@ -174,6 +174,7 @@ enum InstallCommandManifest {
             case .piWeb: return updatePNPMPiWeb
             case .piPackage, .desktopApp: return updatePiPackage
             }
+        case .piManaged: return updatePiPackage
         case .homebrew: return updateHomebrew
         case .nvm: return updateNVM
         case .mise: return updateMise

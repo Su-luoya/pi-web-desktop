@@ -23,7 +23,7 @@ import Foundation
 
 extension UpdateCheckPreferences {
     /// 设置位已生效（GitHub #21）：打开后也只有“没有运行中的 Pi 进程 +
-    /// 已验证的 npm/pnpm 全局安装 + 已验证且更高的目标版本”时才自动执行。
+    /// 已验证的 npm/pnpm 全局安装或官方安装器 + 已验证且更高的目标版本”时才自动执行。
     static let autoUpdatePiBeforeLaunchIsEffective = true
 }
 
@@ -38,7 +38,7 @@ enum PiCLIUpdateRefusal: Equatable {
     case missingInstallation
     /// Pi CLI 识别结果里没有解析出的可执行文件路径。
     case executableUnresolved
-    /// 来源不是已验证的 npm/pnpm 全局安装：自动更新不做，只给手动入口。
+    /// 来源不是已验证的 npm/pnpm 全局安装或官方安装器：只给手动入口。
     case sourceNotVerifiedPackageManager(source: InstallSource, confidence: DetectionConfidence)
     /// 没有可用目标版本（检查结果不是“可更新”或没有版本号）。
     case noTargetVersion
@@ -66,7 +66,7 @@ enum PiCLIUpdateRefusal: Equatable {
         case .executableUnresolved:
             return "没有解析出可用于更新的 Pi CLI 可执行文件"
         case .sourceNotVerifiedPackageManager(let source, let confidence):
-            return "Pi CLI 来源是 \(source.displayName)（可信度 \(confidence.displayName)）；只有来源为已验证的 npm/pnpm 全局安装才允许自动更新，其它来源只提供手动入口"
+            return "Pi CLI 来源是 \(source.displayName)（可信度 \(confidence.displayName)）；只有来源为已验证的 npm/pnpm 全局安装或官方安装器才允许自动更新，其它来源只提供手动入口"
         case .noTargetVersion:
             return "没有可用的目标版本"
         case .targetNotVerified:
@@ -150,7 +150,7 @@ struct PiCLIUpdatePlan: Equatable {
         source: InstallSource,
         confidence: DetectionConfidence
     ) -> PiCLIUpdatePlan? {
-        guard let executablePath, isSafeExecutablePath(executablePath) else { return nil }
+        guard let executablePath = executablePathForExecution(executablePath) else { return nil }
         if let targetVersion {
             guard let target = SemanticVersion(targetVersion), target.description == targetVersion else { return nil }
         }
@@ -167,6 +167,15 @@ struct PiCLIUpdatePlan: Equatable {
         )
     }
 
+    /// 报告和启动缓存里的 Home 路径已脱敏；只在执行边界还原，再做原有安全校验。
+    static func executablePathForExecution(_ path: String?) -> String? {
+        guard let path else { return nil }
+        let expanded = path.hasPrefix("~/")
+            ? NSHomeDirectory() + "/" + String(path.dropFirst(2))
+            : path
+        return isSafeExecutablePath(expanded) ? expanded : nil
+    }
+
     /// 绝对路径、无空白、无 shell 元字符、非空段。路径来自 #16，仍要再校验一次。
     ///
     /// 信任模型（F3，GitHub #121）：应用不固定可执行文件的位置，也不校验它的签名或哈希；
@@ -178,8 +187,7 @@ struct PiCLIUpdatePlan: Equatable {
         guard path.hasPrefix("/"), path.count > 1 else { return false }
         guard path.unicodeScalars.allSatisfy({ executablePathAllowedCharacters.contains($0) }) else { return false }
         guard !path.contains("//"), !path.hasSuffix("/") else { return false }
-        let base = (path as NSString).lastPathComponent
-        return !base.isEmpty && base != "." && base != ".."
+        return path.split(separator: "/").allSatisfy { $0 != "." && $0 != ".." }
     }
 
     /// 展示用的命令文本（参数已固定，因此拼接没有歧义）；路径由调用方脱敏。

@@ -26,7 +26,7 @@ enum PiCLIManualUpdateConfirmation {
             lines.append(UpdateAbandonedAttemptPresenter.confirmationBlock(for: abandonedAttempt))
         }
         lines.append("")
-        lines.append("当前 Pi 进程状态：\(inspection.statusText)")
+        lines.append("当前 Pi 进程状态：\(inspection.records.isEmpty ? inspection.statusText : "检测到 \(inspection.records.count) 个运行中的 Pi 进程（详情如下）")")
         for record in inspection.records {
             lines.append(contentsOf: record.displayLines)
             lines.append("")

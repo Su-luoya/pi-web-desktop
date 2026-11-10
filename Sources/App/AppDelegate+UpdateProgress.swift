@@ -64,6 +64,38 @@ extension AppDelegate {
         return controller
     }
 
+    // MARK: - 更新计划、确认与只读详情
+
+    /// 计划与进程明细复用可滚动的日志区，绝不塞进无高度上限的 NSAlert。
+    func presentUpdateReview(
+        title: String,
+        detail: String,
+        commands: [String] = [],
+        confirm: (() -> Void)? = nil,
+        cancel: (() -> Void)? = nil
+    ) {
+        if let session = updateProgressCenter.session, !session.isFinished {
+            presentUpdateProgressWindow(activating: true)
+            return
+        }
+        updateProgressCenter.begin(title: title, steps: [], requiresConfirmation: confirm != nil)
+        updateProgressCenter.appendLog(logRedactor.redact(detail))
+        if confirm == nil {
+            updateProgressCenter.finish(.skipped(reason: "未执行更新"))
+        }
+        let controller = updateProgressWindowController ?? makeUpdateProgressWindowController()
+        controller.onCopyCommands = commands.isEmpty ? nil : {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(commands.joined(separator: "\n"), forType: .string)
+        }
+        controller.onConfirm = confirm
+        controller.onCancel = confirm == nil ? nil : { [weak self] in
+            cancel?()
+            self?.updateProgressCenter.reset()
+        }
+        controller.present(activating: true)
+    }
+
     // MARK: - 桌面应用自更新（GitHub #175 的流程，进度由这里推给窗口）
 
     /// 桌面应用自更新的固定步骤。它们不是 `UpdateTransactionPhase`：这条路径不走
@@ -88,6 +120,7 @@ extension AppDelegate {
             title: "Pi Web Desktop 更新到 \(version)",
             steps: steps
         )
+        updateProgressWindowController?.onCopyCommands = nil
     }
 
     /// 推进桌面应用自更新的某一步。

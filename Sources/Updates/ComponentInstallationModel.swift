@@ -34,6 +34,8 @@ enum ComponentKind: String, Equatable, CaseIterable {
 enum InstallSource: String, Equatable, CaseIterable {
     case npmGlobal = "npm-global"
     case pnpmGlobal = "pnpm-global"
+    /// Pi 自己维护的用户扩展包目录（`~/.pi/agent/npm/node_modules`）。
+    case piManaged = "pi-managed"
     case homebrew
     /// nvm 管理的 Node 版本目录（`versions/node/<版本>/…`）。
     case nvm
@@ -51,6 +53,7 @@ enum InstallSource: String, Equatable, CaseIterable {
         switch self {
         case .npmGlobal: return "npm 全局"
         case .pnpmGlobal: return "pnpm 全局"
+        case .piManaged: return "Pi 管理"
         case .homebrew: return "Homebrew"
         case .nvm: return "nvm"
         case .mise: return "mise"

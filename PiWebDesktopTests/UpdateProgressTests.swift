@@ -1,3 +1,4 @@
+import Cocoa
 import XCTest
 
 /// GitHub #219：更新进度窗口的模型与窗口渲染测试。
@@ -244,7 +245,210 @@ final class UpdateProgressTests: XCTestCase {
         _ = XCTAssertNoThrow(environment.reportPhase(.piWeb, phase(.preflight, .succeeded)))
     }
 
+    // MARK: - 确认与连续更新
+
+    func testConfirmationWaitsForExplicitActionAndKeepsReviewInSameSession() {
+        let center = UpdateProgressCenter()
+        center.begin(title: "立即更新 Pi CLI", steps: [], requiresConfirmation: true, now: referenceDate)
+        center.appendLog("更新计划与进程详情")
+        center.apply(phase: phase(.preflight, .succeeded), component: .piCLI)
+        center.finish(history: history(component: .piCLI))
+        XCTAssertTrue(center.session?.requiresConfirmation == true)
+        XCTAssertTrue(center.session?.steps.isEmpty == true)
+        XCTAssertFalse(center.session?.isFinished == true)
+
+        let confirmedAt = referenceDate.addingTimeInterval(60)
+        center.confirm(now: confirmedAt)
+        XCTAssertFalse(center.session?.requiresConfirmation == true)
+        XCTAssertEqual(center.session?.startedAt, confirmedAt)
+        XCTAssertEqual(center.session?.logLines, ["更新计划与进程详情"])
+        XCTAssertEqual(center.session?.steps.map(\.state), [.running, .pending, .pending, .pending])
+
+        center.apply(phase: phase(.preflight, .succeeded), component: .piCLI)
+        center.confirm(now: confirmedAt.addingTimeInterval(10))
+        XCTAssertEqual(center.session?.startedAt, confirmedAt, "重复确认不能重置进度")
+        XCTAssertEqual(center.session?.steps.first?.state, .succeeded)
+    }
+
+    func testNewTransactionReplacesFinishedSession() {
+        let center = UpdateProgressCenter()
+        center.apply(phase: phase(.preflight, .succeeded), component: .piWeb, now: referenceDate)
+        center.appendLog("上一轮日志")
+        center.finish(history: history(), now: referenceDate)
+        center.apply(
+            phase: phase(.preflight, .succeeded), component: .piCLI,
+            now: referenceDate.addingTimeInterval(10)
+        )
+        XCTAssertEqual(center.session?.title, "Pi CLI 更新")
+        XCTAssertFalse(center.session?.isFinished == true)
+        XCTAssertEqual(center.session?.logLines, [])
+        XCTAssertEqual(center.session?.steps.map(\.state), [.succeeded, .running, .pending, .pending])
+    }
+
+    func testBatchDoesNotFinishAtFirstPackageAndKeepsLogsBetweenPackages() throws {
+        let center = UpdateProgressCenter()
+        let first = UpdateTransactionComponent.piPackage("extension-one")
+        let second = UpdateTransactionComponent.piPackage("extension-two")
+        center.begin(title: "确认更新", steps: [], requiresConfirmation: true, now: referenceDate)
+        center.appendLog("整批更新计划")
+        var publishedLogs: [String] = []
+        center.onChange = { publishedLogs = $0?.logLines ?? [] }
+        center.beginBatch(components: [first, second], now: referenceDate.addingTimeInterval(10))
+        XCTAssertEqual(publishedLogs, ["整批更新计划"], "发布的第一份批量快照就必须包含确认详情")
+        XCTAssertFalse(center.session?.requiresConfirmation == true)
+
+        center.apply(phase: phase(.preflight, .succeeded), component: first)
+        center.apply(phase: phase(.commit, .succeeded), component: first)
+        center.appendLog("第一个包完成")
+        center.finish(history: history(component: first))
+        XCTAssertFalse(center.session?.isFinished == true, "单包历史不能提前结束整批更新")
+
+        center.apply(phase: phase(.preflight, .succeeded), component: second)
+        XCTAssertEqual(center.session?.title, "Pi 扩展包 extension-two 更新（2/2）")
+        XCTAssertEqual(center.session?.logLines, ["整批更新计划", "第一个包完成"])
+        XCTAssertEqual(center.session?.steps.map(\.state), [.succeeded, .running, .pending, .pending])
+        center.finish(history: history(component: second))
+        XCTAssertFalse(center.session?.isFinished == true)
+
+        let record = PiPackageUpdateCommandRecord(exitCode: 0, duration: 1, failure: nil)
+        let plans = try ["extension-one", "extension-two"].map { name in
+            try XCTUnwrap(PiPackageUpdatePlan.make(
+                executablePath: "/opt/homebrew/bin/pi", packageName: name,
+                installedVersion: "1.0.0", targetVersion: "2.0.0",
+                source: .npmGlobal, confidence: .verified
+            ))
+        }
+        center.finish(batch: PiPackageUpdateBatchOutcome(outcomes: plans.map {
+            .succeeded(plan: $0, newVersion: "2.0.0", record: record)
+        }))
+        XCTAssertEqual(center.session?.outcome, .succeeded(version: nil))
+    }
+
+    func testRefusedBatchDoesNotRemainRunning() throws {
+        let center = UpdateProgressCenter()
+        let plan = try XCTUnwrap(PiPackageUpdatePlan.make(
+            executablePath: "/opt/homebrew/bin/pi", packageName: "extension-one",
+            installedVersion: "1.0.0", targetVersion: "2.0.0",
+            source: .npmGlobal, confidence: .verified
+        ))
+        center.beginBatch(components: [.piPackage(plan.packageName)])
+        center.finish(batch: PiPackageUpdateBatchOutcome(outcomes: [
+            .refused(plan: plan, reason: .processStateUnknown(.enumerationFailed))
+        ]))
+        XCTAssertTrue(center.session?.isFinished == true)
+        XCTAssertFalse(center.session?.steps.contains { $0.state == .running } == true)
+        XCTAssertEqual(center.session?.outcome, .skipped(reason: "0/1 个扩展包更新完成；其余失败或未执行，详见过程日志"))
+    }
+
+    func testHistoryFromDifferentComponentCannotFinishCurrentUpdate() {
+        let center = UpdateProgressCenter()
+        center.apply(phase: phase(.preflight, .succeeded), component: .piCLI)
+        center.finish(history: history(component: .piWeb))
+        XCTAssertFalse(center.session?.isFinished == true)
+        center.finish(history: history(component: .piCLI))
+        XCTAssertTrue(center.session?.isFinished == true)
+    }
+
     // MARK: - 窗口渲染
+
+    func testLongConfirmationStaysInScrollableWindowWithVisibleActions() throws {
+        let center = UpdateProgressCenter()
+        center.begin(title: "立即更新 Pi CLI", steps: [], requiresConfirmation: true, now: referenceDate)
+        let detail = (1...19).map { index in
+            "进程 PID：\(4000 + index)\n父进程 PID：4000\n启动时间：夹具时间\n判定依据：JS 运行时的 argv[0]（进程标题）是 pi\n真实镜像路径：~/.local/bin/node\n命令摘要：pi\n"
+        }.joined(separator: "\n")
+        center.appendLog(detail)
+        let controller = UpdateProgressWindowController()
+        let window = try XCTUnwrap(controller.window)
+        let initialSize = window.frame.size
+        controller.render(center.session)
+        let content = try XCTUnwrap(window.contentView)
+        content.layoutSubtreeIfNeeded()
+        XCTAssertEqual(window.frame.size, initialSize, "长进程列表不得把窗口撑出屏幕")
+        XCTAssertEqual(controller.logText, detail.trimmingCharacters(in: .whitespacesAndNewlines))
+        XCTAssertTrue(controller.isAwaitingConfirmation)
+        XCTAssertEqual(controller.closeButtonTitle, "取消")
+        XCTAssertTrue(controller.statusLabelText.contains("等待确认"))
+        XCTAssertEqual(controller.elapsedLabelText, "尚未执行更新")
+        let scroll = try XCTUnwrap(content.subviews.compactMap { $0 as? NSScrollView }.first)
+        XCTAssertTrue(scroll.hasVerticalScroller)
+        XCTAssertLessThan(scroll.frame.height, window.frame.height)
+        let document = try XCTUnwrap(scroll.documentView as? NSTextView)
+        document.layoutManager?.ensureLayout(for: try XCTUnwrap(document.textContainer))
+        XCTAssertGreaterThan(document.frame.height, scroll.contentSize.height)
+        XCTAssertEqual(scroll.contentView.bounds.minY, 0, "确认详情从头显示，不自动滚到底部")
+
+        let footer = try XCTUnwrap(content.subviews.compactMap { $0 as? NSStackView }.first {
+            $0.arrangedSubviews.contains { ($0 as? NSButton)?.title == "确认更新" }
+        })
+        let confirm = try XCTUnwrap(footer.arrangedSubviews.compactMap { $0 as? NSButton }.first { $0.title == "确认更新" })
+        let cancel = try XCTUnwrap(footer.arrangedSubviews.compactMap { $0 as? NSButton }.first { $0.title == "取消" })
+        for button in [confirm, cancel] {
+            XCTAssertFalse(button.isHidden)
+            XCTAssertTrue(content.bounds.contains(button.convert(button.bounds, to: content)))
+        }
+        XCTAssertEqual(cancel.keyEquivalent, "\r")
+        XCTAssertNotEqual(confirm.keyEquivalent, "\r", "回车不得误触发更新")
+    }
+
+    func testConfirmRunsOnceAndContinuesInSameWindowWithoutCancellation() throws {
+        let center = UpdateProgressCenter()
+        center.begin(title: "立即更新 Pi CLI", steps: [], requiresConfirmation: true, now: referenceDate)
+        let controller = UpdateProgressWindowController()
+        controller.render(center.session)
+        let window = try XCTUnwrap(controller.window)
+        var confirmed = 0
+        var cancelled = 0
+        controller.onConfirm = {
+            confirmed += 1
+            center.confirm(now: self.referenceDate.addingTimeInterval(1))
+            controller.render(center.session)
+        }
+        controller.onCancel = { cancelled += 1 }
+        controller.confirmUpdate(nil)
+        controller.confirmUpdate(nil)
+        XCTAssertEqual(confirmed, 1)
+        XCTAssertFalse(controller.isAwaitingConfirmation)
+        XCTAssertEqual(controller.closeButtonTitle, "关闭")
+        XCTAssertEqual(controller.stepRowCount, 4)
+        XCTAssertTrue(controller.window === window)
+        controller.windowWillClose(Notification(name: NSWindow.willCloseNotification, object: window))
+        XCTAssertEqual(cancelled, 0, "执行中关闭窗口只隐藏进度，不撤销更新")
+    }
+
+    func testClosingPendingReviewCancelsOnceWithoutConfirming() throws {
+        let center = UpdateProgressCenter()
+        center.begin(title: "确认更新", steps: [], requiresConfirmation: true)
+        let controller = UpdateProgressWindowController()
+        controller.render(center.session)
+        var confirmed = 0
+        var cancelled = 0
+        controller.onConfirm = { confirmed += 1 }
+        controller.onCancel = { cancelled += 1; center.reset() }
+        let notification = Notification(name: NSWindow.willCloseNotification, object: controller.window)
+        controller.windowWillClose(notification)
+        controller.windowWillClose(notification)
+        controller.confirmUpdate(nil)
+        XCTAssertEqual(confirmed, 0)
+        XCTAssertEqual(cancelled, 1)
+        XCTAssertNil(center.session)
+    }
+
+    func testNewSessionClearsPreviousReviewActions() {
+        let center = UpdateProgressCenter()
+        center.begin(title: "确认更新", steps: [], requiresConfirmation: true, now: referenceDate)
+        let controller = UpdateProgressWindowController()
+        controller.render(center.session)
+        controller.onConfirm = {}
+        controller.onCancel = {}
+        controller.onCopyCommands = {}
+        center.begin(title: "Pi CLI 更新", steps: UpdateProgressPlan.steps(), now: referenceDate.addingTimeInterval(1))
+        controller.render(center.session)
+        XCTAssertNil(controller.onConfirm)
+        XCTAssertNil(controller.onCancel)
+        XCTAssertNil(controller.onCopyCommands)
+        XCTAssertFalse(controller.isAwaitingConfirmation)
+    }
 
     /// 窗口按快照整块重绘：标题、阶段行、日志与底部状态行都来自模型。
     func testWindowRendersSessionSnapshot() throws {

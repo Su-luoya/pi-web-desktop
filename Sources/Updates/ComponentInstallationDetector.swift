@@ -74,6 +74,7 @@ struct ComponentInstallationDetector {
     struct PiPackageEntry: Equatable {
         var name: String
         var version: String?
+        var installedPath: String? = nil
     }
 
     // MARK: - 入口
@@ -103,11 +104,16 @@ struct ComponentInstallationDetector {
                 "未验证原因：没有可解析的包列表，降级为 unknown（不猜测包名与版本）"
             ])]
         }
-        let parsed = Self.parsePiList(output)
+        let cleanOutput = Self.cleanPiListOutput(output)
+        let parsed = Self.parsePiList(cleanOutput)
         guard !parsed.isEmpty else {
+            if cleanOutput.trimmingCharacters(in: .whitespacesAndNewlines) == "No packages installed."
+                || cleanOutput.components(separatedBy: .newlines).contains(where: { $0 == "User packages:" || $0 == "Project packages:" }) {
+                return []
+            }
             return [Self.unknownPiPackage(evidence: [
-                "`pi list` 输出了 \(Self.lineCount(of: output)) 行，但没有可解析的“包名@版本”行",
-                "未验证原因：输出形态不符合 `包名@版本` / `包名 版本`，降级为 unknown（不猜测包名与版本）"
+                "`pi list` 输出了 \(Self.lineCount(of: output)) 行，但没有可解析的包条目",
+                "未验证原因：输出形态不符合 npm 包来源或旧版“包名@版本”列表，降级为 unknown（不猜测包名与版本）"
             ])]
         }
         let roots = packageManagerRoots()
@@ -137,7 +143,8 @@ struct ComponentInstallationDetector {
 
         // 2. 最近一层 package.json（name/version/bin）。
         let analysisPath = (probe.resolvedPath ?? probe.executablePath).map(Self.normalizedPath)
-        let metadata = nearestPackageMetadata(startingAt: analysisPath)
+        let managedMetadata = request.kind == .piCLI ? managedCLIMetadata(launcherPath: analysisPath) : nil
+        let metadata = managedMetadata ?? nearestPackageMetadata(startingAt: analysisPath)
         if let metadata {
             evidence.append(contentsOf: metadata.evidence)
         } else if probe.executablePath != nil {
@@ -162,7 +169,13 @@ struct ComponentInstallationDetector {
         ) ?? roots.npmRoot
 
         // 4. 来源判定（纯规则，输入是上面收集到的证据组合）。
-        let verdict = ComponentSourceResolver.resolve(ComponentSourceEvidence(
+        let verdict = managedMetadata.map { _ in
+            ComponentSourceVerdict(
+                source: .officialInstaller,
+                confidence: .verified,
+                evidence: ["Pi 官方安装器：启动器、install/current-version、活动 release 的包名/版本与可执行文件已核对"]
+            )
+        } ?? ComponentSourceResolver.resolve(ComponentSourceEvidence(
             kind: request.kind,
             executablePath: probe.executablePath,
             resolvedPath: probe.resolvedPath,
@@ -271,10 +284,17 @@ struct ComponentInstallationDetector {
         var sourceConfidence: DetectionConfidence = .unknown
         var sourceEvidence: [String] = []
 
-        let rootCandidates: [(root: String?, source: InstallSource, evidence: String?)] = [
+        var rootCandidates: [(root: String?, source: InstallSource, evidence: String?)] = [
+            ((homeDirectory as NSString).appendingPathComponent(".pi/agent/npm/node_modules"), .piManaged, "Pi 用户扩展包目录"),
             (roots.pnpmRoot, .pnpmGlobal, roots.pnpmRootEvidence),
             (roots.npmRoot, .npmGlobal, roots.npmRootEvidence)
         ]
+        if let installedPath = entry.installedPath {
+            rootCandidates = rootCandidates.filter { candidate in
+                guard let root = candidate.root else { return false }
+                return Self.normalizedPath(installedPath) == (root as NSString).appendingPathComponent(entry.name)
+            }
+        }
         for candidate in rootCandidates {
             guard let root = candidate.root, !root.isEmpty else { continue }
             let directory = (root as NSString).appendingPathComponent(entry.name)
@@ -285,12 +305,12 @@ struct ComponentInstallationDetector {
             if let rootEvidence = candidate.evidence {
                 sourceEvidence.append("\(candidate.source.displayName)：\(rootEvidence)")
             }
-            sourceEvidence.append("包目录 \(directory) 在 \(candidate.source.displayName) 全局 root 下")
+            sourceEvidence.append("包目录 \(directory) 在 \(candidate.source.displayName) root 下")
             break
         }
         evidence.append(contentsOf: sourceEvidence)
 
-        var packageName: String? = entry.name
+        let packageName = entry.name
         var packageVersion: String?
         var executablePath: String?
         var packageJSONPath: String?
@@ -299,8 +319,11 @@ struct ComponentInstallationDetector {
             if let metadata = metadata(inDirectory: packageDirectory) {
                 packageJSONPath = metadata.path
                 packageJSONEvidence = metadata.evidence
-                if let name = metadata.name { packageName = name }
-                packageVersion = metadata.version
+                if metadata.name != entry.name {
+                    sourceConfidence = .inferred
+                    packageJSONEvidence.append("未验证原因：package.json name 与 `pi list` 报告的包名不一致")
+                }
+                packageVersion = metadata.version.flatMap { SemanticVersion($0)?.description }
                 if metadata.binTargets.count == 1, let bin = metadata.binTargets.first {
                     let candidate = (metadata.directory as NSString).appendingPathComponent(bin.value)
                     if pathExists(candidate) {
@@ -312,7 +335,7 @@ struct ComponentInstallationDetector {
                 packageJSONEvidence.append("package.json：包目录 \(packageDirectory) 内没有可读的 package.json")
             }
         } else {
-            evidence.append("npm/pnpm 全局 root 下没有找到同名包目录：路径与来源无法确认")
+            evidence.append("Pi 管理目录及 npm/pnpm 全局 root 下没有找到同名包目录：路径与来源无法确认")
         }
         evidence.append(contentsOf: packageJSONEvidence)
 
@@ -640,6 +663,22 @@ struct ComponentInstallationDetector {
         return nil
     }
 
+    /// 官方启动器不在 npm 包内，需用活动 release 的包元数据交叉验证。
+    private func managedCLIMetadata(launcherPath: String?) -> PackageMetadata? {
+        guard let launcherPath, (launcherPath as NSString).lastPathComponent == "pi" else { return nil }
+        let bin = (launcherPath as NSString).deletingLastPathComponent
+        guard (bin as NSString).lastPathComponent == "bin" else { return nil }
+        let install = ((bin as NSString).deletingLastPathComponent as NSString).appendingPathComponent("install")
+        guard let version = trimmed(fileSystem.readText(atPath: install + "/current-version")),
+              SemanticVersion(version)?.description == version else { return nil }
+        let release = install + "/releases/" + version + "/node_modules"
+        guard fileSystem.isExecutableFile(atPath: release + "/.bin/pi"),
+              let metadata = metadata(inDirectory: release + "/" + InstallCommandManifest.piCLIPackageName),
+              metadata.name == InstallCommandManifest.piCLIPackageName,
+              metadata.version == version else { return nil }
+        return metadata
+    }
+
     private func metadata(inDirectory directory: String) -> PackageMetadata? {
         let candidate = (directory as NSString).appendingPathComponent("package.json")
         guard let text = fileSystem.readText(atPath: candidate) else { return nil }
@@ -740,47 +779,53 @@ struct ComponentInstallationDetector {
 
     // MARK: - `pi list` 解析
 
-    /// `pi list` 的接受形态（逐行解析，忽略空行与 `#` 注释行）：
-    /// - `name@1.2.3`、`@scope/name@1.2.3`
-    /// - `name 1.2.3`、`@scope/name 1.2.3`
-    ///
-    /// 只有同时给出包名与可解析版本的整行才算一个条目；无法解析的行被计数但不
-    /// 猜测。输出里没有任何可解析行时返回空数组，调用方降级为 unknown。
+    /// 现代列表提供来源和安装目录，版本由 package.json 核对；保留旧版版本行解析。
+    /// 项目包与带版本约束的包不进入用户级更新，避免错误工作目录或绕过版本固定。
     static func parsePiList(_ output: String) -> [PiPackageEntry] {
         var entries: [PiPackageEntry] = []
-        // `pi` 子进程输出异常巨大时的兕底（审计次要）：条目上限与历史库同量级，
-        // 超过后停止解析，避免 entries 无界增长。
+        var userPackages = true
+        var pendingEntry: Int?
         let maximumEntries = 4096
-        for rawLine in output.components(separatedBy: .newlines) {
+        for rawLine in cleanPiListOutput(output).components(separatedBy: .newlines) {
             if entries.count >= maximumEntries { break }
             let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+            if line == "User packages:" || line == "Global packages:" {
+                userPackages = true
+                pendingEntry = nil
+                continue
+            }
+            if line == "Project packages:" {
+                userPackages = false
+                pendingEntry = nil
+                continue
+            }
+            guard userPackages, !line.isEmpty, !line.hasPrefix("#") else { continue }
+            if let index = pendingEntry, line.hasPrefix("/"), rawLine.hasPrefix("    ") {
+                entries[index].installedPath = line
+                pendingEntry = nil
+                continue
+            }
+            pendingEntry = nil
             let tokens = line.split(whereSeparator: { $0.isWhitespace }).map(String.init)
             guard let head = tokens.first else { continue }
-            // 审计次要：行首 token 必须是合法包名（或 `name@version` 形态且名段
-            // 合法），否则整行不是条目。旧实现按 token 顺序宽松匹配，`1.2.3
-            // package.json` 这类版本在前的行也会产出 name=`package.json` 的假条目。
-            let headSplit = splitNameVersion(head)
-            var name = headSplit?.name ?? (isPackageName(head) ? head : nil)
-            var version = headSplit?.version
-            guard let headName = name, isPackageName(headName) else { continue }
-            for token in tokens.dropFirst() {
-                if version == nil, let split = splitNameVersion(token) {
-                    if let parsed = split.version { version = parsed }
-                    continue
-                }
-                if version == nil, let parsed = SemanticVersion(token) {
-                    version = parsed.description
-                    continue
-                }
-                if name == nil, isPackageName(token) {
-                    name = token
-                }
+            if head.hasPrefix("npm:") {
+                let name = String(head.dropFirst(4))
+                guard isPackageName(name), tokens.count == 1 || tokens == [head, "(filtered)"] else { continue }
+                entries.append(PiPackageEntry(name: name, version: nil))
+                pendingEntry = entries.count - 1
+                continue
             }
-            guard let name, let version else { continue }
-            entries.append(PiPackageEntry(name: name, version: version))
+            if tokens.count == 1, let entry = splitNameVersion(head) {
+                entries.append(entry)
+            } else if tokens.count == 2, isPackageName(head), let version = SemanticVersion(tokens[1]) {
+                entries.append(PiPackageEntry(name: head, version: version.description))
+            }
         }
         return entries
+    }
+
+    private static func cleanPiListOutput(_ output: String) -> String {
+        output.replacingOccurrences(of: "\u{001B}\\[[0-9;]*m", with: "", options: .regularExpression)
     }
 
     /// 拆 `[scope/]name@版本`；返回的版本是不可解析的字符串时也要保留，

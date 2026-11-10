@@ -20,6 +20,11 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
     var onCopyDiagnostics: (() -> Void)?
     /// 窗口关闭（自动关闭或用户点关闭）后回调，让 `AppDelegate` 释放引用。
     var onClose: (() -> Void)?
+    var onConfirm: (() -> Void)?
+    var onCancel: (() -> Void)?
+    var onCopyCommands: (() -> Void)? {
+        didSet { commandsButton.isHidden = onCopyCommands == nil }
+    }
 
     private let titleLabel = NSTextField(labelWithString: "更新进度")
     private let statusLabel = NSTextField(labelWithString: "")
@@ -30,6 +35,8 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
     private let logScrollView = NSScrollView()
     private let elapsedLabel = NSTextField(labelWithString: "")
     private let copyButton = NSButton(title: "复制诊断", target: nil, action: nil)
+    private let commandsButton = NSButton(title: "复制命令", target: nil, action: nil)
+    private let confirmButton = NSButton(title: "确认更新", target: nil, action: nil)
     private let closeButton = NSButton(title: "关闭", target: nil, action: nil)
 
     private var session: UpdateProgressSession?
@@ -67,7 +74,20 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
 
     /// 渲染一份快照。nil 表示清空（没有进行中也没有最近一次更新）。
     func render(_ session: UpdateProgressSession?) {
+        if session?.startedAt != self.session?.startedAt {
+            onCopyCommands = nil
+        }
         self.session = session
+        let awaitingConfirmation = session?.requiresConfirmation == true
+        confirmButton.isHidden = !awaitingConfirmation
+        confirmButton.isEnabled = awaitingConfirmation
+        closeButton.title = awaitingConfirmation ? "取消" : "关闭"
+        logCaption.stringValue = awaitingConfirmation ? "更新计划与进程详情（已脱敏）" : "过程日志（已脱敏）"
+        progressBar.isHidden = session?.steps.isEmpty != false
+        if !awaitingConfirmation {
+            onConfirm = nil
+            onCancel = nil
+        }
         guard let session else {
             titleLabel.stringValue = "更新进度"
             titleLabel.toolTip = nil
@@ -88,9 +108,9 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
         renderSteps(session.steps)
         progressBar.doubleValue = Self.progressFraction(for: session)
         renderLog(session)
-        elapsedLabel.stringValue = session.statusLine(at: Date())
+        elapsedLabel.stringValue = awaitingConfirmation ? "尚未执行更新" : session.statusLine(at: Date())
         elapsedLabel.toolTip = elapsedLabel.stringValue
-        if session.isFinished {
+        if session.isFinished || awaitingConfirmation {
             stopTimer()
         } else {
             startTimer()
@@ -184,6 +204,14 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
         copyButton.target = self
         copyButton.action = #selector(copyDiagnostics(_:))
         copyButton.bezelStyle = .rounded
+        commandsButton.target = self
+        commandsButton.action = #selector(copyCommands(_:))
+        commandsButton.bezelStyle = .rounded
+        commandsButton.isHidden = true
+        confirmButton.target = self
+        confirmButton.action = #selector(confirmUpdate(_:))
+        confirmButton.bezelStyle = .rounded
+        confirmButton.isHidden = true
         closeButton.target = self
         closeButton.action = #selector(closeWindow(_:))
         closeButton.bezelStyle = .rounded
@@ -193,7 +221,7 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
         separator.boxType = .separator
         separator.translatesAutoresizingMaskIntoConstraints = false
 
-        let footer = NSStackView(views: [elapsedLabel, NSView(), copyButton, closeButton])
+        let footer = NSStackView(views: [elapsedLabel, NSView(), copyButton, commandsButton, confirmButton, closeButton])
         footer.orientation = .horizontal
         footer.spacing = 8
         footer.alignment = .centerY
@@ -294,11 +322,18 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
         logTextView.string = text
         // 占位行用次要色：空面板上的一行提示不该看着像一条真日志。
         logTextView.textColor = session.logLines.isEmpty ? .tertiaryLabelColor : .labelColor
-        logTextView.scrollToEndOfDocument(nil)
+        if session.requiresConfirmation {
+            logTextView.scrollToBeginningOfDocument(nil)
+        } else {
+            logTextView.scrollToEndOfDocument(nil)
+        }
     }
 
     /// 顶部状态行：进行中显示当前阶段，结束显示结论。
     private static func statusText(for session: UpdateProgressSession) -> String {
+        if session.requiresConfirmation {
+            return "等待确认；尚未执行更新。回车或关闭窗口均取消。"
+        }
         if let outcome = session.outcome {
             return outcome.headline
         }
@@ -348,7 +383,23 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
         onCopyDiagnostics?()
     }
 
+    @objc private func copyCommands(_ sender: Any?) {
+        onCopyCommands?()
+    }
+
+    @objc func confirmUpdate(_ sender: Any?) {
+        guard session?.requiresConfirmation == true, let confirm = onConfirm else { return }
+        onConfirm = nil
+        onCancel = nil
+        confirmButton.isEnabled = false
+        confirm()
+    }
+
     @objc private func closeWindow(_ sender: Any?) {
+        window?.performClose(nil)
+    }
+
+    override func cancelOperation(_ sender: Any?) {
         window?.performClose(nil)
     }
 
@@ -356,6 +407,10 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
 
     func windowWillClose(_ notification: Notification) {
         stopTimer()
+        let cancel = onCancel
+        onConfirm = nil
+        onCancel = nil
+        cancel?()
         onClose?()
     }
 
@@ -386,4 +441,6 @@ extension UpdateProgressWindowController {
     }
     var progressBarFraction: Double { progressBar.doubleValue }
     var logText: String { logTextView.string }
+    var isAwaitingConfirmation: Bool { !confirmButton.isHidden }
+    var closeButtonTitle: String { closeButton.title }
 }

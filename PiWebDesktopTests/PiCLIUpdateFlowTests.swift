@@ -226,7 +226,7 @@ final class PiCLIUpdateFlowTests: XCTestCase {
     }
 
     func testOnlyVerifiedPackageManagerSourceAllowsAutomaticUpdate() {
-        for source in [InstallSource.homebrew, .gitCheckout, .localPath, .unknown, .nvm, .mise, .officialInstaller] {
+        for source in [InstallSource.homebrew, .gitCheckout, .localPath, .unknown, .nvm, .mise] {
             let decision = PiCLIUpdatePlanner.decide(input(installation: installation(source: source)))
             guard case .manualOnly(let commandText, let reason) = decision else {
                 return XCTFail("来源 \(source) 不应自动更新，实际是 \(decision)")
@@ -344,6 +344,18 @@ final class PiCLIUpdateFlowTests: XCTestCase {
     }
 
     // MARK: - 2. 进程保护优先于自动更新
+
+    func testVerifiedOfficialInstallerUsesTheSameSelfUpdateGuards() {
+        let managed = installation(source: .officialInstaller)
+        XCTAssertTrue(PiCLIUpdatePlanner.decide(input(installation: managed)).isAutomatic)
+        XCTAssertFalse(PiCLIUpdatePlanner.decide(input(
+            installation: installation(source: .officialInstaller, confidence: .inferred)
+        )).isAutomatic)
+        XCTAssertFalse(PiCLIUpdatePlanner.decide(input(installation: managed, targetOrigin: .cachedFallback)).isAutomatic)
+        XCTAssertNotNil(PiCLIUpdatePlanner.decide(input(
+            installation: managed, processes: .runningProcesses([processRecord()])
+        )).deferral)
+    }
 
     func testAllPreconditionsMetWithoutProcessesIsAutomatic() {
         let decision = PiCLIUpdatePlanner.decide(input(installation: installation()))
@@ -610,6 +622,39 @@ final class PiCLIUpdateFlowTests: XCTestCase {
 
     // MARK: - 4. 手动路径
 
+    func testRedactedHomePathsRemainExecutableAtTheUpdateBoundary() throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let path = home + "/.pi/agent/bin/pi"
+        let report = installation(executablePath: path).redacted(
+            using: DependencyPathRedactor(homeDirectory: home)
+        )
+        XCTAssertEqual(report.executablePath, "~/.pi/agent/bin/pi")
+
+        let manual = try XCTUnwrap(PiCLIUpdatePlanner.manualPlan(installation: report, targetVersion: "0.4.2"))
+        XCTAssertEqual(manual.executablePath, path)
+        XCTAssertEqual(PiCLIUpdatePlanner.decide(input(installation: report)).plan?.executablePath, path)
+        XCTAssertEqual(report.executablePath, "~/.pi/agent/bin/pi", "执行不能把报告里的展示路径改回绝对路径")
+        XCTAssertFalse(manual.confirmationText(redactingWith: LogRedactor(homeDirectory: home)).contains(home))
+
+        let package = try XCTUnwrap(PiPackageUpdatePlan.make(
+            executablePath: report.executablePath,
+            packageName: "pi-extension-demo",
+            installedVersion: "1.0.0",
+            targetVersion: "2.0.0",
+            source: .npmGlobal,
+            confidence: .verified
+        ))
+        XCTAssertEqual(package.executablePath, path)
+        XCTAssertEqual(
+            PiPackageUpdatePlanner.manualCommandText(piExecutablePath: report.executablePath, packageName: package.packageName),
+            path + " update npm:pi-extension-demo"
+        )
+        XCTAssertEqual(
+            PiPackageUpdatePlanner.nonNPMGlobalManualCommandText(piExecutablePath: report.executablePath),
+            path + " update --extensions"
+        )
+    }
+
     func testManualPlanOnlyNeedsResolvedExecutableAndVersion() {
         let manual = PiCLIUpdatePlanner.manualPlan(
             installation: installation(source: .gitCheckout, confidence: .inferred),
@@ -649,6 +694,10 @@ final class PiCLIUpdateFlowTests: XCTestCase {
     func testUnsafeExecutablePathsAreRejected() {
         let unsafe = [
             "pi",
+            "~other/bin/pi",
+            "~/../bin/pi",
+            "/usr/local/../bin/pi",
+            "/usr/local/./bin/pi",
             "/usr/local/bin/pi ",
             " /usr/local/bin/pi",
             "/usr/local/bin/pi;rm -rf /",
@@ -844,6 +893,23 @@ final class PiCLIUpdateFlowTests: XCTestCase {
         XCTAssertTrue(text.contains("风险说明"))
         XCTAssertTrue(text.contains("不会向它们发送任何信号"))
         XCTAssertTrue(text.contains("不保证成功，也不做回滚"))
+    }
+
+    func testManualConfirmationListsManyProcessesWithoutDuplicatingSummary() {
+        let records = (1...19).map { processRecord(pid: pid_t(4000 + $0)) }
+        let text = PiCLIManualUpdateConfirmation.text(
+            plan: PiCLIUpdatePlanner.manualPlan(installation: installation(), targetVersion: "0.4.2"),
+            commandText: nil,
+            inspection: .runningProcesses(records),
+            redactingWith: LogRedactor(homeDirectory: fixtureHome)
+        )
+        XCTAssertTrue(text.contains("检测到 19 个运行中的 Pi 进程（详情如下）"))
+        for record in records {
+            XCTAssertEqual(text.components(separatedBy: "进程 PID：\(record.pid)\n").count - 1, 1)
+            XCTAssertFalse(text.contains(record.shortText), "摘要不得再重复整份进程表")
+        }
+        XCTAssertFalse(text.contains(fixtureHome))
+        XCTAssertTrue(text.contains("风险说明"))
     }
 
     func testDecisionLogLinesAreRedacted() {

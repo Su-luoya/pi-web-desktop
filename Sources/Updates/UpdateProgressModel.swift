@@ -93,6 +93,7 @@ struct UpdateProgressSession: Equatable {
     var logLines: [String] = []
     var finishedAt: Date?
     var outcome: UpdateProgressOutcome?
+    var requiresConfirmation = false
 
     /// 日志行上限：足够看清一次更新，又不会让窗口无限增长。
     static let maximumLogLines = 400
@@ -141,11 +142,42 @@ final class UpdateProgressCenter {
     private(set) var session: UpdateProgressSession?
     /// 快照变化（开始、阶段变化、新日志、结束、清空）时在主线程回调。
     var onChange: ((UpdateProgressSession?) -> Void)?
+    private var transactionComponent: UpdateTransactionComponent?
+    private var batchComponents: [UpdateTransactionComponent] = []
 
-    /// 开始一次新会话。已有会话时直接替换：同一时刻只显示一次更新，
-    /// 四类更新本来就有各自的互斥门控。
-    func begin(title: String, steps: [UpdateProgressStep], now: Date = Date()) {
-        session = UpdateProgressSession(title: title, startedAt: now, steps: steps)
+    /// 开始一次新会话。已有会话时直接替换。
+    func begin(
+        title: String,
+        steps: [UpdateProgressStep],
+        requiresConfirmation: Bool = false,
+        now: Date = Date()
+    ) {
+        transactionComponent = nil
+        batchComponents = []
+        session = UpdateProgressSession(
+            title: title, startedAt: now, steps: steps,
+            requiresConfirmation: requiresConfirmation
+        )
+        publish()
+    }
+
+    /// 等待确认不计入安装耗时；只允许确认一次。
+    func confirm(now: Date = Date()) {
+        guard session?.requiresConfirmation == true else { return }
+        session?.requiresConfirmation = false
+        session?.startedAt = now
+        session?.steps = UpdateProgressPlan.steps()
+        publish()
+    }
+
+    func beginBatch(components: [UpdateTransactionComponent], now: Date = Date()) {
+        let logs = session?.requiresConfirmation == true ? session?.logLines ?? [] : []
+        transactionComponent = nil
+        batchComponents = components
+        session = UpdateProgressSession(
+            title: "Pi 扩展包更新（共 \(components.count) 个）", startedAt: now,
+            steps: UpdateProgressPlan.steps(), logLines: logs
+        )
         publish()
     }
 
@@ -178,18 +210,22 @@ final class UpdateProgressCenter {
         guard var session, !session.isFinished else { return }
         session.finishedAt = now
         session.outcome = outcome
+        session.requiresConfirmation = false
         // 结束时不再有“进行中”的阶段：还在 running 的那个阶段停在原位，改记为跳过，
         // 免得窗口一直显示一个永远不会完成的“进行中”。
         for index in session.steps.indices where session.steps[index].state == .running {
             session.steps[index].state = .skipped
         }
         self.session = session
+        batchComponents = []
         publish()
     }
 
     /// 清空（窗口关闭且会话已结束）。
     func reset() {
         session = nil
+        transactionComponent = nil
+        batchComponents = []
         publish()
     }
 
@@ -257,18 +293,26 @@ extension UpdateProgressCenter {
         now: Date = Date()
     ) {
         let index = UpdateProgressPlan.stepIndex(for: result.phase)
-        if session == nil {
-            begin(
-                title: UpdateProgressPlan.title(for: component),
-                steps: UpdateProgressPlan.steps(includeDegradation: result.phase == .degrade),
-                now: now
-            )
+        if session == nil || (session?.isFinished == true && result.phase == .preflight && batchComponents.isEmpty) {
+            begin(title: UpdateProgressPlan.title(for: component), steps: UpdateProgressPlan.steps(), now: now)
         }
-        // 降级行是动态追加的：第一次真的记录降级时才加进来，位置固定在末尾。
+        guard session?.isFinished == false, session?.requiresConfirmation == false else { return }
+        if !batchComponents.isEmpty, !batchComponents.contains(component) { return }
+        if transactionComponent != component {
+            guard result.phase == .preflight || transactionComponent == nil else { return }
+            if batchComponents.isEmpty, transactionComponent != nil {
+                begin(title: UpdateProgressPlan.title(for: component), steps: UpdateProgressPlan.steps(), now: now)
+            }
+            transactionComponent = component
+            session?.title = UpdateProgressPlan.title(for: component)
+            if let batchIndex = batchComponents.firstIndex(of: component) {
+                session?.title += "（\(batchIndex + 1)/\(batchComponents.count)）"
+            }
+            session?.steps = UpdateProgressPlan.steps()
+        }
+        // 追加降级行不能用 begin：否则会丢掉日志与本轮的批量状态。
         if result.phase == .degrade, let session, session.steps.count <= index {
-            var steps = session.steps
-            steps.append(UpdateProgressStep(title: UpdateTransactionPhase.degrade.title))
-            begin(title: session.title, steps: steps, now: session.startedAt)
+            self.session?.steps.append(UpdateProgressStep(title: UpdateTransactionPhase.degrade.title))
         }
         let state = UpdateProgressPlan.state(for: result.status)
         setStep(index, state: state, detail: result.reason)
@@ -281,7 +325,8 @@ extension UpdateProgressCenter {
     /// 写入统一历史时结束会话：成功与否由历史判定（`isSuccessful`），失败原因用
     /// 历史里记录的第一个失败阶段原因，保证窗口和诊断页看到的是同一句话。
     func finish(history entry: UpdateHistoryEntry, now: Date = Date()) {
-        guard session != nil else { return }
+        guard session != nil, session?.requiresConfirmation == false, batchComponents.isEmpty,
+              transactionComponent == nil || transactionComponent == entry.component else { return }
         let outcome: UpdateProgressOutcome
         if entry.isSuccessful {
             outcome = .succeeded(version: entry.toVersion)
@@ -293,6 +338,17 @@ extension UpdateProgressCenter {
             outcome = .failed(reason: "更新没有完成")
         }
         finish(outcome, now: now)
+    }
+
+    /// 单包历史仍逐条保存，但整批结束前不能提前报成功或关闭窗口。
+    func finish(batch: PiPackageUpdateBatchOutcome, now: Date = Date()) {
+        if batch.isSucceeded {
+            finish(.succeeded(version: nil), now: now)
+        } else {
+            let completed = batch.outcomes.filter(\.isSucceeded).count
+            let reason = "\(completed)/\(batch.outcomes.count) 个扩展包更新完成；其余失败或未执行，详见过程日志"
+            finish(batch.failures.isEmpty ? .skipped(reason: reason) : .failed(reason: reason), now: now)
+        }
     }
 }
 

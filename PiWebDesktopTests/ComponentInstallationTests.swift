@@ -593,7 +593,152 @@ final class ComponentInstallationTests: XCTestCase {
         XCTAssertEqual(installation.confidence, .inferred, "来源只能算 localPath，整体取最弱证据")
     }
 
+    func testManagedCLIInstallerIsVerifiedFromTheLauncherAndActiveRelease() throws {
+        let fixture = ComponentFixture()
+        defer { fixture.cleanUp() }
+        let launcher = fixture.makeExecutable("home/.pi/agent/bin/pi")
+        let pi = fixture.makeSymlink("home/.local/bin/pi", to: launcher)
+        let current = fixture.makeFile("home/.pi/agent/install/current-version", contents: "1.5.0\n")
+        let package = "home/.pi/agent/install/releases/1.5.0/node_modules/@earendil-works/pi-coding-agent"
+        let packageJSON = fixture.makeFile(package + "/package.json", contents:
+            #"{"name":"@earendil-works/pi-coding-agent","version":"1.5.0","bin":{"pi":"dist/cli.js"}}"#
+        )
+        let releaseBin = fixture.makeExecutable(package + "/dist/cli.js")
+        fixture.makeSymlink("home/.pi/agent/install/releases/1.5.0/node_modules/.bin/pi", to: releaseBin)
+        let runner = ComponentFakeRunner()
+        runner.handler = { $0 == [pi, "--version"] ? "1.5.0" : nil }
+        let detector = makeDetector(fixture: fixture, runner: runner)
+        let input = request(kind: .piCLI, packageName: InstallCommandManifest.piCLIPackageName, names: ["pi"], candidates: [pi])
+
+        let installation = detector.detect(input)
+        XCTAssertEqual(installation.source, .officialInstaller)
+        XCTAssertEqual(installation.confidence, .verified)
+        XCTAssertEqual(installation.executablePath, pi)
+        XCTAssertEqual(installation.packageJSONPath, packageJSON)
+        XCTAssertEqual(installation.version, "1.5.0")
+        XCTAssertNil(installation.suggestedCommand, "官方安装器不能使用 npm 全局命令")
+        XCTAssertTrue(installation.evidence.contains { $0.contains("current-version") })
+
+        try "../escape\n".write(toFile: current, atomically: true, encoding: .utf8)
+        XCTAssertNotEqual(detector.detect(input).source, .officialInstaller)
+        try "1.5.0\n".write(toFile: current, atomically: true, encoding: .utf8)
+        try #"{"name":"unrelated-package","version":"1.5.0"}"#.write(toFile: packageJSON, atomically: true, encoding: .utf8)
+        XCTAssertNotEqual(detector.detect(input).source, .officialInstaller)
+    }
+
     // MARK: `pi list`
+
+    func testCurrentPiListReadsManagedNPMVersionsAndDoesNotUseProjectOrPinnedPackages() {
+        let fixture = ComponentFixture()
+        defer { fixture.cleanUp() }
+        let pi = fixture.makeExecutable("home/bin/pi")
+        let root = fixture.makeDirectory("home/.pi/agent/npm/node_modules")
+        let packageJSON = fixture.makeFile("home/.pi/agent/npm/node_modules/@scope/one/package.json", contents:
+            #"{"name":"@scope/one","version":"1.2.3"}"#
+        )
+        // 同名的旧全局安装不应盖过 `pi list` 报告的实际路径。
+        let npmRoot = fixture.makeDirectory("home/npm-global/lib/node_modules")
+        fixture.makeFile("home/npm-global/lib/node_modules/@scope/one/package.json", contents:
+            #"{"name":"@scope/one","version":"0.1.0"}"#
+        )
+        let runner = ComponentFakeRunner()
+        runner.handler = { arguments in
+            switch arguments {
+            case [pi, "list"]: return """
+            \u{001B}[1mUser packages:\u{001B}[22m
+              npm:@scope/one (filtered)
+                \(root)/@scope/one
+              npm:pinned@1.0.0
+                \(root)/pinned
+              npm:ranged@^1.0.0
+                \(root)/ranged
+              git:github.com/example/extension
+                \(fixture.home.path)/.pi/agent/git/extension
+            Project packages:
+              npm:project-only
+                \(fixture.root.path)/workspace/.pi/npm/node_modules/project-only
+            """
+            case ["/usr/bin/env", "npm", "root", "-g"]: return npmRoot
+            default: return nil
+            }
+        }
+        let installations = makeDetector(fixture: fixture, runner: runner).detectPiPackages(piExecutablePath: pi)
+        XCTAssertEqual(installations.count, 1)
+        XCTAssertEqual(installations.first?.packageName, "@scope/one")
+        XCTAssertEqual(installations.first?.version, "1.2.3")
+        XCTAssertEqual(installations.first?.packageJSONPath, packageJSON)
+        XCTAssertEqual(installations.first?.source, .piManaged)
+        XCTAssertEqual(installations.first?.confidence, .verified)
+    }
+
+    func testPiPackageRedetectionExpandsDisplayPathAndReadsTheUpdatedVersion() {
+        let home = NSHomeDirectory()
+        let pi = home + "/.local/bin/pi"
+        let root = home + "/.pi/agent/npm/node_modules"
+        let fileSystem = FakeDependencyFileSystem()
+        fileSystem.executables = [pi]
+        fileSystem.directories = [root + "/pi-extension-demo"]
+        fileSystem.files[root + "/pi-extension-demo/package.json"] =
+            #"{"name":"pi-extension-demo","version":"2.0.0"}"#
+        let runner = ComponentFakeRunner()
+        runner.handler = { arguments in
+            arguments == [pi, "list"]
+                ? "User packages:\n  npm:pi-extension-demo\n    \(root)/pi-extension-demo\n"
+                : nil
+        }
+        let version = PiPackageUpdateRedetection.versionProvider(
+            piPath: "~/.local/bin/pi", commandRunner: runner,
+            fileSystem: fileSystem, environment: [:], homeDirectory: home
+        )("pi-extension-demo")
+
+        XCTAssertEqual(version, "2.0.0", "展示路径不得让成功更新被误报为版本未知")
+        XCTAssertTrue(runner.invocations.contains([pi, "list"]))
+        XCTAssertFalse(runner.invocations.contains { $0.first?.hasPrefix("~") == true })
+    }
+
+    func testPiPackageRedetectionRejectsUnsafePathsBeforeRunningCommands() {
+        let runner = ComponentFakeRunner()
+        let fileSystem = FakeDependencyFileSystem()
+        for path in [nil, "", "pi", "~someone/bin/pi", "~/../bin/pi", "/unsafe;path/pi"] as [String?] {
+            XCTAssertTrue(PiPackageUpdateRedetection.detect(
+                piPath: path, commandRunner: runner, fileSystem: fileSystem, environment: [:]
+            ).isEmpty)
+        }
+        XCTAssertTrue(runner.invocations.isEmpty)
+    }
+
+    func testCurrentPiListRejectsMismatchedPackageIdentityAndUntrustedPaths() {
+        let fixture = ComponentFixture()
+        defer { fixture.cleanUp() }
+        let pi = fixture.makeExecutable("home/bin/pi")
+        fixture.makeFile("home/.pi/agent/npm/node_modules/wanted/package.json", contents:
+            #"{"name":"other-package","version":"1.2.3"}"#
+        )
+        let external = fixture.makeDirectory("external/node_modules/wanted")
+        fixture.makeFile("external/node_modules/wanted/package.json", contents:
+            #"{"name":"wanted","version":"9.9.9"}"#
+        )
+        let runner = ComponentFakeRunner()
+        runner.handler = { $0 == [pi, "list"] ? "User packages:\n  npm:wanted\n    \(fixture.home.path)/.pi/agent/npm/node_modules/wanted\n" : nil }
+        let detector = makeDetector(fixture: fixture, runner: runner)
+        let mismatch = detector.detectPiPackages(piExecutablePath: pi)
+        XCTAssertEqual(mismatch.first?.packageName, "wanted")
+        XCTAssertNotEqual(mismatch.first?.confidence, .verified)
+
+        runner.handler = { $0 == [pi, "list"] ? "User packages:\n  npm:wanted\n    \(external)\n" : nil }
+        let outside = detector.detectPiPackages(piExecutablePath: pi)
+        XCTAssertEqual(outside.first?.source, .unknown)
+        XCTAssertNil(outside.first?.version, "不能改用同名的其它安装，也不能读取列表中的任意路径")
+    }
+
+    func testCurrentPiListEmptyInstallationProducesNoUnknownPlaceholder() {
+        let fixture = ComponentFixture()
+        defer { fixture.cleanUp() }
+        let pi = fixture.makeExecutable("home/bin/pi")
+        let runner = ComponentFakeRunner()
+        runner.handler = { $0 == [pi, "list"] ? "No packages installed.\n" : nil }
+        XCTAssertTrue(makeDetector(fixture: fixture, runner: runner).detectPiPackages(piExecutablePath: pi).isEmpty)
+    }
 
     func testPiListFailureAndMalformedOutputDegradeToUnknownWithoutCrashing() {
         let fixture = ComponentFixture()

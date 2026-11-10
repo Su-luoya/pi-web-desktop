@@ -192,32 +192,30 @@ struct PiPackageUpdatePlanSet: Equatable {
 
 /// 前置条件、来源约束与命令构造的纯逻辑（GitHub #22 第 1/2/5 项）。
 enum PiPackageUpdatePlanner {
-    /// 唯一允许执行扩展包更新的来源：npm 全局且经过验证。
+    /// 只允许已验证的 npm 全局或 Pi 用户级安装，执行仍交给 Pi 自己。
     static func isExecutableSource(_ source: InstallSource, confidence: DetectionConfidence) -> Bool {
-        source == .npmGlobal && confidence == .verified
+        (source == .npmGlobal || source == .piManaged) && confidence == .verified
     }
 
     /// 非 npm 全局来源的官方命令文本：`pi update --extensions`（只更新已安装扩展包，
     /// 不更新 pi 自身）。应用只展示这段文本，不执行它，也不拼接包管理器命令。
     static func nonNPMGlobalManualCommandText(piExecutablePath: String?) -> String? {
-        guard let piExecutablePath,
-              PiPackageUpdatePlan.isSafeExecutablePath(piExecutablePath),
-              (piExecutablePath as NSString).lastPathComponent == PiPackageUpdatePlan.piExecutableName else { return nil }
+        guard let executablePath = PiCLIUpdatePlan.executablePathForExecution(piExecutablePath),
+              (executablePath as NSString).lastPathComponent == PiPackageUpdatePlan.piExecutableName else { return nil }
         let arguments = ["update", "--extensions"]
         guard PiPackageUpdateArgumentPolicy.isSafe(arguments) else { return nil }
-        return ([piExecutablePath] + arguments).joined(separator: " ")
+        return ([executablePath] + arguments).joined(separator: " ")
     }
 
     /// 可信来源的手动命令文本：`<pi> update npm:<包名>`，包名必须通过 npm 校验。
     static func manualCommandText(piExecutablePath: String?, packageName: String) -> String? {
         guard ComponentInstallationDetector.isPackageName(packageName) else { return nil }
-        guard let piExecutablePath,
-              PiPackageUpdatePlan.isSafeExecutablePath(piExecutablePath),
-              (piExecutablePath as NSString).lastPathComponent == PiPackageUpdatePlan.piExecutableName else { return nil }
+        guard let executablePath = PiCLIUpdatePlan.executablePathForExecution(piExecutablePath),
+              (executablePath as NSString).lastPathComponent == PiPackageUpdatePlan.piExecutableName else { return nil }
         let arguments = [PiPackageUpdatePlan.commandName, PiPackageUpdatePlan.packageSourceSpecPrefix + packageName]
         guard PiPackageUpdatePlan.isExpectedArgumentArray(arguments, packageName: packageName) else { return nil }
         guard PiPackageUpdateArgumentPolicy.isSafe(arguments) else { return nil }
-        return ([piExecutablePath] + arguments).joined(separator: " ")
+        return ([executablePath] + arguments).joined(separator: " ")
     }
 
     /// 显式指定包名时的执行前校验：包名必须出现在本次检测结果里。

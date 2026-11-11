@@ -7,18 +7,6 @@
 > 只追加，不改写：已经发过的记录保持原样（含当时的路径与行号），新增版本的记录追加到末尾
 > 「本次发布执行记录」一节，与门槛清单同名的锚点因此仍可被旧文档直接命中。
 
-## 本次发布执行记录（v0.1.0-alpha.37）
-
-- 内容：Tailscale 手机访问错误诊断与可操作启用链接、stdout/stderr 非阻塞分流与脱敏展示、Pi Web PWA 三个图标同步；图标直接原子覆盖，**不保留备份**，重新安装 Pi Web 可恢复上游图标。版本变更由 PR #277 一并准备。
-- 用户真机已确认：桌面启动与基本操作、Tailscale HTTPS 手机访问、手机添加或刷新主屏入口且图标正常。实测候选的版本字段仍是 alpha.36；alpha.37 正式包由 CI 重新构建，不把旧字段候选冒充正式包实测。
-- PR [#277](https://github.com/Su-luoya/pi-web-desktop/pull/277) squash 合并为 `84a341b48d6d64918ead3bb387a7a8b6b81cc788`；main CI [42962255037](https://github.com/Su-luoya/pi-web-desktop/actions/runs/42962255037) 通过，1091 tests / 0 failures。发布构建、双模式 smoke、56 项身份检查、shell / personal-data / secret scanner / 打包门槛均通过；scanner `suppressed 17 lines`、无 rejected。
-- Tag `v0.1.0-alpha.37` 的 tag object 为 `88baa10cd13745521f45484d5994dc849f0c4be9`，指向上述 commit。Release workflow [42963001970](https://github.com/Su-luoya/pi-web-desktop/actions/runs/42963001970) 的 build 与 draft 创建均通过。
-- [v0.1.0-alpha.37](https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.37) 已于 `2026-11-11T05:06:37Z` 公开为 prerelease，`isDraft=false`、`isPrerelease=true`。公开资产 `Pi-Web-Desktop-0.1.0-alpha.37+build.37.zip`：1,817,021 bytes，SHA-256 `b5b55d601db523480ad9f50498d0a049ae1858b0158c192d811fdd76f6ba523d`；`gh release download` + `shasum -a 256 -c` → OK，匿名 curl 下载字节相同，Release 正文校验值一致。
-- 发布说明无模板占位符，明确 Apple Silicon / macOS 26+、ad-hoc、未公证和 Gatekeeper 限制。证据资产 digest 与公开下载已复核。
-- appcast workflow [42963560776](https://github.com/Su-luoya/pi-web-desktop/actions/runs/42963560776) 成功；`appcast` 分支与 raw CDN 均为 schema 1，首条为 alpha.37，下载 URL、文件名与 SHA-256 一致。
-- 未验证：真实 Pi CLI / 扩展安装端到端、VoiceOver 逐项朗读、另一台 Mac 首次 Gatekeeper 放行。alpha.37 不提供应用访问密码；图标覆盖不创建备份，回退桌面应用不会恢复已覆盖的 Pi Web 图标。
-- 回退：保留 alpha.36 ZIP 与 checksum；退出应用后替换应用包。无设置 schema 或服务数据迁移；从 appcast 移除本版条目可停止推送。
-
 ## 本次发布执行记录（v0.1.0-alpha.1）
 
 本节记录 `v0.1.0-alpha.1` 候选提交上**实际执行过**的本地门槛与输出摘要，供 Release Issue 与草稿
@@ -2328,3 +2316,16 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
 - [appcast workflow 42803431043](https://github.com/Su-luoya/pi-web-desktop/actions/runs/42803431043) 由 `release: published` 自动触发并成功；分别读取 appcast 分支与 raw CDN，均为 schema 1、`releases[0].tag=v0.1.0-alpha.36`，下载 URL 与 `zip.sha256` 和公开资产一致。
 - 未验证：真实 CLI / 扩展安装端到端、VoiceOver 逐项朗读、另一台 Mac 首次 Gatekeeper 放行及本次 tailnet 访问；隔离 fixture 和 smoke 不证明任意本机安装都能升级。本次发布未替换 `/Applications` 中的应用，也未结束现有应用或 Pi 会话。
 - 回退：alpha.35 ZIP 与 checksum 已重新下载并校验 OK；本版无数据迁移，退出应用后替换上一版应用包即可。从 appcast 移除本版条目可停止推送，应用内安装器不提供自动降级。
+
+## 本次发布执行记录（v0.1.0-alpha.37）
+
+- 内容：Tailscale 手机访问错误诊断与可操作启用链接、stdout/stderr 非阻塞分流与脱敏展示、Pi Web PWA 三个图标同步；图标直接原子覆盖，**不保留备份**，重新安装 Pi Web 可恢复上游图标。版本变更由 PR #277 一并准备。
+- 用户真机已确认：桌面启动与基本操作、Tailscale HTTPS 手机访问、手机添加或刷新主屏入口且图标正常。实测候选的版本字段仍是 alpha.36；alpha.37 正式包由 CI 重新构建，不把旧字段候选冒充正式包实测。
+- PR [#277](https://github.com/Su-luoya/pi-web-desktop/pull/277) squash 合并为 `84a341b48d6d64918ead3bb387a7a8b6b81cc788`；main CI [42962255037](https://github.com/Su-luoya/pi-web-desktop/actions/runs/42962255037) 通过，1091 tests / 0 failures。发布构建、双模式 smoke、56 项身份检查、shell / personal-data / secret scanner / 打包门槛均通过；scanner `suppressed 17 lines`、无 rejected。
+- Tag `v0.1.0-alpha.37` 的 tag object 为 `88baa10cd13745521f45484d5994dc849f0c4be9`，指向上述 commit。Release workflow [42963001970](https://github.com/Su-luoya/pi-web-desktop/actions/runs/42963001970) 的 build 与 draft 创建均通过。
+- [v0.1.0-alpha.37](https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.37) 已于 `2026-11-11T05:06:37Z` 公开为 prerelease，`isDraft=false`、`isPrerelease=true`。公开资产 `Pi-Web-Desktop-0.1.0-alpha.37+build.37.zip`：1,817,021 bytes，SHA-256 `b5b55d601db523480ad9f50498d0a049ae1858b0158c192d811fdd76f6ba523d`；`gh release download` + `shasum -a 256 -c` → OK，匿名 curl 下载字节相同，Release 正文校验值一致。
+- 发布说明无模板占位符，明确 Apple Silicon / macOS 26+、ad-hoc、未公证和 Gatekeeper 限制。证据资产 digest 与公开下载已复核。
+- appcast workflow [42963560776](https://github.com/Su-luoya/pi-web-desktop/actions/runs/42963560776) 成功；`appcast` 分支与 raw CDN 均为 schema 1，首条为 alpha.37，下载 URL、文件名与 SHA-256 一致。
+- 下载的正式 CI bundle 在本机再次通过 arm64、`codesign --verify --deep --strict`、45 项单应用身份检查以及启动 / 诊断双模式 smoke（均 exit 0）；没有替换 `/Applications` 中的实测应用或结束用户 Pi 会话。
+- 未验证：真实 Pi CLI / 扩展安装端到端、VoiceOver 逐项朗读、另一台 Mac 首次 Gatekeeper 放行。alpha.37 不提供应用访问密码；图标覆盖不创建备份，回退桌面应用不会恢复已覆盖的 Pi Web 图标。
+- 回退：保留 alpha.36 ZIP 与 checksum；退出应用后替换应用包。无设置 schema 或服务数据迁移；从 appcast 移除本版条目可停止推送。

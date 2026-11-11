@@ -16,6 +16,8 @@ struct CommandRunResult: Equatable {
     var timedOut: Bool = false
     /// 调用方在命令结束前取消；本次启动的子进程已尽力终止。
     var cancelled: Bool = false
+    /// 仅供诊断：stderr，以及失败或超时前的 stdout；展示或写日志前必须脱敏。
+    var diagnosticOutput: String? = nil
 }
 
 /// Runs a command line tool for the app. The protocol exists so process checks
@@ -121,10 +123,16 @@ protocol ProbeProcess: AnyObject {
     func waitForExit(timeout: TimeInterval) -> Bool
     /// 读走已收集的标准输出；绝不在子进程仍运行时阻塞。
     func readStandardOutput() -> Data
+    /// 已收集的标准错误；与 stdout 分开，避免破坏 JSON 等结构化输出。
+    func readStandardError() -> Data
     /// 只对本次启动的子进程发 SIGTERM；返回是否真的发出。不阻塞等待。
     @discardableResult func terminate() -> Bool
     /// 宽限后仍未退出时只对本次启动的子进程发 SIGKILL；返回是否真的发出。
     @discardableResult func forceTerminate() -> Bool
+}
+
+extension ProbeProcess {
+    func readStandardError() -> Data { Data() }
 }
 
 /// 启动探针子进程时的固定错误（参数为空）。
@@ -138,7 +146,9 @@ enum ProbeProcessError: Error, Equatable {
 final class ProcessProbeProcess: ProbeProcess {
     private let process: Process
     private let readHandle: FileHandle
+    private let errorHandle: FileHandle
     private var collected = Data()
+    private var collectedError = Data()
 
     init(arguments: [String], environment: [String: String]? = nil) throws {
         guard let executable = arguments.first, !executable.isEmpty else {
@@ -152,15 +162,19 @@ final class ProcessProbeProcess: ProbeProcess {
         // stdin 也不会阻塞应用（GitHub #89 的 PATH 查询）。
         process.standardInput = FileHandle.nullDevice
         let pipe = Pipe()
+        let errorPipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
+        process.standardError = errorPipe
         self.process = process
         self.readHandle = pipe.fileHandleForReading
+        self.errorHandle = errorPipe.fileHandleForReading
         try process.run()
-        // 非阻塞：等待循环里主动排空管道，不让 64 KiB 的管道缓冲把子进程卡住。
-        let descriptor = readHandle.fileDescriptor
-        let flags = fcntl(descriptor, F_GETFL, 0)
-        if flags >= 0 { _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) }
+        // 两条管道都必须非阻塞排空，否则任意一条写满都会卡住子进程。
+        for handle in [readHandle, errorHandle] {
+            let descriptor = handle.fileDescriptor
+            let flags = fcntl(descriptor, F_GETFL, 0)
+            if flags >= 0 { _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) }
+        }
     }
 
     var isRunning: Bool { process.isRunning }
@@ -182,6 +196,11 @@ final class ProcessProbeProcess: ProbeProcess {
         return collected
     }
 
+    func readStandardError() -> Data {
+        drainOutput()
+        return collectedError
+    }
+
     @discardableResult
     func terminate() -> Bool {
         guard process.isRunning else { return false }
@@ -198,10 +217,15 @@ final class ProcessProbeProcess: ProbeProcess {
 
     /// 排空当前可读的标准输出；EOF 或 EAGAIN 都结束本轮，不阻塞。
     private func drainOutput() {
+        Self.drain(readHandle, into: &collected)
+        Self.drain(errorHandle, into: &collectedError)
+    }
+
+    private static func drain(_ handle: FileHandle, into collected: inout Data) {
         var buffer = [UInt8](repeating: 0, count: 16384)
         while true {
             let count = buffer.withUnsafeMutableBytes { raw -> Int in
-                read(readHandle.fileDescriptor, raw.baseAddress, raw.count)
+                read(handle.fileDescriptor, raw.baseAddress, raw.count)
             }
             guard count > 0 else { return }
             collected.append(contentsOf: buffer[0..<count])

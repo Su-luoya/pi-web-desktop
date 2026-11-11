@@ -110,19 +110,32 @@ final class SystemCommandRunner: CommandRunning {
         // 只看自己这个 token 的标记：并发探针之间不得串味。
         let wasCancelled = cancelledTokens.contains(token)
         lock.unlock()
+        func diagnosticOutput(includingStandardOutput: Bool) -> String? {
+            var parts = [String(decoding: process.readStandardError(), as: UTF8.self)]
+            if includingStandardOutput {
+                parts.append(String(decoding: process.readStandardOutput(), as: UTF8.self))
+            }
+            let text = parts.filter { !$0.isEmpty }.joined(separator: "\n")
+            return text.isEmpty ? nil : text
+        }
         if wasCancelled {
             // 取消只表示“不再等”；不再等宽限、不再补 SIGKILL，退出由子进程自己决定。
-            return CommandRunResult(output: nil, cancelled: true)
+            return CommandRunResult(output: nil, cancelled: true,
+                                    diagnosticOutput: diagnosticOutput(includingStandardOutput: true))
         }
         if !exited {
             process.terminate()
             if !process.waitForExit(timeout: terminationGrace) {
                 process.forceTerminate()
             }
-            return CommandRunResult(output: nil, timedOut: true)
+            return CommandRunResult(output: nil, timedOut: true,
+                                    diagnosticOutput: diagnosticOutput(includingStandardOutput: true))
         }
-        if requireZeroExit, process.terminationStatus != 0 { return CommandRunResult(output: nil) }
-        return CommandRunResult(output: String(data: process.readStandardOutput(), encoding: .utf8))
+        if requireZeroExit, process.terminationStatus != 0 {
+            return CommandRunResult(output: nil, diagnosticOutput: diagnosticOutput(includingStandardOutput: true))
+        }
+        return CommandRunResult(output: String(data: process.readStandardOutput(), encoding: .utf8),
+                                diagnosticOutput: diagnosticOutput(includingStandardOutput: false))
     }
 
     func cancelRunningProbe() {

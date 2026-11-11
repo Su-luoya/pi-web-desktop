@@ -24,6 +24,7 @@ extension AppDelegate {
             item.isEnabled = false
             menu.addItem(item)
             if remoteAccessController.activePort != nil {
+                menu.addItem(remoteAccessItem(title: "重试启用手机访问…", action: #selector(enableRemoteAccess(_:))))
                 menu.addItem(remoteAccessItem(title: "重试关闭手机访问", action: #selector(disableRemoteAccess(_:))))
             }
             // Tailscale 坏了不影响自填隧道——它不靠这套 CLI。
@@ -98,7 +99,11 @@ extension AppDelegate {
                     case let .success(url):
                         self.presentRemoteAccessCode(url)
                     case let .failure(failure):
-                        self.presentRemoteAccessFailure("无法启用手机访问", message: failure.message)
+                        self.presentRemoteAccessFailure(
+                            failure.actionURL == nil ? "无法启用手机访问" : "还需要启用 HTTPS 证书",
+                            message: failure.message,
+                            link: failure.actionURL
+                        )
                     }
                 }
             )
@@ -393,13 +398,47 @@ extension AppDelegate {
         NSPasteboard.general.setString(url.absoluteString, forType: .string)
     }
 
-    private func presentRemoteAccessFailure(_ messageText: String, message: String) {
+    /// 失败提示。`link` 不为 nil 时多一个「打开启用链接」按钮：有些失败是
+    /// 「用户得去 Tailscale 那边点一下」，只说不行等于把活推回去自己猜。
+    private func presentRemoteAccessFailure(_ messageText: String, message: String, link: URL? = nil) {
+        let detail = logRedactor.redact(message)
+        _ = logWriter.append("\(messageText)：\(detail)")
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = messageText
-        alert.informativeText = message
-        alert.addButton(withTitle: "好")
-        presentRemoteAccessAlert(alert) { _ in }
+        alert.informativeText = detail
+        if detail.count > 300 {
+            alert.informativeText = "操作未完成。请查看下方命令输出与处理步骤，完成后重试。"
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 480, height: 220))
+            scroll.hasVerticalScroller = true
+            let textView = NSTextView(frame: scroll.bounds)
+            textView.isEditable = false
+            textView.isSelectable = true
+            textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            textView.autoresizingMask = [.width]
+            textView.isVerticallyResizable = true
+            textView.isHorizontallyResizable = false
+            textView.textContainer?.widthTracksTextView = true
+            textView.textContainer?.containerSize = NSSize(width: scroll.contentSize.width, height: .greatestFiniteMagnitude)
+            textView.setAccessibilityLabel("命令输出与处理步骤")
+            textView.string = detail
+            scroll.documentView = textView
+            alert.accessoryView = scroll
+        }
+        alert.addButton(withTitle: link == nil ? "好" : "打开启用链接")
+        if link != nil { alert.addButton(withTitle: "好") }
+        alert.addButton(withTitle: "复制详情")
+        // 多一个按钮就多一位，别用固定的「第二个按钮」去猜复制是哪个。
+        let copyButton: NSApplication.ModalResponse = link == nil ? .alertSecondButtonReturn : .alertThirdButtonReturn
+        presentRemoteAccessAlert(alert) { response in
+            if let link, response == .alertFirstButtonReturn {
+                NSWorkspace.shared.open(link)
+                return
+            }
+            guard response == copyButton else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(detail, forType: .string)
+        }
     }
 
     private func presentRemoteAccessAlert(_ alert: NSAlert, completion: @escaping (NSApplication.ModalResponse) -> Void) {

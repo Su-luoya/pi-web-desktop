@@ -262,6 +262,7 @@ final class ProcessInspectorTests: XCTestCase {
         var isRunning = true
         var terminationStatus: Int32 = 0
         var standardOutput = Data()
+        var standardError = Data()
         private(set) var waitTimeouts: [TimeInterval] = []
         private(set) var terminateCount = 0
         private(set) var forceTerminateCount = 0
@@ -276,6 +277,7 @@ final class ProcessInspectorTests: XCTestCase {
         }
 
         func readStandardOutput() -> Data { standardOutput }
+        func readStandardError() -> Data { standardError }
 
         @discardableResult
         func terminate() -> Bool {
@@ -333,6 +335,55 @@ final class ProcessInspectorTests: XCTestCase {
         XCTAssertEqual(process.forceTerminateCount, 0)
         // 旧入口保持原语义：退出码 0 时返回标准输出。
         XCTAssertEqual(runner.run(["/bin/echo"]), "v22.19.0\n")
+    }
+
+    func testFailedProbeKeepsBothStreamsForDiagnosticsWithoutReturningSuccess() {
+        let process = FakeProbeProcess(waitAnswers: [true])
+        process.terminationStatus = 1
+        process.standardOutput = Data("HTTPS setup required\n".utf8)
+        process.standardError = Data("permission denied\n".utf8)
+        let runner = SystemCommandRunner(spawn: { _, _ in process })
+
+        let result = runner.run(["/fake/tool"], timeout: 1)
+        XCTAssertNil(result.output)
+        XCTAssertTrue(result.diagnosticOutput?.contains("HTTPS setup required") == true)
+        XCTAssertTrue(result.diagnosticOutput?.contains("permission denied") == true)
+        XCTAssertNil(runner.run(["/fake/tool"]))
+        XCTAssertEqual(runner.runAllowingFailure(["/fake/tool"], timeout: 1).output, "HTTPS setup required\n")
+    }
+
+    func testSuccessfulProbeDoesNotMixStandardErrorIntoStructuredOutput() {
+        let process = FakeProbeProcess(waitAnswers: [true])
+        process.standardOutput = Data("{\"ok\":true}".utf8)
+        process.standardError = Data("warning\n".utf8)
+        let runner = SystemCommandRunner(spawn: { _, _ in process })
+
+        let result = runner.run(["/fake/tool"], timeout: 1)
+        XCTAssertEqual(result.output, "{\"ok\":true}")
+        XCTAssertEqual(result.diagnosticOutput, "warning\n")
+    }
+
+    func testTimedOutProbeKeepsTheConsentPromptPrintedBeforeItWaited() {
+        let process = FakeProbeProcess(waitAnswers: [false, true])
+        process.standardOutput = Data("Enable HTTPS at https://login.example.test/consent\n".utf8)
+        let runner = SystemCommandRunner(spawn: { _, _ in process })
+
+        let result = runner.run(["/fake/tool"], timeout: 0.01)
+        XCTAssertTrue(result.timedOut)
+        XCTAssertNil(result.output)
+        XCTAssertTrue(result.diagnosticOutput?.contains("https://login.example.test/consent") == true)
+    }
+
+    func testRealProbeDrainsBothPipesBeyondTheirBufferCapacity() {
+        let script = "i=0; while [ $i -lt 4000 ]; do printf 'output-0123456789abcdef\\n'; printf 'error-0123456789abcdef\\n' >&2; i=$((i + 1)); done; exit 7"
+        let runner = SystemCommandRunner()
+        let result = runner.run(["/bin/sh", "-c", script], timeout: 10)
+
+        XCTAssertFalse(result.timedOut)
+        XCTAssertNil(result.output)
+        XCTAssertTrue(result.diagnosticOutput?.contains("output-0123456789abcdef") == true)
+        XCTAssertTrue(result.diagnosticOutput?.contains("error-0123456789abcdef") == true)
+        XCTAssertGreaterThan(result.diagnosticOutput?.utf8.count ?? 0, 128 * 1024)
     }
 
     /// 探针超时：先 SIGTERM，宽限后仍未退出才 SIGKILL；结果标记 `timedOut`

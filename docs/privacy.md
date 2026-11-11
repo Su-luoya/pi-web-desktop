@@ -51,6 +51,7 @@ Pi Web Desktop 在应用运行期间做只读的版本查询。桌面应用发�
 - 应用不读取、复制或迁移 `~/.pi/agent/auth.json` 等 Pi 认证内容。
 - 首次启动诊断只检查 `~/.pi/agent` 是否存在与可读（不列目录、不读取任何文件），报告里只出现脱敏后的路径 `~/.pi/agent`。
 - 用户在诊断窗口选择 pi-web 路径时，只对该文件做两件本地只读的事：执行 `--version`、向上查找并读取 package.json 的 `name`（不安装、不联网、不读取其他文件）。
+- PWA 图标同步：每次由应用启动受管 Pi Web 服务前，从已解析的 pi-web 可执行路径向上最多 8 层读取 `package.json`，只有 `name` 精确匹配 `@agegr/pi-web` 才同步。图标来自应用 bundle，不联网、不读取 Pi 认证或会话内容；写入该包的 `public/icons/apple-touch-icon.png`（180px）、`public/icons/icon-192.png` 与 `public/icons/icon-512.png`。内容相同则跳过，否则逐个原子覆盖，**不保留备份**；失败只写脱敏日志、不阻断服务启动。重新安装 Pi Web 可恢复上游图标，之后由桌面应用再次启动服务仍会重新同步。
 - 组件安装识别（GitHub #16）同样只读：它只执行只读命令（`--version`、`npm root -g`、`pnpm root -g`、`pi list`、登录 shell 的 `command -v`）、只读可执行位/符号链接/真实路径、最多向上 6 层读 `package.json` 与检查 `.git` 是否存在（目录只看存在性；`.git` 是文件时只读它一次，不解析内容）。它不执行安装/升级/卸载命令、不调用 `sudo`、不联网、不读 `~/.pi` 认证内容；除了写日志/诊断（仍经同一个 `LogRedactor`）以外不写任何文件，也不修改用户全局目录（`~/.npm-global`、npm prefix、Homebrew 前缀都只读）。临时目录夹具的隔离断言见 [开发说明](development.md) 的测试分层一节。
 
 ## 本地数据一览与删除
@@ -60,10 +61,11 @@ Pi Web Desktop 在应用运行期间做只读的版本查询。桌面应用发�
 | 服务配置、首次设置状态、窗口位置、更新检查设置 | UserDefaults（domain 为 bundle identifier `io.github.su-luoya.pi-web-desktop`） | 先 `defaults read io.github.su-luoya.pi-web-desktop` 确认内容，再 `defaults delete io.github.su-luoya.pi-web-desktop`。工作目录键是 `service.workspacePath`（用户自己选过的单个绝对路径，空值表示用默认目录，不含凭据，也不进日志或诊断导出）。更新检查设置包括策略键 `updateChecks.<组件>.policy`、启动前自动更新开关 `updateChecks.piWeb.autoUpdateBeforeLaunch` 与 `updateChecks.pi.autoUpdateBeforeLaunch`、忽略版本键 `updateChecks.<组件>.ignoredVersion` / `.ignoredVersionAt`（只含版本字符串与时间戳）与最近一次更新失败警告 `updateChecks.piWeb.lastUpdateWarning.*`、`updateChecks.pi.lastUpdateWarning.*` 和 `updateChecks.piPackages.lastUpdateWarning.*`（只含类别、包名、旧/新/目标版本、固定原因文案与时间戳，不含路径、环境变量值、凭据或子进程输出；进程检查结果不落盘，只在内存与界面/日志里存在）、统一更新历史 `updateChecks.updateHistory`（GitHub #23，单键 JSON，最多 20 条；每条含时间、组件、来源、从/到版本、各阶段结果、固定原因与降级结论，写入前逐条校验并截断，不含绝对路径、环境变量值、凭据或子进程输出）与超时/放弃等待的「已放弃」记录 `updateChecks.piWeb.abandonedAttempt` / `updateChecks.pi.abandonedAttempt` / `updateChecks.piPackages.abandonedAttempts`（GitHub #62，单键 JSON，字段固定且读回校验；只含固定文案、已校验的组件/包名与来源、脱敏后的命令摘要、开始时间、超时上限、放弃原因与本次对子进程实际做了什么，**没有结束时间**（恒为空“结束时间未知”），不含绝对路径、环境变量值、凭据或子进程输出；菜单“更新 → 已放弃的更新记录…”可单独清除）、以及「下次启动安装」标记 `updateChecks.piWeb.deferredInstallPending`（只含一个布尔位，不含版本号；清除后不保留任何残留键） |
 | 运行状态与所有权记录 | `~/Library/Application Support/Pi Web Desktop/` | 退出应用后删除该目录 |
 | 日志（含轮转文件） | `~/Library/Logs/Pi Web Desktop/`（`Pi Web Desktop.log` 与 `.1.log` … `.5.log`） | 退出应用后删除该目录 |
+| Pi Web 的三个 PWA 图标 | 已解析的 `@agegr/pi-web` 包内 `public/icons/apple-touch-icon.png`、`public/icons/icon-192.png`、`public/icons/icon-512.png` | 应用不保留原图标备份；重新安装 Pi Web 可恢复上游文件，由桌面应用下次启动服务时仍会重新同步 |
 | 更新检查缓存 | `~/Library/Application Support/Pi Web Desktop/update-check-cache.json` | 退出应用后删除该文件；在“更新 → 更新检查偏好设置…”里关闭四类可停止后续请求（已存缓存不会自动删除），忽略版本记录在 UserDefaults 里、不影响缓存。缓存不是可信输入（可被同一用户改写），读取时校验结构与上限、不合法即整份丢弃，且不参与自动安装判定（GitHub #59） |
 | WebKit 持久化网站数据 | `~/Library/WebKit/io.github.su-luoya.pi-web-desktop/`、`~/Library/Caches/io.github.su-luoya.pi-web-desktop/` | 应用当前没有“清空网站数据”入口，只能退出应用后手动删除：`rm -rf "$HOME/Library/WebKit/io.github.su-luoya.pi-web-desktop" "$HOME/Library/Caches/io.github.su-luoya.pi-web-desktop"` |
 
-删除以上任何一项都不会影响 Pi Web、Pi CLI 或 Node.js 自身的数据。除上表位置外，应用自身不写其他位置；WebKit 的持久化网站数据由系统框架按 bundle id 写入，不在应用自己的 Application Support 目录或 UserDefaults 里，删除应用本身不会自动清除它。`Scripts/smoke.sh` 只把应用自己的 support 目录和日志放进临时目录，不写 UserDefaults、Application Support 和 Logs，但仍会创建默认的 `WKWebView`，所以不隔离上面那两处 WebKit 数据（实测 smoke 会更新其文件 mtime/size，见 [开发说明](development.md)）。
+删除应用自身的设置、状态、日志、更新缓存或 WebKit 数据不会修改 Pi Web、Pi CLI 或 Node.js 的会话与认证数据；PWA 图标是明确的例外，它们属于已安装的 Pi Web 包，恢复上游图标需重新安装 Pi Web。除上表位置与前文明确列出的依赖更新/桌面应用安装目标外，应用自身不写其他位置；WebKit 的持久化网站数据由系统框架按 bundle id 写入，不在应用自己的 Application Support 目录或 UserDefaults 里，删除应用本身不会自动清除它。`Scripts/smoke.sh` 只把应用自己的 support 目录和日志放进临时目录，不写 UserDefaults、Application Support 和 Logs，但仍会创建默认的 `WKWebView`，所以不隔离上面那两处 WebKit 数据（实测 smoke 会更新其文件 mtime/size，见 [开发说明](development.md)）。
 
 ## 诊断脱敏
 

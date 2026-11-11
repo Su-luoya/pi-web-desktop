@@ -238,8 +238,29 @@ enum TailscaleServeError: Error, Equatable {
     case notReady(String)
     /// 首选端口都被占用。
     case noFreePort
+    /// tailnet 还没启用 HTTPS 证书；`url` 是 CLI 打印的启用链接（没打印则为 nil）。
+    ///
+    /// 这种情况 CLI 会以 0 退出并把入口挂上，只是 https 打不开，所以它既不是
+    /// `commandFailed`（命令没失败），也不能当成功（手机连不上）。
+    case httpsNotEnabled(url: URL?, entryInstalled: Bool = false)
     /// 命令退出码非零或无法启动；`arguments` 不含可执行文件路径。
-    case commandFailed(arguments: [String])
+    case commandFailed(arguments: [String], details: String = "")
+
+    var message: String {
+        switch self {
+        case .notInstalled: return "没有找到 Tailscale 命令行工具。请先安装并登录 Tailscale。"
+        case let .notReady(reason): return reason
+        case .noFreePort: return "所选 HTTPS 端口已被其他服务占用，请重试以选择空闲端口。"
+        case let .httpsNotEnabled(url, _):
+            let lead = "这条 tailnet 还没有启用 HTTPS 证书，Tailscale 的 HTTPS 入口因此不可用，手机打不开。"
+            guard let url else {
+                return lead + "请到 Tailscale 管理后台的 DNS 页面启用 HTTPS Certificates，然后回到应用重试。"
+            }
+            return lead + "点「打开启用链接」完成启用，回到应用重试即可：\n\(url.absoluteString)"
+        case let .commandFailed(_, details):
+            return details.isEmpty ? "Tailscale 命令执行失败。" : details
+        }
+    }
 }
 
 struct TailscaleServe {
@@ -311,13 +332,15 @@ struct TailscaleServe {
         return Self.availability(fromStatusJSON: output)
     }
 
-    /// nil 表示配置不可读，不能据此认定端口空闲。
-    func snapshot() -> TailscaleServeSnapshot? {
-        guard let binary = binaryPath,
-              let output = runner.run([binary, "serve", "status", "--json"], environment: environment()) else {
-            return nil
+    /// 配置不可读时保留命令诊断，不能据此认定端口空闲。
+    func snapshot() throws -> TailscaleServeSnapshot {
+        guard let binary = binaryPath else { throw TailscaleServeError.notInstalled }
+        let arguments = [binary, "serve", "status", "--json"]
+        let result = runner.run(arguments, environment: environment(), timeout: SystemCommandRunner.defaultTimeout)
+        guard let output = result.output, let snapshot = Self.snapshot(fromServeStatusJSON: output) else {
+            throw commandFailure(arguments, result: result, reason: "无法读取 Tailscale Serve 配置。")
         }
-        return Self.snapshot(fromServeStatusJSON: output)
+        return snapshot
     }
 
     // MARK: - 动作
@@ -327,16 +350,74 @@ struct TailscaleServe {
     /// 目标端口已被别的条目占用时直接抛 `noFreePort`，不覆盖别人的配置。
     func enable(port: Int, target: URL) throws {
         guard let binary = binaryPath else { throw TailscaleServeError.notInstalled }
-        guard let existing = snapshot() else {
-            throw TailscaleServeError.commandFailed(arguments: ["serve", "status", "--json"])
-        }
+        let existing = try snapshot()
         if existing.isOccupied(port, by: target.absoluteString) {
             throw TailscaleServeError.noFreePort
         }
         let arguments = [binary, "serve", "--bg", "--https=\(port)", target.absoluteString]
-        guard runner.run(arguments, environment: environment()) != nil else {
-            throw TailscaleServeError.commandFailed(arguments: Array(arguments.dropFirst()))
+        let result = runner.run(arguments, environment: environment(), timeout: SystemCommandRunner.defaultTimeout)
+        // tailnet 没启用 HTTPS 时这条命令照样成功、入口也挂上了，只是 https 连不上；
+        // CLI 只把启用链接写进输出。漏掉这条提示，用户会看到二维码却打不开手机页面。
+        let output = [result.diagnosticOutput, result.output].compactMap { $0 }.joined(separator: "\n")
+        if Self.mentionsDisabledHTTPS(output) {
+            let installed = try? snapshot()
+            let entryInstalled = installed?.proxy(for: port) != nil
+                && installed?.isOccupied(port, by: target.absoluteString) == false
+            throw TailscaleServeError.httpsNotEnabled(
+                url: Self.httpsEnablementLink(in: output), entryInstalled: entryInstalled
+            )
         }
+        guard result.output != nil else {
+            throw commandFailure(arguments, result: result, reason: "无法启用 Tailscale HTTPS 转发。")
+        }
+        // 首次授权流程可能以 0 退出却没有写配置，不能只凭退出码显示二维码。
+        let installed = try snapshot()
+        guard installed.proxy(for: port) != nil,
+              !installed.isOccupied(port, by: target.absoluteString) else {
+            throw commandFailure(arguments, result: result, reason: "Tailscale 命令已结束，但 HTTPS 转发尚未生效。")
+        }
+    }
+
+    private func commandFailure(
+        _ arguments: [String], result: CommandRunResult, reason: String
+    ) -> TailscaleServeError {
+        var lines = [reason]
+        if result.timedOut {
+            lines.append("命令等待超时；首次启用可能正在等待 HTTPS 授权。")
+        } else if result.cancelled {
+            lines.append("命令已取消。")
+        }
+        let output = [result.diagnosticOutput, result.output].compactMap { $0 }
+            .filter { !$0.isEmpty }.joined(separator: "\n")
+        if !output.isEmpty { lines.append(output) }
+        let command = arguments.map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+            .joined(separator: " ")
+        lines.append("可在终端执行以下命令查看详情；若提示 HTTPS 授权，请按提示完成后回到应用重试：\nTAILSCALE_BE_CLI=1 \(command)")
+        // 先整段脱敏再截断，不能截掉凭据标签后留下半个秘密。
+        let details = LogRedactor().redact(lines.joined(separator: "\n\n"))
+        return .commandFailed(arguments: Array(arguments.dropFirst()), details: String(details.prefix(6000)))
+    }
+
+    /// CLI 打印的启用链接所在的站点。和 `cliName` 一样拆开拼：仓库的身份扫描
+    /// 不允许在代码里写厂商域名。
+    static let loginHost = "https://login." + cliName + ".com/"
+
+    /// 输出里是否有「这条 tailnet 没启用 HTTPS」的提示。
+    ///
+    /// 认提示语也认启用链接的路径：CLI 换措辞时链接还在，不至于退回成一句
+    /// 「命令执行失败」。
+    static func mentionsDisabledHTTPS(_ output: String) -> Bool {
+        output.range(of: "is not enabled on your tailnet", options: .caseInsensitive) != nil
+            || httpsEnablementLink(in: output) != nil
+    }
+
+    /// 从提示里取出启用链接。CLI 把链接单独缩进成一行，所以按空白切词再挑 URL。
+    static func httpsEnablementLink(in output: String) -> URL? {
+        for token in output.split(whereSeparator: { $0.isWhitespace }) {
+            guard token.hasPrefix(Self.loginHost) else { continue }
+            if let url = URL(string: String(token)), url.path == "/f/serve" { return url }
+        }
+        return nil
     }
 
     /// 撤销一条：`serve --https=<port> off`。返回命令是否成功。

@@ -13,6 +13,8 @@ import Foundation
 final class RemoteAccessController {
     enum DefaultsKey {
         static let port = "remoteAccess.port"
+        /// 已核实的未完成 HTTPS 入口：只能重试或撤销，不能在启动时恢复成已开启。
+        static let cleanupPending = "remoteAccess.cleanupPending"
         /// 用户自填的隧道地址（完整 URL）。它只是“记住这个地址”，没有任何机器配置
         /// 需要撤销，所以退出时不会清掉它。
         static let customURL = "remoteAccess.customURL"
@@ -24,6 +26,15 @@ final class RemoteAccessController {
         case notRunning
         case noFreePort
         case commandFailed
+        case commandError(String)
+        /// tailnet 没启用 HTTPS；`url` 是 Tailscale 给出的启用链接。
+        case httpsNotEnabled(url: URL?, entryInstalled: Bool = false)
+
+        /// 需要用户去点一下的链接（目前只有启用 HTTPS 这一种）。
+        var actionURL: URL? {
+            if case let .httpsNotEnabled(url, _) = self { return url }
+            return nil
+        }
 
         var message: String {
             switch self {
@@ -34,7 +45,12 @@ final class RemoteAccessController {
             case .noFreePort:
                 return "443、8444、9443 都已被其他服务占用，无法再挂一条 HTTPS 入口。"
             case .commandFailed:
-                return "Tailscale 拒绝了这条命令，请检查 Tailscale 是否正常。"
+                return "Tailscale 命令执行失败，请检查 Tailscale 是否正常。"
+            case let .commandError(message):
+                return LogRedactor().redact(message)
+            case let .httpsNotEnabled(url, _):
+                // 文案只在 TailscaleServeError 里维护一份（弹窗要直接给出链接）。
+                return TailscaleServeError.httpsNotEnabled(url: url).message
             }
         }
     }
@@ -95,6 +111,7 @@ final class RemoteAccessController {
             return
         }
         let listensOnLoopback = RemoteAccessPolicy.isLoopbackHostname(configuration.hostname)
+        let cleanupPending = defaults.bool(forKey: DefaultsKey.cleanupPending)
         CommandProbeDispatch.runOffMain(work: { () -> RefreshOutcome in
             switch serve.detect() {
             case .notInstalled:
@@ -102,11 +119,11 @@ final class RemoteAccessController {
             case .notRunning:
                 return .unavailable(Failure.notRunning.message)
             case let .ready(dnsName):
-                guard let snapshot = serve.snapshot() else {
+                guard let snapshot = try? serve.snapshot() else {
                     return .unavailable(Failure.commandFailed.message)
                 }
                 guard snapshot.proxy(for: port) != nil else { return .stale }
-                if listensOnLoopback,
+                if !cleanupPending, listensOnLoopback,
                    !snapshot.isOccupied(port, by: target.absoluteString),
                    let url = TailscaleServe.publicURL(dnsName: dnsName, port: port) {
                     return .on(url)
@@ -158,9 +175,9 @@ final class RemoteAccessController {
             return
         }
         CommandProbeDispatch.runOffMain(work: {
-            (serve.detect(), serve.snapshot())
+            (serve.detect(), Result { try serve.snapshot() })
         }) { [weak self] result in
-            let (detection, snapshot) = result
+            let (detection, snapshotResult) = result
             guard let self else { return }
             let dnsName: String
             switch detection {
@@ -174,8 +191,11 @@ final class RemoteAccessController {
             case let .ready(name):
                 dnsName = name
             }
-            guard let snapshot else {
-                completion(.failure(.commandFailed))
+            let snapshot: TailscaleServeSnapshot
+            do {
+                snapshot = try snapshotResult.get()
+            } catch {
+                completion(.failure(Self.failure(from: error)))
                 return
             }
             let plan: RemoteAccessPlan
@@ -222,20 +242,30 @@ final class RemoteAccessController {
         completion: @escaping (Result<URL, Failure>) -> Void
     ) {
         let serve = self.serve
-        CommandProbeDispatch.runOffMain(work: {
+        CommandProbeDispatch.runOffMain(work: { () -> Result<Void, Failure> in
             do {
                 try serve.enable(port: plan.port, target: plan.target)
-                return true
+                return .success(())
             } catch {
-                return false
+                return .failure(Self.failure(from: error))
             }
-        }) { [weak self] succeeded in
+        }) { [weak self] result in
             guard let self else { return }
-            guard succeeded, let url = TailscaleServe.publicURL(dnsName: dnsName, port: plan.port) else {
+            if case let .failure(failure) = result {
+                if case .httpsNotEnabled(_, true) = failure {
+                    self.defaults.set(plan.port, forKey: DefaultsKey.port)
+                    self.defaults.set(true, forKey: DefaultsKey.cleanupPending)
+                    if self.customAddress == nil { self.update(.unavailable(failure.message)) }
+                }
+                completion(.failure(failure))
+                return
+            }
+            guard let url = TailscaleServe.publicURL(dnsName: dnsName, port: plan.port) else {
                 completion(.failure(.commandFailed))
                 return
             }
             self.forgetCustomAddress()
+            self.defaults.removeObject(forKey: DefaultsKey.cleanupPending)
             self.defaults.set(plan.port, forKey: DefaultsKey.port)
             self.update(.on(url))
             completion(.success(url))
@@ -339,8 +369,20 @@ final class RemoteAccessController {
 
     // MARK: - 内部
 
+    private static func failure(from error: Error) -> Failure {
+        guard let error = error as? TailscaleServeError else { return .commandFailed }
+        switch error {
+        case .notInstalled: return .notInstalled
+        case .noFreePort: return .noFreePort
+        case let .httpsNotEnabled(url, entryInstalled):
+            return .httpsNotEnabled(url: url, entryInstalled: entryInstalled)
+        default: return .commandError(error.message)
+        }
+    }
+
     private func forget() {
         defaults.removeObject(forKey: DefaultsKey.port)
+        defaults.removeObject(forKey: DefaultsKey.cleanupPending)
     }
 
     private func forgetCustomAddress() {

@@ -143,6 +143,9 @@ final class ServiceManager {
     let appConfiguration: AppConfiguration
     let processInspector: ProcessInspector
     let commandRunner: CommandRunning
+
+    /// 启动前同步 PWA 图标（iOS 主屏图标只能由 pi-web 包里的文件决定）。
+    let webAppIconSync: WebAppIconSyncing
     private let launcher: ServiceLaunching
     private let probe: ServiceProbing
     private let scheduler: ServiceScheduling
@@ -245,6 +248,7 @@ final class ServiceManager {
         instanceID: String = UUID().uuidString,
         logWriter: LogWriter? = nil,
         toolPathProvider: ToolPathProvider? = nil,
+        webAppIconSync: WebAppIconSyncing? = nil,
         localAddresses: (() -> LocalAddresses)? = nil,
         resolvesToLocalHost: ((String) -> Bool)? = nil,
         isPortAvailable: ((String, Int) -> Bool?)? = nil
@@ -264,6 +268,7 @@ final class ServiceManager {
         self.workspaceProbe = workspaceProbe ?? .live(fileManager: fileManager)
         self.instanceID = instanceID
         self.logWriter = logWriter ?? LogWriter(logFileURL: appConfiguration.logURL, fileManager: fileManager)
+        self.webAppIconSync = webAppIconSync ?? SystemWebAppIconSync()
         // 监听地址回落依赖：默认读真实接口表与系统解析器，测试注入固定快照。
         // 两个闭包必须成对：`resolvesToLocalHost` 的默认值转调同一个快照来源，
         // 否则注入的快照与主机名判定会看到不同的本机地址。
@@ -541,6 +546,21 @@ final class ServiceManager {
         _ = verifiedOwnershipRecord()
     }
 
+    /// 启动前把 PWA 图标同步成应用图标。
+    ///
+    /// 只在真正要走启动流程时执行；失败与跳过只记一行日志——图标是外观问题，
+    /// 不该让服务起不来，也不该弹窗。
+    private func syncWebAppIconBeforeLaunch(executablePath: String) {
+        switch webAppIconSync.sync(executablePath: executablePath) {
+        case let .updated(paths):
+            logWriter.record("已同步 PWA 图标：\(paths.joined(separator: "、"))")
+        case let .failed(reason):
+            logWriter.record("同步 PWA 图标失败：\(reason)")
+        case .skipped:
+            break
+        }
+    }
+
     func resolvePiWebPath() -> String? {
         if let configured = configuration.piWebPath.nilIfEmpty {
             // 用户配置的路径可能是 `~/bin/pi-web` 或带前后空白：不展开/不 trim 就
@@ -734,6 +754,7 @@ final class ServiceManager {
             reportStartupFailure(message)
             return
         case .launch(let specification):
+            syncWebAppIconBeforeLaunch(executablePath: specification.executablePath)
             do {
                 let handle = try openLogForWriting()
                 // Token for this launch: a late termination callback from an

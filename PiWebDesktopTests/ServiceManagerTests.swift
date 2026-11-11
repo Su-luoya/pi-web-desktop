@@ -56,6 +56,16 @@ private final class ManagerFakeLauncher: ServiceLaunching {
     }
 }
 
+private final class ManagerFakeIconSync: WebAppIconSyncing {
+    var result: WebAppIconSyncOutcome = .skipped("test")
+    private(set) var executablePaths: [String?] = []
+
+    func sync(executablePath: String?) -> WebAppIconSyncOutcome {
+        executablePaths.append(executablePath)
+        return result
+    }
+}
+
 private final class ManagerFakeScheduler: ServiceScheduling {
     /// When true (the default) `onMain` runs inline, which keeps the tests
     /// deterministic without touching the main queue.
@@ -367,6 +377,7 @@ private final class ServiceManagerHarness {
     let appConfiguration: AppConfiguration
     let runner: ManagerFakeRunner
     let launcher: ManagerFakeLauncher
+    let iconSync: ManagerFakeIconSync
     let probe: ManagerFakeProbe
     let scheduler: ManagerFakeScheduler
     let signaler: ManagerFakeSignaler
@@ -407,6 +418,7 @@ private final class ServiceManagerHarness {
         runner = ManagerFakeRunner()
         runner.handler = processOutput
         launcher = ManagerFakeLauncher()
+        iconSync = ManagerFakeIconSync()
         probe = ManagerFakeProbe()
         scheduler = ManagerFakeScheduler()
         signaler = ManagerFakeSignaler()
@@ -433,6 +445,7 @@ private final class ServiceManagerHarness {
             instanceID: Self.instanceID,
             // 注入脱敏器时，日志写入器也用它，保证“同一实例”而不是“同一份规则”。
             logWriter: redactor.map { LogWriter(logFileURL: resolvedAppConfiguration.logURL, redactor: $0) },
+            webAppIconSync: iconSync,
             // 监听地址回落判定：测试默认给空快照与“不解析到本机”的主机名解析，
             // 因此具名地址在测试里一律判为不在本机（也就是回落），需要真实存在的
             // 地址的用例显式注入快照。
@@ -1243,6 +1256,30 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: harness.logURL.path))
         XCTAssertEqual(harness.scheduler.delayedWork.count, 1)
         XCTAssertEqual(harness.scheduler.delayedWork.first?.delay, 0.2)
+        XCTAssertEqual(harness.iconSync.executablePaths, [executable])
+
+        harness.manager.startManagedService()
+        XCTAssertEqual(harness.launcher.launchCount, 1)
+        XCTAssertEqual(harness.iconSync.executablePaths, [executable], "复用已有服务时不应再同步图标")
+    }
+
+    func testIconSyncFailureDoesNotPreventLaunchingTheService() throws {
+        let harness = try makeHarness(alive: { $0 == 5150 }, processOutput: processOutput(for: 5150))
+        defer { harness.cleanUp() }
+        let executable = try harness.makeExecutable()
+        harness.manager.updateConfiguration(configured(executable))
+        harness.launcher.result = .success(ManagerFakeProcess(processIdentifier: 5150))
+        harness.iconSync.result = .failed("backup failed")
+        harness.probe.ready = false
+
+        harness.manager.startManagedService()
+
+        XCTAssertEqual(harness.launcher.launchCount, 1)
+        XCTAssertEqual(harness.iconSync.executablePaths, [executable])
+        XCTAssertEqual(harness.manager.currentState, .starting)
+        harness.drainLogWrites()
+        let log = try String(contentsOf: harness.logURL, encoding: .utf8)
+        XCTAssertTrue(log.contains("同步 PWA 图标失败：backup failed"))
     }
 
     func testPollUntilReadyLoadsThePageOnceTheProbeSucceeds() throws {

@@ -253,6 +253,31 @@ final class AppMenuHygieneTests: XCTestCase {
         XCTAssertFalse(windowMenuBody.contains("新建窗口"), "新建窗口属于文件菜单，不在窗口菜单里重复")
     }
 
+    // MARK: - 手机访问失败：保留恢复入口和可读的命令详情
+
+    func testUnavailableRemoteAccessKeepsBothRetryActions() throws {
+        let source = SourceScan.codeText(of: try SourceScan.text(named: "AppDelegate+RemoteAccess.swift"))
+        let start = try XCTUnwrap(source.range(of: "case let .unavailable(reason):"))
+        let end = try XCTUnwrap(source.range(of: "case .off:", range: start.upperBound..<source.endIndex))
+        let unavailable = String(source[start.upperBound..<end.lowerBound])
+        XCTAssertTrue(unavailable.contains("remoteAccessController.activePort != nil"))
+        XCTAssertTrue(unavailable.contains("#selector(enableRemoteAccess(_:))"), "HTTPS 授权完成后必须能重试启用")
+        XCTAssertTrue(unavailable.contains("#selector(disableRemoteAccess(_:))"), "未完成的 HTTPS 入口必须能撤销")
+    }
+
+    func testLongRemoteAccessFailureDetailsRemainReadableAndCopyable() throws {
+        let source = SourceScan.codeText(of: try SourceScan.text(named: "AppDelegate+RemoteAccess.swift"))
+        let start = try XCTUnwrap(source.range(of: "private func presentRemoteAccessFailure("))
+        let end = try XCTUnwrap(source.range(of: "private func presentRemoteAccessAlert(", range: start.upperBound..<source.endIndex))
+        let failure = String(source[start.lowerBound..<end.lowerBound])
+        XCTAssertTrue(failure.contains("logRedactor.redact(message)"))
+        XCTAssertTrue(failure.contains("hasVerticalScroller = true"))
+        XCTAssertTrue(failure.contains("isVerticallyResizable = true"))
+        XCTAssertTrue(failure.contains("isSelectable = true"))
+        XCTAssertTrue(failure.contains("setAccessibilityLabel("))
+        XCTAssertTrue(failure.contains("NSPasteboard.general.setString(detail, forType: .string)"))
+    }
+
     // MARK: - outD-次要-5：健康探测复用同一个 URLSession
 
     func testServiceProbeReusesASingleSession() throws {

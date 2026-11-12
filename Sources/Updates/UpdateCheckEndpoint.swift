@@ -197,7 +197,7 @@ protocol UpdateHTTPClient: AnyObject {
 /// - 不跟随重定向：`willPerformHTTPRedirection` 一律拒绝，把 3xx 原样交给
 ///   检查器，因此请求不会落到白名单以外的主机；
 /// - 只保留条件请求与内容类型响应头，其余（含 `Set-Cookie`）读完即丢。
-final class URLSessionUpdateHTTPClient: NSObject, UpdateHTTPClient, URLSessionTaskDelegate {
+final class URLSessionUpdateHTTPClient: NSObject, UpdateHTTPClient, URLSessionTaskDelegate, @unchecked Sendable {
     private let defaultTimeout: TimeInterval
 
     /// 应用级单例（AppDelegate 创建）：`perform` 只被 UpdateChecker 的串行队列
@@ -205,6 +205,11 @@ final class URLSessionUpdateHTTPClient: NSObject, UpdateHTTPClient, URLSessionTa
     /// 第二个队列复用，lazy 初始化即竞争——新增调用方前必须保持单队列纪律。
     /// URLSession 强持有 delegate，client↔session 互持且不 invalidate；对应用级
     /// 单例无实际泄漏，勿改成按需重建（会泄漏旧 session）。
+    /// `@unchecked Sendable`：`URLSessionTaskDelegate` 在 SDK 里要求 `Sendable`，但本类
+    /// 有可变存储属性（`session`、`pendingURLs` 一类），无法自动满足。安全性靠上面那
+    /// 段单队列纪律：所有可变状态只在 UpdateChecker 的串行队列上被读写。
+    ///
+    /// 新增调用方前必须保持单队列纪律，否则 `lazy` 初始化就会变成竞争。
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieAcceptPolicy = .never
@@ -227,6 +232,9 @@ final class URLSessionUpdateHTTPClient: NSObject, UpdateHTTPClient, URLSessionTa
         _ request: UpdateHTTPRequest,
         completion: @escaping (Result<UpdateHTTPResponse, UpdateHTTPFailure>) -> Void
     ) {
+        // `completion` 只被转交给 URLSession 的完成回调执行一次，属于所有权转移；
+        // URLSession 的回调参数是 `@Sendable`，直接捕获非 Sendable 的闭包会告警。
+        nonisolated(unsafe) let deliver = completion
         let sanitized = request.sanitized()
         var urlRequest = URLRequest(url: sanitized.url)
         urlRequest.httpMethod = sanitized.method
@@ -236,14 +244,14 @@ final class URLSessionUpdateHTTPClient: NSObject, UpdateHTTPClient, URLSessionTa
         }
         let task = session.dataTask(with: urlRequest) { data, response, error in
             if let error {
-                completion(.failure(Self.failure(from: error)))
+                deliver(.failure(Self.failure(from: error)))
                 return
             }
             guard let http = response as? HTTPURLResponse else {
-                completion(.failure(.transport))
+                deliver(.failure(.transport))
                 return
             }
-            completion(.success(UpdateHTTPResponse(
+            deliver(.success(UpdateHTTPResponse(
                 statusCode: http.statusCode,
                 headers: UpdateHTTPResponse.retainedHeaders(from: http),
                 body: data ?? Data(),

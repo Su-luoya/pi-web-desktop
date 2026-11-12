@@ -99,12 +99,18 @@ enum PiProcessSnapshotOutcome: Equatable {
 /// 2. `arguments(_:)` 才读 argv（`KERN_PROCARGS2`），并且**只对候选进程调用**
 ///    （见 `PiProcessInspector.isCandidate`）。测试注入一个记录调用的闭包，就能
 ///    断言非候选进程没有触发 argv 读取，而不需要任何真实进程。
-struct PiProcessProbing {
+/// `@unchecked Sendable`：成员全是无状态纯函数，实例不可变。
+///
+/// 尝试把成员改成 `@Sendable` 以让编译器复核——它会报出真实问题，但同时
+/// 波及 30+ 个测试替身（它们持有可变记录器），反而要求新增更多 `@unchecked`，
+/// 净收益为负，所以回退为显式担保。
+struct PiProcessProbing: @unchecked Sendable {
     var listProcessIdentifiers: () -> PiProcessPidListing
     var snapshot: (pid_t) -> PiProcessSnapshotOutcome
     /// 读取 argv；读不到（权限、已退出、解析失败）时返回空数组。
     var arguments: (pid_t) -> [String]
 
+    /// 不可变值类型 + 纯函数成员（见类型声明），跨队列读取无竞争。
     static let libproc = PiProcessProbing(
         listProcessIdentifiers: LibprocPiProcessProbe.listProcessIdentifiers,
         snapshot: LibprocPiProcessProbe.snapshot(of:),

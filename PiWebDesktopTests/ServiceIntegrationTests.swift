@@ -1031,3 +1031,141 @@ final class ServiceLifecycleIntegrationTests: XCTestCase {
         XCTAssertTrue(waitForIntegrationCondition { !IntegrationProcess.isAlive(launch.processIdentifier) })
     }
 }
+
+// MARK: - 调度原语
+
+/// `DispatchServiceScheduler` 是全仓唯一把闭包送进主队列、后台队列和重复计时器的
+/// 地方，之前只作为夹具被实例化，从没被直接断言过。
+///
+/// 这里覆盖的是投递语义：**不丢、不重复、线程归属正确**。并发压力用例用 8 条后台
+/// 队列同时投递 2000 次——丢一次或重入一次都会让计数对不上。语言模式 6 下不能拿
+/// 裸 `var` 计数，所以记录器自己带锁。
+final class DispatchServiceSchedulerTests: XCTestCase {
+
+    /// 记录送达的条目，并记下是否曾经在非主线程送达。
+    private final class DeliveryRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [Int] = []
+        private var deliveredOffMainThread = false
+
+        func record(_ identifier: Int) {
+            lock.lock()
+            defer { lock.unlock() }
+            storage.append(identifier)
+            if !Thread.isMainThread { deliveredOffMainThread = true }
+        }
+
+        var identifiers: [Int] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+
+        var sawDeliveryOffMainThread: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return deliveredOffMainThread
+        }
+    }
+
+    /// 一次性标记，跨线程安全。
+    private final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var raised = false
+
+        func raise() {
+            lock.lock()
+            defer { lock.unlock() }
+            raised = true
+        }
+
+        var isRaised: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return raised
+        }
+    }
+
+    func testOnMainDeliversEveryWorkItemExactlyOnceUnderConcurrentLoad() {
+        let scheduler = DispatchServiceScheduler()
+        let recorder = DeliveryRecorder()
+        let workers = 8
+        let perWorker = 250
+        let expected = workers * perWorker
+
+        for worker in 0..<workers {
+            DispatchQueue.global().async {
+                for index in 0..<perWorker {
+                    let identifier = worker * perWorker + index
+                    scheduler.onMain { recorder.record(identifier) }
+                }
+            }
+        }
+
+        XCTAssertTrue(
+            waitForIntegrationCondition(timeout: 60) { recorder.identifiers.count >= expected },
+            "主队列投递在 60 秒内没有全部送达"
+        )
+        let received = recorder.identifiers
+        XCTAssertEqual(received.count, expected, "不得重复派遣")
+        XCTAssertEqual(Set(received).count, expected, "不得丢失派遣")
+        XCTAssertFalse(recorder.sawDeliveryOffMainThread, "onMain 必须在主线程执行")
+    }
+
+    func testOnBackgroundRunsOffTheCallingThread() {
+        let scheduler = DispatchServiceScheduler()
+        let recorder = DeliveryRecorder()
+        let flag = Flag()
+
+        scheduler.onBackground {
+            recorder.record(1)
+            flag.raise()
+        }
+
+        XCTAssertTrue(waitForIntegrationCondition(timeout: 10) { flag.isRaised }, "后台工作没有执行")
+        XCTAssertTrue(recorder.sawDeliveryOffMainThread, "onBackground 不得在调用线程执行")
+    }
+
+    func testAfterDeliversOnMainAndDoesNotFireEarly() {
+        let scheduler = DispatchServiceScheduler()
+        let recorder = DeliveryRecorder()
+        let flag = Flag()
+        let startedAt = Date()
+
+        scheduler.after(0.2) {
+            recorder.record(1)
+            flag.raise()
+        }
+
+        XCTAssertTrue(waitForIntegrationCondition(timeout: 10) { flag.isRaised }, "延时投递没有执行")
+        XCTAssertGreaterThanOrEqual(
+            Date().timeIntervalSince(startedAt), 0.15,
+            "不得早于约定延时投递"
+        )
+        XCTAssertFalse(recorder.sawDeliveryOffMainThread, "after 必须在主线程执行")
+    }
+
+    func testRepeatingFiresRepeatedlyUntilInvalidated() {
+        let scheduler = DispatchServiceScheduler()
+        let recorder = DeliveryRecorder()
+        let token = scheduler.repeating(interval: 0.02) { recorder.record(1) }
+
+        XCTAssertTrue(
+            waitForIntegrationCondition(timeout: 10) { recorder.identifiers.count >= 3 },
+            "重复计时器没有重复触发"
+        )
+
+        token.invalidate()
+        let afterInvalidation = recorder.identifiers.count
+        _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.2))
+
+        // 允许 1 次：`invalidate()` 之前已经排进运行循环的那一次仍会到达，这是
+        // `Timer` 的既定语义，不是泄漏。
+        XCTAssertLessThanOrEqual(
+            recorder.identifiers.count, afterInvalidation + 1,
+            "invalidate 之后不得继续触发"
+        )
+        XCTAssertFalse(recorder.sawDeliveryOffMainThread, "计时器必须在主线程执行")
+    }
+}
+

@@ -257,8 +257,10 @@ extension AppDelegate {
     /// service never receives a signal.
     private func presentExternalServiceWarning(action: String, proceed: @escaping () -> Void) {
         serviceManager.checkServer { [weak self] ready in
+            // 先固化强引用：把 `[weak self]` 的变量读进下面的并发闭包属于
+            // #SendableClosureCaptures（weak 捕获变量被跨线程读写）。
+            guard let self else { return }
             DispatchQueue.main.async {
-                guard let self else { return }
                 if !ready {
                     if action == "重启" { self.serviceManager.startManagedService() }
                     else { self.serviceManager.setState(.stopped) }

@@ -26,7 +26,11 @@ final class UpdateAbandonedAttemptTests: XCTestCase {
         let suite = "io.github.su-luoya.pi-web-desktop.tests.abandoned.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite) ?? .standard
         defaults.removePersistentDomain(forName: suite)
-        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        // teardown 块是 `@Sendable` 的，而 `UserDefaults` 不是 `Sendable`：闭包里只
+        // 捕获 suite 名（`String`），落地时再取一次实例。
+        addTeardownBlock {
+            UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite)
+        }
         return defaults
     }
 

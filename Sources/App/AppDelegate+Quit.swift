@@ -96,7 +96,9 @@ extension AppDelegate {
     private func presentQuitDecisionAlert() {
         quitDecisionTimer?.invalidate()
         let timer = Timer(timeInterval: quitCoordinator.decisionTimeout, repeats: false) { [weak self] _ in
-            self?.handleQuitEvent(.deadlineReached(now: Date()))
+            // 计时器加在 RunLoop.main 上（见下），回调必然在主线程；但 Timer 的 block
+            // 类型本身不带 main-actor 隔离信息，要显式断言。
+            MainActor.assumeIsolated { self?.handleQuitEvent(.deadlineReached(now: Date())) }
         }
         // 加进 common modes：sheet 期间主运行循环跑在 modal panel 模式，只挂在默认
         // 模式上的计时器在那段时间不会触发。
@@ -216,9 +218,13 @@ extension AppDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            // 屏幕旋转/分辨率变化时，windowDidChangeScreen 不一定会发送；
-            // 等 AppKit 更新 NSScreen.visibleFrame 后再重新布局。
-            self?.scheduleWindowFit()
+            // 观察者注册在 `queue: .main` 上，回调必然在主线程；NotificationCenter
+            // 的 block 类型不带隔离信息，要显式断言。
+            MainActor.assumeIsolated {
+                // 屏幕旋转/分辨率变化时，windowDidChangeScreen 不一定会发送；
+                // 等 AppKit 更新 NSScreen.visibleFrame 后再重新布局。
+                self?.scheduleWindowFit()
+            }
         }
     }
 

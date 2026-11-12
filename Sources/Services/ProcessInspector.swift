@@ -60,7 +60,9 @@ struct ProcessInspector {
         var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
         let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
         guard length > 0 else { return nil }
-        let path = String(cString: buffer)
+        // `proc_pidpath` 已经返回有效字节数，按长度切即可，不用再扫终止符。
+        let bytes = buffer.prefix(Int(length)).map { UInt8(bitPattern: $0) }
+        let path = String(decoding: bytes, as: UTF8.self)
         return path.isEmpty ? nil : path
     }
 

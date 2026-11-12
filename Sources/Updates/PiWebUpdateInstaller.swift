@@ -13,7 +13,10 @@ import Foundation
 ///   失败结束，并写一条「已放弃」记录（结束时间未知、派生进程是否结束未确认）；
 /// - 无法建立独立进程组时降级为“只放弃等待 + 记录未确认”，不发送任何信号；
 /// - 任何失败都只返回结果，不抛出、不崩溃。
-final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
+/// `@unchecked Sendable`：并发安全靠 `stateQueue` 这条串行队列，所有可变状态只在它上面
+/// 读写，方法名带 `Locked` 后缀即“调用方已持有该队列”的标记。
+/// 新增属性时请沿用这个约定，不要把裸读写放到队列外面。
+final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling, @unchecked Sendable {
     /// 保留的子进程输出上限（字符）。
     static let outputTailLimit = 2000
     /// 进程退出后等待输出管道 EOF 的有界宽限；防止退出通知抢在最后一块输出前收尾。
@@ -46,7 +49,11 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
 
     /// 一次 install 调用的全部可变状态。每次调用独立一份：重叠调用不会再覆盖
     /// 上一次的 handle / 回调 / 定时器（W2A A-1/A-2）。
-    private final class Attempt {
+    /// 一轮安装的状态。
+    ///
+    /// `@unchecked Sendable`：所有可变字段只在 `stateQueue` 上读写（方法名带 `Locked`
+    /// 后缀即该前提）。
+    private final class Attempt: @unchecked Sendable {
         let plan: PiWebUpdateInstallPlan
         let timeout: TimeInterval
         let completion: (PiWebUpdateInstallResult) -> Void
@@ -115,9 +122,9 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
         timeout: TimeInterval,
         completion: @escaping (PiWebUpdateInstallResult) -> Void
     ) {
-        stateQueue.async { [weak self] in
+        stateQueue.async(execute: DispatchWorkItem { [weak self] in
             self?.startLocked(plan, timeout: timeout, completion: completion)
-        }
+        })
     }
 
     func cancel() {
@@ -199,8 +206,12 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
 
         waitQueue.async { [weak self] in
             let exitCode = self?.spawner.waitForExit(handle) ?? -1
-            self?.stateQueue.async {
-                self?.childExitedLocked(attempt, exitCode: exitCode)
+            // 先把 weak 的 `self` 固化成强引用再进 `stateQueue.async`：weak 捕获变量是
+            // 个可变 var，在并发闭包里读它就是 #SendableClosureCaptures。
+            guard let self else { return }
+            let stateQueue = self.stateQueue
+            stateQueue.async {
+                self.childExitedLocked(attempt, exitCode: exitCode)
             }
         }
         scheduleTimeoutLocked(attempt)
@@ -381,7 +392,10 @@ final class ProcessPiWebUpdateInstaller: PiWebUpdateInstalling {
         _ result: PiWebUpdateInstallResult,
         to completion: @escaping (PiWebUpdateInstallResult) -> Void
     ) {
-        deliveryQueue.async { completion(result) }
+        // 包成 `DispatchWorkItem`：`DispatchQueue.async` 的 block 参数要求 `@Sendable`，
+        // 而 `completion` 是调用方给的普通闭包。work item 是 Sendable 容器，执行一次、
+        // 执行队列不变，语义完全一致。
+        deliveryQueue.async(execute: DispatchWorkItem { completion(result) })
     }
 
     /// 摘掉业务回调后**保持读端打开**，把剩余输出一路读到 EOF 再释放。这样被放弃

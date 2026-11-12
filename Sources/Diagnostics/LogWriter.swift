@@ -291,7 +291,10 @@ final class LogWriter {
         } else if synchronousWhenIdle && wasIdle {
             queue.sync(execute: run)
         } else {
-            queue.async(execute: run)
+            // 用 `DispatchWorkItem` 而不是 `queue.async(execute: run)`：后者的 block 参数是
+            // `@Sendable @convention(block)`，直接传非 Sendable 的局部闭包会被判为“可能
+            // 引入数据竞争”。work item 本身就是 Sendable 容器，语义完全一致。
+            queue.async(execute: DispatchWorkItem { run() })
         }
     }
 

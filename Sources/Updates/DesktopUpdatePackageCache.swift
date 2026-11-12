@@ -27,7 +27,9 @@ final class DesktopUpdatePackageCache {
         let downloadedAt: Date
     }
 
-    static let shared = DesktopUpdatePackageCache()
+    /// `nonisolated(unsafe)`：单例内部的可变状态全部由 `locking` / 串行队列保护（见下）；
+    /// 共享引用本身不提供并发控制，所以不能直接写成 `Sendable`。
+    nonisolated(unsafe) static let shared = DesktopUpdatePackageCache()
 
     private let directory: URL
     private let fileManager: FileManager

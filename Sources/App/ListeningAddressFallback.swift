@@ -173,5 +173,8 @@ private func numericHost(_ socketAddress: UnsafeMutablePointer<sockaddr>, length
     var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
     let status = getnameinfo(socketAddress, length, &buffer, socklen_t(buffer.count), nil, 0, NI_NUMERICHOST)
     guard status == 0 else { return nil }
-    return String(validatingUTF8: buffer)
+    // `String(validating:as:)` 不做 C 字符串截断：从 buffer 里切掉第一个 0 字节
+    // 之后的填充，否则终止符后面的残留内容会被当成地址文本的一部分。
+    let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+    return String(validating: bytes, as: UTF8.self)
 }

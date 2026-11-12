@@ -223,7 +223,8 @@ struct TimeoutCommandRunner: CommandRunning {
 }
 
 /// 读线程写、调用线程读的 stdout 缓冲。
-private final class PipeOutputBuffer {
+/// `@unchecked Sendable`：存取全部在 `lock` 临界区内。
+private final class PipeOutputBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var stored = Data()
 
@@ -257,7 +258,9 @@ struct DiagnosticsProbeResult: Equatable {
 /// 都由注入的 `CommandRunning` 保证有界返回（生产里是 `TimeoutCommandRunner`）。
 /// 外部监听进程的命令行复用更新路径的同一套遮罩（`PiProcessInspector.commandSummary`
 /// = token 级凭据遮罩 + `LogRedactor` + 折叠空白 + 长度上限），导出里不另写一套。
-final class DiagnosticsProbeCollector {
+/// `@unchecked Sendable`：除了 `let` 依赖以外没有任何存储状态，`collect` 的工作全部跑在
+/// 自己的串行 `queue` 上。
+final class DiagnosticsProbeCollector: @unchecked Sendable {
     private let queue: DispatchQueue
     private let runner: CommandRunning
     private let redactor: LogRedactor
@@ -274,7 +277,9 @@ final class DiagnosticsProbeCollector {
 
     /// 串行执行探测；`completion` 也在 `queue` 上回调，调用方自己回主线程。
     func collect(piWebPath: String?, port: Int, completion: @escaping (DiagnosticsProbeResult) -> Void) {
-        queue.async { [self] in
+        // 包成 `DispatchWorkItem`：`DispatchQueue.async` 的 block 参数要求 `@Sendable`，
+        // 而 `completion` 是调用方给的普通闭包。work item 是 Sendable 容器。
+        queue.async(execute: DispatchWorkItem { [self] in
             var result = DiagnosticsProbeResult()
             if let piWebPath, !piWebPath.isEmpty {
                 result.piWebVersion = trimmed(runner.run([piWebPath, "--version"]))
@@ -296,7 +301,7 @@ final class DiagnosticsProbeCollector {
                 }
             }
             completion(result)
-        }
+        })
     }
 
     private func trimmed(_ output: String?) -> String? {

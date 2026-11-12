@@ -54,17 +54,23 @@ protocol RepeatingTimerToken: AnyObject {
     func invalidate()
 }
 
-final class DispatchServiceScheduler: ServiceScheduling {
+/// `Sendable`：实例没有任何存储状态（每个方法只是把闭包交给一条队列或计时器），
+/// 因此可以自由地在并发上下文之间传递。测试需要把它捕获进 `DispatchQueue.async`
+/// 的 `@Sendable` 闭包里，这个一致性把它从“假设”变成“编译器确认”。
+final class DispatchServiceScheduler: ServiceScheduling, Sendable {
+    // 投递一律包成 `DispatchWorkItem`：`DispatchQueue.async` / `asyncAfter` / `Timer` 的
+    // block 参数都要求 `@Sendable`，而这些 `work` 是调用方给的普通闭包。work item 本身是
+    // Sendable 容器，执行一次、执行线程不变，语义完全一致。
     func onMain(_ work: @escaping () -> Void) {
-        DispatchQueue.main.async(execute: work)
+        DispatchQueue.main.async(execute: DispatchWorkItem(block: work))
     }
 
     func onBackground(_ work: @escaping () -> Void) {
-        DispatchQueue.global().async(execute: work)
+        DispatchQueue.global().async(execute: DispatchWorkItem(block: work))
     }
 
     func after(_ delay: TimeInterval, _ work: @escaping () -> Void) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: DispatchWorkItem(block: work))
     }
 
     /// 重复计时器必须挂在 `.common` 模式上，不能只用 `Timer.scheduledTimer`。
@@ -78,7 +84,10 @@ final class DispatchServiceScheduler: ServiceScheduling {
     /// `DispatchUpdateCheckScheduler.startRepeating` 与退出超时计时器有同样的
     /// 处理。
     func repeating(interval: TimeInterval, _ work: @escaping () -> Void) -> RepeatingTimerToken {
-        let timer = Timer(timeInterval: interval, repeats: true) { _ in work() }
+        // `Timer` 的 block 同样是 `@Sendable`，包成 work item 再 `perform()`
+        // （`perform()` 在调用线程上同步执行，与直接写 `work()` 等价）。
+        nonisolated(unsafe) let item = DispatchWorkItem(block: work)
+        let timer = Timer(timeInterval: interval, repeats: true) { _ in item.perform() }
         RunLoop.main.add(timer, forMode: .common)
         return TimerRepeatingToken(timer: timer)
     }
@@ -124,12 +133,14 @@ final class URLSessionServiceProbe: ServiceProbing {
     }
 
     func probe(url: URL, timeout: TimeInterval, completion: @escaping (Bool) -> Void) {
+        // `completion` 只在这里被转交给 URLSession 的完成回调执行一次，属于所有权转移。
+        nonisolated(unsafe) let deliver = completion
         var request = URLRequest(url: url)
         request.timeoutInterval = timeout
         request.cachePolicy = .reloadIgnoringLocalCacheData
         session.dataTask(with: request) { _, response, _ in
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            completion((200..<500).contains(status))
+            deliver((200..<500).contains(status))
         }.resume()
     }
 }

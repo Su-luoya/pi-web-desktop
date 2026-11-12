@@ -155,8 +155,10 @@ extension AppDelegate {
                 let detail = "发布页请求失败（HTTP \(status.map(String.init) ?? "无响应")"
                     + "\(remaining.map { "，限流剩余 \($0)" } ?? "")"
                     + "\(error.map { "，\($0.localizedDescription)" } ?? "")"
+                // 先固化强引用，再把结果丢回主线程（不在并发闭包里读 weak 捕获变量）。
+                guard let self else { return }
                 DispatchQueue.main.async {
-                    self?.failDesktopAppUpdateRound(failure, releaseTag: releaseTag, detail: detail)
+                    self.failDesktopAppUpdateRound(failure, releaseTag: releaseTag, detail: detail)
                 }
                 return
             }
@@ -176,8 +178,9 @@ extension AppDelegate {
                   DesktopAppReleaseAssetSelector.allowsChecksumDownloadURL(
                       checksumAsset.url, assetName: checksumAsset.name, releaseTag: releaseTag
                   ) else {
+                guard let self else { return }
                 DispatchQueue.main.async {
-                    self?.failDesktopAppUpdateRound(.missingAsset, releaseTag: releaseTag)
+                    self.failDesktopAppUpdateRound(.missingAsset, releaseTag: releaseTag)
                 }
                 return
             }
@@ -213,8 +216,9 @@ extension AppDelegate {
                     // （`DesktopAppUpdateEntryPolicy.isBusy`）只看 activity 与安装器
                     // 是否在场。少了结束这一步，校验和下载失败后整轮永远停在忙碌态，
                     // 菜单项永久置灰，只能重启应用才能再试。
+                    guard let self else { return }
                     DispatchQueue.main.async {
-                        self?.failDesktopAppUpdateRound(.checksumUnavailable, releaseTag: releaseTag)
+                        self.failDesktopAppUpdateRound(.checksumUnavailable, releaseTag: releaseTag)
                     }
                     return
                 }
@@ -235,6 +239,9 @@ extension AppDelegate {
         releaseTag: String,
         completion: @escaping (DesktopAppReleaseAsset?) -> Void
     ) {
+        // `completion` 只被转交给 URLSession 的完成回调执行一次，属于所有权转移；
+        // URLSession 的回调参数是 `@Sendable`，直接捕获非 Sendable 的闭包会告警。
+        nonisolated(unsafe) let deliver = completion
         guard let feedURL = AppcastFeed.url else {
             completion(nil)
             return
@@ -261,10 +268,10 @@ extension AppDelegate {
                       releaseTag: releaseTag
                   ) else {
                 // 任何一处不合规都退回 GitHub API：feed 坏了不该让更新失败。
-                completion(nil)
+                deliver(nil)
                 return
             }
-            completion(asset)
+            deliver(asset)
         }.resume()
     }
 
@@ -272,7 +279,7 @@ extension AppDelegate {
     ///
     /// 三条通道（GitHub API、校验和、appcast）以前各自写一份，漏一处就会让某条
     /// 通道带着不同的请求头/超时出去；收在一处后 `User-Agent` 与超时只有一份来源。
-    private static func updateRequest(url: URL, accept: String) -> URLRequest {
+    private nonisolated static func updateRequest(url: URL, accept: String) -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = UpdateChecker.requestTimeout
@@ -282,7 +289,7 @@ extension AppDelegate {
     }
 
     /// 两条通道的共同出口：资产与校验值都到手后，创建安装器接管下载与替换。
-    private func beginDesktopAppUpdateDownload(
+    private nonisolated func beginDesktopAppUpdateDownload(
         asset: DesktopAppReleaseAsset,
         releaseTag: String,
         source: String
@@ -852,7 +859,10 @@ extension AppDelegate {
 ///
 /// 重定向闸控：只有目标 URL 通过调用方给的判定才跟随。校验和下载与 appcast 用的
 /// 是同一条策略实现（差别只在判定函数），因此不会出现两份几乎相同的委托各自漂移。
-private final class AllowlistRedirectDelegate: NSObject, URLSessionTaskDelegate {
+/// `@unchecked Sendable`：`URLSessionTaskDelegate` 在 SDK 里要求 `Sendable`，而本类
+/// 持有的 `allows` 是闭包（函数类型本身不是 `Sendable`）。闭包是不可变的 `let`，且
+/// 只做一次纯判定（不碰任何共享可变状态），所以并发调用它本身是安全的。
+private final class AllowlistRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     /// 判定目标 URL 是否允许跟随；`URL?` 入参是因为 `URLRequest.url` 本身可空，
     /// 拿不到 URL 时必须拒绝而不是放行。
     private let allows: (URL?) -> Bool

@@ -107,7 +107,10 @@ protocol PiPackageUpdateRunning: AnyObject {
 ///   代理变量透传给子进程；PATH 前置 `pi` 所在目录并补上系统目录；
 /// - stdout/stderr 分别合并进有界尾部片段，只用于诊断；
 /// - 超时或 `abandon()` 只标记结果并停止等待：本类型不调用任何信号或终止 API。
-final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
+/// `@unchecked Sendable`：并发安全靠 `stateQueue` 这条串行队列，所有可变状态只在它上面
+/// 读写，方法名带 `Locked` 后缀即“调用方已持有该队列”的标记。
+/// 新增属性时请沿用这个约定，不要把裸读写放到队列外面。
+final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning, @unchecked Sendable {
     /// 保留的子进程输出上限（每条流，字符）。
     static let outputTailLimit = 2000
     /// 进程结束后等两条管道读到 EOF 的宽限时间默认值（有界；超时后照常结束）。
@@ -185,9 +188,9 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
         timeout: TimeInterval,
         completion: @escaping (PiPackageUpdateCommandResult) -> Void
     ) {
-        stateQueue.async { [weak self] in
+        stateQueue.async(execute: DispatchWorkItem { [weak self] in
             self?.startLocked(plan, timeout: timeout, completion: completion)
-        }
+        })
     }
 
     /// 是否有一次运行正在进行（供 UI 门控，GitHub #107）。已经放弃等待、但子进程
@@ -245,7 +248,9 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
                 finishedAt: now
             )
             // F1：拒绝也走 `deliveryQueue`，与正常结果同一投递语义。
-            deliveryQueue.async { completion(refused) }
+            // 包成 `DispatchWorkItem`：`DispatchQueue.async` 的 block 参数要求
+            // `@Sendable`，而 `completion` 是调用方给的普通闭包。
+            deliveryQueue.async(execute: DispatchWorkItem { completion(refused) })
             return
         }
         resetRunStateLocked()
@@ -279,8 +284,11 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
             self?.receive(data, toStdout: false, from: handle)
         }
         process.terminationHandler = { [weak self] finishedProcess in
-            self?.stateQueue.async {
-                guard let self else { return }
+            // 先把 weak 的 `self` 固化成强引用再进 `stateQueue.async`：weak 捕获变量是
+            // 个可变 var，在并发闭包里读它就是 #SendableClosureCaptures。
+            guard let self else { return }
+            let stateQueue = self.stateQueue
+            stateQueue.async {
                 // 退出确认要结清「放弃等待」登记：晚到的退出通知同样要清账，否则门控会
                 // 永久拒绝后续运行（W3）。
                 self.settleAbandonedChildLocked(finishedProcess)
@@ -520,7 +528,7 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning {
         self.pendingFinish = nil
         // F1：在 `deliveryQueue` 上回调，不占住 `stateQueue`。
         if let completion {
-            deliveryQueue.async { completion(result) }
+            deliveryQueue.async(execute: DispatchWorkItem { completion(result) })
         }
     }
 }

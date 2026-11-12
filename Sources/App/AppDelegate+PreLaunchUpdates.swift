@@ -326,11 +326,12 @@ extension AppDelegate {
     /// 有界的健康检查轮询（25 × 0.5 秒）。超时按“健康检查失败”处理，不无限等待。
     private func pollServiceHealth(attemptsRemaining: Int, completion: @escaping (Bool) -> Void) {
         serviceManager.checkServer { [weak self] ready in
-            DispatchQueue.main.async {
-                guard let self else {
-                    completion(ready)
-                    return
-                }
+            // 先固化强引用；拿不到时仍然要在主线程上把结果交回去。
+            guard let self else {
+                DispatchQueue.main.async { completion(ready) }
+                return
+            }
+            DispatchQueue.main.async { [self] in
                 if ready {
                     completion(true)
                     return
@@ -432,9 +433,10 @@ extension AppDelegate {
         logPiWebUpdate("手动立即更新 Pi Web：先停止托管服务，再执行安装（只使用参数数组）。")
         serviceManager.stopService { [weak self] in
             guard let self else { return }
-            self.serviceManager.checkServer { [weak self] ready in
+            // 外层已经在 `stopService` 闭包里固化了强引用，内层不再重新 `weak`:
+            // 在并发闭包里读 weak 捕获变量属于 #SendableClosureCaptures。
+            self.serviceManager.checkServer { ready in
                 DispatchQueue.main.async {
-                    guard let self else { return }
                     guard !ready else {
                         self.presentPiWebUpdateInfo(
                             "已取消更新",

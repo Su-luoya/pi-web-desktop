@@ -4,6 +4,11 @@ import XCTest
 /// GitHub #219：更新进度窗口的模型与窗口渲染测试。
 ///
 /// 全部副作用都是内存状态：不联网、不执行命令、不读写用户目录、不发信号。
+///
+/// `@MainActor`：这里直接构造 `NSWindowController` 并调 `NSWindowDelegate` 的
+/// 主 actor 隔离方法（`windowWillClose(_:)`），语言模式 6 下把非 `Sendable` 的
+/// `Notification` 送过隔离边界是编译错误，测试本身也确实应该跑在主线程上。
+@MainActor
 final class UpdateProgressTests: XCTestCase {
     private let referenceDate = Date(timeIntervalSince1970: 1_700_000_000)
 

@@ -66,7 +66,11 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    deinit {
+    // Swift 6 下 `deinit` 默认是 nonisolated 的，而 `Timer` 不是 `Sendable`：
+    // 直接在主 actor 隔离的属性上读它会报 “cannot access property 'elapsedTimer'
+    // with a non-Sendable type from nonisolated deinit”。`isolated deinit`（SE-0371）
+    // 让析构在所属 actor 的执行器上跑，因此这次访问仍然只在主线程发生。
+    isolated deinit {
         elapsedTimer?.invalidate()
     }
 
@@ -356,7 +360,9 @@ final class UpdateProgressWindowController: NSWindowController, NSWindowDelegate
     private func startTimer() {
         guard elapsedTimer == nil else { return }
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            self?.refreshElapsed()
+            // 计时器加在 RunLoop.main 上（见下），回调必然在主线程；Timer 的 block
+            // 类型不带隔离信息，要显式断言。
+            MainActor.assumeIsolated { self?.refreshElapsed() }
         }
         // .common：sheet、菜单跟踪与拖动窗口期间也继续走（与调度器的取舍一致）。
         RunLoop.main.add(timer, forMode: .common)

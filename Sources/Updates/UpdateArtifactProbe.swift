@@ -49,7 +49,7 @@ enum UpdateArtifactContentHashResult: Equatable {
 /// 生产实现是 `UpdateArtifactProbe.live`（只用 `FileManager`）；unhosted 测试
 /// 注入假探针，绝不触碰真实用户目录、不读取真实安装、不执行任何命令。
 /// `isAvailable == false` 时所有文件层检查都记为“未验证”，而不是猜一个结论。
-struct UpdateArtifactProbe {
+struct UpdateArtifactProbe: @unchecked Sendable {
     /// 探针可用性。false 表示这次运行没有注入文件系统能力。
     var isAvailable: Bool
     var isExecutableFile: (String) -> Bool
@@ -77,6 +77,7 @@ struct UpdateArtifactProbe {
     static let lockfileSizeLimitBytes = 4 * 1024 * 1024
 
     /// 未注入探针：所有文件层检查记为“未验证”。
+    /// 不可变值类型（见类型声明），成员全是无状态纯函数，跨队列读取无竞争。
     static let disabled = UpdateArtifactProbe(
         isAvailable: false,
         isExecutableFile: { _ in false },

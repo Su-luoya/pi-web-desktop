@@ -8,6 +8,11 @@ import WebKit
 ///
 /// AppDelegate only keeps the window and menu wiring and observes the minimal
 /// callbacks below.
+/// `@MainActor`：WebKit 的四个 delegate 协议在 SDK 里都是 main-actor 隔离的（包括
+/// `WKDownloadDelegate.download(_:decideDestinationUsing:suggestedFilename:completionHandler:)`
+/// 的 `completionHandler`）。不标隔离，这些方法就只是“看起来像”协议要求的同名方法——
+/// 运行期靠 ObjC 选择子还能调到，但编译器不再替我们校验签名。
+@MainActor
 final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
     let webView: WKWebView
 
@@ -166,7 +171,7 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKD
         onNavigationFailure?(failure)
     }
 
-    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
         switch WebViewNavigationPolicy.decision(for: url, serviceURL: serviceURL) {
         case .allow:
@@ -191,7 +196,7 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKD
         NSWorkspace.shared.open(url)
     }
 
-    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping @MainActor (WKNavigationResponsePolicy) -> Void) {
         decisionHandler(navigationResponse.canShowMIMEType ? .allow : .download)
     }
 
@@ -207,7 +212,7 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKD
         onDownloadStarted?()
     }
 
-    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
+    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping @MainActor (URL?) -> Void) {
         guard let window = windowProvider() else {
             completionHandler(nil)
             return
@@ -235,7 +240,7 @@ final class WebViewController: NSObject, WKNavigationDelegate, WKUIDelegate, WKD
         return nil
     }
 
-    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor ([URL]?) -> Void) {
         guard let window = windowProvider() else {
             completionHandler(nil)
             return

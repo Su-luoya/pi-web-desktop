@@ -35,7 +35,9 @@ struct PiProcessInspector {
         self.formatStartTime = formatStartTime
     }
 
-    static let defaultStartTimeFormat: (Date) -> String = { date in
+    /// `nonisolated(unsafe)`：纯函数，每次调用自建 `DateFormatter`，不共享任何可变
+    /// 状态。函数类型不是 `Sendable`，所以全局常量需要显式声明访问安全。
+    nonisolated(unsafe) static let defaultStartTimeFormat: (Date) -> String = { date in
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         return formatter.string(from: date)

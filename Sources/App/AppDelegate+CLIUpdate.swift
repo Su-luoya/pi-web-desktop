@@ -287,14 +287,16 @@ extension AppDelegate {
 
     /// 诊断页/设置页的 Pi CLI 进程保护与更新状态块（已脱敏）。smoke 启动返回空串：
     /// 不为诊断 fixture 枚举真实进程。
-    func piCLIStatusBlockText() -> String {
+    /// `compact` 为真时进程状态只报数量（设置页用，诊断页保持完整展开）。
+    func piCLIStatusBlockText(compact: Bool = false) -> String {
         guard !appConfiguration.isSmokeLaunch else { return "" }
         let input = piCLIPlanningInput()
         return PiCLIUpdateStatusPresenter.lines(
             preferences: input.preferences,
             inspection: piProcessInspection,
             decision: PiCLIUpdatePlanner.decide(input),
-            warning: piCLIUpdateWarning
+            warning: piCLIUpdateWarning,
+            compact: compact
         ).joined(separator: "\n")
     }
 }

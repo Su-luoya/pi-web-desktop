@@ -426,8 +426,8 @@ extension AppDelegate {
             preferences: updateChecker.preferences,
             statuses: statusSnapshot(for: updateChecker),
             ignorableVersions: ignorableVersionCandidates(),
-            piCLIStatus: piCLIStatusBlockText(),
-            piPackageStatus: piPackageStatusBlockText(),
+            piCLIStatus: piCLIStatusBlockText(compact: true),
+            piPackageStatus: piPackageStatusBlockText(compact: true),
             abandonedStatus: updateAbandonedStatusBlockText()
         )
     }

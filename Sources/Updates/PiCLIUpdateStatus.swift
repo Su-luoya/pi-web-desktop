@@ -44,15 +44,18 @@ enum PiCLIManualUpdateConfirmation {
 /// 诊断页/设置页用的状态文本（纯函数；输入都是已经脱敏的值）。
 /// `inspection` 为 nil 表示本次运行还没有做过进程检查（smoke 启动不会枚举真实
 /// 进程），此时只展示设置与手动入口，不展示决策结果。
+/// `compact` 为真时进程状态只报数量（设置页用），不影响诊断页的完整展开。
 enum PiCLIUpdateStatusPresenter {
     static func lines(
         preferences: UpdateCheckPreferences,
         inspection: PiProcessInspection?,
         decision: PiCLIUpdateDecision?,
-        warning: PiCLIUpdateWarning?
+        warning: PiCLIUpdateWarning?,
+        compact: Bool = false
     ) -> [String] {
         var lines: [String] = []
-        lines.append("Pi CLI 进程保护：\(inspection?.statusText ?? "尚未检查（本次运行还没有枚举本机进程）")")
+        let processStatus = inspection.map { compact ? $0.compactStatusText : $0.statusText }
+        lines.append("Pi CLI 进程保护：\(processStatus ?? "尚未检查（本次运行还没有枚举本机进程）")")
         lines.append(
             "Pi CLI 启动前自动更新："
                 + (preferences.autoUpdatePiBeforeLaunch ? "已开启" : "已关闭")

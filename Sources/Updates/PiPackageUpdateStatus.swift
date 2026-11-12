@@ -8,17 +8,20 @@ import Foundation
 /// 进程），此时只展示策略与拒绝原因，不展示进程结论。
 enum PiPackageUpdateStatusPresenter {
     /// 更新失败告警的展示文本（跨启动保留）。
+    /// `compact` 为真时进程状态只报数量（设置页用）。
     static func lines(
         policy: UpdateCheckPolicy,
         planSet: PiPackageUpdatePlanSet?,
         inspection: PiProcessInspection?,
-        warning: PiPackageUpdateWarning?
+        warning: PiPackageUpdateWarning?,
+        compact: Bool = false
     ) -> [String] {
         var lines: [String] = []
         let mapped = PiPackageUpdatePolicy(policy)
         lines.append("Pi 扩展包更新：策略 \(mapped?.title ?? "\(policy.title)（不属于扩展包允许集合）")"
             + "；不做无人值守更新（执行入口必须经用户确认）")
-        lines.append("Pi 扩展包进程保护：\(inspection?.statusText ?? "尚未检查（本次运行还没有枚举本机进程）")")
+        let processStatus = inspection.map { compact ? $0.compactStatusText : $0.statusText }
+        lines.append("Pi 扩展包进程保护：\(processStatus ?? "尚未检查（本次运行还没有枚举本机进程）")")
         if let planSet {
             lines.append("本次规划：已检查 \(planSet.didCheck ? "是" : "否")；包数量 \(planSet.packageCount)；"
                 + "待确认计划 \(planSet.executablePlans.count)；只提示 \(planSet.notices.count)")

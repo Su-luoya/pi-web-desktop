@@ -68,6 +68,8 @@ otool -L .build/DerivedData/Build/Products/Debug/PiWebDesktopTests.xctest/Conten
 
 没有这一行就说明 TSan 没开，那次“全绿”是空的。TSan 只报告**实际并发执行到**的竞争，全绿是证据不是证明；改动了 `ServiceManager`、`LogWriter`、`QuitCoordinator` 或任何带锁/队列的代码时应当跑一次。
 
+CI 里有一个独立的 `thread-sanitizer` job 跑同一套件（全量套件在 TSan 下只比常规慢十余秒）。它先 `build-for-testing`、再检查测试 bundle 链上了 TSan 运行时、最后 `test-without-building`，所以插桩没接上会直接红，不会先绿后怪。
+
 需要拆开跑（构建 + XCTest + 身份检查）时用下面的序列：
 
 ```bash

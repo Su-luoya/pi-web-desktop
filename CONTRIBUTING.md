@@ -52,7 +52,21 @@ codesign --verify --deep --strict build/Pi-Web-Desktop.app
 ./Scripts/test.sh
 ```
 
-`xcode-select -p` 仍指向 Command Line Tools 时它会只为本进程设置 `DEVELOPER_DIR`（默认 `/Applications/Xcode.app`，`$XCODE_APP` 可覆盖），所以不需要 `sudo xcode-select -s`；DerivedData 落在 git-ignored 的 `.build/DerivedData`（`$DERIVED_DATA_PATH` 可覆盖）；找不到完整 Xcode 时退出 2 并打印补救命令。当前基线是 `Executed 1022 tests, with 0 failures`。
+`xcode-select -p` 仍指向 Command Line Tools 时它会只为本进程设置 `DEVELOPER_DIR`（默认 `/Applications/Xcode.app`，`$XCODE_APP` 可覆盖），所以不需要 `sudo xcode-select -s`；DerivedData 落在 git-ignored 的 `.build/DerivedData`（`$DERIVED_DATA_PATH` 可覆盖）；找不到完整 Xcode 时退出 2 并打印补救命令。当前基线是 `Executed 1095 tests, with 0 failures`。
+
+`Scripts/test.sh` 会把多余的参数透传给 `xcodebuild`，所以跑 Thread Sanitizer 不用另写脚本：
+
+```bash
+./Scripts/test.sh -enableThreadSanitizer YES
+```
+
+先确认插桩真的生效——产物会链上 `libclang_rt.tsan_osx_dynamic.dylib`：
+
+```bash
+otool -L .build/DerivedData/Build/Products/Debug/PiWebDesktopTests.xctest/Contents/MacOS/PiWebDesktopTests | grep tsan
+```
+
+没有这一行就说明 TSan 没开，那次“全绿”是空的。TSan 只报告**实际并发执行到**的竞争，全绿是证据不是证明；改动了 `ServiceManager`、`LogWriter`、`QuitCoordinator` 或任何带锁/队列的代码时应当跑一次。
 
 需要拆开跑（构建 + XCTest + 身份检查）时用下面的序列：
 

@@ -21,7 +21,8 @@ enum QuitTimelineStage: String {
 /// 退出时间线的格式化（纯函数，便于单测）。
 ///
 /// 每行形如：`退出时间线 12:34:56.789 (+12345ms) 已发送 SIGTERM — SIGTERM 之后等待 8ms`。
-/// `+Nms` 是相对进程启动的单调偏移（`ProcessInfo.systemUptime`），因此任意两行
+/// `+Nms` 是相对系统启动的单调偏移（`ProcessInfo.systemUptime` 是开机以来的时间，
+/// 不是相对进程启动的——同一次开机内任意两次运行的时间线可以直接横向比较），因此任意两行
 /// 相减即得到该阶段的真实耗时，不受系统时钟调整影响；绝对时间只是给人定位现场用。
 enum QuitTimeline {
     /// `HH:mm:ss.SSS`（本地时区）。`LogWriter.timestamp` 只精确到秒，而且它属于诊断

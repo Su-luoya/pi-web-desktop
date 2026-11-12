@@ -148,17 +148,117 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
 
     // MARK: - 界面
 
+    /// 只负责“拼装”：把标签、表格、三个代码框、四个按钮行按顺序放进文档视图，
+    /// 再套上窗口外壳。每个部件自己怎么配置，看下面各自的小函数。
     private func buildWindow() {
-        let content = FlippedDocumentView()
-        content.translatesAutoresizingMaskIntoConstraints = false
+        configureLabels()
+        configureCommandButtons()
+
+        let tableScroll = makeResultsTableScrollView()
+        let componentsScroll = makeCodeScrollView(for: componentsTextView, accessibilityLabel: "组件安装信息")
+        let updateStatusScroll = makeCodeScrollView(for: updateStatusTextView, accessibilityLabel: "更新检查状态")
+        let commandsScroll = makeCodeScrollView(for: commandsTextView, accessibilityLabel: "待手动执行的安装命令")
+
+        let repairRow = makeActionRow([
+            NSButton(title: "选择 pi-web 路径…", target: self, action: #selector(selectPiWebPath(_:))),
+            NSButton(title: "重新检测", target: self, action: #selector(recheck(_:))),
+            NSView()
+        ])
+        let updateRow = makeActionRow([makeSectionHeader("更新检查"), NSView(), updatePiCLIButton])
+        let commandRow = makeActionRow([makeSectionHeader("安装命令"), NSView(), copyButton])
+
+        let closeButton = NSButton(title: "关闭", target: self, action: #selector(closeWindow(_:)))
+        closeButton.keyEquivalent = "\u{1b}"
+        let footerRow = makeActionRow([copyDiagnosticsButton, NSView(), closeButton, continueButton])
+
+        let commandsHint = WrappingLabel(labelWithString: "以下命令仅供复制，请在终端中自行执行。应用不会执行这些命令。")
+        SettingsFormMetrics.configureHint(commandsHint)
+        commandsHint.font = NSFont.systemFont(ofSize: 12)
 
         let title = NSTextField(labelWithString: "依赖与环境诊断")
         title.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
 
+        let document = makeDocumentScrollView(
+            arrangedSubviews: [
+                title, detailLabel, hintLabel, repairRow, tableScroll,
+                makeSectionHeader("组件安装"), componentsScroll, updateRow, updateStatusScroll,
+                commandRow, commandsHint, commandsScroll
+            ],
+            fixedHeights: [
+                (tableScroll, 180),
+                (componentsScroll, 150),
+                (updateStatusScroll, 112),
+                (commandsScroll, 132)
+            ]
+        )
+
+        self.window = makeWindow(document: document, footerRow: footerRow)
+    }
+
+    private func configureLabels() {
         SettingsFormMetrics.configureHint(detailLabel, color: .labelColor)
         SettingsFormMetrics.configureHint(hintLabel, color: .systemRed)
         hintLabel.isHidden = true
+    }
 
+    private func configureCommandButtons() {
+        copyButton.target = self
+        copyButton.action = #selector(copyInstallCommands(_:))
+        copyDiagnosticsButton.target = self
+        copyDiagnosticsButton.action = #selector(copyDiagnostics(_:))
+        continueButton.target = self
+        continueButton.action = #selector(continueToService(_:))
+        continueButton.keyEquivalent = "\r"
+        updatePiCLIButton.target = self
+        updatePiCLIButton.action = #selector(updatePiCLI(_:))
+        updatePiCLIButton.toolTip = "执行前显示计划、运行中的 Pi 进程与风险说明，并要求确认；只调用 pi update --self"
+    }
+
+    private func makeSectionHeader(_ title: String) -> NSTextField {
+        let header = NSTextField(labelWithString: title)
+        header.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        return header
+    }
+
+    /// 横向操作行：左侧标题/按钮、中间弹性空白、右侧按钮。四个行共用同一套
+    /// 间距与对齐，按钮统一用 `.rounded` 样式。
+    private func makeActionRow(_ views: [NSView]) -> NSStackView {
+        for case let button as NSButton in views {
+            button.bezelStyle = .rounded
+        }
+        let row = NSStackView(views: views)
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        return row
+    }
+
+    /// 三个等宽代码视图（组件安装 / 更新检查 / 安装命令）的公共配置：
+    /// 只读可选中、等宽 12 号、纵向可伸缩、宽度跟随容器。
+    private func configureCodeTextView(_ textView: NSTextView, accessibilityLabel: String) {
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.setAccessibilityLabel(accessibilityLabel)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainerInset = NSSize(width: 8, height: 8)
+        textView.textContainer?.widthTracksTextView = true
+    }
+
+    private func makeCodeScrollView(for textView: NSTextView, accessibilityLabel: String) -> NSScrollView {
+        configureCodeTextView(textView, accessibilityLabel: accessibilityLabel)
+        let scrollView = NSScrollView()
+        scrollView.documentView = textView
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .bezelBorder
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        return scrollView
+    }
+
+    private func makeResultsTableScrollView() -> NSScrollView {
         for column in Column.allCases {
             let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.rawValue))
             tableColumn.title = column.title
@@ -174,123 +274,39 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         tableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         tableView.setAccessibilityLabel("依赖与环境检查结果")
 
-        let tableScroll = NSScrollView()
-        tableScroll.documentView = tableView
-        tableScroll.hasVerticalScroller = true
-        tableScroll.borderType = .bezelBorder
-        tableScroll.translatesAutoresizingMaskIntoConstraints = false
+        let scrollView = NSScrollView()
+        scrollView.documentView = tableView
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .bezelBorder
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        return scrollView
+    }
 
-        let componentsHeader = NSTextField(labelWithString: "组件安装")
-        componentsHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+    /// 把纵向排列的各个区块装进一个可滚动文档视图。`fixedHeights` 里每一项既是
+    /// 固定高度的代码框/表格，也是需要额外 20 点留白的段落边界。
+    private func makeDocumentScrollView(
+        arrangedSubviews: [NSView],
+        fixedHeights: [(view: NSScrollView, height: CGFloat)]
+    ) -> (scrollView: NSScrollView, content: NSView) {
+        let content = FlippedDocumentView()
+        content.translatesAutoresizingMaskIntoConstraints = false
 
-        let updateHeader = NSTextField(labelWithString: "更新检查")
-        updateHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        updateStatusTextView.isEditable = false
-        updateStatusTextView.isSelectable = true
-        updateStatusTextView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        updateStatusTextView.setAccessibilityLabel("更新检查状态")
-        updateStatusTextView.isVerticallyResizable = true
-        updateStatusTextView.isHorizontallyResizable = false
-        updateStatusTextView.autoresizingMask = [.width]
-        updateStatusTextView.textContainerInset = NSSize(width: 8, height: 8)
-        updateStatusTextView.textContainer?.widthTracksTextView = true
-
-        let updateStatusScroll = NSScrollView()
-        updateStatusScroll.documentView = updateStatusTextView
-        updateStatusScroll.hasVerticalScroller = true
-        updateStatusScroll.borderType = .bezelBorder
-        updateStatusScroll.translatesAutoresizingMaskIntoConstraints = false
-
-        componentsTextView.isEditable = false
-        componentsTextView.isSelectable = true
-        componentsTextView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        componentsTextView.setAccessibilityLabel("组件安装信息")
-        componentsTextView.isVerticallyResizable = true
-        componentsTextView.isHorizontallyResizable = false
-        componentsTextView.autoresizingMask = [.width]
-        componentsTextView.textContainerInset = NSSize(width: 8, height: 8)
-        componentsTextView.textContainer?.widthTracksTextView = true
-
-        let componentsScroll = NSScrollView()
-        componentsScroll.documentView = componentsTextView
-        componentsScroll.hasVerticalScroller = true
-        componentsScroll.borderType = .bezelBorder
-        componentsScroll.translatesAutoresizingMaskIntoConstraints = false
-
-        let commandsHeader = NSTextField(labelWithString: "安装命令")
-        commandsHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        let commandsHint = WrappingLabel(labelWithString: "以下命令仅供复制，请在终端中自行执行。应用不会执行这些命令。")
-        SettingsFormMetrics.configureHint(commandsHint)
-        commandsHint.font = NSFont.systemFont(ofSize: 12)
-
-        commandsTextView.isEditable = false
-        commandsTextView.isSelectable = true
-        commandsTextView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        commandsTextView.isVerticallyResizable = true
-        commandsTextView.isHorizontallyResizable = false
-        commandsTextView.autoresizingMask = [.width]
-        commandsTextView.textContainerInset = NSSize(width: 8, height: 8)
-        commandsTextView.setAccessibilityLabel("待手动执行的安装命令")
-        commandsTextView.textContainer?.widthTracksTextView = true
-
-        let commandsScroll = NSScrollView()
-        commandsScroll.documentView = commandsTextView
-        commandsScroll.hasVerticalScroller = true
-        commandsScroll.borderType = .bezelBorder
-        commandsScroll.translatesAutoresizingMaskIntoConstraints = false
-
-        copyButton.target = self
-        copyButton.action = #selector(copyInstallCommands(_:))
-        copyDiagnosticsButton.target = self
-        copyDiagnosticsButton.action = #selector(copyDiagnostics(_:))
-        continueButton.target = self
-        continueButton.action = #selector(continueToService(_:))
-        continueButton.keyEquivalent = "\r"
-        updatePiCLIButton.target = self
-        updatePiCLIButton.action = #selector(updatePiCLI(_:))
-        updatePiCLIButton.toolTip = "执行前显示计划、运行中的 Pi 进程与风险说明，并要求确认；只调用 pi update --self"
-        let selectButton = NSButton(title: "选择 pi-web 路径…", target: self, action: #selector(selectPiWebPath(_:)))
-        let recheckButton = NSButton(title: "重新检测", target: self, action: #selector(recheck(_:)))
-        let closeButton = NSButton(title: "关闭", target: self, action: #selector(closeWindow(_:)))
-        closeButton.keyEquivalent = "\u{1b}"
-
-        let repairActions = NSStackView(views: [selectButton, recheckButton, NSView()])
-        let updateActions = NSStackView(views: [updateHeader, NSView(), updatePiCLIButton])
-        let commandActions = NSStackView(views: [commandsHeader, NSView(), copyButton])
-        let buttons = NSStackView(views: [copyDiagnosticsButton, NSView(), closeButton, continueButton])
-        for row in [repairActions, updateActions, commandActions, buttons] {
-            row.orientation = .horizontal
-            row.alignment = .centerY
-            row.spacing = 8
-            row.translatesAutoresizingMaskIntoConstraints = false
-        }
-        for button in [selectButton, recheckButton, copyButton, copyDiagnosticsButton, updatePiCLIButton, continueButton, closeButton] {
-            button.bezelStyle = .rounded
-        }
-
-        let stack = NSStackView(views: [
-            title, detailLabel, hintLabel, repairActions, tableScroll,
-            componentsHeader, componentsScroll, updateActions, updateStatusScroll,
-            commandActions, commandsHint, commandsScroll
-        ])
+        let stack = NSStackView(views: arrangedSubviews)
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
-        stack.setCustomSpacing(20, after: tableScroll)
-        stack.setCustomSpacing(20, after: componentsScroll)
-        stack.setCustomSpacing(20, after: updateStatusScroll)
         stack.translatesAutoresizingMaskIntoConstraints = false
+        for entry in fixedHeights {
+            stack.setCustomSpacing(20, after: entry.view)
+            entry.view.heightAnchor.constraint(equalToConstant: entry.height).isActive = true
+        }
         content.addSubview(stack)
 
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
             stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
-            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -24),
-            tableScroll.heightAnchor.constraint(equalToConstant: 180),
-            componentsScroll.heightAnchor.constraint(equalToConstant: 150),
-            updateStatusScroll.heightAnchor.constraint(equalToConstant: 112),
-            commandsScroll.heightAnchor.constraint(equalToConstant: 132)
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -24)
         ])
         for view in stack.arrangedSubviews {
             view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
@@ -303,29 +319,36 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         scrollView.horizontalScrollElasticity = .none
         scrollView.documentView = content
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        return (scrollView, content)
+    }
 
+    /// 窗口外壳：可滚动文档区 + 分隔线 + 底部操作行。
+    private func makeWindow(
+        document: (scrollView: NSScrollView, content: NSView),
+        footerRow: NSStackView
+    ) -> NSWindow {
         let separator = NSBox()
         separator.boxType = .separator
         separator.translatesAutoresizingMaskIntoConstraints = false
 
         let container = NSView()
-        container.addSubview(scrollView)
+        container.addSubview(document.scrollView)
         container.addSubview(separator)
-        container.addSubview(buttons)
+        container.addSubview(footerRow)
         NSLayoutConstraint.activate([
-            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: container.topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: separator.topAnchor, constant: -12),
-            separator.leadingAnchor.constraint(equalTo: buttons.leadingAnchor),
-            separator.trailingAnchor.constraint(equalTo: buttons.trailingAnchor),
-            separator.bottomAnchor.constraint(equalTo: buttons.topAnchor, constant: -12),
-            buttons.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 24),
-            buttons.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -24),
-            buttons.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -24),
-            content.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
-            content.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
-            content.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor)
+            document.scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            document.scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            document.scrollView.topAnchor.constraint(equalTo: container.topAnchor),
+            document.scrollView.bottomAnchor.constraint(equalTo: separator.topAnchor, constant: -12),
+            separator.leadingAnchor.constraint(equalTo: footerRow.leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: footerRow.trailingAnchor),
+            separator.bottomAnchor.constraint(equalTo: footerRow.topAnchor, constant: -12),
+            footerRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 24),
+            footerRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -24),
+            footerRow.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -24),
+            document.content.leadingAnchor.constraint(equalTo: document.scrollView.contentView.leadingAnchor),
+            document.content.topAnchor.constraint(equalTo: document.scrollView.contentView.topAnchor),
+            document.content.widthAnchor.constraint(equalTo: document.scrollView.contentView.widthAnchor)
         ])
 
         let window = NSWindow(
@@ -339,7 +362,7 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
         window.isReleasedWhenClosed = false
         window.contentMinSize = NSSize(width: 680, height: 480)
         window.center()
-        self.window = window
+        return window
     }
 
     // MARK: - NSTableViewDataSource / NSTableViewDelegate

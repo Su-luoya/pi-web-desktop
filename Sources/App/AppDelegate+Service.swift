@@ -44,8 +44,10 @@ extension AppDelegate {
         // 启动入口在启动前发现工作目录不可用（GitHub #9 复审：健康监控运行期间
         // 自选目录被删除）：进入诊断状态并给出可读修复提示，而不是重建目录。
         serviceManager.onWorkspaceProblem = { [weak self] _, _ in
+            // 先固化强引用，再延到下一个主线程周期（不在并发闭包里读 weak 捕获变量）。
+            guard let self else { return }
             // 从启动入口里回来，延到下一个主线程周期再重路由，避开重入。
-            DispatchQueue.main.async { self?.presentWorkspaceDiagnostics() }
+            DispatchQueue.main.async { self.presentWorkspaceDiagnostics() }
         }
     }
 

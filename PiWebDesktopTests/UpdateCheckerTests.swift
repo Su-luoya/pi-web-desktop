@@ -17,22 +17,41 @@ import XCTest
 /// Pi Web 的版本查询走本机服务的 `/api/app-update`（`ServiceManager.effectiveServiceURL`）。
 private let testPiWebServiceURL = URL(string: "http://127.0.0.1:30141/")!
 
+/// 固定时间点。放在文件作用域而不是测试类的实例属性上：`UpdateClock` 的闭包是
+/// `@Sendable`，捕获 `self`（`XCTestCase` 不是 `Sendable`）在语言模式 6 下是编译错误。
+private let referenceDate = Date(timeIntervalSince1970: 1_700_000_000)
+
 final class UpdateCheckerTests: XCTestCase {
 
     // MARK: - 固定输入
 
-    private let referenceDate = Date(timeIntervalSince1970: 1_700_000_000)
     private let desktopInstalledVersion = "2.4.0"
     private let piCLIInstalledVersion = "1.2.0"
     private let piWebInstalledVersion = "0.9.0"
 
     // MARK: - 替身
 
-    private final class FixedClock {
-        var now: Date
+    /// 假时钟。`UpdateClock.now` 是 `@Sendable` 的：检查器会在后台队列上读时间，
+    /// 而测试在另一条线程上推进它，所以这里用锁保护，而不是靠“测试是单线程”的假设。
+    private final class FixedClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: Date
 
         init(_ now: Date) {
-            self.now = now
+            storage = now
+        }
+
+        var now: Date {
+            get {
+                lock.lock()
+                defer { lock.unlock() }
+                return storage
+            }
+            set {
+                lock.lock()
+                defer { lock.unlock() }
+                storage = newValue
+            }
         }
 
         var clock: UpdateClock { UpdateClock { self.now } }
@@ -1979,7 +1998,7 @@ final class UpdateCheckerTests: XCTestCase {
         let directory = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let fileURL = directory.appendingPathComponent("update-check-cache.json")
-        let store = UpdateCheckCacheFileStore(fileURL: fileURL, clock: UpdateClock { self.referenceDate })
+        let store = UpdateCheckCacheFileStore(fileURL: fileURL, clock: UpdateClock { referenceDate })
 
         try Data("{\"schemaVersion\":1,\"entries\":[]}".utf8).write(to: fileURL)
         XCTAssertEqual(store.load(), .empty)
@@ -2016,7 +2035,7 @@ final class UpdateCheckerTests: XCTestCase {
         let size = UpdateCheckCacheFile.maximumFileBytes + 1
         try Data(repeating: 0x20, count: size).write(to: fileURL)
 
-        let store = UpdateCheckCacheFileStore(fileURL: fileURL, clock: UpdateClock { self.referenceDate })
+        let store = UpdateCheckCacheFileStore(fileURL: fileURL, clock: UpdateClock { referenceDate })
 
         XCTAssertEqual(store.load(), .empty)
         XCTAssertEqual(store.lastLoadRejection, .tooLarge(bytes: size))
@@ -2089,7 +2108,7 @@ final class UpdateCheckerTests: XCTestCase {
         client.responder = { _ in .failure(.timedOut) }
         let checker = UpdateChecker(
             httpClient: client,
-            clock: UpdateClock { self.referenceDate },
+            clock: UpdateClock { referenceDate },
             cacheStore: UpdateCheckCacheFileStore(fileURL: fileURL),
             scheduler: ImmediateUpdateCheckScheduler(),
             identity: UpdateCheckIdentity(appName: "Pi Web Desktop", version: desktopInstalledVersion, bundleIdentifier: nil),
@@ -2469,7 +2488,7 @@ final class UpdateCheckerTests: XCTestCase {
         let scheduler = ControlledUpdateCheckScheduler()
         let checker = UpdateChecker(
             httpClient: client,
-            clock: UpdateClock { self.referenceDate },
+            clock: UpdateClock { referenceDate },
             cacheStore: InMemoryUpdateCacheStore(),
             scheduler: scheduler,
             identity: UpdateCheckIdentity(appName: "Pi Web Desktop", version: desktopInstalledVersion, bundleIdentifier: "io.github.su-luoya.pi-web-desktop"),
@@ -2505,7 +2524,7 @@ final class UpdateCheckerTests: XCTestCase {
         let scheduler = ControlledUpdateCheckScheduler()
         let checker = UpdateChecker(
             httpClient: client,
-            clock: UpdateClock { self.referenceDate },
+            clock: UpdateClock { referenceDate },
             cacheStore: InMemoryUpdateCacheStore(),
             scheduler: scheduler,
             identity: UpdateCheckIdentity(appName: "Pi Web Desktop", version: desktopInstalledVersion, bundleIdentifier: "io.github.su-luoya.pi-web-desktop"),
@@ -2551,7 +2570,7 @@ final class UpdateCheckerTests: XCTestCase {
         let scheduler = ControlledUpdateCheckScheduler()
         let checker = UpdateChecker(
             httpClient: client,
-            clock: UpdateClock { self.referenceDate },
+            clock: UpdateClock { referenceDate },
             cacheStore: InMemoryUpdateCacheStore(),
             scheduler: scheduler,
             identity: UpdateCheckIdentity(appName: "Pi Web Desktop", version: desktopInstalledVersion, bundleIdentifier: "io.github.su-luoya.pi-web-desktop"),
@@ -2580,7 +2599,7 @@ final class UpdateCheckerTests: XCTestCase {
         let scheduler = ControlledUpdateCheckScheduler()
         let checker = UpdateChecker(
             httpClient: client,
-            clock: UpdateClock { self.referenceDate },
+            clock: UpdateClock { referenceDate },
             cacheStore: InMemoryUpdateCacheStore(),
             scheduler: scheduler,
             identity: UpdateCheckIdentity(

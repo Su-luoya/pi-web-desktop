@@ -163,7 +163,10 @@ fi
 
 # SystemConfiguration 供只读的系统代理检测（GitHub #157）使用；其余框架靠
 # 源码里的 import 自动链接。
-swiftc $OPTIMIZATION_FLAGS "$@" \
+# `-swift-version 6` 与工程里的 SWIFT_VERSION = 6.0 一致：语言模式 6 把跨隔离
+# 访问从告警升级成编译错误，所以 `./Scripts/build.sh` 与 `xcodebuild` 对并发
+# 安全的结论相同（之前裸 swiftc 默认语言模式 5，两条构建路径不一致）。
+swiftc -swift-version 6 $OPTIMIZATION_FLAGS "$@" \
   -target "arm64-apple-macosx$APP_MINIMUM_SYSTEM_VERSION" \
   -o "$BIN" \
   -framework Cocoa \

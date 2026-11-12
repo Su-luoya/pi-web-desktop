@@ -215,6 +215,9 @@ extension AppDelegate {
     /// 立刻访问一次。返回 nil 表示“没发现问题”——包括本机测不了（http 被 ATS 拦下），
     /// 那种情况提示用户也没用。4xx 也算通：Host 被挡恰恰是接下来要修的东西。
     private func probeTunnelURL(_ url: URL, completion: @escaping (String?) -> Void) {
+        // `completion` 只被转交给 URLSession 的完成回调执行一次，属于所有权转移；
+        // URLSession 的回调参数是 `@Sendable`，直接捕获非 Sendable 的闭包会告警。
+        nonisolated(unsafe) let deliver = completion
         // 不走系统代理：开了代理的机器上，探测会变成“代理能不能出网”，
         // 而不是“这个隧道地址能不能打开”，误报比不报更坑。
         let sessionConfiguration = URLSessionConfiguration.ephemeral
@@ -234,7 +237,10 @@ extension AppDelegate {
             } else if let http = response as? HTTPURLResponse, http.statusCode >= 500 {
                 problem = "返回 HTTP \(http.statusCode)：隧道通了，但后面的服务像是没起来。"
             }
-            DispatchQueue.main.async { completion(problem) }
+            // 按值把结果带进并发闭包：`problem` 是局部 var，直接捕获等于把一个可变
+            // 变量跨线程读写（#SendableClosureCaptures）。
+            let reported = problem
+            DispatchQueue.main.async { deliver(reported) }
         }.resume()
     }
 

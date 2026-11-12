@@ -498,33 +498,79 @@ final class ProcessInspectorTests: XCTestCase {
     /// 之后——不需要真实命令、窗口或真实主队列。
     func testCommandProbeDispatchRunsWorkOffTheCallingThreadAndDeliversAfterIt() {
         let probeQueue = DispatchQueue(label: "process-inspector-probe-dispatch-tests")
-        var workRanOnMainThread = true
-        var workFinished = false
-        var deliveredBeforeWorkFinished = true
-        var deliveredValue: Int?
+        let recorder = DispatchProbeRecorder()
         let completed = expectation(description: "completion delivered")
 
         CommandProbeDispatch.runOffMain(
             queue: probeQueue,
             deliverOnMain: { block in
-                deliveredBeforeWorkFinished = !workFinished
-                DispatchQueue.main.async { block() }
+                recorder.noteDelivery()
+                // 包成 `DispatchWorkItem` 才不用把非 `Sendable` 的 `block` 直接
+                // 送进 `DispatchQueue.async` 的 `@Sendable` 参数（生产代码同款做法）。
+                DispatchQueue.main.async(execute: DispatchWorkItem(block: block))
             },
             work: {
-                workRanOnMainThread = Thread.isMainThread
-                workFinished = true
+                recorder.noteWorkStartedOnTheCallingThread()
+                recorder.noteWorkFinished()
                 return 42
             },
             completion: { value in
-                deliveredValue = value
+                recorder.noteDeliveredValue(value)
                 completed.fulfill()
             }
         )
 
         wait(for: [completed], timeout: 5)
-        XCTAssertFalse(workRanOnMainThread, "探针不得在调用（主）线程执行")
-        XCTAssertFalse(deliveredBeforeWorkFinished, "结果必须在工作完成之后交付")
-        XCTAssertEqual(deliveredValue, 42)
+        let report = recorder.snapshot
+        XCTAssertFalse(report.workRanOnCallingThread, "探针不得在调用（主）线程执行")
+        XCTAssertFalse(report.deliveredBeforeWorkFinished, "结果必须在工作完成之后交付")
+        XCTAssertEqual(report.deliveredValue, 42)
+    }
+
+    /// 跨线程记录探针的线程与交付顺序。
+    ///
+    /// 语言模式 6 禁止把裸 `var` 跨隔离共享（那是真实数据竞争），所以用锁保护的
+    /// 盒子：每次写入都持锁，读取拿一份快照，才能合法地断言。
+    private final class DispatchProbeRecorder: @unchecked Sendable {
+        struct Report {
+            var workRanOnCallingThread = true
+            var workFinished = false
+            var deliveredBeforeWorkFinished = true
+            var deliveredValue: Int?
+        }
+
+        private let lock = NSLock()
+        private var report = Report()
+
+        func noteWorkStartedOnTheCallingThread() {
+            lock.lock()
+            defer { lock.unlock() }
+            report.workRanOnCallingThread = Thread.isMainThread
+        }
+
+        func noteWorkFinished() {
+            lock.lock()
+            defer { lock.unlock() }
+            report.workFinished = true
+        }
+
+        func noteDelivery() {
+            lock.lock()
+            defer { lock.unlock() }
+            report.deliveredBeforeWorkFinished = !report.workFinished
+        }
+
+        func noteDeliveredValue(_ value: Int) {
+            lock.lock()
+            defer { lock.unlock() }
+            report.deliveredValue = value
+        }
+
+        var snapshot: Report {
+            lock.lock()
+            defer { lock.unlock() }
+            return report
+        }
     }
 
     // MARK: - Helpers

@@ -127,7 +127,7 @@ enum PiProcessInspection: Equatable {
         return nil
     }
 
-    /// 单行状态（诊断页/设置页用）。
+    /// 单行状态（诊断页用）：列出每个进程的 PID、父进程与启动时间。
     var statusText: String {
         switch self {
         case .noProcesses:
@@ -135,6 +135,21 @@ enum PiProcessInspection: Equatable {
         case .runningProcesses(let records):
             let summary = records.map(\.shortText).joined(separator: "；")
             return "检测到 \(records.count) 个运行中的 Pi 进程：\(summary)"
+        case .unknown(let reason):
+            return "无法确认 Pi 进程状态：\(reason.text)"
+        }
+    }
+
+    /// 单行摘要（设置页用）：只报数量。
+    ///
+    /// `statusText` 会展开每个进程的三段信息，进程多时是上千字符——放进设置窗口
+    /// 会把其余设置项挤出可视区，所以设置页只报计数，详情留在诊断页。
+    var compactStatusText: String {
+        switch self {
+        case .noProcesses:
+            return "没有检测到运行中的 Pi 进程"
+        case .runningProcesses(let records):
+            return "检测到 \(records.count) 个运行中的 Pi 进程（详情见「依赖与环境诊断」）"
         case .unknown(let reason):
             return "无法确认 Pi 进程状态：\(reason.text)"
         }

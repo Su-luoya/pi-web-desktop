@@ -110,105 +110,20 @@ final class UpdateSettingsWindowController: NSWindowController {
     // MARK: - 界面
 
     private func buildWindow() {
-        let content = FlippedDocumentView()
-        content.translatesAutoresizingMaskIntoConstraints = false
-
         let title = NSTextField(labelWithString: "更新检查偏好设置")
         title.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
 
         let intro = WrappingLabel(labelWithString: "版本检查不下载或安装。启动前自动更新由下方开关单独控制，修改立即生效。")
         SettingsFormMetrics.configureHint(intro)
 
-        var rows: [NSView] = [title, intro]
-        var categoryRows: [NSStackView] = []
-        for (index, category) in UpdateCheckCategory.allCases.enumerated() {
-            let header = NSTextField(labelWithString: category.displayName)
-            header.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-
-            let popup = NSPopUpButton()
-            for policy in UpdateCheckPolicy.allowed(for: category) {
-                popup.addItem(withTitle: policy.title)
-            }
-            popup.target = self
-            popup.action = #selector(policyChanged(_:))
-            // `NSControl` 没有 `representedObject`；用固定顺序的 tag 回查分类。
-            popup.tag = index
-            popup.widthAnchor.constraint(equalToConstant: 160).isActive = true
-            popup.setAccessibilityLabel("\(category.displayName)检查频率")
-            policyPopups[category] = popup
-
-            let ignoreButton = NSButton(title: "忽略此版本", target: self, action: #selector(ignoreCurrentVersion(_:)))
-            ignoreButton.tag = index
-            ignoreButton.setAccessibilityLabel("忽略\(category.displayName)的当前版本")
-            ignoreButtons[category] = ignoreButton
-
-            let controls = NSStackView(views: [popup, ignoreButton, NSView()])
-            controls.orientation = .horizontal
-            controls.spacing = 8
-            controls.alignment = .centerY
-
-            // 状态只留一句话：结论 + 最近检查。时间、忽略版本、缓存来源这些
-            // 细节归诊断页，设置窗口里堆满它们只会让每行都读不完。
-            let statusLabel = WrappingLabel(labelWithString: "")
-            SettingsFormMetrics.configureHint(statusLabel)
-            statusLabel.font = NSFont.systemFont(ofSize: 12)
-            statusLabels[category] = statusLabel
-
-            let row = NSStackView(views: [header, controls, statusLabel])
-            row.orientation = .vertical
-            row.alignment = .leading
-            row.spacing = 4
-            rows.append(row)
-            categoryRows.append(row)
+        let categoryRows: [NSStackView] = UpdateCheckCategory.allCases.enumerated().map { index, category in
+            makeCategorySection(index: index, category: category)
         }
 
-        autoUpdateButton.target = self
-        autoUpdateButton.action = #selector(autoUpdateChanged(_:))
-        // 两个「启动前自动更新」开关必须各自接到自己的 action：漏接只会表现为
-        // 点不动，不会有编译错误。
-        autoUpdatePiCLIButton.target = self
-        autoUpdatePiCLIButton.action = #selector(autoUpdatePiCLIChanged(_:))
-        for hint in [
-            autoUpdateHintLabel, autoUpdatePiCLIHintLabel, piCLIStatusLabel,
-            piPackageHintLabel, piPackageStatusLabel, abandonedStatusLabel
-        ] {
-            SettingsFormMetrics.configureHint(hint)
-            hint.font = NSFont.systemFont(ofSize: 12)
-        }
+        let content = FlippedDocumentView()
+        content.translatesAutoresizingMaskIntoConstraints = false
 
-        let reservedHeader = NSTextField(labelWithString: "启动前自动更新")
-        reservedHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-
-        let piPackageHeader = NSTextField(labelWithString: "Pi 扩展包")
-        piPackageHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-
-        let explanationButton = NSButton(title: "更新检查说明…", target: self, action: #selector(showExplanation(_:)))
-        let closeButton = NSButton(title: "完成", target: self, action: #selector(closeWindow(_:)))
-        closeButton.keyEquivalent = "\r"
-        let buttons = NSStackView(views: [explanationButton, NSView(), closeButton])
-        buttons.orientation = .horizontal
-        buttons.spacing = 8
-        buttons.alignment = .centerY
-        buttons.translatesAutoresizingMaskIntoConstraints = false
-
-        let separator = NSBox()
-        separator.boxType = .separator
-        separator.translatesAutoresizingMaskIntoConstraints = false
-
-        rows.append(contentsOf: [
-            reservedHeader,
-            autoUpdateButton,
-            autoUpdateHintLabel,
-            autoUpdatePiCLIButton,
-            autoUpdatePiCLIHintLabel,
-            piCLIStatusLabel,
-            piPackageHeader,
-            piPackageHintLabel,
-            piPackageStatusLabel,
-            abandonedStatusLabel
-        ])
-
-        let stack = NSStackView(views: rows)
+        let stack = NSStackView(views: [title, intro] + categoryRows + makeAutoUpdateSection())
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -216,8 +131,11 @@ final class UpdateSettingsWindowController: NSWindowController {
         content.addSubview(stack)
 
         stack.setCustomSpacing(20, after: intro)
-        for row in categoryRows { stack.setCustomSpacing(20, after: row) }
+        for row in categoryRows {
+            stack.setCustomSpacing(20, after: row)
+        }
         stack.setCustomSpacing(20, after: piCLIStatusLabel)
+
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: SettingsFormMetrics.inset),
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -SettingsFormMetrics.inset),
@@ -242,6 +160,106 @@ final class UpdateSettingsWindowController: NSWindowController {
             label.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
 
+        self.window = makeWindow(content: content, footer: makeFooterButtons())
+    }
+
+    /// 一个分类的整块：标题、策略下拉 + 忽略按钮、一句话状态。
+    ///
+    /// 三个字典的写入是给 `refresh` 用的句柄登记，必须在这里一次做完。
+    private func makeCategorySection(index: Int, category: UpdateCheckCategory) -> NSStackView {
+        let header = NSTextField(labelWithString: category.displayName)
+        header.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+
+        let popup = NSPopUpButton()
+        for policy in UpdateCheckPolicy.allowed(for: category) {
+            popup.addItem(withTitle: policy.title)
+        }
+        popup.target = self
+        popup.action = #selector(policyChanged(_:))
+        // `NSControl` 没有 `representedObject`；用固定顺序的 tag 回查分类。
+        popup.tag = index
+        popup.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        popup.setAccessibilityLabel("\(category.displayName)检查频率")
+        policyPopups[category] = popup
+
+        let ignoreButton = NSButton(title: "忽略此版本", target: self, action: #selector(ignoreCurrentVersion(_:)))
+        ignoreButton.tag = index
+        ignoreButton.setAccessibilityLabel("忽略\(category.displayName)的当前版本")
+        ignoreButtons[category] = ignoreButton
+
+        let controls = NSStackView(views: [popup, ignoreButton, NSView()])
+        controls.orientation = .horizontal
+        controls.spacing = 8
+        controls.alignment = .centerY
+
+        // 状态只留一句话：结论 + 最近检查。时间、忽略版本、缓存来源这些
+        // 细节归诊断页，设置窗口里堆满它们只会让每行都读不完。
+        let statusLabel = WrappingLabel(labelWithString: "")
+        SettingsFormMetrics.configureHint(statusLabel)
+        statusLabel.font = NSFont.systemFont(ofSize: 12)
+        statusLabels[category] = statusLabel
+
+        let row = NSStackView(views: [header, controls, statusLabel])
+        row.orientation = .vertical
+        row.alignment = .leading
+        row.spacing = 4
+        return row
+    }
+
+    /// 「启动前自动更新」与「Pi 扩展包」两段：开关、说明与状态行。
+    private func makeAutoUpdateSection() -> [NSView] {
+        autoUpdateButton.target = self
+        autoUpdateButton.action = #selector(autoUpdateChanged(_:))
+        // 两个「启动前自动更新」开关必须各自接到自己的 action：漏接只会表现为
+        // 点不动，不会有编译错误。
+        autoUpdatePiCLIButton.target = self
+        autoUpdatePiCLIButton.action = #selector(autoUpdatePiCLIChanged(_:))
+        for hint in [
+            autoUpdateHintLabel, autoUpdatePiCLIHintLabel, piCLIStatusLabel,
+            piPackageHintLabel, piPackageStatusLabel, abandonedStatusLabel
+        ] {
+            SettingsFormMetrics.configureHint(hint)
+            hint.font = NSFont.systemFont(ofSize: 12)
+        }
+
+        let reservedHeader = NSTextField(labelWithString: "启动前自动更新")
+        reservedHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+
+        let piPackageHeader = NSTextField(labelWithString: "Pi 扩展包")
+        piPackageHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+
+        return [
+            reservedHeader,
+            autoUpdateButton,
+            autoUpdateHintLabel,
+            autoUpdatePiCLIButton,
+            autoUpdatePiCLIHintLabel,
+            piCLIStatusLabel,
+            piPackageHeader,
+            piPackageHintLabel,
+            piPackageStatusLabel,
+            abandonedStatusLabel
+        ]
+    }
+
+    private func makeFooterButtons() -> NSStackView {
+        let explanationButton = NSButton(title: "更新检查说明…", target: self, action: #selector(showExplanation(_:)))
+        let closeButton = NSButton(title: "完成", target: self, action: #selector(closeWindow(_:)))
+        closeButton.keyEquivalent = "\r"
+        let buttons = NSStackView(views: [explanationButton, NSView(), closeButton])
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
+        buttons.alignment = .centerY
+        buttons.translatesAutoresizingMaskIntoConstraints = false
+        return buttons
+    }
+
+    /// 窗口外壳：可滚动文档区 + 分隔线 + 底部按钮行。
+    private func makeWindow(content: NSView, footer: NSStackView) -> NSWindow {
+        let separator = NSBox()
+        separator.boxType = .separator
+        separator.translatesAutoresizingMaskIntoConstraints = false
+
         let scrollView = NSScrollView()
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
@@ -253,7 +271,7 @@ final class UpdateSettingsWindowController: NSWindowController {
         let container = NSView()
         container.addSubview(scrollView)
         container.addSubview(separator)
-        container.addSubview(buttons)
+        container.addSubview(footer)
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 568, height: 720),
@@ -268,23 +286,23 @@ final class UpdateSettingsWindowController: NSWindowController {
         // 不会裁掉内容，也不需要按文案长度现算高度。
         window.contentMinSize = SettingsFormMetrics.minimumContentSize
         window.center()
-        self.window = window
 
         NSLayoutConstraint.activate([
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: container.topAnchor),
             scrollView.bottomAnchor.constraint(equalTo: separator.topAnchor, constant: -12),
-            separator.leadingAnchor.constraint(equalTo: buttons.leadingAnchor),
-            separator.trailingAnchor.constraint(equalTo: buttons.trailingAnchor),
-            separator.bottomAnchor.constraint(equalTo: buttons.topAnchor, constant: -12),
-            buttons.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: SettingsFormMetrics.inset),
-            buttons.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -SettingsFormMetrics.inset),
-            buttons.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -SettingsFormMetrics.inset),
+            separator.leadingAnchor.constraint(equalTo: footer.leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
+            separator.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -12),
+            footer.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: SettingsFormMetrics.inset),
+            footer.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -SettingsFormMetrics.inset),
+            footer.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -SettingsFormMetrics.inset),
             content.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
             content.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
             content.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor)
         ])
+        return window
     }
 
     // MARK: - 动作

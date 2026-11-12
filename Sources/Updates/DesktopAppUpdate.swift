@@ -362,7 +362,10 @@ protocol DesktopAppUpdateInstalling: AnyObject {
     func install(asset: DesktopAppReleaseAsset, completion: @escaping (DesktopAppUpdateResult) -> Void)
 }
 
-final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
+/// `@unchecked Sendable`：`DesktopAppUpdateInstalling` 要求 `Sendable`，而本类持有
+/// `installInProgress` / `activeCompletion` 一类可变状态。并发安全靠 `stateLock`：
+/// 所有可变状态的读写都在 `stateLock` 临界区内。
+final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling, @unchecked Sendable {
     private let applicationURL: URL
     private let fileManager: FileManager
     private let session: URLSession?
@@ -403,7 +406,7 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
         let busy = installInProgress || replacementProcessDidStart
         if !busy { installInProgress = true; completionDelivered = false; activeCompletion = completion }
         stateLock.unlock()
-        guard !busy else { completionQueue.async { completion(.failed(.replacementFailed)) }; return }
+        guard !busy else { completionQueue.async(execute: DispatchWorkItem { completion(.failed(.replacementFailed)) }); return }
         guard let tag = asset.releaseTag, let name = asset.assetName,
               DesktopAppReleaseAssetSelector.allowsDownloadURL(asset.downloadURL, assetName: name, releaseTag: tag) else {
             finish(.failed(.invalidAssetURL)); return
@@ -471,17 +474,20 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
     /// 只给无配额的通道用（调用方负责从 appcast 取资产）。任何一步不合规都
     /// 静默放弃：预下载只是省下一次等待，失败不该让用户看见任何东西。
     func prefetch(asset: DesktopAppReleaseAsset, completion: @escaping (Bool) -> Void) {
+        // `completion` 只被转交给下载回调执行一次，属于所有权转移；URLSession 的回调
+        // 参数是 `@Sendable`，直接捕获非 Sendable 的闭包会告警。
+        nonisolated(unsafe) let deliver = completion
         guard let tag = asset.releaseTag, let name = asset.assetName,
               DesktopAppReleaseAssetSelector.allowsDownloadURL(asset.downloadURL, assetName: name, releaseTag: tag),
               let expectedHash = DesktopAppReleaseAssetSelector.normalizedChecksum(asset.sha256) else {
-            completionQueue.async { completion(false) }
+            completionQueue.async(execute: DispatchWorkItem { deliver(false) })
             return
         }
         stateLock.lock()
         let busy = prefetchInProgress || installInProgress || replacementProcessDidStart
         if !busy { prefetchInProgress = true }
         stateLock.unlock()
-        guard !busy else { completionQueue.async { completion(false) }; return }
+        guard !busy else { completionQueue.async(execute: DispatchWorkItem { deliver(false) }); return }
 
         let downloader = session ?? ownedDownloadSession
         let task = downloader.downloadTask(with: URLRequest(url: asset.downloadURL)) { [weak self] file, response, error in
@@ -492,11 +498,11 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
                   let finalURL = http.url,
                   DesktopAppReleaseAssetSelector.allowsAssetRedirect(finalURL),
                   (try? Self.sha256(of: file)) == expectedHash else {
-                self.completionQueue.async { completion(false) }
+                self.completionQueue.async(execute: DispatchWorkItem { deliver(false) })
                 return
             }
             let stored = (try? self.packageCache.store(archiveAt: file, asset: asset)) != nil
-            self.completionQueue.async { completion(stored) }
+            self.completionQueue.async(execute: DispatchWorkItem { deliver(stored) })
         }
         task.resume()
     }
@@ -553,10 +559,13 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling {
         return fallback
     }
 
+    /// 投递一律包成 `DispatchWorkItem`：`DispatchQueue.async` 的 block 参数要求
+    /// `@Sendable`，而 `completion` 是调用方给的普通闭包。work item 是 Sendable 容器，
+    /// 执行一次、执行队列不变，语义完全一致。
     private func finish(_ result: DesktopAppUpdateResult) {
         stateLock.lock(); let callback = completionDelivered ? nil : activeCompletion
         completionDelivered = true; activeCompletion = nil; installInProgress = false; stateLock.unlock()
-        if let callback { completionQueue.async { callback(result) } }
+        if let callback { completionQueue.async(execute: DispatchWorkItem { callback(result) }) }
     }
 
     private func launchReplacement(stagedApp: URL, staging: URL) throws {

@@ -276,14 +276,15 @@ extension AppDelegate {
     }
 
     /// 诊断页/设置页的扩展包更新状态块（已脱敏）。smoke 启动返回空串：不为诊断
-    /// fixture 枚举真实进程。
-    func piPackageStatusBlockText() -> String {
+    /// fixture 枚举真实进程。`compact` 为真时进程状态只报数量（设置页用）。
+    func piPackageStatusBlockText(compact: Bool = false) -> String {
         guard !appConfiguration.isSmokeLaunch else { return "" }
         return PiPackageUpdateStatusPresenter.lines(
             policy: piPackagePolicy(),
             planSet: piPackageUpdatePlanSet,
             inspection: piProcessInspection,
-            warning: piPackageUpdateWarning
+            warning: piPackageUpdateWarning,
+            compact: compact
         ).joined(separator: "\n")
     }
 }

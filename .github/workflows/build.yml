@@ -60,6 +60,8 @@ jobs:
         run: ./Scripts/scan-secrets.sh
       - name: Check shell scripts
         run: for f in Scripts/*.sh; do sh -n "$f" || exit 1; done
+      - name: Check strict concurrency baseline
+        run: ./Scripts/check-concurrency.sh
       - name: Package smoke artifact
         run: ditto -c -k --sequesterRsrc --keepParent build/Pi-Web-Desktop.app Pi-Web-Desktop-alpha.zip
       - name: Checksum

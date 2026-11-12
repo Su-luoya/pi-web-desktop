@@ -101,7 +101,11 @@ protocol PiCLIUpdateRunning: AnyObject {
 /// - 超时或 `abandon()` 只标记结果并停止等待：本类型不调用任何信号或终止 API；
 /// - 可重入（W3B F1）：每一轮 `run` 的状态都在独立的 `Attempt` 里，轮与轮之间
 ///   不共享「终态」标志——生产里这个执行器是单例，上一轮结束后必须能再跑一轮。
-final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
+/// `@unchecked Sendable`：`PiCLIUpdateRunning` 要求 `Sendable`（它会被交付到主/后台队列
+/// 两边），而本类持有可变状态。并发安全靠 `stateQueue` 这条串行队列：所有可变状态只在
+/// `stateQueue` 上读写，方法名带 `Locked` 后缀即“调用方已持有该队列”的标记。
+/// 新增属性时请沿用这个约定，不要把裸读写放到队列外面。
+final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning, @unchecked Sendable {
     /// 保留的子进程输出上限（每条流，字符）。
     static let outputTailLimit = 2000
     /// 进程结束后等两条管道读到 EOF 的宽限时间（有界；超时后照常结束）。
@@ -147,7 +151,14 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
 
     /// 一次 `run` 调用的全部可变状态。每轮独立一份：重叠调用不会覆盖上一轮的
     /// process / 回调 / 定时器，也不会留下跨轮的「终态」标志（W3B F1）。
-    private final class Attempt {
+    /// 一轮运行的不可变计划 + 只在 `stateQueue` 上变化的状态。
+    ///
+    /// `@unchecked Sendable`：除 `exitNotified` 以外的可变字段全部只在 `stateQueue` 上
+    /// 读写（方法名带 `Locked` 后缀即该前提）；`exitNotified` 是例外，它在 `stateQueue`
+    /// 外面被进程退出回调写，所以由 `terminationObservationLock` 单独保护。两个字段域的
+    /// 锁不能混用：碰 `exitNotified` 一律走 `markTerminationObserved()` /
+    /// `terminationObserved`，不要裸读写。
+    private final class Attempt: @unchecked Sendable {
         let plan: PiCLIUpdatePlan
         let timeout: TimeInterval
         let completion: (PiCLIUpdateCommandResult) -> Void
@@ -219,9 +230,9 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
         timeout: TimeInterval,
         completion: @escaping (PiCLIUpdateCommandResult) -> Void
     ) {
-        stateQueue.async { [weak self] in
+        stateQueue.async(execute: DispatchWorkItem { [weak self] in
             self?.startLocked(plan, timeout: timeout, completion: completion)
-        }
+        })
     }
 
     func abandon() {
@@ -318,9 +329,14 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
             // small race where the timeout fires after Process has invoked the
             // handler but before the handler's stateQueue block runs.
             attempt.markTerminationObserved()
-            self?.stateQueue.async {
-                guard let self else { return }
-                attempt.exitNotified = true
+            // 先把 weak 的 `self` 固化成强引用再进 `stateQueue.async`：weak 捕获变量是
+            // 个可变 var，在并发闭包里读它就是 #SendableClosureCaptures。
+            guard let self else { return }
+            let stateQueue = self.stateQueue
+            stateQueue.async {
+                // 走带锁的写入（与上面同一个入口），不要在队列上裸赋值：`exitNotified`
+                // 的两个写入方分属不同锁域，混用会让 `terminationObserved` 的读看不到。
+                attempt.markTerminationObserved()
                 self.settleAbandonedChildLocked(attempt)
                 self.finishLocked(attempt, exitCode: finishedProcess.terminationStatus)
             }
@@ -510,7 +526,7 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
         )
         // 退出通知已经到过（例如放弃等待正好落在「进程已结束、还在等管道读完」的
         // 窗口里）就必须在这里结清「不确定」计数：那一刻不会再有第二次退出通知。
-        if attempt.exitNotified {
+        if attempt.terminationObserved {
             settleAbandonedChildLocked(attempt)
         }
         // 不关闭管道读端：超时/放弃等待后子进程可能还在跑，读端一关它下一次写
@@ -550,7 +566,10 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning {
         _ result: PiCLIUpdateCommandResult,
         to completion: @escaping (PiCLIUpdateCommandResult) -> Void
     ) {
-        deliveryQueue.async { completion(result) }
+        // 包成 `DispatchWorkItem`：`DispatchQueue.async` 的 block 参数要求 `@Sendable`，
+        // 而 `completion` 是调用方给的普通闭包。work item 是 Sendable 容器，执行一次、
+        // 执行队列不变，语义完全一致。
+        deliveryQueue.async(execute: DispatchWorkItem { completion(result) })
     }
 
     /// 保持读端打开，把剩余输出读到 EOF 再释放：被放弃等待的子进程不会因为读端

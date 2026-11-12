@@ -99,14 +99,19 @@ extension CommandRunning {
 enum CommandProbeDispatch {
     static func runOffMain<Value>(
         queue: DispatchQueue = .global(qos: .userInitiated),
-        deliverOnMain: @escaping (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) },
+        deliverOnMain: @escaping (@escaping () -> Void) -> Void = {
+            DispatchQueue.main.async(execute: DispatchWorkItem(block: $0))
+        },
         work: @escaping () -> Value,
         completion: @escaping (Value) -> Void
     ) {
-        queue.async {
+        // 用 `DispatchWorkItem` 而不是直接 `queue.async { ... }`：后者的 block 参数是
+        // `@Sendable`，而这里的 `work` / `completion` / `deliverOnMain` 都由调用方提供、
+        // 不保证 Sendable。work item 本身就是 Sendable 容器，语义完全一致（执行一次）。
+        queue.async(execute: DispatchWorkItem {
             let value = work()
             deliverOnMain { completion(value) }
-        }
+        })
     }
 }
 

@@ -120,7 +120,7 @@ struct UpdateTransactionPhaseResult: Equatable {
 ///
 /// 默认值是“无探针、不记历史、不应用降级”：已有测试与未接入场景的行为保持
 /// 不变。生产路径显式注入 `.live` 探针、历史写入与降级应用。
-struct UpdateTransactionEnvironment {
+struct UpdateTransactionEnvironment: @unchecked Sendable {
     /// 文件系统探针。
     var probe: UpdateArtifactProbe
     /// 历史写入（生产：UserDefaults；测试：内存数组）。
@@ -150,6 +150,7 @@ struct UpdateTransactionEnvironment {
         self.reportPhase = reportPhase
     }
 
+    /// 不可变值类型（见类型声明），跨队列读取无竞争。
     static let disabled = UpdateTransactionEnvironment(
         probe: .disabled,
         recordHistory: { _ in },

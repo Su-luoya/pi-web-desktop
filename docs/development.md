@@ -275,11 +275,14 @@ sh -n Scripts/*.sh
 ./Scripts/scan-secrets.sh
 git diff --check
 ./Scripts/build.sh
+./Scripts/check-concurrency.sh
 codesign --verify --deep --strict build/Pi-Web-Desktop.app
 ./Scripts/check-identity.sh
 ./Scripts/smoke.sh
 ./Scripts/test.sh
 ```
+
+`./Scripts/check-concurrency.sh` 用 `-swift-version 5 -strict-concurrency=complete` 把 `Sources/` 全量 typecheck 一遍，只在结果比记录基线更差时失败（退出 1）：严格模式告警数超过 `WARNING_BASELINE`、出现不在 `ALLOWED_ANNOTATIONS` 里的 `nonisolated(unsafe)`、或注解总数超过 `ANNOTATION_BASELINE`。它在语言模式 5 下报不出任何告警，所以这是一条单纯防回退的闸，不是代码风格检查。失败信息的最后一段会给出替代手法：队列跳转用 `DispatchWorkItem`、所有权转移把闭包包进显式 Sendable 容器、隔离用 `@MainActor`。类型检查本身没跑起来时（工具链或 SDK 不可用）它退出 2 并打印编译器原始输出，不会把“没跑成”当成“干净”。CI 的 `Check strict concurrency baseline` 步骤执行同一个脚本。
 
 `./Scripts/check-identity.sh` 退出 0 表示身份、版本与服务默认值一致，仓库文本扫描通过，且工作区没有落在扫描范围内的未跟踪文件。`./Scripts/scan-secrets.sh --self-test` 必须证明每条凭据规则都有一个会命中的样本、误报边界的样本（占位符与模板值、示例 URL、camelCase 标识符值）不会被报告、`scan-secrets: allow(reason=…)` 的理由门槛（裸标记、空理由和过短理由都不抑制、该行照常上报且计入 rejected、被抑制的行仍打印并计数），以及未跟踪文件门禁（默认退出 3、加 `--include-untracked` 能扫到未跟踪文件里的样例凭据、没有未跟踪文件时行为不变）；`./Scripts/scan-secrets.sh` 必须退出 0（没有已跟踪文件命中，且工作区没有未跟踪文件：有未跟踪文件时它如实退出 3，先 `git add` 或删除后再重跑）。`xcodebuild build` / `xcodebuild test` 需要完整 Xcode。`xcode-select -p` 指向 Command Line Tools 时裸命令直接失败（`xcode-select: error: tool 'xcodebuild' requires Xcode…`），但这不需要 sudo 改全局设置：`./Scripts/test.sh` 只对本次调用导出 `DEVELOPER_DIR`（`$XCODE_APP` 默认 `/Applications/Xcode.app`），DerivedData 默认落在 git-ignored 的 `.build/DerivedData`（`$DERIVED_DATA_PATH` 可覆盖），退出码 0 通过 / 1 测试或构建失败 / 2 找不到完整 Xcode。本机完全没有 Xcode 时才以上面的脚本链替代（脚本链不运行 XCTest），并在 PR 中说明 XCTest 由 CI 的 `macos-26` job 覆盖。
 

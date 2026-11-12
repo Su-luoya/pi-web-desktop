@@ -141,10 +141,13 @@ struct SystemDependencyPortProbe: DependencyPortProbing {
 }
 
 /// 系统探针：处理器架构与 macOS 版本。测试注入固定值。
-struct DependencySystemProbe {
+/// `@unchecked Sendable`：所有成员都是无状态的纯函数，实例建好后不再变化。函数类型本身
+/// 不是 `Sendable`，所以这里需要显式承担这个结论。
+struct DependencySystemProbe: @unchecked Sendable {
     var architecture: () -> String
     var operatingSystemVersion: () -> OperatingSystemVersion
 
+    /// 不可变值类型 + 纯函数成员（见类型声明），跨队列读取无竞争。
     static let live = DependencySystemProbe(
         architecture: { machineArchitecture() },
         operatingSystemVersion: { ProcessInfo.processInfo.operatingSystemVersion }

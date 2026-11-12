@@ -768,9 +768,11 @@ final class UpdateSettingsTests: XCTestCase {
         let controller = UpdateSettingsWindowController()
         let window = try XCTUnwrap(controller.window)
         let content = try XCTUnwrap(window.contentView)
+        // 不用 `flatMap(\.constraints)` 的关键路径写法：`NSView.constraints` 是
+        // 主 actor 隔离的，Swift 6 不允许关键路径跨隔离；显式闭包不逃逸，安全。
         let scope = content.constraints
-            + content.subviews.flatMap(\.constraints)
-            + content.subviews.flatMap { $0.subviews.flatMap(\.constraints) }
+            + content.subviews.flatMap { $0.constraints }
+            + content.subviews.flatMap { $0.subviews.flatMap { $0.constraints } }
 
         // 1. 不得再出现任何写死宽度的文本约束（620 是旧实现，其他常量同样是隐患）。
         let wrappingLabels: [NSView] = [

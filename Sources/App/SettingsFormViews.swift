@@ -43,6 +43,9 @@ enum SettingsFormMetrics {
     ///
     /// 必须降横向抗压优先级：否则单行内在宽度会反过来把窗口拖到 1100pt 宽，
     /// 窗口就再也变不窄了。
+    ///
+    /// `@MainActor`：改的全是 `NSTextField` 的 main-actor 隔离属性。
+    @MainActor
     static func configureHint(_ label: NSTextField, color: NSColor = .secondaryLabelColor) {
         label.lineBreakMode = .byWordWrapping
         label.maximumNumberOfLines = 0

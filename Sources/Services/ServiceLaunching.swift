@@ -128,11 +128,13 @@ final class SystemServiceLauncher: ServiceLaunching {
         // There is no Foundation `Process` object to attach a termination
         // handler to, so reap the child on a background queue and report its
         // exit exactly once. Reaping also keeps a zombie from looking alive.
-        DispatchQueue.global(qos: .utility).async {
+        // 包成 `DispatchWorkItem`：`DispatchQueue.async` 的 block 参数要求 `@Sendable`，
+        // 而 `onTermination` 是调用方给的普通闭包。work item 本身是 Sendable 容器。
+        DispatchQueue.global(qos: .utility).async(execute: DispatchWorkItem {
             var status: Int32 = 0
             while waitpid(pid, &status, 0) == -1 && errno == EINTR {}
             onTermination()
-        }
+        })
         return POSIXServiceProcess(processIdentifier: pid)
     }
 

@@ -6,9 +6,13 @@ import Foundation
 
 /// 时间来源。默认系统时钟；测试注入由假时钟驱动的闭包，推进时间即可，不需要
 /// 真实 sleep。
-struct UpdateClock {
-    var now: () -> Date
+///
+/// 只持有一个 `@Sendable` 纯函数，值类型因此自动成立 `Sendable`，不需要
+/// `@unchecked` 担保。
+struct UpdateClock: Sendable {
+    var now: @Sendable () -> Date
 
+    /// 不可变值类型（见类型声明），跨队列读取无竞争。
     static let system = UpdateClock { Date() }
 }
 
@@ -35,12 +39,15 @@ protocol UpdateCheckScheduling: AnyObject {
 final class DispatchUpdateCheckScheduler: UpdateCheckScheduling {
     private let queue = DispatchQueue(label: "io.github.su-luoya.pi-web-desktop.update-check", qos: .utility)
 
+    // 投递一律包成 `DispatchWorkItem`：`DispatchQueue.async` 与 `Timer` 的 block 参数都要
+    // 求 `@Sendable`，而 `work` 是调用方给的普通闭包。work item 本身是 Sendable 容器，
+    // 执行一次、执行线程不变，语义完全一致。
     func perform(_ work: @escaping () -> Void) {
-        queue.async(execute: work)
+        queue.async(execute: DispatchWorkItem(block: work))
     }
 
     func deliver(_ work: @escaping () -> Void) {
-        DispatchQueue.main.async(execute: work)
+        DispatchQueue.main.async(execute: DispatchWorkItem(block: work))
     }
 
     /// 计时器必须挂在 `.common` 模式上，不能只用 `Timer.scheduledTimer`。
@@ -52,7 +59,9 @@ final class DispatchUpdateCheckScheduler: UpdateCheckScheduling {
     /// 当天的到期检查就不发生」——静默漏掉一次检查，且没有任何日志。
     /// `AppDelegate+Quit.swift` 的退出超时计时器有同样的注释与同样的处理。
     func startRepeating(interval: TimeInterval, _ work: @escaping () -> Void) -> UpdateTimerToken {
-        let timer = Timer(timeInterval: interval, repeats: true) { _ in work() }
+        // `Timer` 的 block 同样是 `@Sendable`，包成 work item 再 `perform()`。
+        nonisolated(unsafe) let item = DispatchWorkItem(block: work)
+        let timer = Timer(timeInterval: interval, repeats: true) { _ in item.perform() }
         RunLoop.main.add(timer, forMode: .common)
         return TimerUpdateToken(timer: timer)
     }

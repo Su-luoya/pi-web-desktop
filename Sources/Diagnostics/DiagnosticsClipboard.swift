@@ -24,6 +24,8 @@ enum DiagnosticsClipboard {
     /// 窗口可见时挂 sheet；窗口被 ⌘W 隐藏（或本来没有窗口）时改用应用级模态：
     /// 在不可见窗口上 `beginSheetModal` 会让 AppKit 把这个窗口重新显示出来
     /// （W4 L5），与“窗口已经被隐藏”的用户状态不一致。
+    /// `@MainActor`：函数体全是 `NSAlert` / `NSApp` 这类 main-actor 隔离的 AppKit 成员。
+    @MainActor
     static func confirmExport(presentingIn window: NSWindow?, completion: @escaping (Bool) -> Void) {
         let alert = NSAlert()
         alert.alertStyle = .informational

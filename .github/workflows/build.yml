@@ -66,3 +66,56 @@ jobs:
         run: ditto -c -k --sequesterRsrc --keepParent build/Pi-Web-Desktop.app Pi-Web-Desktop-alpha.zip
       - name: Checksum
         run: shasum -a 256 Pi-Web-Desktop-alpha.zip
+
+  # 数据竞争门禁。单独一个 job，失败时和 build 分开看得见。
+  # 全量套件在 TSan 下只比常规慢十余秒（实测 85.6s vs 73.7s），
+  # 所以每个 PR 都跑，不靠夜间任务或人工自觉。
+  thread-sanitizer:
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build with Thread Sanitizer
+        run: |
+          set -euo pipefail
+          DERIVED_DATA_PATH="$(mktemp -d "${RUNNER_TEMP}/PiWebDesktopTSan.XXXXXX")"
+          echo "DERIVED_DATA_PATH=$DERIVED_DATA_PATH" >> "$GITHUB_ENV"
+          xcodebuild \
+            -project PiWebDesktop.xcodeproj \
+            -scheme PiWebDesktop \
+            -sdk macosx \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY=- \
+            -enableThreadSanitizer YES \
+            build-for-testing
+      - name: Verify Thread Sanitizer is really instrumented
+        run: |
+          set -euo pipefail
+          BUNDLE="$DERIVED_DATA_PATH/Build/Products/Debug/PiWebDesktopTests.xctest"
+          test -d "$BUNDLE"
+          BINARY="$BUNDLE/Contents/MacOS/PiWebDesktopTests"
+          test -f "$BINARY"
+          # 没有这条依赖时 TSan 根本没有插桩，下面的“全绿”就是空的。
+          # 检查放在跑测试之前，插桩没接上就直接红，不会先绿后怪。
+          otool -L "$BINARY" | grep -q libclang_rt.tsan_osx_dynamic \
+            || { echo "error: 测试 bundle 没有链接 TSan 运行时（插桩未生效）" >&2; exit 1; }
+          echo "Thread Sanitizer runtime linked: ok"
+      - name: Run XCTest under Thread Sanitizer
+        env:
+          # halt_on_error=1 让第一笔竞争直接终止进程，XCTest 报失败；
+          # 默认配置下个别报告可能只写进日志而不影响退出码。
+          TSAN_OPTIONS: halt_on_error=1:report_thread_leaks=0
+        run: |
+          set -euo pipefail
+          trap 'rm -rf "$DERIVED_DATA_PATH"' EXIT
+          xcodebuild \
+            -project PiWebDesktop.xcodeproj \
+            -scheme PiWebDesktop \
+            -sdk macosx \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY=- \
+            -enableThreadSanitizer YES \
+            test-without-building

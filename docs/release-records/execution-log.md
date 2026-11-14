@@ -2329,3 +2329,16 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
 - 下载的正式 CI bundle 在本机再次通过 arm64、`codesign --verify --deep --strict`、45 项单应用身份检查以及启动 / 诊断双模式 smoke（均 exit 0）；没有替换 `/Applications` 中的实测应用或结束用户 Pi 会话。
 - 未验证：真实 Pi CLI / 扩展安装端到端、VoiceOver 逐项朗读、另一台 Mac 首次 Gatekeeper 放行。alpha.37 不提供应用访问密码；图标覆盖不创建备份，回退桌面应用不会恢复已覆盖的 Pi Web 图标。
 - 回退：保留 alpha.36 ZIP 与 checksum；退出应用后替换应用包。无设置 schema 或服务数据迁移；从 appcast 移除本版条目可停止推送。
+
+## 本次发布执行记录（v0.1.0-alpha.39）
+
+- 内容：三段修复合在一版——(1) 检查链路不再把判定建立在缓存结果上：去掉 `If-None-Match` / `If-Modified-Since`（304 无响应体，版本只能来自本机缓存文件），429/5xx 重试一次，本机 `/api/app-update` 失败时回落 npm；(2) 执行链路收敛为一条：新增 `UpdateFlow` 与 `AppDelegate+UpdateFlow`，检查 → 确认 → 按 Pi CLI、扩展包、Pi Web、桌面应用顺序执行 → 汇总，「更新」菜单只剩检查更新… / 更新设置… / 更新记录…，原四个分组件入口与策略勾选框删除；(3) 组件判定：扩展包更新不再要求零 Pi 进程（确认框提示已运行会话需重启生效），`pi update --self` 报告 already up to date 且目标版本未知时版本未变化判为通过。检查结论为“已是最新”时不再把组件排进更新队列。
+- [Release Issue #286](https://github.com/Su-luoya/pi-web-desktop/issues/286) 记录本地门槛、S1–S8 复核、真机环境、checksum 与未验证范围；[PR #285](https://github.com/Su-luoya/pi-web-desktop/pull/285) squash 为 `aa45f53dc0e92220d29de9813d79fc058b0cafce`。
+- 本地与 CI 均为 **1103 tests, 0 failures**：[PR build 43554077106](https://github.com/Su-luoya/pi-web-desktop/actions/runs/43554077106)（build 与 thread-sanitizer 均 pass）、main CI [43554557003](https://github.com/Su-luoya/pi-web-desktop/actions/runs/43554557003) pass。发布构建 `-O -wmo`；45 项身份检查、版本/tag 检查、打包自测、双模式 smoke 均通过；scanner `suppressed 17 lines`、无 rejected、自测 PASS，本版无新增抑制标记。
+- 本地拆提交时验证过 4 段拆分不可构建（`PiPackageUpdateCoordinator.Environment` 去掉 `inspectProcesses` 与 `AppDelegate` 构造点必须同提交），因此按“能独立构建”切为 `fix(updates)` 与 `docs(updates)` 两个提交。
+- Tag `v0.1.0-alpha.39`（annotated）指向 `aa45f53`；release workflow [43555085592](https://github.com/Su-luoya/pi-web-desktop/actions/runs/43555085592) build 与 draft 均成功。草稿正文由模板 + `## 摘要` 渲染，无占位符。
+- [v0.1.0-alpha.39](https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.39) 于 `2026-11-14T04:11:48Z` 发布为 prerelease，`isDraft=false`、`isPrerelease=true`。资产 `Pi-Web-Desktop-0.1.0-alpha.39+build.39.zip`：**1,810,503 bytes**，SHA-256 **`b6cd19f01709fec767a0219384c4ac702960bc7aaa125103b6b693cdbba7c36e`**；`gh release download` + `shasum -a 256 -c` → OK。本地演练 ZIP（1,768,779 bytes，`a5f13a0e…`）只用于发布前自检，不作为公开校验值。
+- 下载的正式 CI bundle：`CFBundleShortVersionString=0.1.0-alpha.39`、`CFBundleVersion=39`、`Identifier=io.github.su-luoya.pi-web-desktop`、`Signature=adhoc`、`TeamIdentifier=not set`，`codesign --verify --deep --strict` 通过；已用它替换本机 `~/Applications/Pi-Web-Desktop.app`（旧包留在 git-ignored 的 `build/Pi-Web-Desktop-previous.app`），没有替换 `/Applications` 下的任何应用、没有结束用户 Pi 会话。
+- appcast workflow [43555416724](https://github.com/Su-luoya/pi-web-desktop/actions/runs/43555416724) 由 `release: published` 触发并成功；`appcast` 分支为 schema 1，首条 `tag=v0.1.0-alpha.39`，下载 URL、文件名与 `zip.sha256` 和公开资产一致。
+- 未验证：真实 Pi CLI / 扩展包安装的端到端结果（本机 `pi update --self` 是“已是最新”的空操作，扩展包本轮无可执行更新项）、桌面应用一步（下载/换包/重启）未真实跑过、VoiceOver 逐项朗读、另一台 Mac 首次 Gatekeeper 放行。alpha.31–38 的自动更新被上一版判定挡住，拿不到本版，需手动下载一次。
+- 回退：alpha.37 仍是已发布 prerelease（3 个资产可下载）；alpha.38 一直是草稿、从未发布，因此回退目标是 alpha.37。本版无设置 schema 或服务数据迁移，退出应用后替换应用包即可；从 `appcast` 移除本版条目可停止推送，应用内安装器不提供自动降级。

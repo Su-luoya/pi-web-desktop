@@ -295,6 +295,10 @@ final class PiCLIUpdateCoordinator {
             journal.recordInstallSucceeded()
             let detected = self.environment.detectInstallation()
             let detectedVersion = detected?.version
+            // `pi update --self` 的目标版本由 Pi 自己决定：命令成功结束、版本没变、
+            // 而且它自己说已经是最新，结论是“无需变更”，不是验证失败。
+            let reportedUpToDate = plan.targetVersion == nil
+                && (result.stdoutTail ?? "").lowercased().contains("already up to date")
             let verificationInput = UpdateVerificationInput(
                 component: .piCLI,
                 packageName: component.expectedPackageName,
@@ -305,7 +309,8 @@ final class PiCLIUpdateCoordinator {
                 detectedExecutablePath: detected?.executablePath,
                 detectedResolvedPath: detected?.resolvedPath,
                 detectedPackageJSONPath: detected?.packageJSONPath,
-                fingerprint: journal.configuration.fingerprint
+                fingerprint: journal.configuration.fingerprint,
+                upToDateReported: reportedUpToDate
             )
             let report = UpdateVerifier.verify(
                 verificationInput,
@@ -357,7 +362,11 @@ final class PiCLIUpdateCoordinator {
             )
             // 该组件成功完成了一次更新：清除它的「已放弃」记录（GitHub #62）。
             self.environment.clearAbandonedAttempt(component)
-            self.logOutcome("Pi CLI 更新完成：\(plan.installedVersion) → \(newVersion)，耗时 \(Self.durationText(result.duration))。")
+            if newVersion == plan.installedVersion {
+                self.logOutcome("Pi CLI 已是最高版本：\(newVersion)（更新命令成功结束，版本未变化）。")
+            } else {
+                self.logOutcome("Pi CLI 更新完成：\(plan.installedVersion) → \(newVersion)，耗时 \(Self.durationText(result.duration))。")
+            }
             let outcome = PiCLIUpdateRunOutcome.succeeded(
                 plan: plan,
                 oldVersion: plan.installedVersion,

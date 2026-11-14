@@ -55,7 +55,7 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
     /// 由 `AppDelegate` 注入：更新检查状态行（GitHub #18：策略、最近检查、
     /// 结果、忽略版本、下次检查）。窗口只渲染，不读设置、不联网、不安装。
     var updateStatusTextProvider: (() -> String)?
-    /// 由 `AppDelegate` 注入：手动“立即更新 Pi CLI…”入口（GitHub #21）。
+    /// 由 `AppDelegate` 注入：手动“检查更新…”入口（GitHub #21）。
     /// 窗口不执行命令：确认框、进程信息与执行都由 `AppDelegate` 负责。
     var onUpdatePiCLI: (() -> Void)?
 
@@ -68,7 +68,7 @@ final class DiagnosticsWindowController: NSWindowController, NSTableViewDataSour
     private let copyButton = NSButton(title: "复制安装命令", target: nil, action: nil)
     private let copyDiagnosticsButton = NSButton(title: "复制诊断", target: nil, action: nil)
     private let continueButton = NSButton(title: "开始使用 Pi Web", target: nil, action: nil)
-    private let updatePiCLIButton = NSButton(title: "立即更新 Pi CLI…", target: nil, action: nil)
+    private let updatePiCLIButton = NSButton(title: "检查更新…", target: nil, action: nil)
     private var report: DependencyReport
     private var firstLaunchSetupIncomplete: Bool
     private var canContinueToService: Bool

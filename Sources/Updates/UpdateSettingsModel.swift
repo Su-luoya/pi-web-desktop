@@ -258,7 +258,7 @@ struct UpdateCheckPreferences: Equatable {
     func isEnabled(_ category: UpdateCheckCategory) -> Bool { policy(for: category).isEnabled }
 
     /// 菜单快捷开关语义：打开 = 该分类的默认策略，关闭 = `off`。
-    /// 完整策略（每日 / 每周 / 询问后更新）在“更新检查偏好设置”窗口里选择。
+    /// 完整策略（每日 / 每周 / 询问后更新）在“更新 → 更新设置…”窗口里选择。
     mutating func setEnabled(_ enabled: Bool, for category: UpdateCheckCategory) {
         setPolicy(enabled ? Self.defaultPolicy(for: category) : .off, for: category)
     }

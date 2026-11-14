@@ -9,7 +9,8 @@ import Foundation
 /// 行为边界：
 /// - 只检查：本类型没有任何安装/下载/执行路径，也不读启动前的自动更新设置位
 ///   （安装与版本验证由 `PiWebUpdateCoordinator` 负责，见 GitHub #20）；
-/// - 只 GET 固定白名单端点；请求头只有 `Accept` / `User-Agent` / 条件请求字段；
+/// - 只 GET 固定白名单端点；请求头只有 `Accept` / `User-Agent`（不发条件请求，
+///   理由见 `makeRequest`）；
 /// - 失败（网络、超时、限流、5xx、解析失败、非预期主机）只改变检查结果状态，
 ///   不抛出、不重试轰炸、不触碰服务状态；
 /// - 解析失败或非预期主机一律 `unknown`，并保留上一次成功结果（仍在缓存里）；
@@ -556,6 +557,7 @@ final class UpdateChecker {
         at index: Int,
         collected: [UpdateCheckResult],
         now: Date,
+        retriesLeft: Int = 1,
         completion: @escaping ([UpdateCheckResult]) -> Void
     ) {
         guard index < items.count else {
@@ -577,7 +579,7 @@ final class UpdateChecker {
             runItems(items, at: index + 1, collected: collected + [result], now: now, completion: completion)
             return
         }
-        let request = makeRequest(endpoint: endpoint, cached: item.cached)
+        let request = makeRequest(endpoint: endpoint)
         httpClient.perform(request) { [weak self] response in
             guard let self else { return }
             self.scheduler.perform { [weak self] in
@@ -588,8 +590,8 @@ final class UpdateChecker {
                 }
                 // 更新通道（appcast）不可达时回落 GitHub API：一次 CDN 抖动不该
                 // 让检查直接失败。回落后用 API 的解析器重新判定。
-                if let fallback = self.fallbackEndpoint(for: item, endpoint: endpoint, response: response) {
-                    let fallbackRequest = self.makeRequest(endpoint: fallback, cached: item.cached)
+                if let fallback = self.fallbackEndpoint(endpoint: endpoint, response: response) {
+                    let fallbackRequest = self.makeRequest(endpoint: fallback)
                     self.httpClient.perform(fallbackRequest) { [weak self] fallbackResponse in
                         guard let self else { return }
                         self.scheduler.perform { [weak self] in
@@ -598,22 +600,63 @@ final class UpdateChecker {
                                 self.finishStoppedCheck()
                                 return
                             }
-                            let (entry, result) = self.evaluate(
-                                item: item, endpoint: fallback, response: fallbackResponse, at: now
-                            )
-                            self.cache.upsert(entry)
-                            self.runItems(
-                                items, at: index + 1, collected: collected + [result],
-                                now: now, completion: completion
+                            self.finish(
+                                item: item, endpoint: fallback, response: fallbackResponse,
+                                items: items, index: index, collected: collected, now: now,
+                                retriesLeft: retriesLeft, completion: completion
                             )
                         }
                     }
                     return
                 }
-                let (entry, result) = self.evaluate(item: item, endpoint: endpoint, response: response, at: now)
-                self.cache.upsert(entry)
-                self.runItems(items, at: index + 1, collected: collected + [result], now: now, completion: completion)
+                self.finish(
+                    item: item, endpoint: endpoint, response: response,
+                    items: items, index: index, collected: collected, now: now,
+                    retriesLeft: retriesLeft, completion: completion
+                )
             }
+        }
+    }
+
+    /// 限流 / 上游故障后重试一次的等待时间。
+    private static let retryDelay: TimeInterval = 1.5
+
+    /// 记录结果，并对“上游一时的限流或故障”重试一次。
+    ///
+    /// 429 与 5xx 通常是一时的：不重试的话，一次限流就让这一项整轮只剩缓存回退
+    /// （`origin` 不是 `.network`），自动更新和“立即更新”入口一起作废一整个周期。
+    /// 只重试一次，不构成重试轰炸，也不会把一次失败变成多次失败的连锁。
+    private func finish(
+        item: PlanItem,
+        endpoint: UpdateEndpoint,
+        response: Result<UpdateHTTPResponse, UpdateHTTPFailure>,
+        items: [PlanItem],
+        index: Int,
+        collected: [UpdateCheckResult],
+        now: Date,
+        retriesLeft: Int,
+        completion: @escaping ([UpdateCheckResult]) -> Void
+    ) {
+        let (entry, result) = evaluate(item: item, endpoint: endpoint, response: response, at: now)
+        cache.upsert(entry)
+        let isTransient = result.failure == .rateLimited || result.failure == .serverError
+        guard retriesLeft > 0, isTransient else {
+            runItems(
+                items, at: index + 1, collected: collected + [result],
+                now: now, retriesLeft: retriesLeft, completion: completion
+            )
+            return
+        }
+        scheduler.perform(after: Self.retryDelay) { [weak self] in
+            guard let self else { return }
+            guard !self.stopped else {
+                self.finishStoppedCheck()
+                return
+            }
+            self.runItems(
+                items, at: index, collected: collected, now: now,
+                retriesLeft: retriesLeft - 1, completion: completion
+            )
         }
     }
 
@@ -623,34 +666,41 @@ final class UpdateChecker {
     ///
     /// 唯一例外是 `.offline`：根本连不上网络时再打第二个请求只是白花一个超时。
     private func fallbackEndpoint(
-        for item: PlanItem,
         endpoint: UpdateEndpoint,
         response: Result<UpdateHTTPResponse, UpdateHTTPFailure>
     ) -> UpdateEndpoint? {
-        guard item.target.category == .desktopApp,
-              endpoint.kind == .appcast else { return nil }
         switch response {
         case .success(let http) where (200..<300).contains(http.statusCode) || http.statusCode == 304:
             return nil
         case .failure(.offline), .failure(.cancelled):
             return nil
         case .success, .failure:
-            return UpdateEndpoint.githubReleases(repository: UpdateCheckUpstream.desktopRepository)
+            switch endpoint.kind {
+            case .appcast:
+                return UpdateEndpoint.githubReleases(repository: UpdateCheckUpstream.desktopRepository)
+            case .piWebAppUpdate:
+                // 本机服务自己拿不到上游结果时回落 npm：否则只剩缓存回退，
+                // “启动前自动更新”与手动入口永远拿不到可执行的目标版本。
+                return UpdateEndpoint.npmLatest(packageName: UpdateCheckUpstream.piWebPackageName)
+            case .githubReleases, .npmLatest:
+                return nil
+            }
         }
     }
 
-    /// 请求头只有 UA / Accept / 条件请求字段；`sanitized()` 再兜底过滤一次。
-    private func makeRequest(endpoint: UpdateEndpoint, cached: UpdateCacheEntry?) -> UpdateHTTPRequest {
-        var headers: [String: String] = [
+    /// 请求头只有 UA / Accept；`sanitized()` 再兜底过滤一次。
+    ///
+    /// 刻意**不发条件请求**（`If-None-Match` / `If-Modified-Since`）：上一轮成功后
+    /// 再发条件请求，上游必然回 304，而 304 没有响应体，版本值只能来自本机缓存
+    /// 文件，`origin` 因此是 `.cachedFallback`；`UpdateCheckOrigin
+    /// .isEligibleForAutomaticInstall` 只认 `.network`，于是第一次成功之后的每一次
+    /// 检查都变成“缓存回退”，自动更新永远不触发。判定必须基于本次响应体，所以
+    /// 每次都要完整响应；响应体是几百字节到几十 KB 的 JSON，代价可忽略。
+    private func makeRequest(endpoint: UpdateEndpoint) -> UpdateHTTPRequest {
+        let headers: [String: String] = [
             "Accept": "application/json",
             "User-Agent": identity.userAgent
         ]
-        if let etag = cached?.etag, !etag.isEmpty {
-            headers["If-None-Match"] = etag
-        }
-        if let lastModified = cached?.lastModified, !lastModified.isEmpty {
-            headers["If-Modified-Since"] = lastModified
-        }
         return UpdateHTTPRequest(url: endpoint.url, method: "GET", headers: headers).sanitized()
     }
 
@@ -863,7 +913,9 @@ final class UpdateChecker {
                     )
                 }
             case 304:
-                // 条件请求命中：沿用缓存里的成功结果。
+                // 正常不会走到这里（`makeRequest` 不发送条件请求）。保留这段分支是因为
+                // 上游或中间缓存层可能自行回 304：此时没有响应体，版本值只来自本机缓存
+                // 文件，因此按缓存回退处理，不能作为自动安装依据。
                 guard let cachedVersion = item.cached?.latestVersion,
                       let cachedEntry = item.cached,
                       let verdict = UpdateVersionVerdict.status(

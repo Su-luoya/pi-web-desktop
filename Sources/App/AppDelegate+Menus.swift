@@ -13,21 +13,10 @@ extension AppDelegate {
         serviceControlMenuItems.removeAll()
         remoteAccessMenus.removeAll()
         statusMenuItem = nil
-        // 更新检查：状态行、设置子菜单、四类快捷开关与各组件菜单项
+        // 更新检查：只有状态行与“检查更新…”入口
         updateStatusMenuItem = nil
+        updateCheckMenuItem = nil
         updateMenu = nil
-        updateCategoryMenuItems.removeAll()
-        desktopAppUpdateMenuItem = nil
-        piWebUpdateMenuItem = nil
-        piCLIUpdateMenuItem = nil
-        piPackageUpdateMenuItem = nil
-        abandonedAttemptsMenuItem = nil
-        // 进度窗口（GitHub #219）菜单入口
-        updateProgressMenuItem = nil
-        // 持久告警项
-        piWebUpdateWarningMenuItem = nil
-        piCLIUpdateWarningMenuItem = nil
-        piPackageUpdateWarningMenuItem = nil
     }
 
     // MARK: - Menus
@@ -133,8 +122,8 @@ extension AppDelegate {
         statusMenu.addItem(withTitle: "依赖与环境诊断…", action: #selector(showDiagnosticsAction(_:)), keyEquivalent: "")
         statusMenuItemHolder.submenu = statusMenu
 
-        // “更新”菜单：检查、立即更新、策略开关与偏好设置。原来的二级子菜单
-        // “更新检查设置”把 7 个可点项藏在两级之下，是最主要的一处“混乱”。
+        // “更新”菜单：状态行 + 检查、设置、记录三项。四类组件共用一条流程，
+        // 不再有每个组件一个“立即更新 X…”入口，也没有塞进菜单里的策略开关。
         let updateMenuItemHolder = NSMenuItem()
         mainMenu.addItem(updateMenuItemHolder)
         let updateMenu = NSMenu(title: "更新")
@@ -146,7 +135,6 @@ extension AppDelegate {
         updateStatusMenuItem = updateStatus
         updateMenu.addItem(updateStatus)
         updateMenu.addItem(.separator())
-        updateMenu.addItem(withTitle: "检查更新…", action: #selector(checkForUpdatesNow(_:)), keyEquivalent: "")
         appendUpdateMenuItems(to: updateMenu)
         updateMenuItemHolder.submenu = updateMenu
 

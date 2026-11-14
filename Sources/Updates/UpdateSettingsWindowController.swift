@@ -110,7 +110,7 @@ final class UpdateSettingsWindowController: NSWindowController {
     // MARK: - 界面
 
     private func buildWindow() {
-        let title = NSTextField(labelWithString: "更新检查偏好设置")
+        let title = NSTextField(labelWithString: "更新设置")
         title.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
 
         let intro = WrappingLabel(labelWithString: "版本检查不下载或安装。启动前自动更新由下方开关单独控制，修改立即生效。")

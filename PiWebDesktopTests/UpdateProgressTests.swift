@@ -338,7 +338,7 @@ final class UpdateProgressTests: XCTestCase {
         ))
         center.beginBatch(components: [.piPackage(plan.packageName)])
         center.finish(batch: PiPackageUpdateBatchOutcome(outcomes: [
-            .refused(plan: plan, reason: .processStateUnknown(.enumerationFailed))
+            .refused(plan: plan, reason: .unsafeCommand)
         ]))
         XCTAssertTrue(center.session?.isFinished == true)
         XCTAssertFalse(center.session?.steps.contains { $0.state == .running } == true)

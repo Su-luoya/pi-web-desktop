@@ -726,6 +726,49 @@ final class UpdateCheckerTests: XCTestCase {
         }
     }
 
+    /// 429 / 5xx 后自动重试一次：否则一次限流就让这一项整轮只剩缓存回退
+    /// （`origin` 不是 `.network`），自动更新与“立即更新”入口一起作废一整个周期。
+    func testRateLimitedRequestIsRetriedOnceThenSucceeds() {
+        var piCLIRequests = 0
+        let world = makeWorld(responder: { request in
+            guard request.url.path.contains("pi-coding-agent") else {
+                return Self.npmHTTPResponse(version: "0.0.1")
+            }
+            piCLIRequests += 1
+            return piCLIRequests == 1
+                ? Self.npmHTTPResponse(version: "9.9.9", statusCode: 429)
+                : Self.npmHTTPResponse(version: "9.9.9")
+        })
+
+        world.checker.checkNow(triggeredBy: .manual, inventory: fullInventory())
+
+        let result = world.checker.summary.result(for: UpdateCheckTarget(category: .piCLI).id)
+        XCTAssertEqual(piCLIRequests, 2, "429 必须重试一次")
+        XCTAssertEqual(result?.origin, .network)
+        XCTAssertEqual(result?.status, .updateAvailable)
+        XCTAssertEqual(result?.latestVersion, "9.9.9")
+        XCTAssertNil(result?.failure)
+    }
+
+    /// 一直 429 时只重试一次，不无限重试。
+    func testPersistentRateLimitIsRetriedOnlyOnce() {
+        var piCLIRequests = 0
+        let world = makeWorld(responder: { request in
+            if request.url.path.contains("pi-coding-agent") {
+                piCLIRequests += 1
+                return Self.npmHTTPResponse(version: "9.9.9", statusCode: 429)
+            }
+            return Self.npmHTTPResponse(version: "0.0.1")
+        })
+
+        world.checker.checkNow(triggeredBy: .manual, inventory: fullInventory())
+
+        XCTAssertEqual(piCLIRequests, 2, "只重试一次")
+        let result = world.checker.summary.result(for: UpdateCheckTarget(category: .piCLI).id)
+        XCTAssertEqual(result?.failure, .rateLimited)
+        XCTAssertNotEqual(result?.origin, .network)
+    }
+
     func testStaleCacheBeyondTTLBecomesUnknown() {
         // 桌面 TTL 是 24 小时；上次成功是 25 小时前。扩展包 TTL 是 7 天。
         var cached = UpdateCheckCacheFile()
@@ -1536,7 +1579,7 @@ final class UpdateCheckerTests: XCTestCase {
 
     // MARK: - 请求卫生（不发送 cookies / 凭据 / 会话 / 诊断字段）
 
-    func testRequestsUseGetWhitelistedHostsAndConditionalHeadersOnly() {
+    func testRequestsUseGetWhitelistedHostsAndNoConditionalHeaders() {
         var cached = UpdateCheckCacheFile()
         let lastSuccess = referenceDate.addingTimeInterval(-3600)
         for category in [UpdateCheckCategory.desktopApp, .piCLI] {
@@ -1580,10 +1623,12 @@ final class UpdateCheckerTests: XCTestCase {
             XCTAssertEqual(request.headers["User-Agent"], world.identity.userAgent)
             XCTAssertEqual(request.headers["Accept"], "application/json")
         }
-        // 条件请求字段来自缓存。
+        // 判定必须基于本次响应体：即使缓存里有 ETag / Last-Modified，也不发条件
+        // 请求（上游 304 没有响应体，结果只能来自缓存 → 永远不是 network）。
         let desktopRequest = world.client.requests.first { $0.url.host == AppcastFeed.host }
-        XCTAssertEqual(desktopRequest?.headers["If-None-Match"], "\"v1\"")
-        XCTAssertEqual(desktopRequest?.headers["If-Modified-Since"], "Mon, 01 Jan 2024 00:00:00 GMT")
+        XCTAssertNotNil(desktopRequest)
+        XCTAssertNil(desktopRequest?.headers["If-None-Match"])
+        XCTAssertNil(desktopRequest?.headers["If-Modified-Since"])
         XCTAssertFalse(world.client.requests.contains { $0.url.query?.contains("password") == true })
     }
 
@@ -1697,12 +1742,33 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertEqual(result?.failure, nil)
     }
 
-    func testPiWebServiceErrorIsUnknownNotACrash() {
+    /// 本机服务拿不到上游结果（这里 502）时回落 npm：否则只剩缓存回退，
+    /// 自动更新与“立即更新”永远拿不到可执行的目标版本。
+    func testPiWebServiceErrorFallsBackToNpm() {
         let world = makeWorld(responder: { request in
             if request.url.path == "/api/app-update" {
                 return Self.appUpdateHTTPResponse(latestVersion: "0.9.0", statusCode: 502, body: "{\"error\":\"npm registry returned HTTP 503\"}")
             }
             return Self.npmHTTPResponse(version: "2.0.0")
+        })
+
+        world.checker.start(inventory: fullInventory())
+
+        XCTAssertEqual(world.client.requests.filter { isNpmPiWebRequest($0) }.count, 1)
+        let result = world.checker.summary.results.first { $0.target.category == .piWeb }
+        XCTAssertEqual(result?.status, .updateAvailable)
+        XCTAssertEqual(result?.latestVersion, "2.0.0")
+        XCTAssertEqual(result?.origin, .network)
+        XCTAssertNil(result?.failure)
+    }
+
+    /// 服务与 npm 都失败：仍是 unknown + serverError，不崩、不猜。
+    func testPiWebServiceAndNpmFailureIsUnknownNotACrash() {
+        let world = makeWorld(responder: { request in
+            if request.url.path == "/api/app-update" {
+                return Self.appUpdateHTTPResponse(latestVersion: "0.9.0", statusCode: 502, body: "{\"error\":\"npm registry returned HTTP 503\"}")
+            }
+            return .success(UpdateHTTPResponse(statusCode: 502, headers: [:], body: Data("{}".utf8), finalURL: nil))
         })
 
         world.checker.start(inventory: fullInventory())

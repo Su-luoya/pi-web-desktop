@@ -156,6 +156,9 @@ struct UpdateVerificationInput: Equatable {
     var detectedPackageJSONPath: String?
     /// 更新前记录的指纹。
     var fingerprint: UpdateArtifactFingerprint
+    /// 更新命令自己报告了“已经是最新版本”。`pi update --self` 的目标版本由 Pi
+    /// 决定，此时“版本未变化”是正确结果，不能判成验证失败。
+    var upToDateReported: Bool = false
 }
 
 /// 三条更新路径共用的验证器（纯函数；副作用只有注入的探针读取）。
@@ -186,7 +189,8 @@ enum UpdateVerifier {
         checks.append(versionCheck(
             detected: input.detectedVersion,
             previous: input.previousVersion,
-            target: input.targetVersion
+            target: input.targetVersion,
+            upToDateReported: input.upToDateReported
         ))
         // B-3：只有带路径证据的指纹里的包名才算「检测到的名称」；没有路径证据时
         // 它只是计划里的期望值，用它核对身份等于同义反复（恒真）。
@@ -313,7 +317,12 @@ enum UpdateVerifier {
         )
     }
 
-    static func versionCheck(detected: String?, previous: String?, target: String?) -> UpdateVerificationCheckResult {
+    static func versionCheck(
+        detected: String?,
+        previous: String?,
+        target: String?,
+        upToDateReported: Bool = false
+    ) -> UpdateVerificationCheckResult {
         let previousText = previous ?? "未知"
         let targetText = target ?? "由上游更新命令决定"
         if let target, SemanticVersion(target) == nil {
@@ -345,6 +354,13 @@ enum UpdateVerifier {
                 check: .versionReached,
                 status: passed ? .passed : .failed,
                 detail: "重新检测到 \(detected)，目标 \(target)"
+            )
+        }
+        if target == nil, upToDateReported, detected == previous {
+            return UpdateVerificationCheckResult(
+                check: .versionReached,
+                status: .passed,
+                detail: "更新命令报告已是最新版本（\(detected)），版本未发生变化属于正确结果"
             )
         }
         let passed = versionReached(detected: detected, old: previous, target: target)

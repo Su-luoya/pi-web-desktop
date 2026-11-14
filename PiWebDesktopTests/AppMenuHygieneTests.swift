@@ -157,9 +157,10 @@ final class AppMenuHygieneTests: XCTestCase {
     }
 
     /// 更新相关可点项必须是顶层“更新”菜单的直接子项，不能再套一层子菜单。
-    func testUpdateItemsLiveDirectlyInTheUpdateMenu() throws {
+    func testUpdateMenuIsOneCheckOneSettingsOneHistory() throws {
         let updates = SourceScan.codeText(of: try SourceScan.text(named: "AppDelegate+UpdateChecks.swift"))
         let menus = SourceScan.codeText(of: try SourceScan.text(named: "AppDelegate+Menus.swift"))
+        let flow = SourceScan.codeText(of: try SourceScan.text(named: "AppDelegate+UpdateFlow.swift"))
 
         // 追加函数接收顶层菜单，不能再返回/组装子菜单项。
         XCTAssertTrue(updates.contains("func appendUpdateMenuItems(to menu: NSMenu)"))
@@ -170,13 +171,21 @@ final class AppMenuHygieneTests: XCTestCase {
         XCTAssertTrue(menus.contains("appendUpdateMenuItems(to: updateMenu)"))
         XCTAssertTrue(menus.contains("NSMenu(title: \"更新\")"))
 
-        // 关键入口都在这一个菜单里。
-        for action in [
-            "checkForUpdatesNow", "showUpdatePreferences", "updatePiWebNow",
-            "updatePiCLINow", "showPiPackageUpdates", "toggleUpdateCategory"
-        ] {
+        // 统一入口后菜单只留三项：四类组件不再各自占一个菜单项。
+        for action in ["checkForUpdatesNow", "showUpdatePreferences", "showUpdateHistory"] {
             XCTAssertTrue(updates.contains(action), "更新菜单缺 \(action)")
         }
+        for removed in ["updatePiWebNow", "updatePiCLINow", "showPiPackageUpdates", "toggleUpdateCategory"] {
+            XCTAssertFalse(
+                updates.contains(removed),
+                "四类组件已收进统一流程，不应再有独立菜单项：\(removed)"
+            )
+        }
+
+        // “检查更新”必须真的执行：手动检查进可执行对话框，执行入口在同一个文件里。
+        XCTAssertTrue(updates.contains("presentUpdateFlow(manual: manual)"))
+        XCTAssertTrue(flow.contains("func executeUpdateFlow("))
+        XCTAssertTrue(flow.contains("func advanceUpdateFlow()"))
 
         // 人话路径：所有面向用户的提示都指向“更新 → …”，不再提两级旧路径。
         for file in ["PiCLIUpdateStatus", "PiPackageUpdateStatus",

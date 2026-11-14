@@ -126,7 +126,9 @@ enum UpdateHTTPFailure: String, Error, Equatable {
 
 /// 一次只读 GET 请求。
 ///
-/// 头字段刻意只有白名单内的四个：`Accept`、`User-Agent`、条件请求字段。
+/// 头字段刻意只有白名单内的少数几个（`Accept`、`User-Agent`、条件请求字段）。
+/// 检查器目前只发前两个（见 `UpdateChecker.makeRequest`），条件请求字段仍在
+/// 白名单内是为了兼容旧缓存与未来重新启用。
 /// `sanitized()` 会丢弃其它任何头（cookie、Authorization、会话、诊断字段），
 /// 生产客户端在发请求前也会再过滤一次，保证凭据永远不会被发出。
 struct UpdateHTTPRequest: Equatable {

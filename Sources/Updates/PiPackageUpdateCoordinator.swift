@@ -143,8 +143,6 @@ struct PiPackageUpdateBatchOutcome: Equatable {
 /// 不访问网络。
 final class PiPackageUpdateCoordinator {
     struct Environment {
-        /// 进程检查器（生产：`PiProcessInspector`；测试：假进程表）。
-        var inspectProcesses: () -> PiProcessInspection
         /// 命令执行器（生产：`ProcessPiPackageUpdateCommand`；测试：记录替身）。
         var runner: PiPackageUpdateRunning
         /// 重新检测某个包的版本（复用 #16 的 `pi list` 识别结果）。
@@ -164,7 +162,6 @@ final class PiPackageUpdateCoordinator {
         var clearAbandonedAttempt: (UpdateTransactionComponent) -> Void
 
         init(
-            inspectProcesses: @escaping () -> PiProcessInspection,
             runner: PiPackageUpdateRunning,
             detectPackageVersion: @escaping (String) -> String?,
             redactor: LogRedactor,
@@ -174,7 +171,6 @@ final class PiPackageUpdateCoordinator {
             transaction: UpdateTransactionEnvironment = .disabled,
             clearAbandonedAttempt: @escaping (UpdateTransactionComponent) -> Void = { _ in }
         ) {
-            self.inspectProcesses = inspectProcesses
             self.runner = runner
             self.detectPackageVersion = detectPackageVersion
             self.redactor = redactor
@@ -202,8 +198,10 @@ final class PiPackageUpdateCoordinator {
         }
     }
 
-    /// 执行一批已经由用户确认的计划。每个包执行前都重新检查一次进程状态：
-    /// 有运行中的 Pi 进程或状态不确定时，该包与其后的包一律拒绝执行。
+    /// 执行一批已经由用户确认的计划。
+    ///
+    /// 不再于执行前复查 Pi 进程：扩展包更新只替换磁盘上的包，不结束、不暂停也不
+    /// 接管任何 Pi 进程，已运行的会话重启后就会用上新版本。
     func runConfirmed(
         _ plans: [PiPackageUpdatePlan],
         completion: @escaping (PiPackageUpdateBatchOutcome) -> Void
@@ -232,21 +230,8 @@ final class PiPackageUpdateCoordinator {
             return
         }
         let plan = plans[index]
-        switch environment.inspectProcesses() {
-        case .noProcesses:
-            execute(plan: plan) { outcome in
-                self.runPlans(plans, at: index + 1, collected: collected + [outcome], completion: completion)
-            }
-        case .runningProcesses(let records):
-            let reason = PiPackageUpdateRefusal.piRunning(records)
-            let remaining = plans[index...].map { PiPackageUpdateRunOutcome.refused(plan: $0, reason: reason) }
-            logOutcome("Pi 扩展包更新（\(plan.packageName)）：执行前复查发现运行中的 Pi 进程，已拒绝执行（\(reason.text)）")
-            completion(collected + remaining)
-        case .unknown(let reason):
-            let refusal = PiPackageUpdateRefusal.processStateUnknown(reason)
-            let remaining = plans[index...].map { PiPackageUpdateRunOutcome.refused(plan: $0, reason: refusal) }
-            logOutcome("Pi 扩展包更新（\(plan.packageName)）：执行前复查无法确定进程状态，已拒绝执行（\(refusal.text)）")
-            completion(collected + remaining)
+        execute(plan: plan) { outcome in
+            self.runPlans(plans, at: index + 1, collected: collected + [outcome], completion: completion)
         }
     }
 
@@ -281,9 +266,8 @@ final class PiPackageUpdateCoordinator {
         journal.recordPreflight()
         environment.runner.run(plan, timeout: environment.timeout) { [weak self] result in
             // M2（更新事务审计）：执行器在后台投递队列上回调，而此后的工作都会触碰
-            // 主线程状态——执行前进程复查会写 piProcessInspection，版本重检测读
-            // dependencyReport，历史/降级/放弃记录走 UserDefaults 读-改-写。统一先跳
-            // 到投递队列（生产为主队列，与 Web/CLI 协调器同纪律）再继续；测试注入
+            // 主线程状态——版本重检测读 dependencyReport，历史/降级/放弃记录走
+            // UserDefaults 读-改-写。统一先跳到投递队列（生产为主队列，与 Web/CLI 协调器同纪律）再继续；测试注入
             // 的立即投递替身保持原有同步语义。
             guard let self else { return }
             self.environment.deliver {
@@ -525,8 +509,8 @@ enum PiPackageUpdateConfirmation {
         redactingWith redactor: LogRedactor
     ) -> String {
         var lines: [String] = []
-        lines.append("共 \(plans.count) 个扩展包待更新。执行前会再次检查 Pi 进程；"
-            + "检测到运行中的 Pi 进程或状态不确定时不会执行。")
+        lines.append("共 \(plans.count) 个扩展包待更新。更新只替换磁盘上的包，"
+            + "不会结束、暂停或接管正在运行的 Pi 进程。")
         for attempt in abandonedAttempts {
             lines.append("")
             lines.append(UpdateAbandonedAttemptPresenter.confirmationBlock(for: attempt))
@@ -539,9 +523,12 @@ enum PiPackageUpdateConfirmation {
         }
         lines.append("")
         lines.append("当前 Pi 进程状态：\(inspection.statusText)")
-        for record in inspection.records {
-            lines.append(contentsOf: record.displayLines)
-            lines.append("")
+        if !inspection.records.isEmpty {
+            lines.append("已运行的 \(inspection.records.count) 个会话不会中断，但需要重启后才会用上新版本。")
+            for record in inspection.records {
+                lines.append(contentsOf: record.displayLines)
+                lines.append("")
+            }
         }
         lines.append("取消是默认按钮：不确认就不会执行，也不会改动任何状态。")
         return lines.joined(separator: "\n")

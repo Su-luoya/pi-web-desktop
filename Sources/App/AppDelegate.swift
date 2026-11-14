@@ -71,17 +71,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 版本检查器：只检查、不安装。失败只改变检查结果状态，不影响服务状态。
     var updateChecker: UpdateChecker?
     var updateStatusMenuItem: NSMenuItem?
-    var updateCategoryMenuItems: [UpdateCheckCategory: NSMenuItem] = [:]
+    var updateCheckMenuItem: NSMenuItem?
     /// 顶层“更新”菜单：`menuNeedsUpdate` 用它给状态行与告警项刷新文案。
     var updateMenu: NSMenu?
-    /// “更新检查偏好设置”窗口（GitHub #18）。
+    /// “更新 → 更新设置…”窗口（GitHub #18）。
     var updateSettingsWindowController: UpdateSettingsWindowController?
     /// “更新进度”窗口与会话汇总（GitHub #219）。中心是主线程独占的纯状态；
     /// 窗口只渲染它推过来的快照。
     var updateProgressCenter = UpdateProgressCenter()
     var updateProgressWindowController: UpdateProgressWindowController?
     /// “更新 → 显示更新进度”菜单项。
-    var updateProgressMenuItem: NSMenuItem?
+    /// 正在执行的统一更新（检查 → 一个确认框 → 按序执行 → 一条结果）。
+    var updateFlowRun: UpdateFlowRun?
     /// 当前正在执行的桌面 App 安装器；必须由 AppDelegate 持有到下载/替换流程结束。
     var desktopAppUpdateInstaller: DesktopAppUpdateInstalling?
     /// 预下载用的安装器实例（只下载、不安装）。与 `desktopAppUpdateInstaller`
@@ -93,8 +94,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 与校验都完成后才创建，光靠它判断不到「下载窗口期」，于是重复点击会再下
     /// 一遍整包。轮次标记还保证晚到的旧回调不会复位新一轮的阶段位。
     var desktopAppUpdateRound = DesktopAppUpdateRound()
-    /// 更新菜单里的「下载并安装桌面应用更新…」入口；只在检测到已核实的可用新版本时显示。
-    var desktopAppUpdateMenuItem: NSMenuItem?
+    /// 这一轮刚装上的版本（组件分类 → 版本）：下一次网络检查写入新结果前，
+    /// 不再把同一个版本列成“可更新”。
+    var installedUpdateFlowVersions: [UpdateCheckCategory: String] = [:]
     /// 每类组件的“忽略版本”（只存版本字符串与时间戳，见 `UpdateIgnoredVersions`）。
     var ignoredVersions: UpdateIgnoredVersions = .empty
     /// 本次运行已经提示过哪些版本，避免同一个版本反复打扰；退出即丢弃。
@@ -114,11 +116,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 启动前更新进行中：抑制同一版本的自动提示框（安装流程会自己给结果）。
     var preLaunchUpdateInProgress = false
     /// 本次运行已经尝试过启动前自动更新（无论成败）：同一次运行内不再自动重试，
-    /// 失败后由用户显式点击“立即更新 Pi Web…”或下次启动再试。
+    /// 失败后由用户显式点击「检查更新…」或下次启动再试。
     var preLaunchUpdateAttemptedInThisRun = false
-    /// 告警菜单项与“立即更新…”菜单项。
-    var piWebUpdateWarningMenuItem: NSMenuItem?
-    var piWebUpdateMenuItem: NSMenuItem?
     /// 受限自动更新的编排器（安装器、重检测、启动/健康检查全部注入）。
     var piWebUpdateCoordinator: PiWebUpdateCoordinator?
     /// 生产安装器：`posix_spawn` + 参数数组 + 新独立进程组，不使用 shell、不调用
@@ -144,15 +143,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     var piCLIUpdateDecision: PiCLIUpdateDecision?
     /// 最近一次失败的 Pi CLI 更新的持久警告（跨启动保留）。
     var piCLIUpdateWarning: PiCLIUpdateWarning?
-    /// 本次运行是否已经执行过自动更新（无论成败，最多一次；推迟不算执行）。
-    var piCLIUpdateAttemptedInThisRun = false
     /// 自动更新进行中。
     var piCLIUpdateInProgress = false
     /// 重新检测 Pi 版本的输入路径（每次更新前写入）。
     var piCLIUpdateRedetectionPath: String?
-    /// 菜单里的持久告警项与手动更新入口项。
-    var piCLIUpdateWarningMenuItem: NSMenuItem?
-    var piCLIUpdateMenuItem: NSMenuItem?
 
     // MARK: - Pi 扩展包更新（GitHub #22）
 
@@ -167,11 +161,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     var piPackageUpdateWarning: PiPackageUpdateWarning?
     /// 扩展包更新进行中。
     var piPackageUpdateInProgress = false
-    /// 菜单里的持久告警项与扩展包更新入口项。
-    var piPackageUpdateWarningMenuItem: NSMenuItem?
-    var piPackageUpdateMenuItem: NSMenuItem?
-    /// 菜单里的「已放弃」记录项（GitHub #62）。
-    var abandonedAttemptsMenuItem: NSMenuItem?
 
     /// 诊断页/设置窗口的状态时间格式。
     static let updateTimestampFormatter: DateFormatter = {
@@ -404,12 +393,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             clearAbandonedAttempt: { [weak self] component in self?.clearAbandonedAttempt(component) }
         ))
         // Pi 扩展包更新（GitHub #22）：策略只有关闭 / 检查并通知 / 询问后更新，
-        // 绝不无人值守更新；执行前复查 Pi 进程，执行后重新检测该包版本。
+        // 绝不无人值守更新；执行后重新检测该包版本。运行中的 Pi 进程不再阻止
+        // 执行（GitHub #107 原要求）：更新只替换磁盘上的包，不碰这些进程。
         self.piPackageUpdateWarning = appConfiguration.piPackageUpdateWarning()
         self.piPackageUpdateCoordinator = PiPackageUpdateCoordinator(environment: PiPackageUpdateCoordinator.Environment(
-            inspectProcesses: { [weak self] in
-                self?.refreshPiProcessInspection() ?? .unknown(.enumerationFailed)
-            },
             runner: piPackageUpdateRunner,
             detectPackageVersion: { [weak self] packageName in
                 guard let self else { return nil }

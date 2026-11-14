@@ -778,11 +778,11 @@ final class PiCLIUpdateFlowTests: XCTestCase {
 
     /// outD-4 的接线回归（源码级）：手动路径必须自己置位并清理 `piCLIUpdateInProgress`，
     /// 自动路径必须在烧掉「本次运行只一次」额度**之前**用共用的入口闸控判忙。
-    func testAppDelegateWiresTheInProgressGateOnBothPaths() throws {
+    func testAppDelegateWiresTheInProgressGateOnTheManualPath() throws {
         let source = SourceScan.codeText(of: try SourceScan.text(named: "AppDelegate+CLIUpdate.swift"))
 
         // 手动路径：置位、清理（含菜单刷新）。修复前 `performPiCLIManualUpdate` 两者都没有。
-        let manualStart = try XCTUnwrap(source.range(of: "private func performPiCLIManualUpdate"))
+        let manualStart = try XCTUnwrap(source.range(of: "func performPiCLIManualUpdate"))
         let manualTail = String(source[manualStart.lowerBound...].prefix(1200))
         XCTAssertTrue(
             manualTail.contains("piCLIUpdateInProgress = true"),
@@ -791,15 +791,6 @@ final class PiCLIUpdateFlowTests: XCTestCase {
         XCTAssertTrue(
             manualTail.contains("piCLIUpdateInProgress = false"),
             "手动路径必须在回调里清理标记，否则后续自动更新永久失效"
-        )
-
-        // 自动路径：闸控必须在 `piCLIUpdateAttemptedInThisRun = true` 之前。
-        let guardIndex = try XCTUnwrap(source.range(of: "guard !cliEntry.isBlocked"))
-        let burnIndex = try XCTUnwrap(source.range(of: "piCLIUpdateAttemptedInThisRun = true"))
-        XCTAssertLessThan(
-            source.distance(from: source.startIndex, to: guardIndex.lowerBound),
-            source.distance(from: source.startIndex, to: burnIndex.lowerBound),
-            "必须先判忙再烧额度：顺序颠倒时被拒的那次仍然消费掉了本次运行的一次机会"
         )
 
         // 决策输入必须把「已有一轮在跑」交给规划器（纯值判据，不依赖 UI 状态）。
@@ -862,7 +853,7 @@ final class PiCLIUpdateFlowTests: XCTestCase {
         ).joined(separator: "\n")
         XCTAssertTrue(unchecked.contains("尚未检查"))
         XCTAssertTrue(unchecked.contains("已关闭"))
-        XCTAssertTrue(unchecked.contains("立即更新 Pi CLI…"))
+        XCTAssertTrue(unchecked.contains("更新 → 检查更新…"), "统一入口：手动路径只有菜单里那一个检查更新项")
 
         preferences.autoUpdatePiBeforeLaunch = true
         let request = input(

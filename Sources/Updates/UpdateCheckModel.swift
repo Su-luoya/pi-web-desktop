@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - 检查目标（GitHub #17）
 
-/// 更新检查的分类。每一类都可以按策略独立控制（“更新 → 更新检查偏好设置…”）：
+/// 更新检查的分类。每一类都可以按策略独立控制（“更新 → 更新设置…”）：
 /// 桌面应用 / Pi CLI / Pi Web 为关闭 / 每日 / 每周，扩展包为关闭 /
 /// 检查并通知 / 询问后更新；策略定义在 `Sources/Updates/UpdateSettingsModel.swift`。
 

@@ -244,7 +244,7 @@ enum UpdateAbandonedAttemptStore {
         }
     }
 
-    /// 清除全部记录（“已放弃的更新记录…”菜单里的显式清除）。
+    /// 清除全部记录（“更新 → 更新记录…”里的显式清除）。
     static func clearAll(from defaults: UserDefaults) {
         for key in UpdateSettingKeys.allAbandonedAttemptKeys {
             defaults.removeObject(forKey: key)
@@ -494,7 +494,7 @@ enum UpdateAbandonedAttemptPresenter {
         result.append("")
         result.append(
             "这些记录不会阻止手动更新；自动更新在清除记录前不会执行。"
-                + "清除方式：菜单“更新 → 已放弃的更新记录…”。"
+                + "清除方式：菜单“更新 → 更新记录…”。"
         )
         return result.joined(separator: "\n")
     }

@@ -21,7 +21,7 @@ enum PiPackageUpdateStatusPresenter {
         lines.append("Pi 扩展包更新：策略 \(mapped?.title ?? "\(policy.title)（不属于扩展包允许集合）")"
             + "；不做无人值守更新（执行入口必须经用户确认）")
         let processStatus = inspection.map { compact ? $0.compactStatusText : $0.statusText }
-        lines.append("Pi 扩展包进程保护：\(processStatus ?? "尚未检查（本次运行还没有枚举本机进程）")")
+        lines.append("Pi 扩展包运行中的会话：\(processStatus ?? "尚未检查（本次运行还没有枚举本机进程）")")
         if let planSet {
             lines.append("本次规划：已检查 \(planSet.didCheck ? "是" : "否")；包数量 \(planSet.packageCount)；"
                 + "待确认计划 \(planSet.executablePlans.count)；只提示 \(planSet.notices.count)")
@@ -50,7 +50,7 @@ enum PiPackageUpdateStatusPresenter {
         if let warning {
             lines.append(warning.text)
         }
-        lines.append("手动入口：菜单“更新 → 查看 Pi 扩展包更新…”（策略为“关闭”时不检查、不提示、不执行）")
+        lines.append("手动入口：菜单“更新 → 检查更新…”（策略为“关闭”时不检查、不提示、不执行）")
         return lines
     }
 }

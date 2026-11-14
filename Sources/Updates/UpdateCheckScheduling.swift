@@ -24,6 +24,8 @@ protocol UpdateTimerToken: AnyObject {
 /// 更新检查用到的调度原语。
 ///
 /// - `perform`：执行一次检查主体（生产：后台串行队列；测试：立即执行）；
+/// - `perform(after:)`：延迟执行（只用于限流后的一次重试；默认忽略延迟，
+///   因此测试不 sleep 也能断言重试结果）；
 /// - `deliver`：把结果回到主线程（生产：主队列；测试：立即执行）；
 /// - `startRepeating`：按间隔重复触发（生产：主 run loop Timer；测试：记录间隔
 ///   并由测试手动触发）。
@@ -31,8 +33,16 @@ protocol UpdateTimerToken: AnyObject {
 /// 测试用替身让整个检查同步完成，因此断言是确定性的，且从不 sleep、从不联网。
 protocol UpdateCheckScheduling: AnyObject {
     func perform(_ work: @escaping () -> Void)
+    func perform(after delay: TimeInterval, _ work: @escaping () -> Void)
     func deliver(_ work: @escaping () -> Void)
     func startRepeating(interval: TimeInterval, _ work: @escaping () -> Void) -> UpdateTimerToken
+}
+
+extension UpdateCheckScheduling {
+    /// 默认实现：忽略延迟立即执行。测试替身因此不必实现它，也不会 sleep。
+    func perform(after delay: TimeInterval, _ work: @escaping () -> Void) {
+        perform(work)
+    }
 }
 
 /// 生产实现：后台串行队列 + 主队列回调 + 主 run loop 重复计时器。
@@ -44,6 +54,10 @@ final class DispatchUpdateCheckScheduler: UpdateCheckScheduling {
     // 执行一次、执行线程不变，语义完全一致。
     func perform(_ work: @escaping () -> Void) {
         queue.async(execute: DispatchWorkItem(block: work))
+    }
+
+    func perform(after delay: TimeInterval, _ work: @escaping () -> Void) {
+        queue.asyncAfter(deadline: .now() + delay, execute: DispatchWorkItem(block: work))
     }
 
     func deliver(_ work: @escaping () -> Void) {

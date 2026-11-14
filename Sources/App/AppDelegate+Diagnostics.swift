@@ -381,7 +381,7 @@ extension AppDelegate {
                 self?.applySelectedPiWebPath(path)
                 return nil
             }
-            controller.onUpdatePiCLI = { [weak self] in self?.updatePiCLINow(nil) }
+            controller.onUpdatePiCLI = { [weak self] in self?.checkForUpdatesNow(nil) }
             // 与菜单“复制诊断”完全同一条导出路径（W4 M3：提醒 → 后台采集 → 复制）。
             controller.onExportDiagnostics = { [weak self] in
                 guard let self else { return }

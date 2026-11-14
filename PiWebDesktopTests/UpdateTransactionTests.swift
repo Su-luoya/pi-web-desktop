@@ -408,6 +408,32 @@ final class UpdateTransactionTests: XCTestCase {
         XCTAssertTrue(report.summaryLines.contains { $0.contains("未验证") })
     }
 
+    /// `pi update --self` 的目标版本由 Pi 决定：它自己说已经是最新、版本没变，
+    /// 就是正确结果，不能被判成“验证失败”（实测 1.5.2 上必现）。
+    func testVersionCheckAcceptsUnchangedVersionWhenCommandReportsUpToDate() throws {
+        let accepted = UpdateVerifier.versionCheck(
+            detected: "1.5.2",
+            previous: "1.5.2",
+            target: nil,
+            upToDateReported: true
+        )
+        XCTAssertEqual(accepted.status, .passed, accepted.detail)
+        XCTAssertTrue(accepted.detail.contains("已是最新版本"), accepted.detail)
+
+        // 没有“已是最新”的证据时，未变化仍然算失败：不能把静默无操作当成成功。
+        XCTAssertEqual(
+            UpdateVerifier.versionCheck(detected: "1.5.2", previous: "1.5.2", target: nil).status,
+            .failed
+        )
+        // 真的有目标版本时，一码归一码：未达到目标仍是失败。
+        XCTAssertEqual(
+            UpdateVerifier.versionCheck(
+                detected: "1.5.2", previous: "1.5.2", target: "1.6.0", upToDateReported: true
+            ).status,
+            .failed
+        )
+    }
+
     func testVersionReachedRejectsUnparseableTarget() throws {
         XCTAssertFalse(UpdateVerifier.versionReached(detected: "2.0.0", old: "1.0.0", target: "latest"))
         let result = UpdateVerifier.versionCheck(detected: "2.0.0", previous: "1.0.0", target: "latest")
@@ -1194,7 +1220,6 @@ final class UpdateTransactionTests: XCTestCase {
         }
         let log = LogSink()
         let coordinator = PiPackageUpdateCoordinator(environment: PiPackageUpdateCoordinator.Environment(
-            inspectProcesses: { .noProcesses },
             runner: runner,
             detectPackageVersion: { _ in "1.0.0" },
             redactor: LogRedactor(homeDirectory: self.fixtureHome),

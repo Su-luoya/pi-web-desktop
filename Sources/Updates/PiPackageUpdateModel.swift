@@ -20,13 +20,14 @@ import Foundation
 //   不提供执行按钮；
 // - 执行入口还要求目标版本来自**本次运行**的网络结果（GitHub #59 / 安全审查
 //   A-1）：缓存回退只用于提示，不提供一键执行；“检查并通知”仍只提示；
-// - 进程保护：**执行前**必须确认没有任何运行中的 Pi 进程（`noProcesses`）；
-//   有运行中的进程或状态不确定时拒绝执行并给出可读原因。本文件没有任何
-//   `kill` / `killpg` / 终止调用：超时只放弃等待，不向任何进程发送信号；
+// - 运行中的 Pi 进程不再阻止执行（原 GitHub #107“零进程”前置已取消）：扩展包
+//   更新只替换磁盘上的包，不结束、不暂停、不接管任何 Pi 进程，已运行的会话
+//   重启后就会用上新版本。本文件没有任何 `kill` / `killpg` / 终止调用：超时
+//   只放弃等待，不向任何进程发送信号；
 // - 结果语义：执行一次后重新检测该包版本；命令非零退出、超时、放弃等待、
 //   版本未变化（或无法解析）都记为失败并保留可读提示；不无上限重试、不掩盖
 //   失败、不声称回滚（完整回滚框架属于 #23）；
-// - 任何拒绝（策略不允许、进程保护、来源不可信、包名不在检测列表内、用户取消）
+// - 任何拒绝（策略不允许、来源不可信、包名不在检测列表内、用户取消）
 //   都写入拒绝记录、日志与诊断文本。
 
 // MARK: - 策略
@@ -77,7 +78,7 @@ enum PiPackageUpdatePolicy: String, CaseIterable, Equatable {
     /// 是否提示可用更新（关闭时不提示）。
     var notifiesAboutUpdates: Bool { self != .off }
 
-    /// 是否允许“确认后执行”的入口。只有询问策略提供；且仍受来源与进程保护约束。
+    /// 是否允许“确认后执行”的入口。只有询问策略提供；且仍受来源约束。
     var offersExecutionEntry: Bool { self == .askBeforeUpdate }
 }
 
@@ -181,8 +182,6 @@ struct PiPackageUpdatePlanningInput: Equatable {
     var packages: [PiPackageCandidate]
     /// #17 的检查结果。
     var checks: [PiPackageCheckOutcome]
-    /// Pi 进程检查结果。默认值是“枚举失败”，即不安全：漏传时不会退化成允许执行。
-    var processes: PiProcessInspection = .unknown(.enumerationFailed)
     /// 已通过可执行位确认的 `pi` 可执行文件路径（#16 检测结果里 `piCLI` 的路径）。
     var piExecutablePath: String?
     /// 各包未清除的「已放弃」记录（GitHub #62）。存在记录的包不会被自动执行；
@@ -227,10 +226,6 @@ enum PiPackageUpdateRefusal: Equatable {
     case notNewerTargetVersion
     /// 构造出的命令未通过参数安全校验。
     case unsafeCommand
-    /// 进程保护：有运行中的 Pi 进程，拒绝执行。
-    case piRunning([PiProcessRecord])
-    /// 进程保护：无法确定进程状态，按不安全处理，拒绝执行。
-    case processStateUnknown(PiProcessInspectionUnknown)
     /// 用户没有确认（取消或关闭对话框），不执行、不改状态。
     case userCancelled
     /// 同一组件存在未清除的「已放弃」记录（GitHub #62）：不允许自动执行；只有
@@ -274,12 +269,6 @@ enum PiPackageUpdateRefusal: Equatable {
             return "目标版本不高于本机版本"
         case .unsafeCommand:
             return "构造出的更新命令未通过参数安全校验"
-        case .piRunning(let records):
-            let summary = records.map(\.shortText).joined(separator: "；")
-            return "检测到 \(records.count) 个运行中的 Pi 进程（\(summary)）：更新会让正在进行的会话读到被替换的文件，"
-                + "因此拒绝执行。应用不会结束、暂停或接管任何 Pi 进程，也不会向它们发送任何信号。"
-        case .processStateUnknown(let reason):
-            return "无法确定 Pi 进程状态（\(reason.text)）：按不安全处理，拒绝执行。应用不会结束任何进程，也不会发送任何信号。"
         case .userCancelled:
             return "用户取消了更新（未确认）：不执行、不改状态"
         case .abandonedAttemptPending(let attempt):

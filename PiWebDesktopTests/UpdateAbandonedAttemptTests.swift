@@ -160,14 +160,12 @@ final class UpdateAbandonedAttemptTests: XCTestCase {
 
     private func packagePlanSet(
         names: [String],
-        abandonedAttempts: [UpdateAbandonedAttempt] = [],
-        processes: PiProcessInspection = .noProcesses
+        abandonedAttempts: [UpdateAbandonedAttempt] = []
     ) -> PiPackageUpdatePlanSet {
         PiPackageUpdatePlanner.decide(PiPackageUpdatePlanningInput(
             policy: .askBeforeUpdate,
             packages: names.map { packageCandidate(name: $0) },
             checks: names.map { packageCheck(name: $0) },
-            processes: processes,
             piExecutablePath: "/opt/homebrew/bin/pi",
             abandonedAttempts: abandonedAttempts
         ))
@@ -683,7 +681,7 @@ final class UpdateAbandonedAttemptTests: XCTestCase {
         XCTAssertTrue(block.contains("超时上限：300 秒"))
         XCTAssertTrue(block.contains("放弃等待（例如应用退出）"))
         XCTAssertTrue(block.contains("只放弃等待：没有向任何进程发送任何信号"))
-        XCTAssertTrue(block.contains("清除方式：菜单“更新 → 已放弃的更新记录…”"))
+        XCTAssertTrue(block.contains("清除方式：菜单“更新 → 更新记录…”"))
         XCTAssertTrue(
             block.contains("自动更新在清除记录前不会执行"),
             "诊断文本必须说明自动路径被挡住、手动入口不受影响"
@@ -914,7 +912,6 @@ final class UpdateAbandonedAttemptTests: XCTestCase {
         let runner = RecordingPiPackageRunner(result: successPiPackageResult())
         var batch: PiPackageUpdateBatchOutcome?
         PiPackageUpdateCoordinator(environment: PiPackageUpdateCoordinator.Environment(
-            inspectProcesses: { .noProcesses },
             runner: runner,
             detectPackageVersion: { _ in "2.0.0" },
             redactor: makeRedactor(),
@@ -1028,7 +1025,6 @@ final class UpdateAbandonedAttemptTests: XCTestCase {
         let packageRunner = RecordingPiPackageRunner(result: successPiPackageResult())
         var packageCleared: [UpdateTransactionComponent] = []
         PiPackageUpdateCoordinator(environment: PiPackageUpdateCoordinator.Environment(
-            inspectProcesses: { .noProcesses },
             runner: packageRunner,
             detectPackageVersion: { _ in "2.0.0" },
             redactor: makeRedactor(),

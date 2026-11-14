@@ -17,7 +17,7 @@ enum PiPackageUpdateDecision: Equatable {
     /// 计划就绪，但同一包存在未清除的「已放弃」记录：不允许自动/常规执行。
     /// 确认框必须先展示这条记录，用户显式确认后才执行一次（GitHub #62）。
     case awaitingAbandonedConfirmation(plan: PiPackageUpdatePlan, attempt: UpdateAbandonedAttempt)
-    /// 计划就绪但被拒绝执行（进程保护）：给出可读原因，不执行。
+    /// 计划就绪但被拒绝执行（命令参数校验不通过）：给出可读原因，不执行。
     case executeBlocked(plan: PiPackageUpdatePlan, reason: PiPackageUpdateRefusal)
     /// 没有执行入口，只展示官方命令文本（来源/可信度不可接受等）。
     case manualOnly(PiPackageUpdateNotice, reason: PiPackageUpdateRefusal)
@@ -234,14 +234,13 @@ enum PiPackageUpdatePlanner {
     /// →「已放弃」记录。后两项只让“已经就绪的计划”变成需要确认/拒绝的状态，
     /// 不会掩盖其它拒绝原因。
     ///
-    /// 进程保护先于「已放弃」记录（GitHub #107 / W2B B-12）：检测到运行中的 Pi
-    /// 进程时执行阶段必然拒绝，先要求用户确认「已放弃」记录只会让人确认一个注定
-    /// 失败的操作；先给出进程状态，等进程退出后同一条记录仍会要求确认。
+    /// 进程状态不再是执行前置（GitHub #107 原先要求“零 Pi 进程”）：扩展包更新
+    /// 只替换磁盘上的包，不碰正在运行的进程，已运行的会话重启后就会用上新版本。
+    /// 这与 pi CLI 自身不同（那个必须退出会话），所以进程数只在确认框里提示。
     static func decide(
         _ candidate: PiPackageCandidate,
         check: PiPackageCheckOutcome?,
         policy: PiPackageUpdatePolicy,
-        processes: PiProcessInspection,
         piExecutablePath: String?,
         abandonedAttempt: UpdateAbandonedAttempt? = nil
     ) -> PiPackageUpdateDecision {
@@ -328,17 +327,6 @@ enum PiPackageUpdatePlanner {
                 reason: .unsafeCommand
             )
         }
-        // 进程保护：只有“确认没有任何 Pi 进程”才允许进入确认流程；否则拒绝执行。
-        // GitHub #107（W2B B-12）：这一判定在「已放弃」记录之前——被进程挡住的
-        // 计划不该再要求用户确认一条记录（执行前的复查同样以进程态优先）。
-        switch processes {
-        case .noProcesses:
-            break
-        case .runningProcesses(let records):
-            return .executeBlocked(plan: plan, reason: .piRunning(records))
-        case .unknown(let reason):
-            return .executeBlocked(plan: plan, reason: .processStateUnknown(reason))
-        }
         // 「已放弃」记录硬前置（GitHub #62 / alpha.3 安全审查 A-6、A-7）：同一包
         // 存在未清除的记录时不允许自动/常规执行；确认框必须先展示这条记录，
         // 用户在看过之后显式确认才执行一次。
@@ -387,7 +375,6 @@ enum PiPackageUpdatePlanner {
                 candidate,
                 check: checks[candidate.packageName],
                 policy: policy,
-                processes: input.processes,
                 piExecutablePath: input.piExecutablePath,
                 abandonedAttempt: UpdateAbandonedAttemptGate.blockingAttempt(
                     for: UpdateTransactionComponent.piPackage(candidate.packageName),
@@ -414,7 +401,6 @@ enum PiPackageUpdatePlanner {
     static func plan(
         policy: UpdateCheckPolicy,
         packages: [PiPackageCandidate],
-        processes: PiProcessInspection = .unknown(.enumerationFailed),
         piExecutablePath: String?,
         abandonedAttempts: [UpdateAbandonedAttempt] = [],
         check: () -> [PiPackageCheckOutcome]
@@ -438,7 +424,6 @@ enum PiPackageUpdatePlanner {
             policy: policy,
             packages: packages,
             checks: checks,
-            processes: processes,
             piExecutablePath: piExecutablePath,
             abandonedAttempts: abandonedAttempts
         ))

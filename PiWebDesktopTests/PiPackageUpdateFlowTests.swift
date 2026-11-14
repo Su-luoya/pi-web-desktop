@@ -56,8 +56,6 @@ final class PiPackageUpdateFlowTests: XCTestCase {
     private final class World {
         let runner = RecordingRunner()
         let log = LogSink()
-        var inspections: [PiProcessInspection] = [.noProcesses]
-        private(set) var inspectCount = 0
         var detectedVersions: [String: String] = [:]
         private(set) var detectCount = 0
         /// 事务替身（GitHub #107）：只记录 `applyDegradation` 的调用，不碰文件系统。
@@ -68,11 +66,6 @@ final class PiPackageUpdateFlowTests: XCTestCase {
 
         func makeCoordinator(timeout: TimeInterval = PiPackageUpdateCoordinator.defaultTimeout) -> PiPackageUpdateCoordinator {
             PiPackageUpdateCoordinator(environment: PiPackageUpdateCoordinator.Environment(
-                inspectProcesses: {
-                    self.inspectCount += 1
-                    let index = min(self.inspectCount - 1, self.inspections.count - 1)
-                    return self.inspections[max(0, index)]
-                },
                 runner: runner,
                 detectPackageVersion: { name in
                     self.detectCount += 1
@@ -132,7 +125,6 @@ final class PiPackageUpdateFlowTests: XCTestCase {
         policy: UpdateCheckPolicy = .askBeforeUpdate,
         packages: [PiPackageCandidate]? = nil,
         checks: [PiPackageCheckOutcome]? = nil,
-        processes: PiProcessInspection = .noProcesses,
         piPath: String? = "/opt/homebrew/bin/pi",
         abandonedAttempts: [UpdateAbandonedAttempt] = []
     ) -> PiPackageUpdatePlanningInput {
@@ -140,7 +132,6 @@ final class PiPackageUpdateFlowTests: XCTestCase {
             policy: policy,
             packages: packages ?? [candidate()],
             checks: checks ?? [check()],
-            processes: processes,
             piExecutablePath: piPath,
             abandonedAttempts: abandonedAttempts
         )
@@ -178,12 +169,6 @@ final class PiPackageUpdateFlowTests: XCTestCase {
             matchSource: .imagePath,
             commandSummary: piPath
         )
-    }
-
-    /// 从拒绝原因里取出被进程保护拦下的 Pi 进程 PID（非进程保护原因返回 nil）。
-    private func blockedPids(_ reason: PiPackageUpdateRefusal) -> [pid_t]? {
-        guard case .piRunning(let records) = reason else { return nil }
-        return records.map(\.pid)
     }
 
     /// 「已放弃」记录夹具（GitHub #62）：扩展包组件、超时原因、只放弃等待。
@@ -236,8 +221,6 @@ final class PiPackageUpdateFlowTests: XCTestCase {
         let set = PiPackageUpdatePlanner.plan(
             policy: .off,
             packages: [candidate()],
-            // 即使本机「有」运行中的 Pi 进程，关闭策略也不会去枚举进程或检查更新。
-            processes: .runningProcesses([processRecord()]),
             piExecutablePath: piPath,
             check: {
                 checkCount += 1
@@ -263,7 +246,6 @@ final class PiPackageUpdateFlowTests: XCTestCase {
             candidate(),
             check: check(),
             policy: .off,
-            processes: .noProcesses,
             piExecutablePath: piPath
         )
         XCTAssertEqual(single, .disabled(packageName: packageName))
@@ -293,7 +275,6 @@ final class PiPackageUpdateFlowTests: XCTestCase {
         let set = PiPackageUpdatePlanner.plan(
             policy: .checkAndNotify,
             packages: [candidate()],
-            processes: .noProcesses,
             piExecutablePath: piPath,
             check: { checkCount += 1; return [self.check()] }
         )
@@ -359,13 +340,12 @@ final class PiPackageUpdateFlowTests: XCTestCase {
         XCTAssertEqual(world.runner.plans.count, 1, "确认后只执行一次")
         XCTAssertEqual(world.runner.plans[0].arguments, ["update", "npm:\(packageName)"])
         XCTAssertEqual(world.runner.timeouts, [42])
-        XCTAssertEqual(world.inspectCount, 1, "执行前必须复查一次进程")
         XCTAssertEqual(world.detectCount, 1, "执行后必须重新检测一次版本")
         XCTAssertEqual(world.runner.abandonCount, 0)
         XCTAssertNil(outcome.latestWarning)
     }
 
-    /// 一批多个包：每个包执行前都复查一次进程，顺序与输入一致。
+    /// 一批多个包：按输入顺序逐个执行，每个包只执行一次。
     func testBatchConfirmationExecutesEachPlanOnce() throws {
         let second = "pi-extension-other"
         let set = PiPackageUpdatePlanner.decide(input(
@@ -376,115 +356,41 @@ final class PiPackageUpdateFlowTests: XCTestCase {
         XCTAssertEqual(plans.map(\.packageName), [packageName, second])
         let world = World(fixtureHome: fixtureHome)
         world.detectedVersions = [packageName: "2.0.0", second: "3.0.0"]
-        world.inspections = [.noProcesses, .noProcesses]
         var batch: PiPackageUpdateBatchOutcome?
         world.makeCoordinator().runConfirmed(plans) { batch = $0 }
         let outcome = try XCTUnwrap(batch)
         XCTAssertTrue(outcome.isSucceeded)
         XCTAssertEqual(world.runner.plans.map(\.packageName), [packageName, second])
-        XCTAssertEqual(world.inspectCount, 2)
         XCTAssertEqual(world.runner.plans.map(\.arguments), [
             ["update", "npm:\(packageName)"],
             ["update", "npm:\(second)"]
         ])
     }
 
-    // MARK: - 2. 进程保护
+    // MARK: - 2. 运行中的 Pi 进程（不再作为执行前置）
 
-    func testRunningPiProcessesBlockTheExecuteEntry() {
-        let records = [processRecord(pid: 4242), processRecord(pid: 4243, parentPID: 4242)]
-        let set = PiPackageUpdatePlanner.decide(input(processes: .runningProcesses(records)))
-        XCTAssertTrue(set.executablePlans.isEmpty, "有运行中的 Pi 进程时不得给出执行入口")
-        XCTAssertFalse(set.executionAvailable)
-        XCTAssertEqual(set.allPlans.count, 1, "计划本身仍然可见（用于展示与诊断）")
-        guard case .executeBlocked(let plan, let reason) = set.decisions[0] else {
-            return XCTFail("应拒绝执行，实际是 \(set.decisions)")
-        }
-        XCTAssertEqual(blockedPids(reason), [4242, 4243])
-        XCTAssertTrue(reason.text.contains("拒绝执行"))
-        XCTAssertTrue(reason.text.contains("不会向它们发送任何信号"))
+    /// 有运行中的 Pi 进程时照常给出执行入口（原 GitHub #107 的「零进程」前置已取消）：
+    /// 更新只替换磁盘上的包，会话重启后生效；进程信息只出现在确认框里。
+    func testRunningPiProcessesDoNotBlockTheExecuteEntry() throws {
+        let set = PiPackageUpdatePlanner.decide(input())
+        let plan = try XCTUnwrap(set.executablePlans.first)
+        XCTAssertTrue(set.executionAvailable, "运行中的 Pi 进程不再阻止执行")
+        XCTAssertTrue(set.refusalRecords.isEmpty)
         XCTAssertEqual(plan.arguments, ["update", "npm:\(packageName)"])
-        XCTAssertEqual(set.refusalRecords.map(\.reason), [reason])
+
+        let records = [processRecord(pid: 4242), processRecord(pid: 4243, parentPID: 4242)]
+        let confirmation = PiPackageUpdateConfirmation.text(
+            plans: [plan],
+            inspection: .runningProcesses(records),
+            redactingWith: LogRedactor(homeDirectory: fixtureHome)
+        )
+        XCTAssertTrue(confirmation.contains("已运行的 2 个会话不会中断"))
+        XCTAssertTrue(confirmation.contains("需要重启后才会用上新版本"))
+        XCTAssertTrue(confirmation.contains("进程 PID：4242"))
+        XCTAssertFalse(confirmation.contains("拒绝执行"))
     }
 
-    func testUnknownProcessStateBlocksTheExecuteEntry() {
-        let unknownCases: [PiProcessInspectionUnknown] = [
-            .enumerationFailed,
-            .argumentsUnavailable(pid: 4242, interpreter: "node"),
-            .identityUnavailable(pid: 4243, failure: .permissionDenied),
-            .scriptPathUnconfirmed(pid: 4244, path: "/tmp/notes/pi")
-        ]
-        for unknown in unknownCases {
-            let set = PiPackageUpdatePlanner.decide(input(processes: .unknown(unknown)))
-            XCTAssertTrue(set.executablePlans.isEmpty, "状态不确定必须拒绝执行")
-            guard case .executeBlocked(_, let reason) = set.decisions[0] else {
-                return XCTFail("应拒绝执行，实际是 \(set.decisions)")
-            }
-            XCTAssertEqual(reason, .processStateUnknown(unknown))
-            XCTAssertTrue(reason.text.contains("按不安全处理"))
-        }
-    }
-
-    /// 规划时没有进程，但确认后执行前出现了 Pi 进程：拒绝执行，且不调用执行器。
-    func testPreExecutionRecheckBlocksExecutionWhenProcessAppears() throws {
-        let ready = try XCTUnwrap(plan())
-        let world = World(fixtureHome: fixtureHome)
-        world.inspections = [.runningProcesses([processRecord()])]
-        var batch: PiPackageUpdateBatchOutcome?
-        world.makeCoordinator().runConfirmed([ready]) { batch = $0 }
-        let outcome = try XCTUnwrap(batch)
-        guard case .refused(let refusedPlan, let reason) = outcome.outcomes[0] else {
-            return XCTFail("执行前复查发现进程时必须拒绝，实际是 \(outcome.outcomes)")
-        }
-        XCTAssertEqual(refusedPlan.packageName, packageName)
-        XCTAssertEqual(blockedPids(reason), [4242])
-        XCTAssertTrue(world.runner.plans.isEmpty, "拒绝执行时绝不调用执行器")
-        XCTAssertEqual(world.detectCount, 0)
-        XCTAssertTrue(world.log.text.contains("执行前复查"))
-        XCTAssertFalse(outcome.isSucceeded)
-        XCTAssertNil(outcome.latestWarning, "拒绝不是执行失败，不写失败告警")
-    }
-
-    func testPreExecutionRecheckBlocksExecutionWhenStateBecomesUnknown() throws {
-        let ready = try XCTUnwrap(plan())
-        let world = World(fixtureHome: fixtureHome)
-        world.inspections = [.unknown(.enumerationFailed)]
-        var batch: PiPackageUpdateBatchOutcome?
-        world.makeCoordinator().runConfirmed([ready]) { batch = $0 }
-        let outcome = try XCTUnwrap(batch)
-        guard case .refused(_, let reason) = outcome.outcomes[0] else {
-            return XCTFail("状态不确定时必须拒绝，实际是 \(outcome.outcomes)")
-        }
-        XCTAssertEqual(reason, .processStateUnknown(.enumerationFailed))
-        XCTAssertTrue(world.runner.plans.isEmpty)
-    }
-
-    /// 批量执行到一半时出现 Pi 进程：已完成的包保留结果，其余包全部拒绝。
-    func testBatchStopsAndRefusesRemainingPlansWhenProcessAppears() throws {
-        let second = "pi-extension-other"
-        let set = PiPackageUpdatePlanner.decide(input(
-            packages: [candidate(), candidate(name: second)],
-            checks: [check(), check(name: second, latest: "3.0.0")]
-        ))
-        let plans = set.executablePlans
-        XCTAssertEqual(plans.count, 2)
-        let world = World(fixtureHome: fixtureHome)
-        world.detectedVersions = [packageName: "2.0.0"]
-        world.inspections = [.noProcesses, .runningProcesses([processRecord()])]
-        var batch: PiPackageUpdateBatchOutcome?
-        world.makeCoordinator().runConfirmed(plans) { batch = $0 }
-        let outcome = try XCTUnwrap(batch)
-        XCTAssertEqual(outcome.outcomes.count, 2)
-        XCTAssertTrue(outcome.outcomes[0].isSucceeded)
-        guard case .refused(let refusedPlan, _) = outcome.outcomes[1] else {
-            return XCTFail("第二个包必须被拒绝，实际是 \(outcome.outcomes[1])")
-        }
-        XCTAssertEqual(refusedPlan.packageName, second)
-        XCTAssertEqual(world.runner.plans.map(\.packageName), [packageName])
-        XCTAssertEqual(world.inspectCount, 2)
-    }
-
-    /// 执行前复查通过后，`abandon()` 只放弃等待（应用退出路径），不发送信号。
+    /// `abandon()` 只放弃等待（应用退出路径），不发送信号。
     func testAbandonOnlyGivesUpWaiting() throws {
         let ready = try XCTUnwrap(plan())
         let world = World(fixtureHome: fixtureHome)
@@ -711,9 +617,6 @@ final class PiPackageUpdateFlowTests: XCTestCase {
         XCTAssertEqual(plan.arguments, ["update", "npm:\(packageName)"])
         XCTAssertTrue(plan.requiresUserConfirmation)
         XCTAssertFalse(plan.isAutomaticallyExecutable)
-        XCTAssertTrue(PiPackageUpdatePlanner.decide(input(
-            packages: [managed], processes: .runningProcesses([processRecord()])
-        )).executablePlans.isEmpty)
         XCTAssertTrue(PiPackageUpdatePlanner.decide(input(
             packages: [managed], checks: [check(origin: .cachedFallback)]
         )).executablePlans.isEmpty)
@@ -1016,12 +919,12 @@ final class PiPackageUpdateFlowTests: XCTestCase {
         XCTAssertTrue(offText.contains("策略 关闭"))
         XCTAssertTrue(offText.contains("不做无人值守更新"))
         XCTAssertTrue(offText.contains("尚未检查"))
-        XCTAssertTrue(offText.contains("查看 Pi 扩展包更新…"))
+        XCTAssertTrue(offText.contains("更新 → 检查更新…"))
 
-        let blocked = PiPackageUpdatePlanner.decide(input(processes: .runningProcesses([processRecord()])))
-        let blockedText = PiPackageUpdateStatusPresenter.lines(
+        let ready = PiPackageUpdatePlanner.decide(input())
+        let readyText = PiPackageUpdateStatusPresenter.lines(
             policy: .askBeforeUpdate,
-            planSet: blocked,
+            planSet: ready,
             inspection: .runningProcesses([processRecord()]),
             warning: PiPackageUpdateWarning(
                 kind: .commandFailed,
@@ -1031,10 +934,10 @@ final class PiPackageUpdateFlowTests: XCTestCase {
                 reason: "更新命令以非零退出码结束"
             )
         ).joined(separator: "\n")
-        XCTAssertTrue(blockedText.contains("检测到 1 个运行中的 Pi 进程"))
-        XCTAssertTrue(blockedText.contains("拒绝记录"))
-        XCTAssertTrue(blockedText.contains("Pi 扩展包更新未完成"))
-        XCTAssertTrue(blockedText.contains("已就绪但被拒绝执行"))
+        XCTAssertTrue(readyText.contains("检测到 1 个运行中的 Pi 进程"))
+        XCTAssertTrue(readyText.contains("待确认：\(packageName)"))
+        XCTAssertTrue(readyText.contains("Pi 扩展包更新未完成"))
+        XCTAssertFalse(readyText.contains("已就绪但被拒绝执行"), "运行中的 Pi 进程不再产生拒绝")
     }
 
     // MARK: - 7. 输入映射与持久警告
@@ -1200,10 +1103,6 @@ final class PiPackageUpdateFlowTests: XCTestCase {
         let secondPlan = try XCTUnwrap(plan(name: "pkg-b"))
 
         let coordinator = PiPackageUpdateCoordinator(environment: PiPackageUpdateCoordinator.Environment(
-            inspectProcesses: {
-                recorder.append("inspect", Self.onCoordinatorDelivery(deliveryKey))
-                return .noProcesses
-            },
             runner: BackgroundQueueRunner(queue: runnerDelivery),
             detectPackageVersion: { _ in
                 recorder.append("detect", Self.onCoordinatorDelivery(deliveryKey))
@@ -1233,13 +1132,12 @@ final class PiPackageUpdateFlowTests: XCTestCase {
         }
         XCTAssertEqual(done.value, true, "批量更新应在超时前完成")
 
-        // 入口 1 次 + 第二个包执行前 1 次 = 2 次进程复查；每包各 1 次重检测/历史/清除。
-        XCTAssertEqual(recorder.labels("inspect").count, 2)
+        // 每包各 1 次重检测/历史/清除；不再有执行前的进程复查。
         XCTAssertEqual(recorder.labels("detect").count, 2)
         XCTAssertEqual(recorder.labels("history").count, 2)
         XCTAssertEqual(recorder.labels("clear").count, 2)
 
-        for key in ["inspect", "detect", "history", "clear", "complete"] {
+        for key in ["detect", "history", "clear", "complete"] {
             let labels = recorder.labels(key)
             XCTAssertFalse(labels.contains(false), "\(key) 不得在执行器投递队列或调用线程上运行（M2）")
             XCTAssertTrue(labels.allSatisfy { $0 == true }, "\(key) 必须全部在投递队列上运行（M2），实际：\(labels)")
@@ -1659,7 +1557,6 @@ final class PiPackageUpdateFlowTests: XCTestCase {
         let command = ProcessPiPackageUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
         let log = LogSink()
         let coordinator = PiPackageUpdateCoordinator(environment: PiPackageUpdateCoordinator.Environment(
-            inspectProcesses: { .noProcesses },
             runner: command,
             detectPackageVersion: { _ in "2.0.0" },
             redactor: LogRedactor(homeDirectory: fixtureHome),
@@ -1736,44 +1633,17 @@ final class PiPackageUpdateFlowTests: XCTestCase {
 
     // MARK: - 9. GitHub #107（W2B B-12 / B-13、非阻塞读状态接口）
 
-    /// B-12：判定顺序是「进程保护 → 已放弃记录」。检测到运行中的 Pi 进程（或进程
-    /// 状态不确定）时直接拒绝执行，不再先要求用户确认一条注定执行不下去的记录；
-    /// 进程状态恢复后，同一条记录仍然会要求确认（记录没有被跳过）。
-    func testProcessRefusalOutranksAbandonedAttemptConfirmation() {
+    /// B-12：运行中的 Pi 进程不再参与判定，「已放弃」记录仍然必须先确认才执行。
+    func testAbandonedAttemptConfirmationIgnoresRunningProcesses() {
         let attempt = abandonedAttempt()
-
-        let blocked = PiPackageUpdatePlanner.decide(input(
-            processes: .runningProcesses([processRecord(pid: 4242)]),
-            abandonedAttempts: [attempt]
-        ))
-        XCTAssertTrue(blocked.abandonedConfirmationPlans.isEmpty, "进程保护先判：不得要求确认「已放弃」记录")
-        XCTAssertFalse(blocked.executionAvailable)
-        guard case .executeBlocked(_, let reason) = blocked.decisions[0] else {
-            return XCTFail("有运行中的 Pi 进程时必须拒绝执行，实际是 \(blocked.decisions)")
-        }
-        XCTAssertEqual(blockedPids(reason), [4242])
-        XCTAssertEqual(blocked.allPlans.count, 1, "计划本身仍然可见（用于展示与诊断）")
-
-        let unknown = PiPackageUpdatePlanner.decide(input(
-            processes: .unknown(.enumerationFailed),
-            abandonedAttempts: [attempt]
-        ))
-        XCTAssertTrue(unknown.abandonedConfirmationPlans.isEmpty, "状态不确定同样先拒绝，不引导确认记录")
-        guard case .executeBlocked(_, let unknownReason) = unknown.decisions[0] else {
-            return XCTFail("进程状态不确定时必须拒绝执行，实际是 \(unknown.decisions)")
-        }
-        XCTAssertEqual(unknownReason, .processStateUnknown(.enumerationFailed))
-
-        let confirmation = PiPackageUpdatePlanner.decide(input(
-            processes: .noProcesses,
-            abandonedAttempts: [attempt]
-        ))
-        guard case .awaitingAbandonedConfirmation(_, let confirmed) = confirmation.decisions[0] else {
-            return XCTFail("进程消失后必须要求确认「已放弃」记录，实际是 \(confirmation.decisions)")
+        let set = PiPackageUpdatePlanner.decide(input(abandonedAttempts: [attempt]))
+        guard case .awaitingAbandonedConfirmation(_, let confirmed) = set.decisions[0] else {
+            return XCTFail("必须先要求确认「已放弃」记录，实际是 \(set.decisions)")
         }
         XCTAssertEqual(confirmed, attempt)
-        XCTAssertEqual(confirmation.abandonedConfirmationPlans.count, 1)
-        XCTAssertFalse(confirmation.executionAvailable, "未确认前不得给出执行入口")
+        XCTAssertEqual(set.abandonedConfirmationPlans.count, 1)
+        XCTAssertFalse(set.executionAvailable, "未确认前不得给出执行入口")
+        XCTAssertEqual(set.allPlans.count, 1, "计划本身仍然可见（用于展示与诊断）")
     }
 
     /// B-13：安装失败（非零退出）分支必须像验证失败分支一样调用 `applyDegradation`。

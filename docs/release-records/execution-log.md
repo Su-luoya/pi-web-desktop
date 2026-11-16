@@ -2342,3 +2342,15 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
 - appcast workflow [43555416724](https://github.com/Su-luoya/pi-web-desktop/actions/runs/43555416724) 由 `release: published` 触发并成功；`appcast` 分支为 schema 1，首条 `tag=v0.1.0-alpha.39`，下载 URL、文件名与 `zip.sha256` 和公开资产一致。
 - 未验证：真实 Pi CLI / 扩展包安装的端到端结果（本机 `pi update --self` 是“已是最新”的空操作，扩展包本轮无可执行更新项）、桌面应用一步（下载/换包/重启）未真实跑过、VoiceOver 逐项朗读、另一台 Mac 首次 Gatekeeper 放行。alpha.31–38 的自动更新被上一版判定挡住，拿不到本版，需手动下载一次。
 - 回退：alpha.37 仍是已发布 prerelease（3 个资产可下载）；alpha.38 一直是草稿、从未发布，因此回退目标是 alpha.37。本版无设置 schema 或服务数据迁移，退出应用后替换应用包即可；从 `appcast` 移除本版条目可停止推送，应用内安装器不提供自动降级。
+
+## 本次发布执行记录（v0.1.0-alpha.40）
+
+- 内容：远程访问的重挂特性——退出时 `revokeForQuit` 撤掉 serve 入口后保留 `remoteAccess.restorePending`（当时的端口），下次启动 `refresh` 先按它重挂并优先复用旧端口，手机书签里带端口的地址继续有效；重挂时 CLI 已挂上、只是 tailnet 未启用 HTTPS 的按「已装但打不开」处理，端口与 `remoteAccessCleanupPort` 一并记在自己名下，退出才撤得掉；新增 `restoreGeneration` 代际，用户在重挂期间点「启用」或「关闭」后，重挂晚到的结果整个丢弃，不覆盖刚写出的状态。同时去掉菜单里的「在 Finder 中打开工作目录」，`Scripts/install.sh` 改为先装到 `Pi-Web-Desktop.app.new`、签名校验通过后再删旧换新。
+- [Release Issue #289](https://github.com/Su-luoya/pi-web-desktop/issues/289) 记录本地门槛、S1–S8 复核、真机环境、checksum 与未验证范围；[PR #288](https://github.com/Su-luoya/pi-web-desktop/pull/288) squash 为 `88b6f12c52e602738a3c4f0a1cf5874828b37dab`。
+- 过程记录：首次打 tag 时 `git push origin main` 被保护分支拒绝，但同一条命令里的 tag 已经推上去，release workflow 43788544255 因此在未合并的提交上启动；随即用 `gh run cancel` 取消、删除远端与本地 tag，改走 PR。正式 tag 指向 main 上的 `88b6f12`。教训是「push 分支与 push tag」不该串在同一条 `&&` 链里。
+- 本地与 CI 均为 **1113 tests, 0 failures**：[PR build 43788625741](https://github.com/Su-luoya/pi-web-desktop/actions/runs/43788625741)（build 与 thread-sanitizer 均 pass）、main CI [43789279020](https://github.com/Su-luoya/pi-web-desktop/actions/runs/43789279020) pass，后者指向 `88b6f12`。`check-concurrency.sh` clean（103 files, 12 baseline annotations）；45 项身份检查、版本/tag 检查、打包自测、启动与诊断双模式 smoke 均通过；scanner `suppressed 17 lines`、无 rejected、自测 PASS，本版无新增抑制标记。
+- Tag `v0.1.0-alpha.40`（annotated，tag object `737cd20733ed03da3c08a9cb164cbbb6a3b22092`）指向 `88b6f12`；release workflow [43789298583](https://github.com/Su-luoya/pi-web-desktop/actions/runs/43789298583) 的 build 与 draft 创建均成功，草稿正文由模板 + `## 摘要` 渲染，无占位符。
+- [v0.1.0-alpha.40](https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.40) 于 `2026-11-16T02:05:12Z` 发布为 prerelease，`isDraft=false`、`isPrerelease=true`。资产 `Pi-Web-Desktop-0.1.0-alpha.40+build.40.zip`：**1,814,492 bytes**，SHA-256 **`b7143aafe13db03bf85582b7be45469893c0a0e101b7e84e9218e5a128bd0807`**；`gh release download` + `shasum -a 256 -c` → OK。本地演练 ZIP（`b09690b7…507a`）只用于发布前自检，不作为公开校验值。
+- appcast workflow [43790012640](https://github.com/Su-luoya/pi-web-desktop/actions/runs/43790012640) 由 `release: published` 触发并成功；`appcast` 分支为 schema 1，首条 `tag=v0.1.0-alpha.40`，下载 URL、文件名与 `zip.sha256` 和公开资产一致。
+- 未验证：真机记录只到用户「试了一下，应该是没问题了」的粒度，未逐条回传重挂后的端口号、手机侧实际现象，也没确认竞态那一步是否真的触发；真实 Pi CLI / 扩展包安装的端到端结果、VoiceOver 逐项朗读、另一台 Mac 首次 Gatekeeper 放行同样没有覆盖。
+- 回退：alpha.39 仍是已发布 prerelease（3 个资产可下载）。本版无设置 schema 或服务数据迁移，退出应用后替换应用包即可；从 `appcast` 移除本版条目可停止推送，应用内安装器不提供自动降级。

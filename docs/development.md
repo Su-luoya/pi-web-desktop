@@ -206,7 +206,7 @@ open build/Pi-Web-Desktop.app
 open "$HOME/Applications/Pi-Web-Desktop.app"
 ```
 
-`Scripts/install.sh` 会把 `build/Pi-Web-Desktop.app` 复制到 `~/Applications/`，覆盖前把已有同名 app 改名为带时间戳的备份，然后重新做 ad-hoc 签名与校验。它要求 `~/Applications` 已存在（脚本不会创建目录），目录缺失时先执行 `mkdir -p ~/Applications`，否则复制会以 No such file or directory 失败。
+`Scripts/install.sh` 会把 `build/Pi-Web-Desktop.app` 复制到 `~/Applications/`，先落到同目录的 `Pi-Web-Desktop.app.new`，在那里重新做 ad-hoc 签名与校验，通过后才删掉旧 app 换成新名字（不保留备份：需要旧版就从 git 重新构建；复制或签名中途失败时旧 app 原封不动）。它要求 `~/Applications` 已存在（脚本不会创建目录），目录缺失时先执行 `mkdir -p ~/Applications`，否则复制会以 No such file or directory 失败。
 
 把 `/Applications` 或 `~/Applications` 里的应用替换成另一个 ad-hoc 构建（包括用应用内更新装上的新版
 本）后，首次启动 macOS 可能弹出一次与钥匙串相关的授权提示。当前版本不读写钥匙串，这条提示来自旧版

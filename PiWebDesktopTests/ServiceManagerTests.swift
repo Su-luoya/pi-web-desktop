@@ -305,36 +305,6 @@ private final class ManagerFailingOwnershipStore: ServiceOwnershipStoring {
     func removeRecord(at url: URL) {}
 }
 
-/// 可变密码来源：测试可以在运行中把“Keychain 条目”删掉（置 nil）。
-private final class MutablePasswordProvider {
-    var password: String?
-    private(set) var readCount = 0
-
-    init(_ password: String?) {
-        self.password = password
-    }
-
-    func read() -> String? {
-        readCount += 1
-        return password
-    }
-}
-
-/// 依次返回给定值、之后恒为 nil 的密码来源。用来证明启动路径只读一次。
-private final class OneShotPasswordProvider {
-    private var remaining: [String?]
-    private(set) var readCount = 0
-
-    init(_ values: [String?]) {
-        remaining = values
-    }
-
-    func read() -> String? {
-        readCount += 1
-        return remaining.isEmpty ? nil : remaining.removeFirst()
-    }
-}
-
 // MARK: - Harness
 
 private let fakeLaunchedAt = "Wed Jul 30 12:00:00 2025"
@@ -2617,9 +2587,6 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(harness.launcher.launchCount, 1)
         XCTAssertEqual(harness.manager.currentState, .starting)
     }
-
-    // MARK: - 远程访问密码（GitHub #8）
-
 
     private func remoteConfiguration(piWebPath: String) -> ServiceConfiguration {
         var configuration = configured(piWebPath)

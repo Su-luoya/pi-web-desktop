@@ -2373,4 +2373,4 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
 - 装的确实是公开产物：安装包 `Contents/MacOS/PiWebDesktop` 的 SHA-256 为 **`ae04aed7aea1cf344fe0de1164f4889d5ab032b2aadbb23535fc2483fd1f2c79`**，与 `gh release download v0.1.0-alpha.41` 取回的 `Pi-Web-Desktop-0.1.0-alpha.41+build.41.zip` 解出的同一文件**逐字节一致**。包内各文件 mtime 均为 `2001-01-01 08:00:00`（打包脚本归一化时间戳），本地 dev build 不会是这个时间戳。
 - 签名：`codesign --verify --deep --strict` 通过；`Identifier=io.github.su-luoya.pi-web-desktop`、`Signature=adhoc`、`TeamIdentifier=not set`（仍未公证）。
 - 换包后 `~/Applications` 下没有 `*.app.new` 残留。`~/.Trash/Pi-Web-Desktop.app` 是 `0.1.0-alpha.37`（build 37）的旧包，时间戳同样归一化，与本轮 40 → 41 无关，不作为本次证据。
-- 未覆盖：这次只验证了「`~/Applications` 内的旧版 → 新版」；`/Applications` 内的就地更新与「两个目录之外」的拒绝提示仍按代码与单元测试为准，未在本机实测。
+- 未覆盖（经决定不补测）：这次只验证了「`~/Applications` 内的旧版 → 新版」。`/Applications` 内的就地更新**未**在本机实测——本机只探到前置条件成立（`/Applications` 为 `drwxrwxr-x root:admin`，当前用户在 `admin` 组，按 `canReplaceInstalledApp` 的思路建临时文件成功），真正的换包动作仍需一个比已装版本更新的包才能走一遍，本次决定不做。「两个目录之外」的拒绝提示同样以代码与单元测试为准。

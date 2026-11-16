@@ -68,6 +68,9 @@ final class RemoteAccessController {
     /// 诊断日志的落点（生产环境由 `AppDelegate` 接到 `LogWriter`）。
     /// 丢掉重挂标记这件事在菜单上完全看不见，只能靠日志复盘。
     var log: ((String) -> Void)?
+    /// 启动重挂的代际：用户一旦手动启用/关闭，启动时那次还在跑的 CLI 结果就该作废。
+    /// 否则晚到的「未开启」会盖掉用户刚点出来的「已开启」，还顺手清掉端口记录（退出就撤不掉了）。
+    private var restoreGeneration = 0
 
     convenience init(runner: CommandRunning, defaults: UserDefaults = .standard) {
         self.init(serve: TailscaleServe(runner: runner), defaults: defaults)
@@ -168,6 +171,8 @@ final class RemoteAccessController {
     /// 配置被重置过），这里不去驱动启动流程重启服务，而是作废标记，把这一次重启交给
     /// 菜单里的「启用」——那条路径本来就会先弹确认框说明会话会中断。
     private func restore(port: Int, configuration: ServiceConfiguration) {
+        restoreGeneration &+= 1
+        let generation = restoreGeneration
         guard RemoteAccessPolicy.isLoopbackHostname(configuration.hostname),
               let target = TailscaleServe.loopbackTarget(port: configuration.port) else {
             // 监听地址不是回环：这条入口到了也连不上。等用户手动启用（那次会顺带改回回环）。
@@ -221,7 +226,7 @@ final class RemoteAccessController {
                 }
             }
         }) { [weak self] outcome in
-            guard let self else { return }
+            guard let self, generation == self.restoreGeneration else { return }
             switch outcome {
             case let .restored(url, port):
                 self.forget()
@@ -277,6 +282,8 @@ final class RemoteAccessController {
         applyConfiguration: @escaping (ServiceConfiguration, @escaping () -> Void) -> Void,
         completion: @escaping (Result<URL, Failure>) -> Void
     ) {
+        // 用户的显式操作优先：启动时那次重挂还在跑的话，它的结果从这里开始作废。
+        restoreGeneration &+= 1
         let serve = self.serve
         // 代理目标只能是回环（见 `TailscaleServe.loopbackTarget`），监听地址也必须
         // 是回环：服务绑在 tailnet 地址上时旧版本会造出一条扫码打不开的入口。
@@ -448,6 +455,8 @@ final class RemoteAccessController {
 
     /// 撤销成功才清掉记录；失败时保留端口与状态，以便重试或下次启动对账。
     func disable(completion: @escaping (Bool) -> Void) {
+        // 同上：用户关了就不再让启动时的重挂结果回头把状态改成「已开启」。
+        restoreGeneration &+= 1
         guard let port = activePort else {
             // 自定义地址只是默认里的一行字符串，没有机器配置要撤销；
             // 顺手清掉「下次启动重挂」的标记——用户明确关掉了，就不该再自己开回来。

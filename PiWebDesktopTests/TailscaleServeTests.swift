@@ -6,9 +6,21 @@ final class RemoteAccessControllerTests: XCTestCase {
         var succeeds = false
         var snapshotAfterEnable: String?
         var results: [String: CommandRunResult] = [:]
+        /// 命中这条命令时在后台停住，直到测试调用 `release()`：用来制造
+        /// 「启动重挂还在跑、用户已经点了菜单」的交错。
+        var blockedArguments: [String]?
+        private let entered = DispatchSemaphore(value: 0)
+        private let blocked = DispatchSemaphore(value: 0)
         private(set) var commands: [[String]] = []
 
+        func waitUntilBlocked() { entered.wait() }
+        func release() { blocked.signal() }
+
         func run(_ arguments: [String]) -> String? {
+            if arguments == blockedArguments {
+                entered.signal()
+                blocked.wait()
+            }
             commands.append(arguments)
             if arguments == ["/fake/tail-cli", "status", "--json"] {
                 return "{\"BackendState\": \"Running\", \"Self\": {\"DNSName\": \"mini.example-tailnet\"}}"
@@ -222,6 +234,42 @@ final class RemoteAccessControllerTests: XCTestCase {
 
         XCTAssertEqual(controller.state, .off)
         XCTAssertTrue(lines.contains { $0.contains("丢弃重启重挂标记") }, "\(lines)")
+    }
+
+    /// 启动重挂还在跑时用户点了「关闭」：晚到的结果不得把状态改回「已开启」，
+    /// 也不得把已经清掉的端口记录写回去（否则退出时又撤不掉了）。
+    func testLateRestoreResultDoesNotOverwriteUserDisable() {
+        // 正常退出的样子：没有 activePort，只剩重挂标记。
+        defaults.removeObject(forKey: RemoteAccessController.DefaultsKey.port)
+        defaults.set(443, forKey: RemoteAccessController.DefaultsKey.restorePending)
+        runner.snapshot = """
+        {"Web": {"mini.example-tailnet:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:30141"}}}}}
+        """
+        runner.succeeds = true
+        // 重挂的第一次 CLI（detect）就卡住，等测试放行。
+        runner.blockedArguments = ["/fake/tail-cli", "status", "--json"]
+
+        controller.refresh(configuration: .default)
+        runner.waitUntilBlocked()
+
+        var states: [RemoteAccessViewState] = []
+        let lateResult = expectation(description: "晚到的重挂结果不该落地")
+        lateResult.isInverted = true
+        controller.onChange = { state in
+            states.append(state)
+            if state != .off { lateResult.fulfill() }
+        }
+
+        controller.disable { _ in }
+        XCTAssertEqual(controller.state, .off)
+        XCTAssertNil(controller.activePort)
+
+        runner.release()
+        wait(for: [lateResult], timeout: 0.5)
+
+        XCTAssertEqual(controller.state, .off)
+        XCTAssertNil(controller.activePort)
+        XCTAssertEqual(states, [.off])
     }
 
     /// 用户明确关掉之后，下次启动不该自己把入口开回来。

@@ -122,6 +122,7 @@ final class DesktopAppUpdateTests: XCTestCase {
         XCTAssertFalse(DesktopAppUpdateInstaller.canReplaceInstalledApp(URL(fileURLWithPath: "/Applications/Pi-Web-Desktop.app-copy")))
         XCTAssertFalse(DesktopAppUpdateInstaller.canReplaceInstalledApp(URL(fileURLWithPath: "/Applications/Utilities/Pi-Web-Desktop.app")))
         XCTAssertFalse(DesktopAppUpdateInstaller.canReplaceInstalledApp(URL(fileURLWithPath: "/tmp/Pi-Web-Desktop.app")))
+        XCTAssertFalse(DesktopAppUpdateInstaller.canReplaceInstalledApp(URL(fileURLWithPath: NSHomeDirectory() + "/Program/Pi-Web-Desktop.app", isDirectory: true)))
 
         // 真实 bundle 的三类判定用注入的根目录验证，不要求运行机装了 App
         let fileManager = FileManager.default
@@ -140,18 +141,26 @@ final class DesktopAppUpdateTests: XCTestCase {
         }
         let applications = applicationsRoot("Applications", withInfoPlist: true)
         let installed = applications.appendingPathComponent("Pi-Web-Desktop.app", isDirectory: true)
-        XCTAssertTrue(DesktopAppUpdateInstaller.canReplaceInstalledApp(installed, applicationsRoot: applications))
-        XCTAssertTrue(DesktopAppUpdateInstaller.canReplaceInstalledApp(URL(fileURLWithPath: installed.path + "/"), applicationsRoot: applications))
-        XCTAssertFalse(DesktopAppUpdateInstaller.canReplaceInstalledApp(applications.appendingPathComponent("Pi-Web-Desktop.app/Contents/../Pi-Web-Desktop.app"), applicationsRoot: applications))
-        XCTAssertFalse(DesktopAppUpdateInstaller.canReplaceInstalledApp(applications.appendingPathComponent("Tools/Pi-Web-Desktop.app", isDirectory: true), applicationsRoot: applications))
+        XCTAssertTrue(DesktopAppUpdateInstaller.canReplaceInstalledApp(installed, applicationsRoots: [applications]))
+        XCTAssertTrue(DesktopAppUpdateInstaller.canReplaceInstalledApp(URL(fileURLWithPath: installed.path + "/"), applicationsRoots: [applications]))
+        XCTAssertFalse(DesktopAppUpdateInstaller.canReplaceInstalledApp(applications.appendingPathComponent("Pi-Web-Desktop.app/Contents/../Pi-Web-Desktop.app"), applicationsRoots: [applications]))
+        XCTAssertFalse(DesktopAppUpdateInstaller.canReplaceInstalledApp(applications.appendingPathComponent("Tools/Pi-Web-Desktop.app", isDirectory: true), applicationsRoots: [applications]))
 
         let withoutInfoPlist = applicationsRoot("NoInfo", withInfoPlist: false)
-        XCTAssertFalse(DesktopAppUpdateInstaller.canReplaceInstalledApp(withoutInfoPlist.appendingPathComponent("Pi-Web-Desktop.app", isDirectory: true), applicationsRoot: withoutInfoPlist))
+        XCTAssertFalse(DesktopAppUpdateInstaller.canReplaceInstalledApp(withoutInfoPlist.appendingPathComponent("Pi-Web-Desktop.app", isDirectory: true), applicationsRoots: [withoutInfoPlist]))
 
         let symlinked = temporary.appendingPathComponent("Symlinked", isDirectory: true)
         try! fileManager.createDirectory(at: symlinked, withIntermediateDirectories: true)
         try! fileManager.createSymbolicLink(at: symlinked.appendingPathComponent("Pi-Web-Desktop.app", isDirectory: true), withDestinationURL: external)
-        XCTAssertFalse(DesktopAppUpdateInstaller.canReplaceInstalledApp(symlinked.appendingPathComponent("Pi-Web-Desktop.app", isDirectory: true), applicationsRoot: symlinked))
+        XCTAssertFalse(DesktopAppUpdateInstaller.canReplaceInstalledApp(symlinked.appendingPathComponent("Pi-Web-Desktop.app", isDirectory: true), applicationsRoots: [symlinked]))
+    }
+
+    /// `~/Applications` 是安装脚本的落地目录，必须与 `/Applications` 一视同仁。
+    func testDefaultUpdateRootsCoverUserApplications() {
+        let roots = DesktopAppUpdateInstaller.defaultApplicationsRoots.map { $0.standardizedFileURL.path }
+        XCTAssertEqual(roots.count, 2)
+        XCTAssertTrue(roots.contains("/Applications"))
+        XCTAssertTrue(roots.contains(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications").standardizedFileURL.path))
     }
 
     /// 更新包自带的最低系统高于本机时不得安装。

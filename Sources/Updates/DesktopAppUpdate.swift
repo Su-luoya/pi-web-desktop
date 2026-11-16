@@ -51,7 +51,7 @@ enum DesktopAppUpdateFailure: String, Error, Equatable {
 
     var text: String {
         switch self {
-        case .unsupportedInstallation: return "当前应用不是从 /Applications 安装，无法自动更新。"
+        case .unsupportedInstallation: return "当前应用不在 /Applications 或 ~/Applications 里，无法自动更新。"
         case .unconfirmedUpdate: return "本次检查结果不是本轮从上游确认的可用更新，或目标版本不比当前版本新；请重新检查更新后再试。"
         case .updateAlreadyInProgress:
             return "桌面应用更新已在进行中（等待确认、下载、校验或替换），请等它完成后再试；"
@@ -412,11 +412,7 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling, @un
             finish(.failed(.invalidAssetURL)); return
         }
         let id = Bundle(url: applicationURL)?.bundleIdentifier
-        let root = URL(fileURLWithPath: "/Applications", isDirectory: true)
-            .resolvingSymlinksInPath().path
-        let installed = applicationURL.resolvingSymlinksInPath()
-        guard Self.canReplaceInstalledApp(applicationURL, fileManager: fileManager),
-              installed.path == root + "/Pi-Web-Desktop.app" else {
+        guard Self.canReplaceInstalledApp(applicationURL, fileManager: fileManager) else {
             finish(.failed(.unsupportedInstallation)); return
         }
         guard id == "io.github.su-luoya.pi-web-desktop" else { finish(.failed(.invalidBundle)); return }
@@ -632,19 +628,28 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling, @un
         }) else { throw DesktopAppUpdateFailure.invalidArchive }
         return app
     }
+    /// 允许自更新的安装位置：系统 `/Applications` 与用户 `~/Applications`。
+    /// 后者是 `Scripts/install.sh` 的安装目录，只认前者会让本地装机包永远无法更新。
+    static var defaultApplicationsRoots: [URL] {
+        [URL(fileURLWithPath: "/Applications", isDirectory: true),
+         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true)]
+    }
+
     static func canReplaceInstalledApp(_ app: URL,
-                                       applicationsRoot: URL = URL(fileURLWithPath: "/Applications", isDirectory: true),
+                                       applicationsRoots: [URL] = defaultApplicationsRoots,
                                        fileManager: FileManager = .default) -> Bool {
-        let root = applicationsRoot.resolvingSymlinksInPath().path
         let originalPath = app.path.hasSuffix("/") ? String(app.path.dropLast()) : app.path
         let appURL = URL(fileURLWithPath: originalPath, isDirectory: true).standardizedFileURL
         let resolvedApp = appURL.resolvingSymlinksInPath()
         let resolvedParent = appURL.deletingLastPathComponent().resolvingSymlinksInPath()
         guard appURL.path == originalPath, appURL.pathExtension == "app",
-              appURL.lastPathComponent == "Pi-Web-Desktop.app", appURL.path == root + "/Pi-Web-Desktop.app",
-              resolvedApp.path == appURL.path, resolvedParent.path == root,
+              appURL.lastPathComponent == "Pi-Web-Desktop.app",
+              resolvedApp.path == appURL.path,
               fileManager.fileExists(atPath: appURL.appendingPathComponent("Contents/Info.plist").path) else { return false }
-        return true
+        return applicationsRoots.contains { root in
+            let resolvedRoot = root.resolvingSymlinksInPath().path
+            return appURL.path == resolvedRoot + "/Pi-Web-Desktop.app" && resolvedParent.path == resolvedRoot
+        }
     }
 
     static func canWriteApplicationDirectory(applicationURL: URL, fileManager: FileManager = .default) -> Bool {

@@ -68,7 +68,7 @@ ZIP 只包含应用包，不含 Node.js、Pi 与 `@agegr/pi-web`。
 - 未公证：首次打开必须手动放行；换成新的 ad-hoc 构建（含应用内更新装上的版本）后可能再次提示，
   这是 CDHash 变化导致的预期行为，不是更新失败。
 - 只支持 Apple Silicon 与 macOS 26 或更高版本，不支持 Intel Mac。
-- 应用内更新只在 `/Applications` 下可用，且需要用户确认后才执行；没有无人值守的自动更新。
+- 应用内更新只在 `/Applications` 或 `~/Applications` 下可用，且需要用户确认后才执行；没有无人值守的自动更新。
 
 ## 完整记录
 

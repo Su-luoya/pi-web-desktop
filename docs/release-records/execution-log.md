@@ -2354,3 +2354,13 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
 - appcast workflow [43790012640](https://github.com/Su-luoya/pi-web-desktop/actions/runs/43790012640) 由 `release: published` 触发并成功；`appcast` 分支为 schema 1，首条 `tag=v0.1.0-alpha.40`，下载 URL、文件名与 `zip.sha256` 和公开资产一致。
 - 未验证：真机记录只到用户「试了一下，应该是没问题了」的粒度，未逐条回传重挂后的端口号、手机侧实际现象，也没确认竞态那一步是否真的触发；真实 Pi CLI / 扩展包安装的端到端结果、VoiceOver 逐项朗读、另一台 Mac 首次 Gatekeeper 放行同样没有覆盖。
 - 回退：alpha.39 仍是已发布 prerelease（3 个资产可下载）。本版无设置 schema 或服务数据迁移，退出应用后替换应用包即可；从 `appcast` 移除本版条目可停止推送，应用内安装器不提供自动降级。
+
+## 本次发布执行记录（v0.1.0-alpha.41）
+
+- 内容：应用内更新的安装位置判定从「必须是 `/Applications/Pi-Web-Desktop.app`」改成「父目录解析后等于 `/Applications` 或 `~/Applications`」，修掉 `Scripts/install.sh` 装到 `~/Applications` 却永远走不到更新那一步的问题（`Sources/Updates/DesktopAppUpdate.swift` 的 `canReplaceInstalledApp` / `defaultApplicationsRoots`）。包名精确、不跳符号链接、`Info.plist` 存在、父目录写权限探查等既有判定不变；两个目录之外仍拒绝就地替换。版本变更由 PR #291 一并准备，release notes 模板里「只在 /Applications 可用」的说法同步改掉。
+- [Release Issue #292](https://github.com/Su-luoya/pi-web-desktop/issues/292) 记录本地门槛、S1–S8 复核、真机环境与未验证范围；[PR #291](https://github.com/Su-luoya/pi-web-desktop/pull/291) squash 为 `30deabfb64c9e6bc813dbeda053f20725751b195`。
+- 本地与 CI 均为 **1114 tests, 0 failures**：[PR build 43793275918](https://github.com/Su-luoya/pi-web-desktop/actions/runs/43793275918)（build 5m48s、thread-sanitizer 4m39s 均 pass）、main CI [43794240430](https://github.com/Su-luoya/pi-web-desktop/actions/runs/43794240430) pass，指向 `30deabf`。发布构建 `-O -wmo`；45 项身份检查、`check-release-version.sh v0.1.0-alpha.41`、打包自测、启动与诊断双模式 smoke、`check-concurrency.sh`（103 files, 12 baseline annotations）均通过；scanner `suppressed 17 lines`、无 rejected、自测 PASS。
+- Tag `v0.1.0-alpha.41`（annotated，tag object `d9f87733df78a234c044d0fa95a21508072612b7`）指向 `30deabf`；release workflow [43794765199](https://github.com/Su-luoya/pi-web-desktop/actions/runs/43794765199) 的 build 与 draft 创建均成功，草稿正文由模板 + `## 摘要` 渲染，无 `{{…}}` 残留、无 `<待填写`。
+- [v0.1.0-alpha.41](https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.41) 于 `2026-11-16T02:55:46Z` 发布为 prerelease，`isDraft=false`、`isPrerelease=true`。资产 `Pi-Web-Desktop-0.1.0-alpha.41+build.41.zip`：**1,814,687 bytes**，SHA-256 **`9df0a6e80876c2efd14fa6b7352aca26f5cc209deb93358291d50040e428b359`**；`gh release download` + `shasum -a 256 -c` → OK，与 `.sha256` 资产逐字符一致。
+- appcast workflow [43795079145](https://github.com/Su-luoya/pi-web-desktop/actions/runs/43795079145) 由 `release: published` 触发并成功；`appcast` 分支提交 `70be76e chore(appcast): v0.1.0-alpha.41`，schema 1，首条 `tag=v0.1.0-alpha.41`，下载 URL、文件名与 `zip.sha256` 和公开资产一致，raw CDN 字节相同。
+- 应用内更新的真实验证：发布前 `~/Applications/Pi-Web-Desktop.app` 是同一代码的本地构建（`CFBundleShortVersionString=0.1.0-alpha.40`），appcast 推出 alpha.41 后具备「旧版就地更新」的条件；实际点击与结果见下方「发布后补记」。

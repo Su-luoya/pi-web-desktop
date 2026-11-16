@@ -62,7 +62,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 不在打开菜单时跑 CLI。
     var remoteAccessMenus: [NSMenu] = []
     /// 远程访问（Tailscale serve）的状态与「本应用占的那一条入口」的记录。
-    lazy var remoteAccessController = RemoteAccessController(runner: commandRunner)
+    /// 「丢掉了重挂标记」这类情况菜单上看不出来，接一行日志给现场诊断。
+    lazy var remoteAccessController: RemoteAccessController = {
+        let controller = RemoteAccessController(runner: commandRunner)
+        controller.log = { [logWriter, logRedactor] message in
+            _ = logWriter.append(logRedactor.redact(message))
+        }
+        return controller
+    }()
     /// 「测试访问延迟」打开的结果窗口：持有控制器，否则窗口会被释放。
     var latencyReportWindowControllers: [NSWindowController] = []
 

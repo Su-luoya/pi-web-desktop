@@ -81,6 +81,164 @@ final class RemoteAccessControllerTests: XCTestCase {
         XCTAssertEqual(controller.activePort, 443)
     }
 
+    // MARK: - 退出后重开：自动重挂
+
+    /// 退出时撤掉入口（应用不在时不留一条指向 502 的入口），但留下“下次启动重挂”的标记：
+    /// 用户手机上的地址在应用回来之后又能打开，不用重新点一次菜单。
+    func testCleanQuitRecordsRestoreHintForNextLaunch() {
+        runner.succeeds = true
+        controller.revokeForQuit()
+        XCTAssertNil(controller.activePort)
+        XCTAssertEqual(defaults.object(forKey: RemoteAccessController.DefaultsKey.restorePending) as? Int, 443)
+    }
+
+    /// 撤销失败时记录还在（下次启动靠对账收尾），不额外写重挂标记。
+    func testFailedRevocationLeavesNoRestoreHint() {
+        controller.revokeForQuit()
+        XCTAssertEqual(controller.activePort, 443)
+        XCTAssertNil(defaults.object(forKey: RemoteAccessController.DefaultsKey.restorePending))
+    }
+
+    func testRefreshReattachesEntryAfterCleanQuit() {
+        var configuration = ServiceConfiguration.default
+        configuration.allowedHosts = "mini.example-tailnet"
+        runner.succeeds = true
+        controller.revokeForQuit()
+
+        let finished = expectation(description: "restored")
+        controller.onChange = { _ in finished.fulfill() }
+        controller.refresh(configuration: configuration)
+        wait(for: [finished], timeout: 5)
+
+        XCTAssertEqual(controller.state.url?.absoluteString, "https://mini.example-tailnet/")
+        XCTAssertEqual(controller.activePort, 443)
+        XCTAssertNil(defaults.object(forKey: RemoteAccessController.DefaultsKey.restorePending))
+        XCTAssertTrue(runner.commands.contains { $0.contains("--bg") && $0.contains("--https=443") })
+    }
+
+    /// 退出前挂的是 8444：重挂优先用回它，手机书签里带着的端口号还能用。
+    func testRefreshPrefersThePortUsedBeforeQuit() {
+        var configuration = ServiceConfiguration.default
+        configuration.allowedHosts = "mini.example-tailnet"
+        defaults.set(8444, forKey: RemoteAccessController.DefaultsKey.port)
+        runner.succeeds = true
+        controller.revokeForQuit()
+        // 443 被别的服务占着（不是我们的目标）：只能退到 8444。
+        runner.snapshot = """
+        {"Web": {"mini.example-tailnet:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:9999"}}}}}
+        """
+        runner.results["/fake/tail-cli serve --bg --https=8444 http://127.0.0.1:30141/"] = CommandRunResult(output: "ok")
+        runner.snapshotAfterEnable = """
+        {"Web": {
+          "mini.example-tailnet:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:9999"}}},
+          "mini.example-tailnet:8444": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:30141"}}}
+        }}
+        """
+
+        let finished = expectation(description: "restored on the previous port")
+        controller.onChange = { _ in finished.fulfill() }
+        controller.refresh(configuration: configuration)
+        wait(for: [finished], timeout: 5)
+
+        XCTAssertEqual(controller.state.url?.absoluteString, "https://mini.example-tailnet:8444/")
+        XCTAssertEqual(controller.activePort, 8444)
+    }
+
+    /// 重挂需要改配置（机器名改过、配置被重置）：启动不驱动服务重启，作废标记，
+    /// 把这一次重启交给菜单里的「启用」——那条路径会先弹确认框。
+    func testRefreshSkipsRestoreWhenConfigurationNeedsRestart() {
+        runner.succeeds = true
+        controller.revokeForQuit()
+
+        let finished = expectation(description: "refresh completed")
+        controller.onChange = { _ in finished.fulfill() }
+        controller.refresh(configuration: .default) // allowedHosts 为空
+        wait(for: [finished], timeout: 5)
+
+        XCTAssertEqual(controller.state, .off)
+        XCTAssertNil(controller.activePort)
+        XCTAssertNil(defaults.object(forKey: RemoteAccessController.DefaultsKey.restorePending))
+        XCTAssertFalse(runner.commands.contains { $0.contains("--bg") })
+    }
+
+    /// 这次挂不上（配置读不出来）：标记留着，下次启动再试，不把用户的设置悄悄丢掉。
+    func testRefreshKeepsRestoreHintWhenTheCommandFails() {
+        var configuration = ServiceConfiguration.default
+        configuration.allowedHosts = "mini.example-tailnet"
+        runner.succeeds = true
+        controller.revokeForQuit()
+        runner.results["/fake/tail-cli serve status --json"] = CommandRunResult(output: "boom")
+
+        let finished = expectation(description: "refresh completed")
+        controller.onChange = { _ in finished.fulfill() }
+        controller.refresh(configuration: configuration)
+        wait(for: [finished], timeout: 5)
+
+        XCTAssertEqual(controller.state, .unavailable(RemoteAccessController.Failure.commandFailed.message))
+        XCTAssertEqual(defaults.object(forKey: RemoteAccessController.DefaultsKey.restorePending) as? Int, 443)
+    }
+
+    /// 重挂时 CLI 照样把入口挂上、只是 tailnet 没启用 HTTPS：那条入口必须记在自己名下，
+    /// 否则退出时撤不掉，手机拿到的正是这次改动想避免的 502。
+    func testRestoreRecordsEntryThatCannotServeHTTPSSoQuitStillRevokesIt() {
+        var configuration = ServiceConfiguration.default
+        configuration.allowedHosts = "mini.example-tailnet"
+        runner.succeeds = true
+        controller.revokeForQuit()
+        runner.results["/fake/tail-cli serve --bg --https=443 http://127.0.0.1:30141/"] = CommandRunResult(
+            output: "Success.\nAvailable within your tailnet:\n",
+            diagnosticOutput: "Serve is not enabled on your tailnet.\nTo enable, visit:\n\n         "
+                + TailscaleServe.loginHost + "f/serve?node=nqbSQ7FYai11CNTRL\n"
+        )
+        runner.snapshotAfterEnable = """
+        {"Web": {"mini.example-tailnet:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:30141"}}}}}
+        """
+
+        let finished = expectation(description: "refresh completed")
+        controller.onChange = { _ in finished.fulfill() }
+        controller.refresh(configuration: configuration)
+        wait(for: [finished], timeout: 5)
+
+        XCTAssertEqual(controller.activePort, 443)
+        XCTAssertTrue(defaults.bool(forKey: RemoteAccessController.DefaultsKey.cleanupPending))
+
+        controller.revokeForQuit()
+        XCTAssertNil(controller.activePort)
+        XCTAssertFalse(defaults.bool(forKey: RemoteAccessController.DefaultsKey.cleanupPending))
+        XCTAssertEqual(runner.commands.last, ["/fake/tail-cli", "serve", "--https=443", "off"])
+    }
+
+    /// 重挂被跳过时菜单只会回到「未开启」，现场得能从日志里看出原因。
+    func testRestoreSkipIsLogged() {
+        var lines: [String] = []
+        controller.log = { lines.append($0) }
+        runner.succeeds = true
+        controller.revokeForQuit()
+
+        let finished = expectation(description: "refresh completed")
+        controller.onChange = { _ in finished.fulfill() }
+        controller.refresh(configuration: .default)
+        wait(for: [finished], timeout: 5)
+
+        XCTAssertEqual(controller.state, .off)
+        XCTAssertTrue(lines.contains { $0.contains("丢弃重启重挂标记") }, "\(lines)")
+    }
+
+    /// 用户明确关掉之后，下次启动不该自己把入口开回来。
+    func testDisableClearsRestoreHint() {
+        runner.succeeds = true
+        controller.revokeForQuit()
+
+        let finished = expectation(description: "disabled")
+        controller.disable { success in
+            XCTAssertTrue(success)
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 5)
+
+        XCTAssertNil(defaults.object(forKey: RemoteAccessController.DefaultsKey.restorePending))
+    }
+
     func testRefreshKeepsPortWhenSnapshotIsUnreadable() {
         runner.snapshot = nil
         let finished = expectation(description: "refresh completed")

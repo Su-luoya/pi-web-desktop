@@ -18,6 +18,11 @@ final class RemoteAccessController {
         /// 用户自填的隧道地址（完整 URL）。它只是“记住这个地址”，没有任何机器配置
         /// 需要撤销，所以退出时不会清掉它。
         static let customURL = "remoteAccess.customURL"
+        /// 退出前远程访问是开着的，记下当时那条 serve 的端口。
+        ///
+        /// 退出会撤掉入口（留着只会让手机打开 502），但用户的手机书签不该因此失效：
+        /// 这个标记让下次启动自动重挂，并优先用回同一个端口。
+        static let restorePending = "remoteAccess.restorePending"
     }
 
     /// 启用失败的可读原因；`noFreePort` 与命令失败要分开说，否则用户不知道该改什么。
@@ -60,6 +65,9 @@ final class RemoteAccessController {
     private(set) var state: RemoteAccessViewState = .off
     /// 状态变化（主线程回调）。菜单用它刷新标题与可用性。
     var onChange: ((RemoteAccessViewState) -> Void)?
+    /// 诊断日志的落点（生产环境由 `AppDelegate` 接到 `LogWriter`）。
+    /// 丢掉重挂标记这件事在菜单上完全看不见，只能靠日志复盘。
+    var log: ((String) -> Void)?
 
     convenience init(runner: CommandRunning, defaults: UserDefaults = .standard) {
         self.init(serve: TailscaleServe(runner: runner), defaults: defaults)
@@ -105,6 +113,12 @@ final class RemoteAccessController {
             }
             return
         }
+        // 正常退出会把 serve 条目撤销并只留下这个标记：启动时重挂，手机书签不用重扫。
+        if recordedPort == nil,
+           let restorePort = defaults.object(forKey: DefaultsKey.restorePending) as? Int {
+            restore(port: restorePort, configuration: configuration)
+            return
+        }
         guard let port = recordedPort,
               let target = TailscaleServe.loopbackTarget(port: configuration.port) else {
             update(.off)
@@ -136,10 +150,93 @@ final class RemoteAccessController {
             guard let self else { return }
             switch outcome {
             case let .on(url):
+                self.defaults.removeObject(forKey: DefaultsKey.restorePending)
                 self.update(.on(url))
             case let .unavailable(message):
                 self.update(.unavailable(message))
             case .stale:
+                self.forget()
+                self.update(.off)
+            }
+        }
+    }
+
+    /// 启动时把退出前那条入口重新挂上。
+    ///
+    /// 只做「挂入口」这一件事：允许主机名在启用时已经写进配置，退出不会清掉它，所以
+    /// 正常情况下不需要重启服务、用户的会话也不会断。万一确实要改配置（机器名变过、
+    /// 配置被重置过），这里不去驱动启动流程重启服务，而是作废标记，把这一次重启交给
+    /// 菜单里的「启用」——那条路径本来就会先弹确认框说明会话会中断。
+    private func restore(port: Int, configuration: ServiceConfiguration) {
+        guard RemoteAccessPolicy.isLoopbackHostname(configuration.hostname),
+              let target = TailscaleServe.loopbackTarget(port: configuration.port) else {
+            // 监听地址不是回环：这条入口到了也连不上。等用户手动启用（那次会顺带改回回环）。
+            log?("远程访问：丢弃重启重挂标记（监听地址 \(configuration.hostname) 不是回环）")
+            forget()
+            update(.off)
+            return
+        }
+        let serve = self.serve
+        let allowedHosts = configuration.allowedHosts
+        // 优先用回退出前那个端口：手机书签里可能带着端口号（例如 :8444）。
+        let ports = [port] + TailscaleServe.defaultPorts
+        CommandProbeDispatch.runOffMain(work: { () -> RestoreOutcome in
+            switch serve.detect() {
+            case .notInstalled:
+                return .unavailable(Failure.notInstalled.message)
+            case .notRunning:
+                return .unavailable(Failure.notRunning.message)
+            case let .ready(dnsName):
+                guard let snapshot = try? serve.snapshot() else {
+                    return .unavailable(Failure.commandFailed.message)
+                }
+                switch RemoteAccessPlanner.plan(
+                    dnsName: dnsName,
+                    target: target,
+                    allowedHosts: allowedHosts,
+                    snapshot: snapshot,
+                    ports: ports
+                ) {
+                case let .failure(error):
+                    return .unavailable(Self.failure(from: error).message)
+                case let .success(plan):
+                    guard plan.updatedAllowedHosts == nil else {
+                        return .skip(reason: "允许主机名里缺 \(dnsName)，补上要重启服务")
+                    }
+                    guard let url = TailscaleServe.publicURL(dnsName: dnsName, port: plan.port) else {
+                        return .skip(reason: "无法拼出 \(dnsName) 的公开地址")
+                    }
+                    do {
+                        try serve.enable(port: plan.port, target: plan.target)
+                    } catch {
+                        let failure = Self.failure(from: error)
+                        // CLI 已经把入口挂上了（只是 tailnet 没启用 HTTPS）：它现在真的在机器上，
+                        // 就得记在自己名下，否则退出时撤不掉，手机拿到的正是这次改动要避免的 502。
+                        if case .httpsNotEnabled(_, true) = failure {
+                            return .installedButUnusable(message: failure.message, port: plan.port)
+                        }
+                        return .unavailable(failure.message)
+                    }
+                    return .restored(url: url, port: plan.port)
+                }
+            }
+        }) { [weak self] outcome in
+            guard let self else { return }
+            switch outcome {
+            case let .restored(url, port):
+                self.forget()
+                self.defaults.set(port, forKey: DefaultsKey.port)
+                self.update(.on(url))
+            case let .unavailable(message):
+                // 这次挂不上（没装、没登录、CLI 失败）：标记留着，下次启动再试一次。
+                self.update(.unavailable(message))
+            case let .installedButUnusable(message, port):
+                self.defaults.set(port, forKey: DefaultsKey.port)
+                self.defaults.set(true, forKey: DefaultsKey.cleanupPending)
+                self.update(.unavailable(message))
+            case let .skip(reason):
+                // 入口照旧有效，只是要改配置才能重挂：交给菜单里的「启用」，它会先警告。
+                self.log?("远程访问：丢弃重启重挂标记（\(reason)）")
                 self.forget()
                 self.update(.off)
             }
@@ -153,6 +250,19 @@ final class RemoteAccessController {
         case unavailable(String)
         /// 那条入口已经不在或已成功撤销：记录作废。
         case stale
+    }
+
+    /// 启动时重挂的一次结果。
+    private enum RestoreOutcome {
+        /// 挂上了：端口记回自己名下。
+        case restored(url: URL, port: Int)
+        /// 这次挂不上：标记留着，下次启动再试。
+        case unavailable(String)
+        /// 入口挂上了但打不开（tailnet 没启用 HTTPS）：和「启用」一样记在自己名下，
+        /// 让退出能撤掉、下次启动按未完成入口对账。
+        case installedButUnusable(message: String, port: Int)
+        /// 需要改配置才能挂：不自动重启服务，交给菜单里的「启用」。
+        case skip(reason: String)
     }
 
     // MARK: - 启用
@@ -265,7 +375,7 @@ final class RemoteAccessController {
                 return
             }
             self.forgetCustomAddress()
-            self.defaults.removeObject(forKey: DefaultsKey.cleanupPending)
+            self.forget()
             self.defaults.set(plan.port, forKey: DefaultsKey.port)
             self.update(.on(url))
             completion(.success(url))
@@ -339,8 +449,10 @@ final class RemoteAccessController {
     /// 撤销成功才清掉记录；失败时保留端口与状态，以便重试或下次启动对账。
     func disable(completion: @escaping (Bool) -> Void) {
         guard let port = activePort else {
-            // 自定义地址只是默认里的一行字符串，没有机器配置要撤销。
+            // 自定义地址只是默认里的一行字符串，没有机器配置要撤销；
+            // 顺手清掉「下次启动重挂」的标记——用户明确关掉了，就不该再自己开回来。
             forgetCustomAddress()
+            forget()
             update(.off)
             completion(true)
             return
@@ -362,9 +474,13 @@ final class RemoteAccessController {
     /// 退出时的同步撤销：不留后台任务，`applicationWillTerminate` 返回前做完。
     ///
     /// 失败也不阻止退出，但保留记录供下次启动核对并重试撤销。
+    /// 撤销成功则记下端口，让下次启动自动重挂（见 `DefaultsKey.restorePending`）：
+    /// 应用不在时不留一条指向 502 的入口，但用户手机上的地址在应用回来后又通了。
     func revokeForQuit() {
         guard let port = activePort else { return }
-        if serve.disable(port: port) { forget() }
+        guard serve.disable(port: port) else { return }
+        forget()
+        defaults.set(port, forKey: DefaultsKey.restorePending)
     }
 
     // MARK: - 内部
@@ -383,6 +499,7 @@ final class RemoteAccessController {
     private func forget() {
         defaults.removeObject(forKey: DefaultsKey.port)
         defaults.removeObject(forKey: DefaultsKey.cleanupPending)
+        defaults.removeObject(forKey: DefaultsKey.restorePending)
     }
 
     private func forgetCustomAddress() {

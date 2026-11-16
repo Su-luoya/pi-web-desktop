@@ -103,8 +103,6 @@ extension AppDelegate {
         serviceRemoteAccessItem.submenu = makeRemoteAccessMenu()
         serviceMenu.addItem(serviceRemoteAccessItem)
         serviceMenu.addItem(.separator())
-        serviceMenu.addItem(withTitle: "在 Finder 中打开工作目录", action: #selector(openCurrentWorkspace(_:)), keyEquivalent: "")
-        serviceMenu.addItem(.separator())
         serviceMenu.addItem(withTitle: "设置…", action: #selector(showPreferences(_:)), keyEquivalent: "")
         serviceMenuItem.submenu = serviceMenu
 
@@ -181,26 +179,6 @@ extension AppDelegate {
             NSApp.activate(ignoringOtherApps: true)
             completionHandler?(alert.runModal())
         }
-    }
-
-    private func presentWorkspaceSwitchFailure(_ validation: WorkspaceDirectoryValidation) {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "无法打开工作目录"
-        alert.informativeText = validation.problem?.message(path: validation.path, isDefaultLocation: false)
-            ?? "请选择一个已存在且可写的文件夹。"
-        alert.addButton(withTitle: "好")
-        presentAlert(alert)
-    }
-
-    @objc private func openCurrentWorkspace(_ sender: Any?) {
-        let directory = appConfiguration.workspaceDirectory(for: serviceManager.configuration)
-        let validation = WorkspaceDirectory.validate(path: directory.path, probe: workspaceProbe)
-        guard validation.isUsable else {
-            presentWorkspaceSwitchFailure(validation)
-            return
-        }
-        NSWorkspace.shared.open(directory)
     }
 
     @objc func startServiceAction(_ sender: Any?) {

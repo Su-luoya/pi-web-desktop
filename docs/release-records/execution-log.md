@@ -2364,3 +2364,13 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
 - [v0.1.0-alpha.41](https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.41) 于 `2026-11-16T02:55:46Z` 发布为 prerelease，`isDraft=false`、`isPrerelease=true`。资产 `Pi-Web-Desktop-0.1.0-alpha.41+build.41.zip`：**1,814,687 bytes**，SHA-256 **`9df0a6e80876c2efd14fa6b7352aca26f5cc209deb93358291d50040e428b359`**；`gh release download` + `shasum -a 256 -c` → OK，与 `.sha256` 资产逐字符一致。
 - appcast workflow [43795079145](https://github.com/Su-luoya/pi-web-desktop/actions/runs/43795079145) 由 `release: published` 触发并成功；`appcast` 分支提交 `70be76e chore(appcast): v0.1.0-alpha.41`，schema 1，首条 `tag=v0.1.0-alpha.41`，下载 URL、文件名与 `zip.sha256` 和公开资产一致，raw CDN 字节相同。
 - 应用内更新的真实验证：发布前 `~/Applications/Pi-Web-Desktop.app` 是同一代码的本地构建（`CFBundleShortVersionString=0.1.0-alpha.40`），appcast 推出 alpha.41 后具备「旧版就地更新」的条件；实际点击与结果见下方「发布后补记」。
+
+### 发布后补记：应用内就地更新（40 → 41）实测通过
+
+- 触发路径：应用菜单「更新 → 检查更新…」（手动检查日志 `更新检查完成（手动）：可用更新 1 项`）→ 执行更新。`~/Library/Logs/Pi Web Desktop/Pi Web Desktop.log` 记录 `开始统一更新：桌面应用 0.1.0-alpha.40 → 0.1.0-alpha.41。`，紧接 `退出时间线 11:52:50.225 (+81917628ms) 退出请求`：应用退出、换包、重启，同一次更新内没有出现 `桌面应用更新失败` 行。
+- 对照证据：同一日志在此之前有两条修复前的老失败 —— `桌面应用更新失败（v0.1.0-alpha.40）：当前应用不是从 /Applications 安装，无法自动更新。`（配合 `开始统一更新：桌面应用 0.1.0-alpha.39 → 0.1.0-alpha.40`）。同一条 `~/Applications` 路径，修复前必失败、修复后成功。
+- 装机结果：`~/Applications/Pi-Web-Desktop.app` 的 `CFBundleShortVersionString=0.1.0-alpha.41`、`CFBundleVersion=41`（`defaults read …/Info.plist`）；重启后的日志为 `更新检查完成（启动）：可用更新 0 项`，即已认作最新。
+- 装的确实是公开产物：安装包 `Contents/MacOS/PiWebDesktop` 的 SHA-256 为 **`ae04aed7aea1cf344fe0de1164f4889d5ab032b2aadbb23535fc2483fd1f2c79`**，与 `gh release download v0.1.0-alpha.41` 取回的 `Pi-Web-Desktop-0.1.0-alpha.41+build.41.zip` 解出的同一文件**逐字节一致**。包内各文件 mtime 均为 `2001-01-01 08:00:00`（打包脚本归一化时间戳），本地 dev build 不会是这个时间戳。
+- 签名：`codesign --verify --deep --strict` 通过；`Identifier=io.github.su-luoya.pi-web-desktop`、`Signature=adhoc`、`TeamIdentifier=not set`（仍未公证）。
+- 换包后 `~/Applications` 下没有 `*.app.new` 残留。`~/.Trash/Pi-Web-Desktop.app` 是 `0.1.0-alpha.37`（build 37）的旧包，时间戳同样归一化，与本轮 40 → 41 无关，不作为本次证据。
+- 未覆盖：这次只验证了「`~/Applications` 内的旧版 → 新版」；`/Applications` 内的就地更新与「两个目录之外」的拒绝提示仍按代码与单元测试为准，未在本机实测。

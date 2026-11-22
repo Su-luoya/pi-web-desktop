@@ -652,24 +652,9 @@ final class ServiceManager {
         if configuration.autoStart || forceStart {
             ensureServerIsRunning()
         } else {
-            let generation = lifecycleGeneration
-            checkServer { [weak self] ready in
-                guard let self else { return }
-                self.scheduler.onMain {
-                    guard self.lifecycleGeneration == generation else {
-                        self.discardStaleCallback("启动探测", generation: generation)
-                        return
-                    }
-                    // 与 autoStart 分支一致：探测期间门控关闭就不能再改状态或加载页面。
-                    guard self.isStartPermitted else { return }
-                    if ready {
-                        self.setState(.running)
-                        self.requestLoad()
-                    } else {
-                        self.setState(.stopped)
-                        self.onPageMessage?("Pi Web 服务未运行。")
-                    }
-                }
+            connectToReadyService { manager in
+                manager.setState(.stopped)
+                manager.onPageMessage?("Pi Web 服务未运行。")
             }
         }
         // 幂等：`ensureServerIsRunning` 会进入 `startManagedService`，那里也会请求
@@ -689,21 +674,28 @@ final class ServiceManager {
             return
         }
         startHealthMonitorIfNeeded()
+        connectToReadyService { $0.startManagedService() }
+    }
+
+    /// 只有同一生命周期且门控仍打开才采信探测结果；未就绪时由入口决定是否启动。
+    private func connectToReadyService(
+        probeName: String = "启动探测",
+        ifUnavailable: @escaping (ServiceManager) -> Void
+    ) {
         let generation = lifecycleGeneration
         checkServer { [weak self] ready in
             guard let self else { return }
             self.scheduler.onMain {
                 guard self.lifecycleGeneration == generation else {
-                    self.discardStaleCallback("启动探测", generation: generation)
+                    self.discardStaleCallback(probeName, generation: generation)
                     return
                 }
-                // 门控可能在探测期间被关掉（例如重新检测），回调必须再确认。
                 guard self.isStartPermitted else { return }
                 if ready {
                     self.setState(.running)
                     self.requestLoad()
                 } else {
-                    self.startManagedService()
+                    ifUnavailable(self)
                 }
             }
         }
@@ -1305,24 +1297,12 @@ final class ServiceManager {
             return
         }
         startHealthMonitorIfNeeded()
-        let generation = lifecycleGeneration
-        checkServer { [weak self] ready in
-            guard let self else { return }
-            self.scheduler.onMain {
-                guard self.lifecycleGeneration == generation else {
-                    self.discardStaleCallback("配置变更探测", generation: generation)
-                    return
-                }
-                guard self.isStartPermitted else { return }
-                if ready {
-                    self.setState(.running)
-                    self.requestLoad()
-                } else if self.configuration.autoStart {
-                    self.startManagedService()
-                } else {
-                    self.setState(.stopped)
-                    self.onPageMessage?("设置已保存，服务尚未启动。")
-                }
+        connectToReadyService(probeName: "配置变更探测") { manager in
+            if manager.configuration.autoStart {
+                manager.startManagedService()
+            } else {
+                manager.setState(.stopped)
+                manager.onPageMessage?("设置已保存，服务尚未启动。")
             }
         }
     }

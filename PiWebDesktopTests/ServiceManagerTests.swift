@@ -2471,6 +2471,25 @@ final class ServiceManagerTests: XCTestCase {
         XCTAssertEqual(harness.scheduler.repeatingWork.count, 1, "仍要开始健康轮询")
     }
 
+    func testReloadDoesNotLaunchIfAutoStartIsDisabledWhileProbing() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+        var configuration = configured(try harness.makeExecutable())
+        configuration.autoStart = true
+        harness.manager.updateConfiguration(configuration)
+        harness.probe.defersCompletions = true
+        harness.manager.reloadAfterConfigurationChange()
+
+        configuration.autoStart = false
+        harness.manager.updateConfiguration(configuration)
+        XCTAssertEqual(harness.probe.deliverPendingCompletions(false), 1)
+
+        XCTAssertEqual(harness.launcher.launchCount, 0)
+        XCTAssertEqual(harness.loadRequests, 0)
+        XCTAssertEqual(harness.manager.currentState, .stopped)
+        XCTAssertEqual(harness.pageMessages, ["设置已保存，服务尚未启动。"])
+    }
+
     /// 首次启动诊断刚完成时 `forceStart` 为 true：即使 `autoStart` 关闭也必须
     /// 显式启动服务，否则用户刚修好前置却只看到“服务未运行”（GitHub #7 复审）。
     func testStartAtLaunchForceStartLaunchesEvenWhenAutoStartIsOff() throws {

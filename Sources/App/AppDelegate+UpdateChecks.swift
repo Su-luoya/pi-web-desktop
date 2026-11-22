@@ -82,7 +82,7 @@ extension AppDelegate {
             failDesktopAppUpdateRound(.invalidAssetURL, releaseTag: releaseTag)
             return
         }
-        fetchDesktopAppReleaseAssetsFromAppcast(version: version, releaseTag: releaseTag) { [weak self] asset in
+        AppcastFeed.fetchAsset(version: version, releaseTag: releaseTag) { [weak self] asset in
             guard let self else { return }
             if let asset {
                 self.beginDesktopAppUpdateDownload(
@@ -109,7 +109,7 @@ extension AppDelegate {
             return
         }
 
-        let request = Self.updateRequest(url: releaseURL, accept: "application/json")
+        let request = URLRequest(desktopUpdateURL: releaseURL, accept: "application/json")
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             let http = response as? HTTPURLResponse
             let status = http?.statusCode
@@ -162,7 +162,7 @@ extension AppDelegate {
                 return
             }
 
-            let checksumRequest = Self.updateRequest(url: checksumAsset.url, accept: "text/plain")
+            let checksumRequest = URLRequest(desktopUpdateURL: checksumAsset.url, accept: "text/plain")
             // 进度窗口（GitHub #219）：发布页与资产列表都核对完了，进入下载阶段。
             DispatchQueue.main.async { [weak self] in
                 self?.setDesktopAppUpdateProgressStep(0, .succeeded, detail: "已核对发布页与资产列表")
@@ -207,62 +207,6 @@ extension AppDelegate {
                 )
             }.resume()
         }.resume()
-    }
-
-    /// 更新通道（appcast）优先。回调 nil 表示「通道不可用」，由调用方回落
-    /// GitHub API —— feed 是加速器，不是新的单点依赖。
-    private func fetchDesktopAppReleaseAssetsFromAppcast(
-        version: String,
-        releaseTag: String,
-        completion: @escaping (DesktopAppReleaseAsset?) -> Void
-    ) {
-        // `completion` 只被转交给 URLSession 的完成回调执行一次，属于所有权转移；
-        // URLSession 的回调参数是 `@Sendable`，直接捕获非 Sendable 的闭包会告警。
-        nonisolated(unsafe) let deliver = completion
-        guard let feedURL = AppcastFeed.url else {
-            completion(nil)
-            return
-        }
-        let request = Self.updateRequest(url: feedURL, accept: "application/json")
-        let session = URLSession(
-            configuration: .ephemeral,
-            delegate: AllowlistRedirectDelegate(
-                allows: { $0.map { AppcastFeed.allows(finalURL: $0) } ?? false }
-            ),
-            delegateQueue: nil
-        )
-        session.dataTask(with: request) { data, response, error in
-            session.finishTasksAndInvalidate()
-            guard let data, error == nil,
-                  (response as? HTTPURLResponse)?.statusCode == 200,
-                  let finalURL = response?.url, AppcastFeed.allows(finalURL: finalURL),
-                  let release = AppcastFeed.release(tag: releaseTag, in: data),
-                  release.version == version,
-                  let asset = DesktopAppReleaseAssetSelector.select(
-                      version: version,
-                      assets: [(name: release.zip.name, url: release.zip.url)],
-                      checksum: release.zip.sha256,
-                      releaseTag: releaseTag
-                  ) else {
-                // 任何一处不合规都退回 GitHub API：feed 坏了不该让更新失败。
-                deliver(nil)
-                return
-            }
-            deliver(asset)
-        }.resume()
-    }
-
-    /// 更新路径的统一请求构造：固定方法、超时、UA 与 Accept。
-    ///
-    /// 三条通道（GitHub API、校验和、appcast）以前各自写一份，漏一处就会让某条
-    /// 通道带着不同的请求头/超时出去；收在一处后 `User-Agent` 与超时只有一份来源。
-    private nonisolated static func updateRequest(url: URL, accept: String) -> URLRequest {
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.timeoutInterval = UpdateChecker.requestTimeout
-        request.setValue(accept, forHTTPHeaderField: "Accept")
-        request.setValue(UpdateCheckIdentity.current.userAgent, forHTTPHeaderField: "User-Agent")
-        return request
     }
 
     /// 两条通道的共同出口：资产与校验值都到手后，创建安装器接管下载与替换。
@@ -580,47 +524,16 @@ extension AppDelegate {
               let releaseTag = result.upstreamTag,
               DesktopAppReleaseAssetSelector.isReleaseTag(releaseTag),
               prefetchedDesktopUpdateVersion != version else { return }
-        fetchDesktopAppReleaseAssetsFromAppcast(version: version, releaseTag: releaseTag) { [weak self] asset in
-            guard let self, let asset else { return }
-            DispatchQueue.main.async { [self] in
-                guard self.desktopAppUpdateInstaller == nil, self.desktopAppPrefetcher == nil else { return }
-                let prefetcher = DesktopAppUpdateInstaller()
-                self.desktopAppPrefetcher = prefetcher
-                prefetcher.prefetch(asset: asset) { [weak self, weak prefetcher] stored in
-                    guard let self else { return }
-                    if self.desktopAppPrefetcher === prefetcher { self.desktopAppPrefetcher = nil }
-                    if stored { self.prefetchedDesktopUpdateVersion = version }
-                }
+        AppcastFeed.fetchAsset(version: version, releaseTag: releaseTag) { [weak self] asset in
+            guard let self, let asset,
+                  self.desktopAppUpdateInstaller == nil, self.desktopAppPrefetcher == nil else { return }
+            let prefetcher = DesktopAppUpdateInstaller()
+            self.desktopAppPrefetcher = prefetcher
+            prefetcher.prefetch(asset: asset) { [weak self, weak prefetcher] stored in
+                guard let self else { return }
+                if self.desktopAppPrefetcher === prefetcher { self.desktopAppPrefetcher = nil }
+                if stored { self.prefetchedDesktopUpdateVersion = version }
             }
         }
-    }
-
-}
-
-/// Checksummed assets use a dedicated session so the redirect policy cannot be toggled
-/// while an unrelated archive download is in flight.
-///
-/// 重定向闸控：只有目标 URL 通过调用方给的判定才跟随。校验和下载与 appcast 用的
-/// 是同一条策略实现（差别只在判定函数），因此不会出现两份几乎相同的委托各自漂移。
-/// `@unchecked Sendable`：`URLSessionTaskDelegate` 在 SDK 里要求 `Sendable`，而本类
-/// 持有的 `allows` 是闭包（函数类型本身不是 `Sendable`）。闭包是不可变的 `let`，且
-/// 只做一次纯判定（不碰任何共享可变状态），所以并发调用它本身是安全的。
-private final class AllowlistRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    /// 判定目标 URL 是否允许跟随；`URL?` 入参是因为 `URLRequest.url` 本身可空，
-    /// 拿不到 URL 时必须拒绝而不是放行。
-    private let allows: (URL?) -> Bool
-
-    init(allows: @escaping (URL?) -> Bool) {
-        self.allows = allows
-    }
-
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping (URLRequest?) -> Void
-    ) {
-        completionHandler(allows(request.url) ? request : nil)
     }
 }

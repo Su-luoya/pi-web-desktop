@@ -5,6 +5,37 @@ final class DesktopAppUpdateTests: XCTestCase {
         XCTAssertGreaterThan(DesktopAppUpdateInstaller.downloadResourceTimeout, UpdateChecker.requestTimeout)
     }
 
+    @MainActor
+    func testInstallChecksFilesOffMainAndCanRetryAfterFailure() {
+        final class MissingApp: FileManager {
+            let checked = XCTestExpectation(description: "检查安装目录")
+
+            override func fileExists(atPath path: String) -> Bool {
+                XCTAssertFalse(Thread.isMainThread, "安装器不能在主线程做磁盘检查")
+                checked.fulfill()
+                return false
+            }
+        }
+        let files = MissingApp()
+        files.checked.expectedFulfillmentCount = 2
+        let app = files.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("Pi-Web-Desktop.app")
+        let installer = DesktopAppUpdateInstaller(applicationURL: app, fileManager: files)
+        let name = "Pi-Web-Desktop-2.5.0+build.42.zip"
+        let url = URL(string: "https://github.com/Su-luoya/pi-web-desktop/releases/download/v2.5.0/\(name)")!
+        let asset = DesktopAppReleaseAsset(version: "2.5.0", downloadURL: url,
+                                         sha256: String(repeating: "a", count: 64), releaseTag: "v2.5.0", assetName: name)
+        for _ in 0..<2 {
+            let done = expectation(description: "安装失败")
+            installer.install(asset: asset) { @Sendable result in
+                XCTAssertTrue(Thread.isMainThread)
+                XCTAssertEqual(result, .failed(.unsupportedInstallation))
+                done.fulfill()
+            }
+            wait(for: [done], timeout: 5)
+        }
+        wait(for: [files.checked], timeout: 5)
+    }
+
     private final class ReplacementDeniedFileManager: FileManager {
         private(set) var replacementScript: String?
 
@@ -76,7 +107,9 @@ final class DesktopAppUpdateTests: XCTestCase {
             try? files.removeItem(at: root)
             if let script = files.replacementScript { try? files.removeItem(atPath: script) }
         }
-        try installLocalArchive(makeArchive(in: root, withBundle: true), in: root, fileManager: files)
+        let archive = try makeArchive(in: root, withBundle: true)
+        try installLocalArchive(archive, in: root, fileManager: files)
+        XCTAssertTrue(files.fileExists(atPath: archive.path), "替换失败后仍应能用预下载的 ZIP 重试")
         let script = try XCTUnwrap(files.replacementScript, "Must reach replacement setup without launching the app")
         XCTAssertFalse(files.fileExists(atPath: script))
         let entries = try files.contentsOfDirectory(atPath: root.path)

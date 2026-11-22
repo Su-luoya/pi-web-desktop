@@ -2,7 +2,25 @@ import AppKit
 import CryptoKit
 import Foundation
 
-private final class DesktopAppArchiveRedirectDelegate: NSObject, URLSessionTaskDelegate {
+extension URLRequest {
+    /// 发布页、校验和与 appcast 共用同一套请求身份和超时。
+    init(desktopUpdateURL url: URL, accept: String) {
+        self.init(url: url)
+        httpMethod = "GET"
+        timeoutInterval = UpdateChecker.requestTimeout
+        setValue(accept, forHTTPHeaderField: "Accept")
+        setValue(UpdateCheckIdentity.current.userAgent, forHTTPHeaderField: "User-Agent")
+    }
+}
+
+/// 发布资产与 appcast 各用自己的重定向判据；谓词也会被 URLSession 在后台队列上调用。
+final class AllowlistRedirectDelegate: NSObject, URLSessionTaskDelegate {
+    private let allows: @Sendable (URL?) -> Bool
+
+    init(allows: @escaping @Sendable (URL?) -> Bool) {
+        self.allows = allows
+    }
+
     func urlSession(
         _ session: URLSession,
         task: URLSessionTask,
@@ -10,7 +28,7 @@ private final class DesktopAppArchiveRedirectDelegate: NSObject, URLSessionTaskD
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
-        completionHandler(DesktopAppReleaseAssetSelector.allowsAssetRedirect(request.url) ? request : nil)
+        completionHandler(allows(request.url) ? request : nil)
     }
 }
 
@@ -358,22 +376,14 @@ enum DesktopAppReleaseAssetSelector {
     }
 }
 
-protocol DesktopAppUpdateInstalling: AnyObject {
-    func install(asset: DesktopAppReleaseAsset, completion: @escaping (DesktopAppUpdateResult) -> Void)
-}
-
-/// `@unchecked Sendable`：`DesktopAppUpdateInstalling` 要求 `Sendable`，而本类持有
-/// `installInProgress` / `activeCompletion` 一类可变状态。并发安全靠 `stateLock`：
-/// 所有可变状态的读写都在 `stateLock` 临界区内。
-final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling, @unchecked Sendable {
+/// 安装与预下载会跨队列；进行中的操作和替换脚本的启动标记由 stateLock 保护。
+final class DesktopAppUpdateInstaller: @unchecked Sendable {
     private let applicationURL: URL
     private let fileManager: FileManager
-    private let session: URLSession?
-    private let completionQueue: DispatchQueue
     private let packageCache: DesktopUpdatePackageCache
     static let downloadResourceTimeout: TimeInterval = 300
 
-    private lazy var ownedDownloadSession: URLSession = {
+    private static let downloadSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieAcceptPolicy = .never
         configuration.httpShouldSetCookies = false
@@ -381,32 +391,39 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling, @un
         configuration.urlCredentialStorage = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = UpdateChecker.requestTimeout
-        configuration.timeoutIntervalForResource = Self.downloadResourceTimeout
-        return URLSession(configuration: configuration, delegate: DesktopAppArchiveRedirectDelegate(), delegateQueue: nil)
+        configuration.timeoutIntervalForResource = downloadResourceTimeout
+        return URLSession(
+            configuration: configuration,
+            delegate: AllowlistRedirectDelegate(allows: DesktopAppReleaseAssetSelector.allowsAssetRedirect),
+            delegateQueue: nil
+        )
     }()
-    private var installInProgress = false
     private var prefetchInProgress = false
-    private var completionDelivered = false
-    private var activeCompletion: ((DesktopAppUpdateResult) -> Void)?
+    private var activeCompletion: (@MainActor (DesktopAppUpdateResult) -> Void)?
     private var replacementProcessDidStart = false
     private let stateLock = NSLock()
 
     init(applicationURL: URL = Bundle.main.bundleURL, fileManager: FileManager = .default,
-         session: URLSession = .shared, completionQueue: DispatchQueue = .main,
          packageCache: DesktopUpdatePackageCache = .shared) {
         self.applicationURL = applicationURL.standardizedFileURL
         self.fileManager = fileManager
-        self.session = session == URLSession.shared ? nil : session
-        self.completionQueue = completionQueue
         self.packageCache = packageCache
     }
 
-    func install(asset: DesktopAppReleaseAsset, completion: @escaping (DesktopAppUpdateResult) -> Void) {
-        stateLock.lock()
-        let busy = installInProgress || replacementProcessDidStart
-        if !busy { installInProgress = true; completionDelivered = false; activeCompletion = completion }
-        stateLock.unlock()
-        guard !busy else { completionQueue.async(execute: DispatchWorkItem { completion(.failed(.replacementFailed)) }); return }
+    func install(asset: DesktopAppReleaseAsset, completion: @escaping @MainActor (DesktopAppUpdateResult) -> Void) {
+        let started = stateLock.withLock {
+            guard activeCompletion == nil, !replacementProcessDidStart else { return false }
+            activeCompletion = completion
+            return true
+        }
+        guard started else {
+            DispatchQueue.main.async { completion(.failed(.replacementFailed)) }
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async { self.prepareInstallation(of: asset) }
+    }
+
+    private func prepareInstallation(of asset: DesktopAppReleaseAsset) {
         guard let tag = asset.releaseTag, let name = asset.assetName,
               DesktopAppReleaseAssetSelector.allowsDownloadURL(asset.downloadURL, assetName: name, releaseTag: tag) else {
             finish(.failed(.invalidAssetURL)); return
@@ -423,7 +440,6 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling, @un
             finish(.failed(.checksumUnavailable)); return
         }
 
-        let downloader = session ?? ownedDownloadSession
         // 预下载命中：跳过下载，直接用已经校验过的包。安装前仍会再算一次 SHA-256
         // ——缓存目录是用户可写的，不能只信写缓存那一刻的结果。
         if let cached = Self.cachedArchive(
@@ -436,7 +452,7 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling, @un
             return
         }
 
-        let task = downloader.downloadTask(with: URLRequest(url: asset.downloadURL)) { [weak self] file, response, error in
+        Self.downloadSession.downloadTask(with: asset.downloadURL) { [weak self] file, response, error in
             guard let self, let file, error == nil,
                   let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode,
                   let finalURL = http.url,
@@ -444,8 +460,7 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling, @un
                 self?.finish(.failed(.downloadFailed)); return
             }
             self.installArchive(at: file, asset: asset, bundleIdentifier: id, expectedHash: expectedHash)
-        }
-        task.resume()
+        }.resume()
     }
 
     /// 预下载命中判定：版本、tag、校验值三项都对上才算命中。
@@ -469,38 +484,37 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling, @un
     ///
     /// 只给无配额的通道用（调用方负责从 appcast 取资产）。任何一步不合规都
     /// 静默放弃：预下载只是省下一次等待，失败不该让用户看见任何东西。
-    func prefetch(asset: DesktopAppReleaseAsset, completion: @escaping (Bool) -> Void) {
-        // `completion` 只被转交给下载回调执行一次，属于所有权转移；URLSession 的回调
-        // 参数是 `@Sendable`，直接捕获非 Sendable 的闭包会告警。
-        nonisolated(unsafe) let deliver = completion
+    func prefetch(asset: DesktopAppReleaseAsset, completion: @escaping @MainActor (Bool) -> Void) {
         guard let tag = asset.releaseTag, let name = asset.assetName,
               DesktopAppReleaseAssetSelector.allowsDownloadURL(asset.downloadURL, assetName: name, releaseTag: tag),
               let expectedHash = DesktopAppReleaseAssetSelector.normalizedChecksum(asset.sha256) else {
-            completionQueue.async(execute: DispatchWorkItem { deliver(false) })
+            DispatchQueue.main.async { completion(false) }
             return
         }
-        stateLock.lock()
-        let busy = prefetchInProgress || installInProgress || replacementProcessDidStart
-        if !busy { prefetchInProgress = true }
-        stateLock.unlock()
-        guard !busy else { completionQueue.async(execute: DispatchWorkItem { deliver(false) }); return }
+        let started = stateLock.withLock {
+            guard !prefetchInProgress, activeCompletion == nil, !replacementProcessDidStart else { return false }
+            prefetchInProgress = true
+            return true
+        }
+        guard started else {
+            DispatchQueue.main.async { completion(false) }
+            return
+        }
 
-        let downloader = session ?? ownedDownloadSession
-        let task = downloader.downloadTask(with: URLRequest(url: asset.downloadURL)) { [weak self] file, response, error in
+        Self.downloadSession.downloadTask(with: asset.downloadURL) { [weak self] file, response, error in
             guard let self else { return }
-            self.stateLock.lock(); self.prefetchInProgress = false; self.stateLock.unlock()
+            self.stateLock.withLock { self.prefetchInProgress = false }
             guard let file, error == nil,
                   let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode,
                   let finalURL = http.url,
                   DesktopAppReleaseAssetSelector.allowsAssetRedirect(finalURL),
                   (try? Self.sha256(of: file)) == expectedHash else {
-                self.completionQueue.async(execute: DispatchWorkItem { deliver(false) })
+                DispatchQueue.main.async { completion(false) }
                 return
             }
             let stored = (try? self.packageCache.store(archiveAt: file, asset: asset)) != nil
-            self.completionQueue.async(execute: DispatchWorkItem { deliver(stored) })
-        }
-        task.resume()
+            DispatchQueue.main.async { completion(stored) }
+        }.resume()
     }
 
     /// 下载（或缓存）到手的包 → 校验 → 解压 → 替换。两条来源共用这一段。
@@ -555,13 +569,12 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling, @un
         return fallback
     }
 
-    /// 投递一律包成 `DispatchWorkItem`：`DispatchQueue.async` 的 block 参数要求
-    /// `@Sendable`，而 `completion` 是调用方给的普通闭包。work item 是 Sendable 容器，
-    /// 执行一次、执行队列不变，语义完全一致。
     private func finish(_ result: DesktopAppUpdateResult) {
-        stateLock.lock(); let callback = completionDelivered ? nil : activeCompletion
-        completionDelivered = true; activeCompletion = nil; installInProgress = false; stateLock.unlock()
-        if let callback { completionQueue.async(execute: DispatchWorkItem { callback(result) }) }
+        let callback = stateLock.withLock {
+            defer { activeCompletion = nil }
+            return activeCompletion
+        }
+        if let callback { DispatchQueue.main.async { callback(result) } }
     }
 
     private func launchReplacement(stagedApp: URL, staging: URL) throws {
@@ -601,12 +614,7 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling, @un
             throw DesktopAppUpdateFailure.replacementFailed
         }
         scriptStarted = true
-        // `URLSession.downloadTask` 的完成回调不在主线程（实测 completionQueue 为
-        // nil 时落在一个 NSThread 上，不是 Thread.isMainThread），而 `NSApp.terminate`
-        // 是 AppKit 调用，必须在主线程。直接调会在子线程上动 AppKit 状态，轻则
-        // 退出时不跑 `applicationWillTerminate`（服务收尾、日志落盘、退出状态机
-        // 全部跳过），重则崩溃。换出脚本已经在等待本进程结束，所以这里只是把
-        // 退出请求交给主线程。
+        // 替换脚本等本进程退出；AppKit 的退出请求只能在主线程发起。
         DispatchQueue.main.async { NSApp.terminate(nil) }
     }
 
@@ -617,8 +625,8 @@ final class DesktopAppUpdateInstaller: NSObject, DesktopAppUpdateInstalling, @un
         let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
         process.arguments = ["-x", "-k", archive.path, directory.path]
         try process.run(); process.waitUntilExit()
+        // 输入只借用：下载临时文件由 URLSession 回收，预下载包由缓存管理。
         guard process.terminationStatus == 0 else { throw DesktopAppUpdateFailure.invalidArchive }
-        try? fileManager.removeItem(at: archive)
     }
     private static func findBundle(in directory: URL, fileManager: FileManager) throws -> URL {
         let root = directory.resolvingSymlinksInPath().path + "/"

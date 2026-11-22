@@ -5,7 +5,7 @@
 /// 的 CDN，不消耗 API 配额，一个请求就带齐「最新 tag + zip 直链 + SHA-256」，
 /// 因此检查与安装都不必再问 `api.github.com`。
 ///
-/// 信任边界：本类型只做结构解析。zip 地址与校验值的形态由
+/// 信任边界：检查路径只取 tag；安装与预下载还要验证响应、zip 地址与校验值。后两项由
 /// `DesktopAppReleaseAssetSelector.select` 校验（必须钉死在
 /// `github.com/<repo>/releases/download/<tag>/<name>`，SHA-256 必须是 64 位十六
 /// 进制），因此 feed 的内容无法把下载引到别的域名。
@@ -42,8 +42,48 @@ enum AppcastFeed {
     }
 
     /// 响应最终落点是否可信：必须仍是 feed 主机。
-    static func allows(finalURL: URL) -> Bool {
-        finalURL.scheme?.lowercased() == "https" && finalURL.host?.lowercased() == host
+    static func allows(finalURL: URL?) -> Bool {
+        finalURL?.scheme?.lowercased() == "https" && finalURL?.host?.lowercased() == host
+    }
+
+    /// 更新通道（appcast）优先。回调 nil 表示「通道不可用」，由调用方回落
+    /// GitHub API —— feed 是加速器，不是新的单点依赖。
+    @MainActor
+    static func fetchAsset(
+        version: String,
+        releaseTag: String,
+        configuration: URLSessionConfiguration = .ephemeral,
+        completion: @escaping @MainActor (DesktopAppReleaseAsset?) -> Void
+    ) {
+        guard let feedURL = AppcastFeed.url else {
+            completion(nil)
+            return
+        }
+        let request = URLRequest(desktopUpdateURL: feedURL, accept: "application/json")
+        let session = URLSession(
+            configuration: configuration,
+            delegate: AllowlistRedirectDelegate(allows: AppcastFeed.allows(finalURL:)),
+            delegateQueue: nil
+        )
+        session.dataTask(with: request) { data, response, error in
+            session.finishTasksAndInvalidate()
+            let asset: DesktopAppReleaseAsset?
+            if let data, error == nil,
+               (response as? HTTPURLResponse)?.statusCode == 200,
+               AppcastFeed.allows(finalURL: response?.url),
+               let release = AppcastFeed.release(tag: releaseTag, in: data),
+               release.version == version {
+                asset = DesktopAppReleaseAssetSelector.select(
+                    version: version,
+                    assets: [(name: release.zip.name, url: release.zip.url)],
+                    checksum: release.zip.sha256,
+                    releaseTag: releaseTag
+                )
+            } else {
+                asset = nil
+            }
+            DispatchQueue.main.async { completion(asset) }
+        }.resume()
     }
 
     /// 解析 feed。结构不合法（不是 JSON、schema 不认识、缺字段）时返回 nil，

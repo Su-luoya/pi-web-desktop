@@ -91,7 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 正在执行的统一更新（检查 → 一个确认框 → 按序执行 → 一条结果）。
     var updateFlowRun: UpdateFlowRun?
     /// 当前正在执行的桌面 App 安装器；必须由 AppDelegate 持有到下载/替换流程结束。
-    var desktopAppUpdateInstaller: DesktopAppUpdateInstalling?
+    var desktopAppUpdateInstaller: DesktopAppUpdateInstaller?
     /// 预下载用的安装器实例（只下载、不安装）。与 `desktopAppUpdateInstaller`
     /// 分开：后者一旦非空，菜单入口就按“安装中”置灰，预下载期间不该置灰。
     var desktopAppPrefetcher: DesktopAppUpdateInstaller?

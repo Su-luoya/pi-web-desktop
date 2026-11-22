@@ -6,34 +6,55 @@
 
 import XCTest
 
-final class AppcastFeedTests: XCTestCase {
-    private let tag = "v0.2.0-alpha.3"
-    private let zipURL = "https://github.com/Su-luoya/pi-web-desktop/releases/download/v0.2.0-alpha.3/Pi-Web-Desktop-0.2.0-alpha.3+build.3.zip"
-    private let sha256 = String(repeating: "a1b2", count: 16)
+private let tag = "v0.2.0-alpha.3"
+private let zipURL = "https://github.com/Su-luoya/pi-web-desktop/releases/download/v0.2.0-alpha.3/Pi-Web-Desktop-0.2.0-alpha.3+build.3.zip"
+private let sha256 = String(repeating: "a1b2", count: 16)
 
-    private func feedBody(
-        tag: String? = nil,
-        version: String? = nil,
-        zip: String? = nil,
-        sha256: String? = nil,
-        schema: String = "1"
-    ) -> String {
-        let resolvedTag = tag ?? self.tag
-        let resolvedZip = zip ?? """
-        {"name":"Pi-Web-Desktop-0.2.0-alpha.3+build.3.zip","url":"\(zipURL)","sha256":"\(sha256 ?? self.sha256)"}
-        """
-        let resolvedVersion = version ?? "0.2.0-alpha.3"
-        return """
-        {"schema":\(schema),"releases":[
-          {"tag":"\(resolvedTag)","version":"\(resolvedVersion)","zip":\(resolvedZip)}
-        ]}
-        """
+private func feedBody(schema: Int = 1) -> Data {
+    Data("""
+    {"schema":\(schema),"releases":[{
+      "tag":"\(tag)","version":"0.2.0-alpha.3",
+      "zip":{"name":"Pi-Web-Desktop-0.2.0-alpha.3+build.3.zip","url":"\(zipURL)","sha256":"\(sha256)"}
+    }]}
+    """.utf8)
+}
+
+private final class FeedProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: feedBody())
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+final class AppcastFeedTests: XCTestCase {
+    /// 无论是可安装的资产还是需要回落的 nil，两条 UI 路径都只能在主线程继续。
+    @MainActor
+    func testFetchDeliversAssetAndVersionMismatchOnMainThread() {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FeedProtocol.self]
+        let published = "0.2.0-alpha.3"
+        for (version, expectedVersion) in [(published, Optional(published)), ("0.2.0-alpha.4", nil)] {
+            let done = expectation(description: version)
+            AppcastFeed.fetchAsset(version: version, releaseTag: tag, configuration: configuration) { @Sendable asset in
+                XCTAssertTrue(Thread.isMainThread, "版本 \(version) 的回调不在主线程")
+                XCTAssertEqual(asset?.version, expectedVersion)
+                done.fulfill()
+            }
+            wait(for: [done], timeout: 5)
+        }
     }
 
     // MARK: - 结构解析
 
     func testParsesReleaseWithZipAndChecksum() {
-        let releases = AppcastFeed.releases(from: Data(feedBody().utf8))
+        let releases = AppcastFeed.releases(from: feedBody())
         XCTAssertEqual(releases?.count, 1)
         let release = releases?.first
         XCTAssertEqual(release?.tag, tag)
@@ -44,7 +65,7 @@ final class AppcastFeedTests: XCTestCase {
     }
 
     func testReleaseLookupIsByExactTag() {
-        let data = Data(feedBody().utf8)
+        let data = feedBody()
         XCTAssertEqual(AppcastFeed.release(tag: tag, in: data)?.tag, tag)
         // 安装路径只认用户确认过的版本，不做「最新即最佳」的推断。
         XCTAssertNil(AppcastFeed.release(tag: "v0.2.0-alpha.4", in: data))
@@ -64,8 +85,9 @@ final class AppcastFeedTests: XCTestCase {
     }
 
     func testRejectsUnknownSchemaAndMalformedDocuments() {
-        XCTAssertNil(AppcastFeed.releases(from: Data(feedBody(schema: "99").utf8)))
-        XCTAssertNil(AppcastFeed.tags(from: Data(feedBody(schema: "99").utf8)))
+        let unknownSchema = feedBody(schema: 99)
+        XCTAssertNil(AppcastFeed.releases(from: unknownSchema))
+        XCTAssertNil(AppcastFeed.tags(from: unknownSchema))
         XCTAssertNil(AppcastFeed.releases(from: Data("not json".utf8)))
         XCTAssertNil(AppcastFeed.tags(from: Data("[]".utf8)))
         XCTAssertNil(AppcastFeed.releases(from: Data("{\"schema\":1}".utf8)))

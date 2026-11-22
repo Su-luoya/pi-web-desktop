@@ -47,8 +47,7 @@ set -eu
 # Exit status: 0 consistent or skipped, 1 inconsistent, 2 usage error.
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-XCCONFIG_REL="Configuration/AppIdentity.xcconfig"
-XCCONFIG="$ROOT/$XCCONFIG_REL"
+. "$ROOT/Scripts/xcconfig.sh"
 
 usage() {
   printf 'usage: ./Scripts/check-release-version.sh [--print-tag] [tag]\n'
@@ -65,41 +64,6 @@ fail() {
   printf 'check-release-version: FAILED\n' >&2
   printf 'error: %s\n' "$1" >&2
   exit 1
-}
-
-# Read one value from the single-source xcconfig, expanding $(VAR) references.
-# Same parser as Scripts/build.sh and Scripts/check-identity.sh.
-xcconfig_value() {
-  awk -v key="$1" '
-    function trim(text) {
-      gsub(/^[[:space:]]+/, "", text)
-      gsub(/[[:space:]]+$/, "", text)
-      return text
-    }
-    {
-      line = $0
-      sub(/\/\/.*/, "", line)
-      if (line ~ /^[[:space:]]*#/) next
-      eq = index(line, "=")
-      if (eq == 0) next
-      name = trim(substr(line, 1, eq - 1))
-      if (name != "") values[name] = trim(substr(line, eq + 1))
-    }
-    END {
-      value = values[key]
-      for (pass = 0; pass < 5; pass++) {
-        expanded = value
-        while (match(expanded, /\$\([A-Za-z_][A-Za-z0-9_]*\)/)) {
-          ref = substr(expanded, RSTART + 2, RLENGTH - 3)
-          if (!(ref in values)) break
-          expanded = substr(expanded, 1, RSTART - 1) values[ref] substr(expanded, RSTART + RLENGTH)
-        }
-        if (expanded == value) break
-        value = expanded
-      }
-      print value
-    }
-  ' "$XCCONFIG"
 }
 
 # normalize_int VALUE: print VALUE without leading zeros so two numeric build
@@ -286,8 +250,8 @@ self_test() {
       ;;
   esac
   mkdir -p "$TMP_DIR/repo/Scripts" "$TMP_DIR/repo/Configuration"
-  if ! cp "$ROOT/Scripts/check-release-version.sh" "$TMP_DIR/repo/Scripts/check-release-version.sh"; then
-    printf 'self-test: FAIL: cannot copy Scripts/check-release-version.sh into %s\n' "$TMP_DIR" >&2
+  if ! cp "$ROOT/Scripts/check-release-version.sh" "$ROOT/Scripts/xcconfig.sh" "$TMP_DIR/repo/Scripts/"; then
+    printf 'self-test: FAIL: cannot copy version-check scripts into %s\n' "$TMP_DIR" >&2
     return 1
   fi
   chmod +x "$TMP_DIR/repo/Scripts/check-release-version.sh"
@@ -301,6 +265,10 @@ self_test() {
   self_test_case 'stable tag with a non-numeric build number' '9.9.9' 'next' 'v9.9.9' reject 'non-negative integer'
   self_test_case 'stable tag with the build number missing' '9.9.9' 'missing' 'v9.9.9' reject 'must define both MARKETING_VERSION and CURRENT_PROJECT_VERSION'
   self_test_case 'stable tag with a two-component version' '9.9' '9' 'v9.9' reject 'cannot derive a build number'
+
+  printf 'self-test: xcconfig references\n'
+  self_test_case 'expand version reference and strip comments' ' 9.9.9-alpha.$(CURRENT_PROJECT_VERSION) // counter' '7' 'v9.9.9-alpha.7' accept 'matches the build rule'
+  self_test_case 'circular version/build references' '$(CURRENT_PROJECT_VERSION)' '$(MARKETING_VERSION)' 'no-tag' reject 'circular xcconfig reference'
 
   printf 'self-test: pre-release counters\n'
   self_test_case 'pre-release counter matches' '9.9.9-alpha.7' '7' 'v9.9.9-alpha.7' accept 'matches the build rule'

@@ -32,8 +32,7 @@ set -eu
 # commit, so this affects local runs; it is the fix for security review R-11.
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-XCCONFIG_REL="Configuration/AppIdentity.xcconfig"
-XCCONFIG="$ROOT/$XCCONFIG_REL"
+. "$ROOT/Scripts/xcconfig.sh"
 PBXPROJ_REL="PiWebDesktop.xcodeproj/project.pbxproj"
 PBXPROJ="$ROOT/$PBXPROJ_REL"
 SERVICE_CONFIG_REL="Sources/App/ServiceConfiguration.swift"
@@ -64,45 +63,6 @@ usage_error() {
   printf 'error: %s\n' "$1" >&2
   printf 'usage: ./Scripts/check-identity.sh [--test-bundle path/to/App.xctest] [path/to/App.app ...]\n' >&2
   exit 2
-}
-
-# Read one value from the single-source xcconfig and expand $(VAR) references.
-# Pass "raw" as the second argument to keep the unexpanded text, which is how a
-# circular reference (APP_TEST_BUNDLE_IDENTIFIER -> PRODUCT_BUNDLE_IDENTIFIER,
-# which the test target overrides back to APP_TEST_BUNDLE_IDENTIFIER) is caught.
-# Same parser as Scripts/build.sh: Xcode, the build script and this checker must
-# interpret the file identically.
-xcconfig_value() {
-  awk -v key="$1" -v mode="${2:-expanded}" '
-    function trim(text) {
-      gsub(/^[[:space:]]+/, "", text)
-      gsub(/[[:space:]]+$/, "", text)
-      return text
-    }
-    {
-      line = $0
-      sub(/\/\/.*/, "", line)
-      if (line ~ /^[[:space:]]*#/) next
-      eq = index(line, "=")
-      if (eq == 0) next
-      name = trim(substr(line, 1, eq - 1))
-      if (name != "") values[name] = trim(substr(line, eq + 1))
-    }
-    END {
-      value = values[key]
-      for (pass = 0; pass < 5 && mode != "raw"; pass++) {
-        expanded = value
-        while (match(expanded, /\$\([A-Za-z_][A-Za-z0-9_]*\)/)) {
-          ref = substr(expanded, RSTART + 2, RLENGTH - 3)
-          if (!(ref in values)) break
-          expanded = substr(expanded, 1, RSTART - 1) values[ref] substr(expanded, RSTART + RLENGTH)
-        }
-        if (expanded == value) break
-        value = expanded
-      }
-      print value
-    }
-  ' "$XCCONFIG"
 }
 
 # Print every literal (non "$(...)") value assigned to a build setting in the

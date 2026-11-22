@@ -151,6 +151,8 @@ GitHub #73 起 `LogWriter` 的所有文件 I/O（追加、轮转、历史脱敏�
 
 应用身份与版本只有一个来源：`Configuration/AppIdentity.xcconfig`。它包含显示名、可执行名、图标名、最低系统版本、bundle identifier、`MARKETING_VERSION` 与 `CURRENT_PROJECT_VERSION`。`PiWebDesktop.xcodeproj` 的全部 6 个 build configuration（project、app、tests 的 Debug/Release）都通过 `baseConfigurationReference` 继承该文件，`Scripts/build.sh` 也从同一个文件读取并生成 `build/Pi-Web-Desktop.app/Contents/Info.plist`。不要在其他文件里重复版本、bundle id、显示名或最低系统版本字面值：改版本只需要改这一个文件，并让 Git tag 与 `MARKETING_VERSION` 一致（见 docs/releasing.md）。
 
+构建、身份检查、发布版本检查和并发检查都通过 `Scripts/xcconfig.sh` 读取配置。它展开 `$(变量)` 引用；遇到循环引用会指出涉及的变量并退出。
+
 `APP_ICON_NAME`（`ApplicationIcon`）只由打包脚本与一致性检查使用：xcconfig 里刻意不写 `INFOPLIST_KEY_CFBundleIconFile`，因为 Xcode 不会从该设置生成 `CFBundleIconFile`（已在 CI 的 Xcode 产物上确认），保留它只会制造“已配置图标键”的假象。
 
 测试 target 复用同一身份，但不能形成循环引用。身份变量分两层：`APP_BUNDLE_IDENTIFIER` 是不参与覆盖的基础变量（`io.github.su-luoya.pi-web-desktop`），`PRODUCT_BUNDLE_IDENTIFIER = $(APP_BUNDLE_IDENTIFIER)` 与 `APP_TEST_BUNDLE_IDENTIFIER = $(APP_BUNDLE_IDENTIFIER).tests` 都由它派生。测试 target 只覆盖 `PRODUCT_BUNDLE_IDENTIFIER = $(APP_TEST_BUNDLE_IDENTIFIER)`；覆盖之后 `PRODUCT_BUNDLE_IDENTIFIER` 在测试 target 里已经是测试 id，所以 `APP_TEST_BUNDLE_IDENTIFIER` 不能反过来引用 `$(PRODUCT_BUNDLE_IDENTIFIER)`，否则两个值互相定义、测试 bundle identifier 就无法被证明能正确解析。`Scripts/check-identity.sh` 对这条做静态断言（检查未展开的模板），出现循环即判定失败；CI 也会在真实的 `.xctest` 产物上断言该 identifier。测试 target 的另外两个覆盖是 `INFOPLIST_KEY_CFBundleDisplayName = $(APP_TEST_DISPLAY_NAME)` 与 `PRODUCT_NAME = $(TARGET_NAME)`，变量同样定义在 xcconfig 里。

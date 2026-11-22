@@ -62,45 +62,9 @@ case $BUILD_MODE in
 esac
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-XCCONFIG_REL="Configuration/AppIdentity.xcconfig"
-XCCONFIG="$ROOT/$XCCONFIG_REL"
+. "$ROOT/Scripts/xcconfig.sh"
 BUILD_DIR="$ROOT/build"
 APP="$BUILD_DIR/Pi-Web-Desktop.app"
-
-# Read one value from the single-source xcconfig, expanding $(VAR) references,
-# so this script and PiWebDesktop.xcodeproj always agree on identity and version.
-xcconfig_value() {
-  awk -v key="$1" '
-    function trim(text) {
-      gsub(/^[[:space:]]+/, "", text)
-      gsub(/[[:space:]]+$/, "", text)
-      return text
-    }
-    {
-      line = $0
-      sub(/\/\/.*/, "", line)
-      if (line ~ /^[[:space:]]*#/) next
-      eq = index(line, "=")
-      if (eq == 0) next
-      name = trim(substr(line, 1, eq - 1))
-      if (name != "") values[name] = trim(substr(line, eq + 1))
-    }
-    END {
-      value = values[key]
-      for (pass = 0; pass < 5; pass++) {
-        expanded = value
-        while (match(expanded, /\$\([A-Za-z_][A-Za-z0-9_]*\)/)) {
-          ref = substr(expanded, RSTART + 2, RLENGTH - 3)
-          if (!(ref in values)) break
-          expanded = substr(expanded, 1, RSTART - 1) values[ref] substr(expanded, RSTART + RLENGTH)
-        }
-        if (expanded == value) break
-        value = expanded
-      }
-      print value
-    }
-  ' "$XCCONFIG"
-}
 
 require_value() {
   if [ -z "$2" ]; then

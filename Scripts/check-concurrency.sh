@@ -55,9 +55,10 @@ case ${1:-} in
     ;;
 esac
 
-PROJECT_DIR=$(cd "$(dirname "$0")/.." && pwd)
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$ROOT/Scripts/xcconfig.sh"
 XCODE_APP=${XCODE_APP:-/Applications/Xcode.app}
-WORK_DIR=$PROJECT_DIR/.build/concurrency
+WORK_DIR=$ROOT/.build/concurrency
 
 if [ -z "${DEVELOPER_DIR:-}" ] && [ -d "$XCODE_APP/Contents/Developer" ]; then
   DEVELOPER_DIR=$XCODE_APP/Contents/Developer
@@ -85,14 +86,16 @@ SDK_PATH=$(/usr/bin/xcrun --show-sdk-path 2>/dev/null || true)
 
 # Deployment target comes from the same xcconfig the app builds with, so this
 # check never disagrees with the real build about available API.
-MACOS_VERSION=$(sed -n 's/^APP_MINIMUM_SYSTEM_VERSION *= *//p' \
-  "$PROJECT_DIR/Configuration/AppIdentity.xcconfig" | head -1)
-: "${MACOS_VERSION:=26.0}"
+MACOS_VERSION=$(xcconfig_value APP_MINIMUM_SYSTEM_VERSION) || exit 2
+if [ -z "$MACOS_VERSION" ]; then
+  printf 'error: APP_MINIMUM_SYSTEM_VERSION is missing from %s\n' "$XCCONFIG_REL" >&2
+  exit 2
+fi
 TARGET="$(/usr/bin/uname -m)-apple-macosx$MACOS_VERSION"
 
 mkdir -p "$WORK_DIR"
 
-cd "$PROJECT_DIR"
+cd "$ROOT"
 /usr/bin/find Sources -name '*.swift' | LC_ALL=C sort > "$WORK_DIR/sources.txt"
 
 status=0

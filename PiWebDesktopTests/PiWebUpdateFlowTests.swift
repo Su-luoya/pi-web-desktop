@@ -497,7 +497,6 @@ final class PiWebUpdateFlowTests: XCTestCase {
         XCTAssertNil(plan.environment["npm_config_ignore_scripts"])
         XCTAssertNil(plan.environment["NPM_CONFIG_IGNORE_SCRIPTS"])
         XCTAssertNil(plan.environment["npm_config_registry"])
-        XCTAssertFalse(PiWebUpdateEnvironment.allowedKeys.contains { $0.lowercased().hasPrefix("npm_config_") })
         XCTAssertFalse(plan.environment.keys.contains { $0.lowercased().hasPrefix("npm_config_") })
     }
 

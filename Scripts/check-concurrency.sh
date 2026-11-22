@@ -33,17 +33,16 @@ set -eu
 # warning baseline only if a new warning is genuinely unactionable; prefer
 # fixing it.
 WARNING_BASELINE=0
-ANNOTATION_BASELINE=12
+ANNOTATION_BASELINE=7
 
 # The reviewed `nonisolated(unsafe)` shapes. Everything else fails gate 1.
 #
-#   let payload = work          dispatch-work-item wrapper / one-shot delivery
 #   let deliver = completion    closure ownership handed to a queue or URLSession
 #   let item = DispatchWorkItem same wrapper, reused by a repeating Timer
 #   static let shared = ...     process-wide cache whose state is lock- or
 #                               queue-protected inside the type
 #   static let defaultStartTimeFormat  pure function, allocates per call
-ALLOWED_ANNOTATIONS='let (payload = work|deliver = completion|item = DispatchWorkItem)|static let shared = DesktopUpdatePackageCache\(\)|static let defaultStartTimeFormat'
+ALLOWED_ANNOTATIONS='let (deliver = completion|item = DispatchWorkItem)|static let shared = DesktopUpdatePackageCache\(\)|static let defaultStartTimeFormat'
 
 usage() {
   printf 'usage: ./Scripts/check-concurrency.sh\n'
@@ -56,9 +55,10 @@ case ${1:-} in
     ;;
 esac
 
-PROJECT_DIR=$(cd "$(dirname "$0")/.." && pwd)
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$ROOT/Scripts/xcconfig.sh"
 XCODE_APP=${XCODE_APP:-/Applications/Xcode.app}
-WORK_DIR=$PROJECT_DIR/.build/concurrency
+WORK_DIR=$ROOT/.build/concurrency
 
 if [ -z "${DEVELOPER_DIR:-}" ] && [ -d "$XCODE_APP/Contents/Developer" ]; then
   DEVELOPER_DIR=$XCODE_APP/Contents/Developer
@@ -86,14 +86,16 @@ SDK_PATH=$(/usr/bin/xcrun --show-sdk-path 2>/dev/null || true)
 
 # Deployment target comes from the same xcconfig the app builds with, so this
 # check never disagrees with the real build about available API.
-MACOS_VERSION=$(sed -n 's/^APP_MINIMUM_SYSTEM_VERSION *= *//p' \
-  "$PROJECT_DIR/Configuration/AppIdentity.xcconfig" | head -1)
-: "${MACOS_VERSION:=26.0}"
+MACOS_VERSION=$(xcconfig_value APP_MINIMUM_SYSTEM_VERSION) || exit 2
+if [ -z "$MACOS_VERSION" ]; then
+  printf 'error: APP_MINIMUM_SYSTEM_VERSION is missing from %s\n' "$XCCONFIG_REL" >&2
+  exit 2
+fi
 TARGET="$(/usr/bin/uname -m)-apple-macosx$MACOS_VERSION"
 
 mkdir -p "$WORK_DIR"
 
-cd "$PROJECT_DIR"
+cd "$ROOT"
 /usr/bin/find Sources -name '*.swift' | LC_ALL=C sort > "$WORK_DIR/sources.txt"
 
 status=0

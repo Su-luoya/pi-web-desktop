@@ -119,29 +119,6 @@ enum PiCLIUpdatePlanner {
     }
 }
 
-/// 子进程环境变量白名单：与 #20 的 npm 路径使用同一组允许键与兜底 PATH。
-enum PiCLIUpdateEnvironment {
-    static func environment(base: [String: String], executablePath: String) -> [String: String] {
-        var result = PiWebUpdateEnvironment.sanitized(base)
-        // PATH 合并复用 `ToolPathBuilder`（GitHub #89）：pi 自己所在目录排在最前，
-        // 其余目录（登录 shell PATH、已知目录、node 目录、npm prefix/bin）由构建器
-        // 给出；白名单与“只增路径、不增变量”的语义保持不变。
-        let builder = ToolPathBuilder(
-            appEnvironment: result,
-            homeDirectory: result["HOME"] ?? ""
-        )
-        result["PATH"] = builder.path(prioritizing: [
-            (executablePath as NSString).deletingLastPathComponent
-        ])
-        return result
-    }
-
-    /// 只用于展示/日志：按键排序的键名，不含值。
-    static func keyDescription(_ environment: [String: String]) -> String {
-        PiWebUpdateEnvironment.keyDescription(environment)
-    }
-}
-
 // MARK: - 重新检测辅助
 
 /// 执行后的聚焦版本重检测：复用 #16 识别器，只识别 Pi CLI 一个组件。

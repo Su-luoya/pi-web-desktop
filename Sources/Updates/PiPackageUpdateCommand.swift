@@ -263,9 +263,9 @@ final class ProcessPiPackageUpdateCommand: PiPackageUpdateRunning, @unchecked Se
         let process = Process()
         process.executableURL = URL(fileURLWithPath: plan.executablePath)
         process.arguments = plan.arguments
-        process.environment = PiPackageUpdateEnvironment.environment(
+        process.environment = UpdateCommandEnvironment.make(
             base: baseEnvironment,
-            piExecutablePath: plan.executablePath
+            executablePath: plan.executablePath
         )
         process.standardInput = FileHandle.nullDevice
         let stdoutPipe = Pipe()

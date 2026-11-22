@@ -304,7 +304,7 @@ final class ProcessPiCLIUpdateCommand: PiCLIUpdateRunning, @unchecked Sendable {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: plan.executablePath)
         process.arguments = plan.arguments
-        process.environment = PiCLIUpdateEnvironment.environment(
+        process.environment = UpdateCommandEnvironment.make(
             base: baseEnvironment,
             executablePath: plan.executablePath
         )

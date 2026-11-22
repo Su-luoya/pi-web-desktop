@@ -163,7 +163,7 @@ Pi Web Desktop 是独立的 macOS AppKit/WebKit companion app。它启动、管�
 
 登录 shell 查询不写死 `zsh`：优先用户数据库里的登录 shell（`getpwuid(getuid()).pw_shell`，与 `dscl . -read ~ UserShell` 同一个数据源，不需要额外子进程），取不到时用应用环境里的 `$SHELL`，再退回 `/bin/zsh`、`/bin/sh`；只有绝对路径且可执行的值会被采用。查询命令是 `<shell> -lc 'printf '__PI_WEB_TOOL_PATH__%s' "$PATH"'`，输出用固定标记解析，用户 shell 自己打印的内容不会污染 PATH 值；等待上限 3 秒，结果单次缓存。登录查询拿不到值时，再尝试一次交互式查询（`-ilc`），覆盖“PATH 只配在 `~/.zshrc` 这类非登录 shell 的 rc 里”的情况：交互式 rc 可能有副作用或很慢，所以只试一次、同样受超时约束，并且子进程的 stdin 固定为 `/dev/null`，不会因为 rc 读 stdin 而卡住诊断。
 
-`DependencyChecker` 用同一份 PATH 执行所有只读探测（`--version`、`npm prefix -g`、`command -v`），`ComponentInstallation` 用同一份环境执行 `pi list`、`npm/pnpm root -g`；只读约束不变：不安装、不联网、不写配置、不执行 `sudo`。`PiCLIUpdateEnvironment`、`PiPackageUpdateEnvironment`、`PiWebUpdateEnvironment` 的白名单（`PATH`、`HOME`、`TMPDIR`、`LANG`、`LC_ALL`、`LC_CTYPE`）保持不变，构建器只替换 `PATH` 的值、不新增任何键；`ServiceManager` 的启动环境同样用注入的 Provider 生成 PATH（没有 Provider 的纯单元测试场景退化为“应用环境 + 已知目录”的静态构建器，不执行任何命令），`PI_WEB_NO_OPEN`、`PI_WEB_PASSWORD`、`PI_WEB_ALLOWED_HOSTS` 与代理变量的语义不变。
+`DependencyChecker` 用同一份 PATH 执行所有只读探测（`--version`、`npm prefix -g`、`command -v`），`ComponentInstallation` 用同一份环境执行 `pi list`、`npm/pnpm root -g`；只读约束不变：不安装、不联网、不写配置、不执行 `sudo`。Pi CLI、扩展包和 Pi Web 的更新命令共用 `UpdateCommandEnvironment`：`PATH` 优先放入命令所在目录，其余只保留非空的 `HOME`、`TMPDIR`、`LANG`、`LC_ALL` 和 `LC_CTYPE`；`ServiceManager` 的启动环境同样用注入的 Provider 生成 PATH（没有 Provider 的纯单元测试场景退化为“应用环境 + 已知目录”的静态构建器，不执行任何命令），`PI_WEB_NO_OPEN`、`PI_WEB_PASSWORD`、`PI_WEB_ALLOWED_HOSTS` 与代理变量的语义不变。
 
 拿不到版本时不再只留一个 `unknown`：`DependencyFinding.diagnosis` 记录可读原因（例如“命令无法执行：合并后的工具 PATH 里找不到 node；`pi` 是 `#!/usr/bin/env node` 脚本，没有 node 时会以 127 退出”），诊断页的行内备注、摘要文本的“诊断：…”、`DependencyReportPresenter.diagnosisText` 诊断块与日志（`依赖诊断：<条目> <原因>`）都读这一个字段，文案只由静态字符串与工具名组成，不含路径、凭据或 URL。
 

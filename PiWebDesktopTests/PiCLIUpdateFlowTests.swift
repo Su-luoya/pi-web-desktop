@@ -751,31 +751,6 @@ final class PiCLIUpdateFlowTests: XCTestCase {
         ))
     }
 
-    func testEnvironmentWhitelistKeepsOnlySafeKeysAndPrependsPiDirectory() {
-        let environment = PiCLIUpdateEnvironment.environment(
-            base: [
-                "PATH": "/usr/bin:/bin",
-                "HOME": fixtureHome,
-                "TMPDIR": "/tmp",
-                "NPM_TOKEN": "npm-secret",
-                "AWS_SECRET_ACCESS_KEY": "aws-secret",
-                "HTTPS_PROXY": "http://proxy.example.test:3128",
-                "LANG": "zh_CN.UTF-8"
-            ],
-            executablePath: piPath
-        )
-        XCTAssertNil(environment["NPM_TOKEN"], "凭据类环境变量不得透传")
-        XCTAssertNil(environment["AWS_SECRET_ACCESS_KEY"])
-        XCTAssertNil(environment["HTTPS_PROXY"], "代理变量不在白名单内")
-        XCTAssertEqual(environment["HOME"], fixtureHome)
-        XCTAssertEqual(environment["LANG"], "zh_CN.UTF-8")
-        let directories = (environment["PATH"] ?? "").split(separator: ":").map(String.init)
-        XCTAssertEqual(directories.first, "/opt/homebrew/bin", "pi 所在目录必须排在最前（node 由 env 查找）")
-        XCTAssertTrue(directories.contains("/usr/bin"))
-        XCTAssertTrue(directories.contains("/bin"))
-        XCTAssertEqual(Set(directories).count, directories.count, "PATH 不应有重复目录")
-    }
-
     /// outD-4 的接线回归（源码级）：手动路径必须自己置位并清理 `piCLIUpdateInProgress`，
     /// 自动路径必须在烧掉「本次运行只一次」额度**之前**用共用的入口闸控判忙。
     func testAppDelegateWiresTheInProgressGateOnTheManualPath() throws {
@@ -928,15 +903,20 @@ final class PiCLIUpdateFlowTests: XCTestCase {
     /// 真执行器：参数数组执行（脚本回显 `$@`）、退出码、stdout/stderr 尾部与耗时。
     func testRealExecutorRecordsExitCodeAndOutputTails() throws {
         let directory = try tempDirectory()
-        let script = try makeExecutableScript(in: directory, body: "echo \"args:$@\"\necho \"to-stderr\" >&2\nexit 0")
-        let command = ProcessPiCLIUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
+        let script = try makeExecutableScript(in: directory, body: """
+            echo "args:$@"
+            echo "${PATH%%:*}|$HOME|${HTTPS_PROXY-unset}" >&2
+            """)
+        let command = ProcessPiCLIUpdateCommand(baseEnvironment: [
+            "PATH": "/usr/bin:/bin", "HOME": fixtureHome, "HTTPS_PROXY": "http://proxy.invalid"
+        ])
         let box = Locked<PiCLIUpdateCommandResult>()
         command.run(try plan(forScript: script), timeout: 30) { box.value = $0 }
         let result = try XCTUnwrap(waitForValue(box, timeout: 20))
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertNil(result.failure)
         XCTAssertEqual(result.stdoutTail, "args:update --self\n", "argv 必须是参数数组 update --self")
-        XCTAssertEqual(result.stderrTail, "to-stderr\n")
+        XCTAssertEqual(result.stderrTail, "\(directory.path)|\(fixtureHome)|unset\n")
         XCTAssertGreaterThanOrEqual(result.duration, 0)
     }
 

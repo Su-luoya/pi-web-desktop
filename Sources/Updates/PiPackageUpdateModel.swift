@@ -333,32 +333,6 @@ enum PiPackageUpdateArgumentPolicy {
     }
 }
 
-/// 子进程环境变量白名单（与 #20/#21 同一组允许键）。
-///
-/// Pi CLI 是 `#!/usr/bin/env node` 脚本，需要 `HOME`（`~/.pi` 配置）与 `PATH`
-/// （解析 `node`），所以只保留这些键；`NODE_OPTIONS`、`NPM_TOKEN` 等
-/// `npm_config_*`、代理与任何凭据都不进入子进程。日志与诊断只记录键名。
-enum PiPackageUpdateEnvironment {
-    static func environment(base: [String: String], piExecutablePath: String) -> [String: String] {
-        var result = PiWebUpdateEnvironment.sanitized(base)
-        // PATH 合并复用 `ToolPathBuilder`（GitHub #89）：pi 自己所在目录排在最前，
-        // 其余目录由构建器给出（登录 shell PATH、已知目录、node 目录、npm prefix/bin）。
-        let builder = ToolPathBuilder(
-            appEnvironment: result,
-            homeDirectory: result["HOME"] ?? ""
-        )
-        result["PATH"] = builder.path(prioritizing: [
-            (piExecutablePath as NSString).deletingLastPathComponent
-        ])
-        return result
-    }
-
-    /// 只用于展示/日志：按键排序的键名，不含值。
-    static func keyDescription(_ environment: [String: String]) -> String {
-        PiWebUpdateEnvironment.keyDescription(environment)
-    }
-}
-
 // MARK: - 更新计划
 
 /// 一个扩展包的更新计划（GitHub #22 第 1 项）。

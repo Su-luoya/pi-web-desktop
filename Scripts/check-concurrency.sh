@@ -33,17 +33,16 @@ set -eu
 # warning baseline only if a new warning is genuinely unactionable; prefer
 # fixing it.
 WARNING_BASELINE=0
-ANNOTATION_BASELINE=12
+ANNOTATION_BASELINE=7
 
 # The reviewed `nonisolated(unsafe)` shapes. Everything else fails gate 1.
 #
-#   let payload = work          dispatch-work-item wrapper / one-shot delivery
 #   let deliver = completion    closure ownership handed to a queue or URLSession
 #   let item = DispatchWorkItem same wrapper, reused by a repeating Timer
 #   static let shared = ...     process-wide cache whose state is lock- or
 #                               queue-protected inside the type
 #   static let defaultStartTimeFormat  pure function, allocates per call
-ALLOWED_ANNOTATIONS='let (payload = work|deliver = completion|item = DispatchWorkItem)|static let shared = DesktopUpdatePackageCache\(\)|static let defaultStartTimeFormat'
+ALLOWED_ANNOTATIONS='let (deliver = completion|item = DispatchWorkItem)|static let shared = DesktopUpdatePackageCache\(\)|static let defaultStartTimeFormat'
 
 usage() {
   printf 'usage: ./Scripts/check-concurrency.sh\n'

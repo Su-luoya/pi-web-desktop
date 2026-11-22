@@ -249,10 +249,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         let updatePreferences = appConfiguration.updateCheckPreferences(diagnostics: updateLog)
         self.ignoredVersions = appConfiguration.updateCheckIgnoredVersions(diagnostics: updateLog)
+        let updateScheduler = DispatchUpdateCheckScheduler()
         let updateChecker = UpdateChecker(
             httpClient: URLSessionUpdateHTTPClient(),
             cacheStore: UpdateCheckCacheFileStore(fileURL: appConfiguration.paths.updateCheckCacheURL),
-            scheduler: DispatchUpdateCheckScheduler(),
+            scheduler: updateScheduler,
             identity: .current,
             preferences: updatePreferences,
             ignoredVersions: ignoredVersions,
@@ -277,7 +278,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         )
         self.piCLIUpdateRunner = ProcessPiCLIUpdateCommand(
             // 更新子进程的 PATH 也来自同一个构建器（GitHub #89）；白名单在
-            // `PiCLIUpdateEnvironment` 里保持不变。
+            // `UpdateCommandEnvironment` 里保持不变。
             baseEnvironment: toolPathProvider.probeEnvironment(),
             redact: { text in logRedactor.redact(text) },
             recordAbandonedAttempt: recordAbandonedAttempt
@@ -312,43 +313,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             },
             redactor: logRedactor,
             log: updateLog,
-            deliver: { work in
-                // `deliver` 的契约就是“把 work 送到主线程执行一次”。work 捕获的对象
-                // 在入队到执行之间没有别的线程在碰它们，所以用 `nonisolated(unsafe)`
-                // 明确承担这个假设；把整条投递链改成 `@Sendable` 会波及
-                // Sources/Updates 里的全部 25 处投递点，收益不相当。
-                nonisolated(unsafe) let payload = work
-                DispatchQueue.main.async { payload() }
-            },
+            deliver: updateScheduler.deliver,
             timeout: PiWebUpdateCoordinator.defaultTimeout,
-            transaction: UpdateTransactionEnvironment(
-                probe: .live,
-                recordHistory: { [weak self] entry in
-                    // 这个闭包由更新协调器在后台队列调用（`reportPhase` 同理），而
-                    // `appConfiguration` 与进度窗口都是主 actor 隔离的：旧版第一行
-                    // `self.appConfiguration.recordUpdateHistory(entry)` 就在后台线程
-                    // 直接读写主 actor 状态。整段搬到主队列，顺序与调用顺序一致。
-                    DispatchQueue.main.async {
-                        guard let self else { return }
-                        self.appConfiguration.recordUpdateHistory(entry)
-                        self.updateProgressCenter.finish(history: entry)
-                    }
-                },
-                applyDegradation: { [weak self] plan in
-                    // `applyPiWebUpdateDegradation` 改的是主 actor 隔离的配置。
-                    DispatchQueue.main.async { self?.applyPiWebUpdateDegradation(plan) }
-                },
-                now: Date.init,
-                reportPhase: { [weak self] component, result in
-                    // 先在当前闭包里把 weak 引用固化成强引用，再进 `DispatchQueue.main.async`：
-                    // 直接把 `[weak self]` 的变量读进并发闭包是对捕获变量的跨线程读写
-                    // （`-strict-concurrency=complete` 报 #SendableClosureCaptures）。
-                    guard let self else { return }
-                    DispatchQueue.main.async {
-                        self.updateProgressCenter.apply(phase: result, component: component)
-                    }
-                }
-            ),
+            transaction: updateTransaction { [weak self] plan in
+                DispatchQueue.main.async { self?.applyPiWebUpdateDegradation(plan) }
+            },
             clearAbandonedAttempt: { [weak self] component in self?.clearAbandonedAttempt(component) }
         ))
         // Pi CLI 更新与运行进程保护（GitHub #21）：进程检查复用同一个脱敏器；
@@ -369,34 +338,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             },
             redactor: logRedactor,
             log: updateLog,
-            deliver: { work in
-                // 同上：契约就是主线程执行一次。
-                nonisolated(unsafe) let payload = work
-                DispatchQueue.main.async { payload() }
-            },
+            deliver: updateScheduler.deliver,
             timeout: PiCLIUpdateCoordinator.defaultTimeout,
-            transaction: UpdateTransactionEnvironment(
-                probe: .live,
-                recordHistory: { [weak self] entry in
-                    // 同上：协调器在后台队列调用，主 actor 状态只能在主队列读写。
-                    DispatchQueue.main.async {
-                        guard let self else { return }
-                        self.appConfiguration.recordUpdateHistory(entry)
-                        self.updateProgressCenter.finish(history: entry)
-                    }
-                },
-                applyDegradation: { [weak self] plan in
-                    DispatchQueue.main.async { self?.applyPiCLIUpdateDegradation(plan) }
-                },
-                now: Date.init,
-                reportPhase: { [weak self] component, result in
-                    // 同上：先固化强引用，避免在并发闭包里读写 weak 捕获变量。
-                    guard let self else { return }
-                    DispatchQueue.main.async {
-                        self.updateProgressCenter.apply(phase: result, component: component)
-                    }
-                }
-            ),
+            transaction: updateTransaction { [weak self] plan in
+                DispatchQueue.main.async { self?.applyPiCLIUpdateDegradation(plan) }
+            },
             clearAbandonedAttempt: { [weak self] component in self?.clearAbandonedAttempt(component) }
         ))
         // Pi 扩展包更新（GitHub #22）：策略只有关闭 / 检查并通知 / 询问后更新，
@@ -415,37 +361,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             },
             redactor: logRedactor,
             log: updateLog,
-            deliver: { work in
-                // 同上：契约就是主线程执行一次。
-                nonisolated(unsafe) let payload = work
-                DispatchQueue.main.async { payload() }
-            },
+            deliver: updateScheduler.deliver,
             timeout: PiPackageUpdateCoordinator.defaultTimeout,
-            transaction: UpdateTransactionEnvironment(
-                probe: .live,
-                recordHistory: { [weak self] entry in
-                    // 同上：协调器在后台队列调用，主 actor 状态只能在主队列读写。
-                    DispatchQueue.main.async {
-                        guard let self else { return }
-                        self.appConfiguration.recordUpdateHistory(entry)
-                        self.updateProgressCenter.finish(history: entry)
-                    }
-                },
-                applyDegradation: { plan in
-                    // 扩展包没有可重新指向的可执行文件：只把降级结果写进日志与历史。
-                    _ = plan
-                },
-                now: Date.init,
-                reportPhase: { [weak self] component, result in
-                    // 同上：先固化强引用，避免在并发闭包里读写 weak 捕获变量。
-                    guard let self else { return }
-                    DispatchQueue.main.async {
-                        self.updateProgressCenter.apply(phase: result, component: component)
-                    }
-                }
-            ),
+            // 扩展包没有可重新指向的可执行文件，只记录历史与日志。
+            transaction: updateTransaction { _ in },
             clearAbandonedAttempt: { [weak self] component in self?.clearAbandonedAttempt(component) }
         ))
+    }
+
+    // 协调器在后台回报；历史、进度和最终完成回调按入队顺序交给主线程。
+    private nonisolated func updateTransaction(
+        applyDegradation: @escaping @Sendable (UpdateDegradationPlan) -> Void
+    ) -> UpdateTransactionEnvironment {
+        UpdateTransactionEnvironment(
+            probe: .live,
+            recordHistory: { [weak self] entry in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.appConfiguration.recordUpdateHistory(entry)
+                    self.updateProgressCenter.finish(history: entry)
+                }
+            },
+            applyDegradation: applyDegradation,
+            reportPhase: { [weak self] component, result in
+                guard let self else { return }
+                DispatchQueue.main.async {
+                    self.updateProgressCenter.apply(phase: result, component: component)
+                }
+            }
+        )
     }
 
     // MARK: - Smoke launch

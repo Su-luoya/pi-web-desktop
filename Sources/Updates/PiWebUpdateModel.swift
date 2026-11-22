@@ -224,49 +224,6 @@ enum PiWebUpdateArgumentPolicy {
     }
 }
 
-/// 子进程环境变量白名单。
-///
-/// npm 正常运行需要 `HOME`（npmrc/缓存）与 `PATH`（`node` 通过 shebang 解析），
-/// 所以只保留以下键；`NODE_OPTIONS`、`NODE_PATH`、`npm_config_*`、代理与任何
-/// 凭据（token/password/secret/key）都不进入子进程。日志与诊断只记录键名，
-/// 从不记录值。
-enum PiWebUpdateEnvironment {
-    static let allowedKeys: Set<String> = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"]
-
-    /// 只保留白名单键，空值也丢弃。
-    static func sanitized(_ base: [String: String]) -> [String: String] {
-        var result: [String: String] = [:]
-        for key in allowedKeys {
-            guard let value = base[key], !value.isEmpty else { continue }
-            result[key] = value
-        }
-        return result
-    }
-
-    /// 白名单化后把 npm 所在目录放到 PATH 最前：npm 是带 `#!/usr/bin/env node`
-    /// shebang 的脚本，GUI 应用的默认 PATH 里通常没有 Node.js 的目录。
-    ///
-    /// PATH 合并本身复用 `ToolPathBuilder`（GitHub #89）：`base` 里的 PATH 通常
-    /// 已经来自应用级工具 PATH 构建器（登录 shell PATH、已知目录、node 目录），
-    /// 这里只保证“npm 自己所在目录优先”与已知目录兜底——只增路径，不增变量。
-    static func environment(base: [String: String], npmExecutablePath: String) -> [String: String] {
-        var result = sanitized(base)
-        let builder = ToolPathBuilder(
-            appEnvironment: result,
-            homeDirectory: result["HOME"] ?? ""
-        )
-        result["PATH"] = builder.path(prioritizing: [
-            (npmExecutablePath as NSString).deletingLastPathComponent
-        ])
-        return result
-    }
-
-    /// 只用于展示/日志：按键排序的键名，不含值。
-    static func keyDescription(_ environment: [String: String]) -> String {
-        environment.keys.sorted().joined(separator: ", ")
-    }
-}
-
 // MARK: - npm 生命周期脚本策略（GitHub #60，对应 alpha.3 安全审查 A-2）
 
 /// 自动安装是否传 `--ignore-scripts` 的结论与理由。
@@ -336,7 +293,7 @@ struct PiWebUpdateInstallPlan: Equatable {
         return PiWebUpdateInstallPlan(
             npmExecutablePath: npmExecutablePath,
             arguments: arguments,
-            environment: PiWebUpdateEnvironment.environment(base: baseEnvironment, npmExecutablePath: npmExecutablePath),
+            environment: UpdateCommandEnvironment.make(base: baseEnvironment, executablePath: npmExecutablePath),
             packageName: packageName,
             installedVersion: installedVersion,
             targetVersion: targetVersion,
@@ -355,7 +312,7 @@ struct PiWebUpdateInstallPlan: Equatable {
             "当前版本：\(installedVersion)",
             "目标版本：\(targetVersion)",
             "来源：\(source.displayName)；可信度：\(confidence.displayName)",
-            "环境变量键（不记录值）：\(PiWebUpdateEnvironment.keyDescription(environment))",
+            "环境变量键（不记录值）：\(UpdateCommandEnvironment.keyDescription(environment))",
             "不使用 shell 字符串、不调用 sudo。"
         ]
     }

@@ -632,11 +632,15 @@ final class ToolPathTests: XCTestCase {
 
     // MARK: - 6. 更新子进程复用同一份目录列表与白名单
 
-    func testUpdateEnvironmentsUseTheSharedKnownDirectoryListAndKeepTheirWhitelist() {
+    func testUpdateCommandEnvironmentKeepsOnlyNonemptyAllowedKeysAndPrioritizesTheExecutable() {
         let base = [
-            "PATH": "/app/bin",
+            "PATH": "/app/bin:/opt/homebrew/bin",
             "HOME": "/home/test",
             "LANG": "zh_CN.UTF-8",
+            "LC_CTYPE": "UTF-8",
+            "LC_ALL": "C",
+            "TMPDIR": "",
+            "AWS_SECRET_ACCESS_KEY": "discard",
             "NPM_TOKEN": "fixture-npm-token",  // scan-secrets: allow(reason=test fixture value)
             "HTTPS_PROXY": "http://proxy.invalid:3128"
         ]
@@ -646,16 +650,13 @@ final class ToolPathTests: XCTestCase {
             ToolPath.knownDirectories(homeDirectory: "/home/test")
         ]).joined(separator: ":")
 
-        for environment in [
-            PiWebUpdateEnvironment.environment(base: base, npmExecutablePath: "/opt/homebrew/bin/npm"),
-            PiCLIUpdateEnvironment.environment(base: base, executablePath: "/opt/homebrew/bin/pi"),
-            PiPackageUpdateEnvironment.environment(base: base, piExecutablePath: "/opt/homebrew/bin/pi")
-        ] {
-            XCTAssertEqual(environment["PATH"], expected)
-            XCTAssertEqual(Set(environment.keys), ["PATH", "HOME", "LANG"], "白名单之外不新增键")
-            XCTAssertNil(environment["NPM_TOKEN"])
-            XCTAssertNil(environment["HTTPS_PROXY"])
-        }
+        let environment = UpdateCommandEnvironment.make(base: base, executablePath: "/opt/homebrew/bin/pi")
+        XCTAssertEqual(environment, [
+            "PATH": expected, "HOME": "/home/test", "LANG": "zh_CN.UTF-8", "LC_CTYPE": "UTF-8", "LC_ALL": "C"
+        ])
+        let withTemp = UpdateCommandEnvironment.make(base: ["TMPDIR": "/tmp"], executablePath: "/bin/pi")
+        XCTAssertEqual(UpdateCommandEnvironment.keyDescription(withTemp), "PATH, TMPDIR")
+        XCTAssertEqual(withTemp["TMPDIR"], "/tmp")
     }
 }
 

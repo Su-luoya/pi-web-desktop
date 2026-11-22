@@ -1153,15 +1153,20 @@ final class PiPackageUpdateFlowTests: XCTestCase {
     /// 真执行器：参数数组执行（脚本回显 `$@`）、退出码、stdout/stderr 尾部与耗时。
     func testRealExecutorRecordsExitCodeAndOutputTails() throws {
         let directory = try tempDirectory()
-        let script = try makeExecutableScript(in: directory, body: "echo \"args:$@\"\necho \"to-stderr\" >&2\nexit 0")
-        let command = ProcessPiPackageUpdateCommand(baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": fixtureHome])
+        let script = try makeExecutableScript(in: directory, body: """
+            echo "args:$@"
+            echo "${PATH%%:*}|$HOME|${HTTPS_PROXY-unset}" >&2
+            """)
+        let command = ProcessPiPackageUpdateCommand(baseEnvironment: [
+            "PATH": "/usr/bin:/bin", "HOME": fixtureHome, "HTTPS_PROXY": "http://proxy.invalid"
+        ])
         let box = Locked<PiPackageUpdateCommandResult>()
         command.run(try plan(forScript: script), timeout: 30) { box.value = $0 }
         let result = try XCTUnwrap(waitForValue(box, timeout: 20))
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertNil(result.failure)
         XCTAssertEqual(result.stdoutTail, "args:update npm:\(packageName)\n", "argv 必须是参数数组 update npm:<包名>")
-        XCTAssertEqual(result.stderrTail, "to-stderr\n")
+        XCTAssertEqual(result.stderrTail, "\(directory.path)|\(fixtureHome)|unset\n")
         XCTAssertGreaterThanOrEqual(result.duration, 0)
     }
 
@@ -1571,36 +1576,6 @@ final class PiPackageUpdateFlowTests: XCTestCase {
             let outcome = try XCTUnwrap(waitForValue(box, timeout: 20), "第 \(name) 批必须回调")
             XCTAssertTrue(outcome.isSucceeded, "第 \(name) 批应当成功：\(outcome.outcomes)")
         }
-    }
-
-    func testEnvironmentWhitelistKeepsOnlySafeKeysAndPrependsPiDirectory() {
-        let environment = PiPackageUpdateEnvironment.environment(
-            base: [
-                "PATH": "/usr/bin:/bin",
-                "HOME": fixtureHome,
-                "TMPDIR": "/tmp",
-                "NPM_TOKEN": "npm-secret",
-                "AWS_SECRET_ACCESS_KEY": "aws-secret",
-                "HTTPS_PROXY": "http://proxy.example.test:3128",
-                "LANG": "zh_CN.UTF-8"
-            ],
-            piExecutablePath: piPath
-        )
-        XCTAssertNil(environment["NPM_TOKEN"], "凭据类环境变量不得透传")
-        XCTAssertNil(environment["AWS_SECRET_ACCESS_KEY"])
-        XCTAssertNil(environment["HTTPS_PROXY"], "代理变量不在白名单内")
-        XCTAssertEqual(environment["HOME"], fixtureHome)
-        XCTAssertEqual(environment["LANG"], "zh_CN.UTF-8")
-        let directories = (environment["PATH"] ?? "").split(separator: ":").map(String.init)
-        XCTAssertEqual(directories.first, "/opt/homebrew/bin", "pi 所在目录必须排在最前（node 由 env 查找）")
-        XCTAssertTrue(directories.contains("/usr/bin"))
-        XCTAssertTrue(directories.contains("/bin"))
-        XCTAssertEqual(Set(directories).count, directories.count, "PATH 不应有重复目录")
-        XCTAssertEqual(
-            PiPackageUpdateEnvironment.keyDescription(["B": "2", "A": "1", "TOKEN": "x"]),
-            "A, B, TOKEN",
-            "只记录键名，不记录值"
-        )
     }
 
     // MARK: - 9. 源码负向断言（没有信号、没有 shell、没有 sudo）

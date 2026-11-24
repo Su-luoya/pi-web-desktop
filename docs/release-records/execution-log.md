@@ -2389,7 +2389,7 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
 
 ### 发布后补记：应用内就地更新（41 → 42）实测通过
 
-- 前置：本机原装 42 的安装来源在本轮开始时无法确认（日志已轮转），为把这步真正跑一遍，先把 `~/Applications/Pi-Web-Desktop.app` 手动换成公开的 alpha.41（`Pi-Web-Desktop-0.1.0-alpha.41+build.41.zip`，SHA-256 `9df0a6e80876c2efd14fa6b7352aca26f5cc209deb93358291d50040e428b359`；包内 `Contents/MacOS/PiWebDesktop` 为 `ae04aed7aea1cf344fe0de1164f4889d5ab032b2aadbb23535fc2483fd1f2c79`，与 alpha.41 记录里的同一值一致）。`updateChecks.piWeb.autoUpdateBeforeLaunch` 保持未开启（默认 false），所以走的是手动路径，不是启动前自动更新。
+- 前置：本机原装 42 的安装来源在本轮开始时无法确认（日志已轮转），为把这步真正跑一遍，先把 `~/Applications/Pi-Web-Desktop.app` 手动换成公开的 alpha.41（`Pi-Web-Desktop-0.1.0-alpha.41+build.41.zip`，SHA-256 `9df0a6e80876c2efd14fa6b7352aca26f5cc209deb93358291d50040e428b359`；包内 `Contents/MacOS/PiWebDesktop` 为 `ae04aed7aea1cf344fe0de1164f4889d5ab032b2aadbb23535fc2483fd1f2c79`，与 alpha.41 记录里的同一值一致）。走的是手动路径：日志前缀是 `更新检查完成（手动）`，且只有点了进度窗口的「确认更新」才出现 `开始统一更新`。
 - 触发路径：菜单「更新 → 检查更新…」→ 进度窗口点「确认更新」。日志依次为 `更新检查完成（手动）：可用更新 1 项，无法确定 0 项，共检查 11 项。`、`开始统一更新：桌面应用 0.1.0-alpha.41 → 0.1.0-alpha.42。`，随后 `退出时间线 23:34:17.281 (+19581294ms) 退出请求`，进程 PID 85538 → 86138，同一次更新内没有 `桌面应用更新失败` 行。
 - 装机结果：`~/Applications/Pi-Web-Desktop.app` 的 `CFBundleShortVersionString=0.1.0-alpha.42`、`CFBundleVersion=42`；从换包到服务重启约 2 秒（`退出时间线 23:34:17.425 应用即将终止` → `[2026-11-24 23:34:19] 服务已启动：PID 86219`）；重启后日志为 `更新检查完成（启动）：可用更新 0 项`，即已认作最新。
 - 装的确实是公开产物：`Contents/MacOS/PiWebDesktop` 的 SHA-256 为 `b664b4423a9c6d9bd2857c231e24540162ac65e01d001d688d93e55faf9359c7`，与 `gh release download v0.1.0-alpha.42` 解出的同一文件**逐字节一致**，两份 `.app` 整包 `diff -rq` 无输出；包内各文件 mtime 均为 `2001-01-01 08:00:00`。`codesign --verify --deep --strict` 通过，`Identifier=io.github.su-luoya.pi-web-desktop`、`Signature=adhoc`、`TeamIdentifier=not set`。

@@ -2384,7 +2384,7 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
 - Tag `v0.1.0-alpha.42`（annotated，tag object `15da8adae3cb96bb069dd293877c35c15bc49771`）指向 `9ddb541`；release workflow [45031286438](https://github.com/Su-luoya/pi-web-desktop/actions/runs/45031286438) 的 build 与 draft 创建均成功，草稿正文由模板 + `## 摘要` 渲染，无 `{{…}}` 残留、无 `<待填写`。
 - [v0.1.0-alpha.42](https://github.com/Su-luoya/pi-web-desktop/releases/tag/v0.1.0-alpha.42) 于 `2026-11-22T14:19:08Z` 发布为 prerelease，`isDraft=false`、`isPrerelease=true`。资产 `Pi-Web-Desktop-0.1.0-alpha.42+build.42.zip`：**1,812,786 bytes**，SHA-256 **`20dede946d3db0245c9c5c4c79c4c8f39720e2463a4714a18d1a1156adf39dd3`**；`gh release download` + `shasum -a 256 -c` → OK，与 `.sha256` 资产逐字符一致。解出的应用包 `CFBundleShortVersionString=0.1.0-alpha.42`、`CFBundleVersion=42`，`codesign --verify --deep --strict` 通过。
 - appcast workflow [45032160747](https://github.com/Su-luoya/pi-web-desktop/actions/runs/45032160747) 由 `release: published` 触发并成功；`appcast` 分支提交 `b813294 chore(appcast): v0.1.0-alpha.42`，schema 1，首条 `tag=v0.1.0-alpha.42`，下载 URL、文件名与 `zip.sha256` 和公开资产一致。
-- 未验证：`/Applications` 内的就地更新仍未实测；真实 Pi CLI / 扩展包安装的端到端结果、VoiceOver 逐项朗读、另一台 Mac 首次 Gatekeeper 放行同样没有覆盖。41 → 42 的应用内更新见下方补记。
+- 未验证：真实 Pi CLI / 扩展包安装的端到端结果、VoiceOver 逐项朗读、另一台 Mac 首次 Gatekeeper 放行没有覆盖。41 → 42 的两条就地更新路径（`~/Applications`、`/Applications`）见下方补记。
 - 回退：alpha.41 仍是已发布 prerelease（3 个资产可下载）。本版无设置 schema 或服务数据迁移，退出应用后替换应用包即可；从 `appcast` 移除本版条目可停止推送，应用内安装器不提供自动降级。
 
 ### 发布后补记：应用内就地更新（41 → 42）实测通过
@@ -2394,4 +2394,12 @@ SHA-256 校验失败路径测试、[#195](https://github.com/Su-luoya/pi-web-des
 - 装机结果：`~/Applications/Pi-Web-Desktop.app` 的 `CFBundleShortVersionString=0.1.0-alpha.42`、`CFBundleVersion=42`；从换包到服务重启约 2 秒（`退出时间线 23:34:17.425 应用即将终止` → `[2026-11-24 23:34:19] 服务已启动：PID 86219`）；重启后日志为 `更新检查完成（启动）：可用更新 0 项`，即已认作最新。
 - 装的确实是公开产物：`Contents/MacOS/PiWebDesktop` 的 SHA-256 为 `b664b4423a9c6d9bd2857c231e24540162ac65e01d001d688d93e55faf9359c7`，与 `gh release download v0.1.0-alpha.42` 解出的同一文件**逐字节一致**，两份 `.app` 整包 `diff -rq` 无输出；包内各文件 mtime 均为 `2001-01-01 08:00:00`。`codesign --verify --deep --strict` 通过，`Identifier=io.github.su-luoya.pi-web-desktop`、`Signature=adhoc`、`TeamIdentifier=not set`。
 - 换包后 `~/Applications` 下没有 `*.app.new` 残留，`~/.Trash` 里也没有本轮旧包。当日日志已复制为 `build/release-evidence/alpha.42-inapp-update-41-to-42.log`（`build/` 在 `.gitignore` 内，日志轮转后仍可查）。
-- 未覆盖：这次仍只验证「`~/Applications` 内旧版 → 新版」这一条路径，`/Applications` 内的就地更新依旧未实测。
+- 未覆盖：这次只验证「`~/Applications` 内旧版 → 新版」这一条路径；`/Applications` 内的就地更新见下一节补记二。
+
+### 发布后补记二：`/Applications` 内就地更新（41 → 42）实测通过
+
+- 前置：`/Applications` 对本机用户可写，且里面原本没有本应用。把公开的 alpha.41 解压后 `ditto` 到 `/Applications/Pi-Web-Desktop.app`（`CFBundleShortVersionString=0.1.0-alpha.41`，`Contents/MacOS/PiWebDesktop` 为 `ae04aed7aea1cf344fe0de1164f4889d5ab032b2aadbb23535fc2483fd1f2c79`，与 alpha.41 记录里的同一值一致；只有 `com.apple.provenance` 扩展属性，没有 quarantine），再用 `open -a /Applications/Pi-Web-Desktop.app` 启动，确认运行中的进程就是 `/Applications/Pi-Web-Desktop.app/Contents/MacOS/PiWebDesktop`。
+- 触发路径：菜单「更新 → 检查更新…」，进度窗口点「确认更新」。日志为 `更新检查完成（手动）：可用更新 1 项，无法确定 0 项，共检查 11 项。`、`开始统一更新：桌面应用 0.1.0-alpha.41 → 0.1.0-alpha.42。`；退出时间线 `09:39:23.411 退出请求` → `09:39:23.540 应用即将终止`，重启 `[2026-11-25 09:39:25] 服务已启动：PID 56530`，从请求退出到服务恢复约 1.6 秒。重启后日志为 `更新检查完成（启动）：可用更新 0 项`。
+- 装机结果：`/Applications/Pi-Web-Desktop.app` 为 `0.1.0-alpha.42` / build 42，`Contents/MacOS/PiWebDesktop` 的 SHA-256 仍是 `b664b4423a9c6d9bd2857c231e24540162ac65e01d001d688d93e55faf9359c7`（与公开 zip 逐字节一致）；`codesign --verify --deep --strict` 通过（`Signature=adhoc`、`TeamIdentifier=not set`）；`/Applications` 下没有 `*.app.new` 残留，`~/.Trash` 里也没有旧包——安装器就地替换后直接删掉了旧包。
+- 测后恢复：`/Applications` 里没有本应用是测试前的状态，验证完已删除该副本；`~/Applications/Pi-Web-Desktop.app` 未受影响（仍为 alpha.42）。日志副本存 `build/release-evidence/alpha.42-inapp-update-applications-41-to-42.log`。
+- 结论：`~/Applications` 与 `/Applications` 两条就地替换路径都已实测；仍未覆盖的是「另一台 Mac 首次 Gatekeeper 放行」与「当前用户对安装目录无写权限（需管理员授权）的机器」。
